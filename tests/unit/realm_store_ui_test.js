@@ -952,3 +952,66 @@ test('16. the operator publishing-authority toggle grants and revokes through th
     sharedLocalStorage.clear();
   }
 });
+
+// ============================================================================
+// 17. [7571ce5] VirtualFS operator partitions group by realm: shared first,
+//     registry order, same-id partitions kept distinct, resolved counts kept
+// ============================================================================
+
+test('17. [7571ce5] FS operator partitions group by realm with shared first and registry order', async () => {
+  const groupModule = await import('../../src/lib/components/sandbox/realmGroups.ts');
+  assert.strictEqual(typeof groupModule.groupFsPartitionsByRealm, 'function', 'the FS partition grouping helper is exported');
+  assert.strictEqual(groupModule.FS_SHARED_GROUP_KEY, '__shared__');
+  assert.strictEqual(groupModule.FS_SHARED_GROUP_LABEL, 'Shared');
+  assert.strictEqual(groupModule.FS_WORKSPACES_GROUP_KEY, '__workspaces__');
+  assert.strictEqual(groupModule.FS_WORKSPACES_GROUP_LABEL, 'Workspaces');
+
+  const realms = seededRealms();
+  const partitions = [
+    // Deliberately unsorted input: the helper owns the presentation order.
+    { key: 'realm:r1:scout', label: 'Realm One · scout', realmId: 'r1', realmName: 'Realm One', kind: 'agent', fileCount: 1 },
+    { key: 'writer-persisted', label: 'writer-persisted', realmId: null, realmName: null, kind: 'workspace', fileCount: 2 },
+    { key: 'realm:r1:global', label: 'Realm One · global', realmId: 'r1', realmName: 'Realm One', kind: 'realm-global', fileCount: 3 },
+    { key: 'realm:realm_deleted:global', label: 'realm_deleted · global', realmId: 'realm_deleted', realmName: null, kind: 'realm-global', fileCount: 0 },
+    { key: 'global', label: 'global', realmId: null, realmName: null, kind: 'global', fileCount: 5 },
+    { key: 'realm:realm_generic:othman', label: 'Generic · othman', realmId: GENERIC_REALM_ID, realmName: 'Generic', kind: 'agent', fileCount: 0 }
+  ];
+
+  const groups = groupModule.groupFsPartitionsByRealm(partitions, realms);
+
+  assert.deepStrictEqual(
+    groups.map((group) => group.key),
+    [groupModule.FS_SHARED_GROUP_KEY, GENERIC_REALM_ID, 'r1', 'realm_deleted', groupModule.FS_WORKSPACES_GROUP_KEY],
+    'shared first, then registry order, then unregistered realms, then other workspaces'
+  );
+  assert.deepStrictEqual(
+    groups.map((group) => group.label),
+    ['Shared', 'Generic', 'Realm One', 'realm_deleted', 'Workspaces']
+  );
+  assert.strictEqual(groups[0].realm, null, 'the shared group is synthetic');
+  assert.strictEqual(groups[2].realm, realms[1], 'a registered realm group carries its record');
+  assert.strictEqual(groups[3].realm, null, 'an unregistered realm renders under its raw id');
+
+  const sharedPartitions = groups[0].partitions;
+  assert.deepStrictEqual(sharedPartitions.map((partition) => partition.key), ['global']);
+  assert.strictEqual(sharedPartitions[0].fileCount, 5, 'the resolved count is carried through, never recomputed from a label');
+
+  const realmOne = groups[2].partitions;
+  assert.deepStrictEqual(
+    realmOne.map((partition) => partition.key),
+    ['realm:r1:global', 'realm:r1:scout'],
+    'inside a realm the realm-global partition sorts before its agents regardless of input order'
+  );
+
+  assert.deepStrictEqual(groups[1].partitions.map((partition) => partition.key), ['realm:realm_generic:othman']);
+  assert.deepStrictEqual(groups[4].partitions.map((partition) => partition.key), ['writer-persisted']);
+  assert.strictEqual(
+    groups.flatMap((group) => group.partitions).length,
+    partitions.length,
+    'every partition renders exactly once'
+  );
+
+  // Degenerate input stays safe and empty-friendly.
+  assert.deepStrictEqual(groupModule.groupFsPartitionsByRealm([], realms), []);
+  assert.deepStrictEqual(groupModule.groupFsPartitionsByRealm(null, null), []);
+});

@@ -64,6 +64,18 @@ test.describe('06: Agent Inspector & VirtualFS Explorer', () => {
     await expect(globalPill).toBeVisible();
     await globalPill.click();
 
+    // 3a. Realm-aware partition grouping (ticket 7571ce5): the pill bar renders
+    //     the shared partition and one group per registered Realm, and a
+    //     realm-global partition is selectable with its resolved count.
+    await expect(page.locator('.ws-group').first()).toBeVisible();
+    await expect(page.locator('.ws-group-label', { hasText: 'Shared' })).toBeVisible();
+    const genericGroupLabel = page.locator('.ws-group-label', { hasText: 'Generic' });
+    await expect(genericGroupLabel).toBeVisible();
+    const genericGroup = page.locator('.ws-group').filter({ has: genericGroupLabel });
+    const genericGlobalPill = genericGroup.locator('.ws-pill').filter({ hasText: 'global' }).first();
+    await expect(genericGlobalPill).toBeVisible();
+    await expect(genericGlobalPill.locator('.file-count')).toHaveText('0');
+
     // 4. Create New File in VirtualFS
     await page.locator('button:has-text("+ New File")').click();
     const createFileModal = page.locator('.file-modal');
@@ -107,6 +119,26 @@ test.describe('06: Agent Inspector & VirtualFS Explorer', () => {
     const grepResultBox = page.locator('.grep-results-box');
     await expect(grepResultBox).toBeVisible();
     await expect(grepResultBox).toContainText('/config/server.json');
+
+    // 8. Realm-global partition write/read (ticket 7571ce5): selecting the
+    //    Generic realm's global partition and creating a file there keeps the
+    //    partition counts and file lists distinct from the shared global.
+    await genericGlobalPill.click();
+    await expect(genericGlobalPill).toHaveClass(/active/);
+    await expect(page.locator('.empty-files code')).toHaveText('Generic · global');
+    await page.locator('.empty-files button:has-text("Create Initial File")').click();
+    await expect(page.locator('.file-modal')).toBeVisible();
+    await page.fill('#new-path', '/realm_seed.md');
+    await page.fill('#new-content', 'realm-global seed');
+    await page.locator('.file-modal button[type="submit"]').click();
+    await expect(page.locator('.file-modal')).not.toBeVisible();
+    await expect(page.locator('.file-row:has-text("/realm_seed.md")')).toBeVisible();
+    await expect(genericGlobalPill.locator('.file-count')).toHaveText('1');
+
+    // The shared global partition keeps its own file list and count.
+    await globalPill.click();
+    await expect(page.locator('.file-row:has-text("/config/server.json")')).toBeVisible();
+    await expect(page.locator('.file-row:has-text("/realm_seed.md")')).toHaveCount(0);
 
     expect(auditor.pageErrors).toEqual([]);
   });

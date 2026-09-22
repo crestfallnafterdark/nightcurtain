@@ -4221,3 +4221,108 @@ test('58. [3595f6a] seedRealm resolves a padded hydrated membership with the sto
     sharedLocalStorage.clear();
   }
 });
+
+// ============================================================================
+// 59. [7571ce5] the operator partition listing addresses realm-global and
+//     same-id realm workspaces with resolved counts (agent opacity intact)
+// ============================================================================
+
+test('59. [7571ce5] the operator partition listing addresses realm-global and same-id realm workspaces with resolved counts', async () => {
+  drainPendingAutosaves();
+  sharedLocalStorage.clear();
+  const { runtime, store } = createSharedSubstrateStore();
+  try {
+    const realmA = store.createRealm({ id: 'realm_part_59a', name: 'Realm 59 A' });
+    const realmB = store.createRealm({ id: 'realm_part_59b', name: 'Realm 59 B' });
+    await store.launchAgent({ id: 'scout', name: 'Scout A', realmId: realmA.id, allowedTools: ['read_file'], modelConfig: IDENTITY_OFFLINE_MODEL_CONFIG });
+    await store.launchAgent({ id: 'scout', name: 'Scout B', realmId: realmB.id, allowedTools: ['read_file'], modelConfig: IDENTITY_OFFLINE_MODEL_CONFIG });
+
+    const identityPort = runtime.createAgentIdentityPort();
+    const keyA = identityPort.getAgentIdentity('scout', { realmId: realmA.id }).key;
+    const keyB = identityPort.getAgentIdentity('scout', { realmId: realmB.id }).key;
+    const realmGlobalA = `realm:${realmA.id}:global`;
+    const realmGlobalB = `realm:${realmB.id}:global`;
+
+    store.writeFile('/shared.md', 'shared', { workspaceId: 'global' });
+    store.writeFile('/own.md', 'Alpha own', { workspaceId: keyA });
+    store.writeFile('/own.md', 'Beta own', { workspaceId: keyB });
+    store.writeFile('/seed.md', 'Alpha global seed', { workspaceId: realmGlobalA });
+
+    const partitions = store.fsWorkspacePartitions;
+    assert.ok(Array.isArray(partitions), 'the operator partition listing is an array');
+    const byKey = new Map(partitions.map((partition) => [partition.key, partition]));
+
+    // 1. The literal shared global partition keeps its own count.
+    const shared = byKey.get('global');
+    assert.ok(shared, 'the shared global partition is listed');
+    assert.strictEqual(shared.kind, 'global');
+    assert.strictEqual(shared.realmId, null);
+    assert.strictEqual(shared.fileCount, 1, 'the shared partition counts only its own file');
+
+    // 2. Realm-global partitions: reachable per realm, uploadable even when empty.
+    const alphaGlobal = byKey.get(realmGlobalA);
+    assert.ok(alphaGlobal, 'realm A global partition is listed');
+    assert.strictEqual(alphaGlobal.kind, 'realm-global');
+    assert.strictEqual(alphaGlobal.realmId, realmA.id);
+    assert.strictEqual(alphaGlobal.realmName, realmA.name);
+    assert.ok(alphaGlobal.label.includes(realmA.name), 'the label carries the realm name');
+    assert.strictEqual(alphaGlobal.fileCount, 1, 'the realm-global count resolves its own key, never the shared global');
+    const betaGlobal = byKey.get(realmGlobalB);
+    assert.ok(betaGlobal, 'realm B global partition is listed even with no files (uploadable)');
+    assert.strictEqual(betaGlobal.kind, 'realm-global');
+    assert.strictEqual(betaGlobal.fileCount, 0);
+
+    // 3. The same bare id in two realms yields two distinct partitions, each
+    //    resolving its own bytes and its own count.
+    const alphaAgent = byKey.get(keyA);
+    const betaAgent = byKey.get(keyB);
+    assert.ok(alphaAgent && betaAgent, 'both same-id registrations own a partition');
+    assert.strictEqual(alphaAgent.kind, 'agent');
+    assert.strictEqual(betaAgent.kind, 'agent');
+    assert.strictEqual(alphaAgent.realmId, realmA.id);
+    assert.strictEqual(betaAgent.realmId, realmB.id);
+    assert.notStrictEqual(alphaAgent.label, betaAgent.label, 'the two pills carry distinct realm-qualified labels');
+    assert.strictEqual(alphaAgent.fileCount, 1, 'the pill count resolves the canonical key, not the raw bare label');
+    assert.strictEqual(betaAgent.fileCount, 1);
+
+    // 4. Selecting a partition addresses exactly it (operator path).
+    store.setActiveFsWorkspace(keyA);
+    assert.strictEqual(store.activeFsWorkspace, keyA, 'the selection keeps the internal key for exact addressing');
+    assert.deepStrictEqual(store.activeFsFiles.map((file) => file.path), ['/own.md']);
+    assert.strictEqual(store.activeFsFiles[0].content, 'Alpha own', 'the Alpha pill reads Alpha bytes');
+    assert.ok(store.activeFsPartition, 'the active partition resolves');
+    assert.strictEqual(store.activeFsPartition.key, keyA);
+    assert.strictEqual(store.activeFsPartition.fileCount, 1, 'the active pill count reads the resolved partition');
+
+    store.setActiveFsWorkspace(realmGlobalA);
+    assert.deepStrictEqual(store.activeFsFiles.map((file) => file.path), ['/seed.md'], 'the realm-global partition is viewable');
+    assert.strictEqual(store.activeFsPartition.kind, 'realm-global');
+
+    store.setActiveFsWorkspace(keyB);
+    assert.strictEqual(store.activeFsFiles[0].content, 'Beta own', 'the Beta pill resolves its own workspace');
+
+    // 5. Upload into a realm-global partition through the operator surface.
+    await store.uploadFiles([{ path: '/uploaded.md', content: 'uploaded' }], realmGlobalB);
+    assert.strictEqual(store.fsSnapshot[realmGlobalB]['/uploaded.md'].content, 'uploaded');
+    const refreshed = new Map(store.fsWorkspacePartitions.map((partition) => [partition.key, partition]));
+    assert.strictEqual(refreshed.get(realmGlobalB).fileCount, 1, 'the uploaded realm-global partition count updates');
+
+    // 6. Agent-facing realm opacity stays intact: the public listing never
+    //    carries a canonical key, and the same-id label still projects once.
+    assert.ok(store.allWorkspaces.includes('global'));
+    assert.ok(store.allWorkspaces.includes('scout'), 'the bare id stays in the agent-facing list');
+    assert.ok(
+      store.allWorkspaces.every((workspace) => !workspace.startsWith('realm:') && !workspace.startsWith('system:')),
+      'no canonical key may appear in the agent-facing workspace list'
+    );
+    assert.ok(!store.allWorkspaces.includes(keyA) && !store.allWorkspaces.includes(keyB));
+    assert.ok(
+      !JSON.stringify(store.agents).includes('realm:'),
+      'no canonical key may appear in the agent projection'
+    );
+  } finally {
+    store.destroy();
+    runtime.destroy();
+    sharedLocalStorage.clear();
+  }
+});
