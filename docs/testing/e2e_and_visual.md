@@ -162,6 +162,7 @@ The E2E suite consists of **8 core specifications** located in [`tests/e2e/`](..
   - Toggles inline tool invocation badge (`.inline-tool-badge`), expanding JSON arguments (`/system_init.json`).
   - Verifies Markdown prose formatting (headers `h3`, bold tags `strong`, lists).
   - Tests inline user message editing: activates `.micro-btn:has-text("Edit")`, updates text, saves, and asserts chronicle update.
+  - Verifies System Directive whitespace preservation (ticket 4154694): `.system-body p` computes `white-space: pre-wrap` / `overflow-wrap: anywhere`, the multi-line root prompt keeps its line breaks, and an inline edit → save round-trips the multi-line text verbatim.
 
 ---
 
@@ -181,6 +182,7 @@ The E2E suite consists of **8 core specifications** located in [`tests/e2e/`](..
 - **Target Surfaces**: Inspector tabs (Trace, Telemetry, Sent Context), Timer scheduler, VirtualFS Explorer, JSON KeyPath query, Grep widget, Run Handshake Demo.
 - **Key Assertions**:
   - Schedules a 30s diagnostic timer via the Inspector UI and verifies dynamic appearance and cancellation.
+  - Asserts the realm-grouped workspace selector (ticket 7571ce5): Shared/Generic group headers, a realm-global pill with its resolved count, file creation inside the Realm's global partition, and isolation from the shared global file list.
   - Creates a new file `/config/server.json` via the VirtualFS file modal and inspects code viewer content.
   - Executes structured AST JSON KeyPath query (`$.server`) and asserts result value `Alpha-Omega`.
   - Executes regex grep search (`Alpha-Omega`) and verifies matching file result row.

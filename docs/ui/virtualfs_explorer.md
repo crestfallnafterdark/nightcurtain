@@ -1,7 +1,7 @@
 # Virtual Filesystem Explorer Architecture
 
 **Status:** CANONICAL
-**Last verified: 2026-09-20**
+**Last verified: 2026-09-22**
 
 > [!NOTE]
 > This document specifies the technical architecture, interactive file tree navigation, AST JSON keypath querying, regex line grep, USTAR archive packaging, and drag-and-drop ingestion within `VirtualFsExplorer.svelte`.
@@ -15,7 +15,7 @@ The **Virtual Filesystem Explorer** provides full multi-tenant workspace managem
 ```mermaid
 flowchart TD
     subgraph ExplorerRoot ["VirtualFsExplorer.svelte"]
-        WorkspaceBar["Workspace Selector Toolbar\n('global' Shared Workspace | Private Agent Workspaces)"]
+        WorkspaceBar["Workspace Selector Toolbar\n(Realm-grouped operator partitions:\nShared 'global' | <Realm> · global | <Realm> · <agent> | Workspaces)"]
         BulkBar["Bulk Action Bar (Selected Files: Archive | Separate | Delete | Clear)"]
         DragOverlay["Drag-and-Drop Upload Overlay (Full Viewport)"]
         TransferBanner["Archiving & Transfer Notification Banner"]
@@ -54,7 +54,18 @@ flowchart TD
 The filesystem architecture enforces strict multi-tenant workspace isolation:
 
 1. **`global` (Shared Workspace)**: Accessible by all agents for mission coordination, telemetry exchange, and shared status reports. Root configuration files can be marked **Read-Only** (`readOnly: true`).
-2. **Private Agent Workspaces (`agent-*`)**: Sandboxed per-agent storage directories. Non-privileged agents cannot write across partitions without universal `sudo` authority.
+2. **Realm-global partitions (`realm:<realmId>:global`)**: Each Realm's shared workspace. Realm-bound members resolve their `global` alias onto this partition; the operator explorer lists one partition per registered Realm (uploadable even while empty).
+3. **Private Agent Workspaces**: Sandboxed per-agent storage directories, keyed by the resolved private workspace (a Realm-bound agent's canonical identity key, an explicit workspace pin, or the legacy bare agent id). Non-privileged agents cannot write across partitions without universal `sudo` authority.
+
+### 2.1 Operator partition listing (ticket 7571ce5)
+
+`VirtualFsExplorer.svelte` renders `sandboxStore.fsWorkspacePartitions` — the **operator-scoped** projection of the VirtualFS snapshot — instead of the agent-facing `allWorkspaces` labels:
+
+- each entry carries `{ key, label, realmId, realmName, kind, fileCount }`: the internal snapshot key for exact addressing, a realm-qualified display label, the Realm scope, the partition kind (`global` | `realm-global` | `agent` | `workspace`), and the file count read from the resolved key (never from a projected label);
+- realm-global partitions are selectable, viewable, uploadable, and downloadable — a Realm's `global` bytes no longer collide with the literal shared `global` workspace;
+- the same bare agent id live in two Realms yields two distinct partitions (distinct realm-qualified labels, distinct keys, distinct counts);
+- `groupFsPartitionsByRealm()` (`realmGroups.ts`) groups the listing into **Shared** → registered Realm groups (registry order) → unregistered/synthetic Realm groups → trailing **Workspaces** group; realm-global partitions sort before their agents, then by label;
+- `sandboxStore.activeFsWorkspace` holds the selected **partition key**; `sandboxStore.activeFsPartition` exposes its descriptor. The agent-facing `allWorkspaces` projection stays realm-opaque and is not consumed by the explorer.
 
 ```mermaid
 graph LR
@@ -64,17 +75,21 @@ graph LR
         G3["/event_list.json (owner: system)"]
     end
 
-    subgraph ScoutWS ["Workspace: 'agent-scout' (Private)"]
+    subgraph RealmGlobalWS ["Workspace: 'realm:alpha:global' (Realm alpha)"]
+        R1["/source_tree/*.md (operator-seeded)"]
+    end
+
+    subgraph ScoutWS ["Workspace: 'realm:alpha:scout' (Private, Realm alpha)"]
         S1["/telemetry_raw.log"]
         S2["/sensor_cache.json"]
     end
 
-    subgraph CommanderWS ["Workspace: 'agent-commander' (Private)"]
+    subgraph CommanderWS ["Workspace: 'agent-commander' (Private pin)"]
         C1["/tactical_matrix.json"]
     end
 
     GlobalWS <-->|Read & Write| ScoutWS
-    GlobalWS <-->|Read & Write| CommanderWS
+    RealmGlobalWS <-->|Realm-bound alias 'global'| ScoutWS
     ScoutWS -.->|Cross-Workspace Blocked without Sudo| CommanderWS
 ```
 
@@ -117,10 +132,14 @@ graph LR
 
 ### 3.2 Derived State (`$derived` / `$derived.by()`)
 
-- **`currentWorkspace`**: `$derived(sandboxStore.activeFsWorkspace)`.
+- **`currentWorkspace`**: `$derived(sandboxStore.activeFsWorkspace)` — the selected operator partition key.
+- **`currentPartition`**: `$derived(sandboxStore.activeFsPartition)` — the selected partition descriptor (label, Realm, kind, file count).
+- **`currentWorkspaceLabel`**: `$derived(currentPartition ? currentPartition.label : currentWorkspace)` — display-only label used by menus, confirmations, modals, and status toasts.
+- **`snapshotKey`**: `$derived(currentPartition ? currentPartition.key : currentWorkspace)` — resolved internal key used for direct snapshot reads (a persisted legacy label resolves to its partition).
+- **`partitionGroups`**: `$derived(groupFsPartitionsByRealm(sandboxStore.fsWorkspacePartitions, sandboxStore.realms))` — the realm-grouped pill projection.
 - **`files`**: `$derived(sandboxStore.activeFsFiles)` (sorted alphabetically by file path).
 - **`isAllSelected`**: `$derived(files.length > 0 && selectedFilePaths.size === files.length)`.
-- **`selectedFile`**: Retrieves the full file object from `sandboxStore.fsSnapshot[currentWorkspace][selectedFilePath]`.
+- **`selectedFile`**: Retrieves the full file object from `sandboxStore.fsSnapshot[snapshotKey][selectedFilePath]`.
 
 ---
 
@@ -221,7 +240,7 @@ Modifying specific files triggers automated synchronization with the narrative s
 
 | Action Trigger | Component Method | Description |
 | :--- | :--- | :--- |
-| Click Workspace Pill | `selectWorkspace(wsId)` | Switches active workspace partition, resets selection and query states. |
+| Click Workspace Pill | `selectWorkspace(partitionKey)` | Switches the active operator partition (internal key from `fsWorkspacePartitions`), resets selection and query states. |
 | Checkbox Toggle | `toggleSelectFile(path)` | Adds or removes file path from `selectedFilePaths` set. |
 | Select All Checkbox | `toggleSelectAll()` | Selects or deselects all files in the current workspace. |
 | Click Download Single | `handleDownloadSingleFile(f)` | Dispatches individual file download. |

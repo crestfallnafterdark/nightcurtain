@@ -1,7 +1,7 @@
 # Chat Studio & Message Cards Architecture
 
 **Status:** CURRENT
-**Last verified: 2026-09-20**
+**Last verified: 2026-09-22**
 
 > [!NOTE]
 > This document specifies the implementation of `SandboxChatLog.svelte` and `SandboxMessageCard.svelte` in the `ai-story` Studio UI, covering token streaming rendering, cognitive reasoning accordions, tool call visualization, deterministic yielding, inline editing, and auto-scroll mechanics.
@@ -197,6 +197,7 @@ classDiagram
 
 ### 4.4 4. System Directive Turn
 - Encapsulated in a subtle glass panel with an info icon and monospaced directive text.
+- The directive body (`.system-body p`) renders with `white-space: pre-wrap` and `overflow-wrap: anywhere` (ticket 4154694): multi-line system prompts keep their line breaks, blank lines, and indentation exactly like the inline editor's textarea and the Sent Context view, while a long single line wraps without horizontal overflow. The stored/sent prompt was never affected — display only.
 
 ### 4.5 Failure & Interrupted Turn Notices
 
