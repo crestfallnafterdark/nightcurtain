@@ -1021,6 +1021,11 @@
     font-size: 0.85rem;
     color: var(--text-secondary);
     line-height: 1.5;
+    /* Ticket 4154694: the directive is plain text seeded with meaningful line
+       breaks and indentation; preserve them exactly like the inline editor's
+       textarea and the Sent Context view instead of collapsing to one line. */
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
 
   /* Inline History Message Editor (REQ-UI-04) */
