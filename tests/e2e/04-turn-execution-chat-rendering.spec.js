@@ -102,6 +102,28 @@ test.describe('04: Turn Execution & Chat Log Rendering', () => {
     await userTurn.locator('.btn-save').click();
     await expect(userTurn.locator('.book-blockquote')).toContainText('Initialize the system with verbose telemetry.');
 
+    // 8. System Directive whitespace preservation (ticket 4154694): the
+    //    multi-line root prompt renders with line breaks and indentation
+    //    intact, and an inline edit round-trips the multi-line text verbatim.
+    const systemCard = page.locator('.turn-system').first();
+    await expect(systemCard).toBeVisible();
+    await expect(systemCard.locator('.system-title')).toHaveText('System Directive');
+    const systemBody = systemCard.locator('.system-body p');
+    await expect(systemBody).toHaveCSS('white-space', 'pre-wrap');
+    await expect(systemBody).toHaveCSS('overflow-wrap', 'anywhere');
+    await expect(systemBody).toContainText('You are the Director Meta-Agent');
+
+    await systemCard.hover();
+    await systemCard.locator('.micro-btn:has-text("Edit")').click();
+    const systemEditArea = systemCard.locator('.inline-edit-textarea');
+    await expect(systemEditArea).toBeVisible();
+    await expect(systemEditArea).toHaveValue(/Operational Directive:\n- /);
+    const editedDirective = 'Multi-line directive line one.\n\nLine three with indentation:\n    indented detail.';
+    await systemEditArea.fill(editedDirective);
+    await systemCard.locator('.inline-edit-wrap .btn-save').click();
+    await expect(systemCard.locator('.inline-edit-textarea')).toHaveCount(0);
+    expect(await systemCard.locator('.system-body p').evaluate((el) => el.textContent)).toBe(editedDirective);
+
     expect(auditor.pageErrors).toEqual([]);
   });
 });
