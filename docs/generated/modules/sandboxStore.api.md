@@ -206,6 +206,19 @@ export type FormattedContextMessage = {
 };
 
 // @public
+export interface FsWorkspacePartition {
+    readonly fileCount: number;
+    readonly key: string;
+    readonly kind: FsWorkspacePartitionKind;
+    readonly label: string;
+    readonly realmId: string | null;
+    readonly realmName: string | null;
+}
+
+// @public
+export type FsWorkspacePartitionKind = 'global' | 'realm-global' | 'agent' | 'workspace';
+
+// @public
 export const GENERIC_REALM_ID = "realm_generic";
 
 // @public
@@ -432,6 +445,7 @@ export interface SandboxHydrationNotice {
 export class SandboxStore {
     constructor(input?: SandboxStoreOptions);
     get activeFsFiles(): ReadonlyArray<FileRecord>;
+    get activeFsPartition(): FsWorkspacePartition | null;
     activeFsWorkspace: string;
     activeTab: SandboxTabId;
     get activeToolCalls(): ReadonlyArray<ToolCallSnapshot>;
@@ -485,6 +499,7 @@ export class SandboxStore {
     factoryReset(): void;
     // Warning: (ae-forgotten-export) The symbol "FileRecord" needs to be exported by the entry point index.svelte.d.ts
     fsSnapshot: Record<string, Record<string, FileRecord>>;
+    get fsWorkspacePartitions(): ReadonlyArray<FsWorkspacePartition>;
     getAgentClock(agentId?: string | null): AgentClockState;
     getAgentDraft(agentId: string): string;
     getAgentUnreadCount(agentId?: string | null): number;
@@ -1028,6 +1043,33 @@ const context: FormattedContextMessage[] = [
 ];
 ```
 
+### `FsWorkspacePartition` — interface
+
+One operator-facing VirtualFS workspace partition (ticket 7571ce5): the resolved internal snapshot key an operator surface must address, a realm-qualified display label, the Realm the partition belongs to, the partition kind, and the file count read from the resolved key.
+
+This is the operator projection of the VirtualFS snapshot: unlike the agent-facing `allWorkspaces` labels it deliberately carries the internal storage key (and the Realm id/name) so the operator explorer can select, view, upload into, and download a specific partition — including realm-global partitions and the same bare agent id live in two Realms. Agent-visible listings and receipts must never consume this projection.
+
+#### Examples
+
+```typescript
+for (const partition of sandboxStore.fsWorkspacePartitions) {
+  console.log(`${partition.label} [${partition.kind}] — ${partition.fileCount} file(s)`);
+}
+```
+
+#### Members
+
+- **`fileCount`** — File count of the resolved partition (`key`), never of a projected label.
+- **`key`** — Internal VirtualFS snapshot key; operator addressing only, never agent-visible.
+- **`kind`** — Partition kind.
+- **`label`** — Operator display label (realm-qualified for Realm-scoped partitions).
+- **`realmId`** — Realm membership of the partition, or `null` for shared/literal workspaces.
+- **`realmName`** — Registered Realm display name when resolvable, else `null`.
+
+### `FsWorkspacePartitionKind` — type alias
+
+Partition kind of one operator-facing VirtualFS workspace entry (ticket 7571ce5): the literal shared `global` workspace, a Realm's realm-global partition (`realm:<realmId>:global`), an active agent's resolved private workspace, or any other literal/pinned/orphaned workspace key carried by the snapshot.
+
 ### `GENERIC_REALM_ID` — variable
 
 Fixed id of the seeded default Realm ("Generic", Wave R ticket 56ba4b9) exported as the canonical engine-side home of the constant. The store seeds the record at init and marks it protected in the owned registry, so removal is refused on every public surface and reconciliation keeps it in place (Wave R hardening, ticket 0fe25fd); the UI helper (`realmGroups.ts`) mirrors the literal for its store-free projections, and the runtime's launch composition mirrors it for the Generic fallback — `sandbox_store_module_test` pins the UI mirror, and the runtime composition is pinned behaviorally by the launch-default assertions.
@@ -1450,6 +1492,7 @@ console.log('Agent response:', turn.output);
 
 - **`constructor`** — Constructs a new isolated `SandboxStore` instance with private domain engines and reactive state.
 - **`activeFsFiles`** — Alphabetically sorted list of `FileRecord` entries (with `content`, `workspaceId`, and full metadata) residing in `activeFsWorkspace`.
+- **`activeFsPartition`** — Operator partition descriptor of `activeFsWorkspace` (ticket 7571ce5): the listed partition the current selection addresses, or `null` when the selection resolves to no listed partition (a stale literal label).
 - **`activeFsWorkspace`** — Currently focused workspace identifier in the VirtualFS Explorer tab (e.g. `'global'`, `'director'`).
 - **`activeTab`** — Currently active workstation tab (`'chat'`, `'settings'`, `'inspector'`, `'filesystem'`, `'messaging'`).
 - **`activeToolCalls`** — Active tool calls currently executing in the selected agent's turn.
@@ -1494,6 +1537,7 @@ console.log('Agent response:', turn.output);
 - **`exportRealmTemplate`** — Exports one effective launch template as canonical transport JSON (Wave T, ticket 0df20ae): the exact bundle future launches resolve — an import when one shadows the id, otherwise the shipped revision — rendered by `realmCatalog.serializeTemplateBundle` (recursively sorted keys, no insignificant whitespace), so re-importing the output reproduces the same content version.
 - **`factoryReset`** — Factory Reset: Clears persisted storage, cancels pending debounced saves, resets VirtualFS and MessagingBus, and restores fresh Director Meta-Agent.
 - **`fsSnapshot`** — Reactive snapshot of all virtual files across all workspaces (`global` and agent-private). Mirrors `VirtualFS.exportSnapshot()` verbatim: `Record<workspaceId, Record<normalizedPath, FileRecord>>`, where each record carries `path`, `workspaceId`, `content`, `size`, `updatedAt`, `readOnly`, and `owner`. Exported through the runtime persistence port, whose VFS members carry the composition-root `InternalPrincipal` binding (MOD-21 W8-D/W8-F); without an authorized route the projection stays empty.
+- **`fsWorkspacePartitions`** — Operator-facing partition listing of the VirtualFS snapshot (ticket 7571ce5): the literal shared `global` workspace, every registered Realm's realm-global partition, every active registration's resolved private workspace, and every remaining literal/pinned/orphaned snapshot key. Each entry carries the internal snapshot key for exact addressing, a realm-qualified display label, the Realm id/name, the partition kind, and the file count read from the resolved key. The agent-facing `allWorkspaces` projection stays separate and realm-opaque; operator surfaces (the Virtual Filesystem explorer) consume this listing instead, so realm-global partitions are reachable and the same bare agent id live in two Realms yields two distinct partitions. Realm-global and empty agent partitions are listed even when the snapshot carries no bytes yet, so they can be selected and uploaded into.
 - **`getAgentClock`** — Retrieves current formatted narrative clock time for an agent partition. Reads the reactive `clockSnapshot` cache first. On a cache miss the call delegates to the WorldClock engine's `getTime` without a privileged caller context, so per the WorldClock contract a partition absent from the cache resolves to the `'global'` partition — an unknown agent therefore yields the global clock. Returns a zeroed `'Day 1'` clock when no WorldClock is attached.
 - **`getAgentDraft`** — Retrieves the in-progress draft prompt for a specific agent ID.
 - **`getAgentUnreadCount`** — Returns the count of unread messages pending in an agent's active queue.
@@ -1563,7 +1607,7 @@ console.log('Agent response:', turn.output);
 - **`selectedAgentId`** — Currently selected / focused agent ID across Chat Studio and Agent Inspector. `null` if no agent is currently active or selected.
 - **`sendMessage`** — Injects a manual point-to-point or broadcast message into the `MessagingBus`. An unregistered recipient that is not marked terminated is auto-registered before delivery. The store does not verify that the recipient exists as an active runtime agent, so a phantom recipient id is accepted and delivered to instead of following the bus `RECIPIENT_NOT_FOUND` dead-letter path. Operator attribution (ticket 99faaf1; Wave I, ticket c02d0b9): the store is the human-operator surface, so a `from` label that does not resolve to a registered agent identity (e.g. the `MessagingBusViewer` default `'human'`) is sent through a store-built execution context carrying the runtime's host operator principal by exact reference — the bypass is the principal, never an id, and the label stays presentation only. Agent- labelled sends keep the agent's own identity and Realm scope.
 - **`serialize`** — Serializes complete store, runtime, VirtualFS, MessagingBus, clock, and UI metadata snapshot. Wave I (ticket c02d0b9; fix lane G2): the active operator `realmBypass` grants (`runtime.listRealmBypassGrants()`, canonical identity keys) ride the additive top-level `realmBypassGrants` field; it is omitted when empty, so grant-free and legacy snapshots keep every existing field and byte. Wave U (ticket 2518510): the explicit publishing-authority grants ride the additive `metaAuthorityGrants` field (canonical identity keys per authority) and the per-template trust record rides `templateAuthorityTrust`; both are omitted when empty, so grant-free and legacy snapshots stay byte-identical.
-- **`setActiveFsWorkspace`** — Changes the active workspace filter in the VirtualFS Explorer tab.
+- **`setActiveFsWorkspace`** — Changes the active workspace filter in the VirtualFS Explorer tab. Operator surfaces pass a partition key from `fsWorkspacePartitions` (an internal snapshot key) so a realm-global partition or a same-id agent in two Realms is addressed exactly (ticket 7571ce5). Legacy callers keep the historical verbatim behavior: a public label is stored as-is and the read paths (`activeFsFiles`, `activeFsPartition`) resolve it through the unique registration when one exists.
 - **`setActiveTab`** — Changes the workstation view tab (`'chat'`, `'settings'`, `'inspector'`, `'filesystem'`, `'messaging'`).
 - **`setAgentDraft`** — Sets the draft prompt text for an agent and schedules debounced auto-persistence.
 - **`spawnAgent`** — Ergonomic alias for launchAgent. Provisions and selects a new agent instance.
@@ -1921,9 +1965,9 @@ console.log(`Uploaded ${receipt.count} files:`, receipt.files);
 
 ## Doc coverage
 
-- Top-level exports: 59
-- Declarations (exports + members): 419
-- Documented declarations: 419 / 419 (100%)
+- Top-level exports: 61
+- Declarations (exports + members): 429
+- Documented declarations: 429 / 429 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): `Agent`, `AgentConfig`, `AgentConfigUpdate`, `AgentIdentityScope`, `AgentRuntime`, `AgentState`, `ArchiveDownloadReceipt`, `AuthorityDescriptor`, `BatchDownloadFailure`, `BusMessageEnvelope`, `CopyReceipt`, `CredentialResolverPort`, `CredentialStoragePort`, `CredentialVault`, `DownloadReceipt`, `FileRecord`, `GrepMatch`, `GrepOptions`, `InboxHeader`, `InboxListOptions`, `LaunchHistoryEntry`, `MessageEnvelope`, `MessagingBus`, `NarrativeEvent`, `PendingInstancePayload`, `PresetCatalog`, `PresetModelConfig`, `ReadMessageResult`, `RealmPublishingPort`, `RealmRecord`, `RealmRegistry`, `RealmTemplate`, `RealmUpdatePatch`, `SandboxPersistedState`, `ScheduleReceipt`, `SendMessageReceipt`, `TurnBundle`, `TurnExecutionResult`, `TurnInput`, `VfsCopyOptions`, `VfsWriteOptions`, `VirtualFS`, `WriteReceipt`

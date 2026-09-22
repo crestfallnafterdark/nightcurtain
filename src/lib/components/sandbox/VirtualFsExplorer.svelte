@@ -1,5 +1,6 @@
 <script>
   import { sandboxStore } from '../../sandbox/sandboxStore/index.svelte.ts';
+  import { groupFsPartitionsByRealm, safeRealmColor } from './realmGroups.ts';
   import {
     downloadSingleFile,
     downloadFilesSeparately,
@@ -70,21 +71,43 @@
   let fileInputRef = $state(null);
   let folderInputRef = $state(null);
 
-  // Derived active workspace files
+  // Derived active workspace files (ticket 7571ce5): `activeFsWorkspace`
+  // addresses an operator partition key from `fsWorkspacePartitions`, so the
+  // snapshot read, the resolved label, and the counts all share one key.
   let currentWorkspace = $derived(sandboxStore.activeFsWorkspace);
+  let currentPartition = $derived(sandboxStore.activeFsPartition);
+  let currentWorkspaceLabel = $derived(currentPartition ? currentPartition.label : currentWorkspace);
+  // Resolved snapshot key of the selection: a legacy public label (persisted
+  // pre-7571ce5 state) resolves through the partition listing to its internal
+  // key, so direct snapshot reads never miss a resolved partition.
+  let snapshotKey = $derived(currentPartition ? currentPartition.key : currentWorkspace);
+  let partitionGroups = $derived(
+    groupFsPartitionsByRealm(sandboxStore.fsWorkspacePartitions, sandboxStore.realms)
+  );
   let files = $derived(sandboxStore.activeFsFiles);
   let isAllSelected = $derived(files.length > 0 && selectedFilePaths.size === files.length);
+
+  /**
+   * Resolves the operator display label of one partition key, falling back to
+   * the key itself for an unlisted (stale) workspace.
+   * @param {string} wsId
+   * @returns {string}
+   */
+  function workspaceLabel(wsId) {
+    const partition = sandboxStore.fsWorkspacePartitions.find((entry) => entry.key === wsId);
+    return partition ? partition.label : wsId;
+  }
 
   // Selected file content
   let selectedFile = $derived.by(() => {
     if (!selectedFilePath) return null;
-    const ws = sandboxStore.fsSnapshot[currentWorkspace];
+    const ws = sandboxStore.fsSnapshot[snapshotKey];
     if (!ws) return null;
     return ws[selectedFilePath] || null;
   });
 
-  function selectWorkspace(wsId) {
-    sandboxStore.setActiveFsWorkspace(wsId);
+  function selectWorkspace(partitionKey) {
+    sandboxStore.setActiveFsWorkspace(partitionKey);
     selectedFilePath = null;
     selectedFilePaths = new Set();
     jsonQueryResult = null;
@@ -177,7 +200,7 @@
   function handleDownloadSingleFile(f, e) {
     if (e) e.stopPropagation();
     try {
-      const ws = sandboxStore.fsSnapshot[currentWorkspace] || {};
+      const ws = sandboxStore.fsSnapshot[snapshotKey] || {};
       const fileData = ws[f.path] || f;
       const receipt = downloadSingleFile({
         path: f.path,
@@ -236,7 +259,7 @@
         transferProgress = { current: cur, total: tot, file };
         showStatus(`Downloading file ${cur}/${tot}: ${file}...`, 5000);
       });
-      if (!reportPartialDownloadFailure(res, `file(s) from [${wsId}]`)) {
+      if (!reportPartialDownloadFailure(res, `file(s) from [${workspaceLabel(wsId)}]`)) {
         showStatus(`Downloaded ${res.count} files separately`);
       }
     } catch (err) {
@@ -252,7 +275,7 @@
     isTransferring = true;
     transferError = null;
 
-    const ws = sandboxStore.fsSnapshot[currentWorkspace] || {};
+    const ws = sandboxStore.fsSnapshot[snapshotKey] || {};
     const selectedFiles = Array.from(selectedFilePaths).map(p => {
       const item = ws[p] || {};
       return {
@@ -267,7 +290,7 @@
 
     try {
       const res = await downloadFolderAsArchive(selectedFiles, {
-        archiveName: `${currentWorkspace}_selected_files`,
+        archiveName: `${currentWorkspaceLabel}_selected_files`,
         workspaceId: currentWorkspace
       });
       if (!res.success) {
@@ -295,7 +318,7 @@
     isTransferring = true;
     transferError = null;
 
-    const ws = sandboxStore.fsSnapshot[currentWorkspace] || {};
+    const ws = sandboxStore.fsSnapshot[snapshotKey] || {};
     const selectedFiles = Array.from(selectedFilePaths).map(p => {
       const item = ws[p] || {};
       return {
@@ -404,7 +427,7 @@
         }
       });
       refreshGrepResults();
-      showStatus(`Successfully uploaded ${res.count} file(s) to [${currentWorkspace}]`);
+      showStatus(`Successfully uploaded ${res.count} file(s) to [${currentWorkspaceLabel}]`);
     } catch (err) {
       transferError = { message: `Upload failed: ${err.message}` };
     } finally {
@@ -435,7 +458,7 @@
         }
       });
       refreshGrepResults();
-      showStatus(`Successfully uploaded ${res.count} dropped item(s) to [${currentWorkspace}]`);
+      showStatus(`Successfully uploaded ${res.count} dropped item(s) to [${currentWorkspaceLabel}]`);
     } catch (err) {
       transferError = { message: `Drop upload failed: ${err.message}` };
     } finally {
@@ -470,7 +493,7 @@
         overwrite: copyOverwrite
       });
       refreshGrepResults();
-      showStatus(`Copied ${copySrcFile.path} to [${copyDestWorkspace}] ${copyDestPath.trim()}`);
+      showStatus(`Copied ${copySrcFile.path} to [${workspaceLabel(copyDestWorkspace)}] ${copyDestPath.trim()}`);
       showCopyModal = false;
     } catch (err) {
       alert(`Copy failed: ${err.message}`);
@@ -480,7 +503,7 @@
   // --- Delete Handlers ---
   function handleDeleteFile(path, e) {
     if (e) e.stopPropagation();
-    if (!confirm(`Are you sure you want to delete '${path}' from workspace [${currentWorkspace}]?`)) return;
+    if (!confirm(`Are you sure you want to delete '${path}' from workspace [${currentWorkspaceLabel}]?`)) return;
     try {
       sandboxStore.deleteFile(path, currentWorkspace);
       if (selectedFilePath === path) {
@@ -499,7 +522,7 @@
   function handleDeleteSelected() {
     if (selectedFilePaths.size === 0) return;
     const count = selectedFilePaths.size;
-    if (!confirm(`Are you sure you want to delete ${count} selected file(s) from [${currentWorkspace}]?`)) return;
+    if (!confirm(`Are you sure you want to delete ${count} selected file(s) from [${currentWorkspaceLabel}]?`)) return;
 
     try {
       const res = sandboxStore.deleteFiles(Array.from(selectedFilePaths), currentWorkspace);
@@ -508,7 +531,7 @@
         selectedFilePath = null;
       }
       refreshGrepResults();
-      showStatus(`Deleted ${res.count} file(s) from [${currentWorkspace}]`);
+      showStatus(`Deleted ${res.count} file(s) from [${currentWorkspaceLabel}]`);
     } catch (err) {
       alert(`Bulk delete failed: ${err.message}`);
     }
@@ -516,7 +539,7 @@
 
   function handleClearWorkspace() {
     if (files.length === 0) return;
-    if (!confirm(`Are you sure you want to delete ALL ${files.length} file(s) in workspace [${currentWorkspace}]?`)) return;
+    if (!confirm(`Are you sure you want to delete ALL ${files.length} file(s) in workspace [${currentWorkspaceLabel}]?`)) return;
 
     try {
       const allPaths = files.map(f => f.path);
@@ -524,7 +547,7 @@
       selectedFilePaths = new Set();
       selectedFilePath = null;
       refreshGrepResults();
-      showStatus(`Cleared ${res.count} file(s) from [${currentWorkspace}]`);
+      showStatus(`Cleared ${res.count} file(s) from [${currentWorkspaceLabel}]`);
     } catch (err) {
       alert(`Clear workspace failed: ${err.message}`);
     }
@@ -654,7 +677,7 @@
           <line x1="12" y1="3" x2="12" y2="15" />
         </svg>
         <h3>Drop Folders or Files</h3>
-        <p>Drop items here to upload directly to workspace <code>[{currentWorkspace}]</code></p>
+        <p>Drop items here to upload directly to workspace <code>[{currentWorkspaceLabel}]</code></p>
       </div>
     </div>
   {/if}
@@ -730,32 +753,52 @@
     </div>
   {/if}
 
-  <!-- Workspace Selector Toolbar -->
+  <!-- Workspace Selector Toolbar (ticket 7571ce5: realm-grouped operator partitions) -->
   <div class="workspace-bar glass-panel">
     <div class="workspace-pills">
-      {#each sandboxStore.allWorkspaces as wsId (wsId)}
-        <button
-          type="button"
-          class="ws-pill"
-          class:active={currentWorkspace === wsId}
-          onclick={() => selectWorkspace(wsId)}
-        >
-          {#if wsId === 'global'}
-            <svg class="icon-svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="12" cy="12" r="10" /><line x1="2" y1="12" x2="22" y2="12" />
-              <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
-            </svg>
-            <span>Global Shared</span>
-          {:else}
-            <svg class="icon-svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" />
-            </svg>
-            <span>{wsId}</span>
-          {/if}
-          <span class="file-count font-mono">
-            {Object.keys(sandboxStore.fsSnapshot[wsId] || {}).length}
-          </span>
-        </button>
+      {#each partitionGroups as group (group.key)}
+        <div class="ws-group" class:synthetic={group.realm === null}>
+          <div class="ws-group-header">
+            <span
+              class="ws-group-dot"
+              style="background: {group.realm ? (safeRealmColor(group.realm.color) ?? 'var(--text-muted)') : 'var(--text-muted)'}"
+            ></span>
+            <span class="ws-group-label font-mono">{group.label}</span>
+          </div>
+          <div class="ws-group-pills">
+            {#each group.partitions as partition (partition.key)}
+              <button
+                type="button"
+                class="ws-pill"
+                class:active={snapshotKey === partition.key}
+                onclick={() => selectWorkspace(partition.key)}
+                title="Workspace [{partition.label}] ({partition.fileCount} file(s))"
+              >
+                {#if partition.kind === 'global'}
+                  <svg class="icon-svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10" /><line x1="2" y1="12" x2="22" y2="12" />
+                    <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+                  </svg>
+                  <span>Global Shared</span>
+                {:else if partition.kind === 'realm-global'}
+                  <svg class="icon-svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10" /><line x1="2" y1="12" x2="22" y2="12" />
+                    <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+                  </svg>
+                  <span>{partition.label}</span>
+                {:else}
+                  <svg class="icon-svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" />
+                  </svg>
+                  <span>{partition.label}</span>
+                {/if}
+                <span class="file-count font-mono">
+                  {partition.fileCount}
+                </span>
+              </button>
+            {/each}
+          </div>
+        </div>
       {/each}
     </div>
 
@@ -784,7 +827,7 @@
 
         {#if showUploadMenu}
           <div class="action-dropdown-menu glass-panel" role="menu">
-            <div class="menu-label font-mono">Upload to [{currentWorkspace}]</div>
+            <div class="menu-label font-mono">Upload to [{currentWorkspaceLabel}]</div>
             <button
               type="button"
               class="dropdown-item"
@@ -833,7 +876,7 @@
 
         {#if showDownloadMenu}
           <div class="action-dropdown-menu glass-panel" role="menu">
-            <div class="menu-label font-mono">Current Workspace [{currentWorkspace}]</div>
+            <div class="menu-label font-mono">Current Workspace [{currentWorkspaceLabel}]</div>
             <button
               type="button"
               class="dropdown-item"
@@ -989,7 +1032,7 @@
 
       {#if files.length === 0}
         <div class="empty-files">
-          <p>No files in workspace <code>{currentWorkspace}</code>.</p>
+          <p>No files in workspace <code>{currentWorkspaceLabel}</code>.</p>
           <div class="empty-actions">
             <button type="button" class="btn-secondary btn-sm" onclick={() => showCreateModal = true}>
               Create Initial File
@@ -1263,15 +1306,21 @@
         <div class="form-group">
           <span class="form-label">Source File</span>
           <div class="source-info font-mono">
-            <span>[{currentWorkspace}]</span> {copySrcFile.path}
+            <span>[{currentWorkspaceLabel}]</span> {copySrcFile.path}
           </div>
         </div>
 
         <div class="form-group">
           <label for="copy-dest-ws">Target Workspace <span class="req">*</span></label>
           <select id="copy-dest-ws" bind:value={copyDestWorkspace} class="input-field font-mono">
-            {#each sandboxStore.allWorkspaces as wsId (wsId)}
-              <option value={wsId}>{wsId === 'global' ? 'Global Shared (global)' : wsId}</option>
+            {#each partitionGroups as group (group.key)}
+              <optgroup label={group.label}>
+                {#each group.partitions as partition (partition.key)}
+                  <option value={partition.key}>
+                    {partition.kind === 'global' ? 'Global Shared (global)' : partition.label}
+                  </option>
+                {/each}
+              </optgroup>
             {/each}
           </select>
         </div>
@@ -1316,7 +1365,7 @@
     onkeydown={(e) => { if (e.key === 'Escape') showCreateModal = false; }}
   >
     <div class="file-modal glass-panel" role="dialog" aria-modal="true" aria-labelledby="create-file-title">
-      <h3 id="create-file-title" class="modal-title">Create New File in [{currentWorkspace}]</h3>
+      <h3 id="create-file-title" class="modal-title">Create New File in [{currentWorkspaceLabel}]</h3>
       <form onsubmit={handleCreateFile} class="modal-form">
         <div class="form-group">
           <label for="new-path">File Path <span class="req">*</span></label>
@@ -1340,7 +1389,7 @@
           ></textarea>
         </div>
 
-        {#if currentWorkspace === 'global'}
+        {#if currentPartition?.kind === 'global'}
           <label class="checkbox-label">
             <input type="checkbox" bind:checked={newFileReadOnly} />
             <span>Mark as Read-Only in Global Workspace</span>
@@ -1561,6 +1610,46 @@
   }
 
   .workspace-pills {
+    display: flex;
+    gap: 0.85rem;
+    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+
+  /* Realm-grouped operator partitions (ticket 7571ce5) */
+  .ws-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+
+  .ws-group-header {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0 0.15rem;
+  }
+
+  .ws-group-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .ws-group-label {
+    font-size: 0.62rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+    font-weight: 600;
+  }
+
+  .ws-group.synthetic .ws-group-label {
+    font-style: italic;
+  }
+
+  .ws-group-pills {
     display: flex;
     gap: 0.5rem;
     flex-wrap: wrap;

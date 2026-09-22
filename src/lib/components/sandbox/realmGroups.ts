@@ -1,12 +1,18 @@
 /**
  * Realm sidebar grouping and deletion-dialog helpers (Wave A, ticket d13a038;
- * Wave R, ticket 56ba4b9).
+ * Wave R, ticket 56ba4b9; VirtualFS partitions, ticket 7571ce5).
  *
  * Pure, UI-framework-free projections shared by `SandboxView.svelte` (drawer
  * grouping) and the Realm manager modal: agents are grouped by their
  * `config.realmId` against the registry records, with a stable ordering
  * (registry order; the store seeds the Generic default first) and input order
  * preserved inside every group.
+ *
+ * `groupFsPartitionsByRealm` is the operator VirtualFS explorer's companion:
+ * the store's `fsWorkspacePartitions` listing (shared global, realm-global,
+ * agent, and literal partitions) is grouped into Shared / Realm / Workspaces
+ * sections with realm-qualified ordering, so the Files tab is realm-aware
+ * instead of a flat cross-realm pill list (ticket 7571ce5).
  *
  * Wave R realm model (locked 2026-09-20; I2 scope-awareness, ticket 93243cc):
  * - the system-scope director is never a group member — it is identified by the
@@ -207,6 +213,156 @@ export function groupAgentsByRealm<T extends RealmGroupableAgent>(
   }
 
   return groups;
+}
+
+/**
+ * Stable group key of the shared (non-Realm) VirtualFS partition group
+ * (ticket 7571ce5): the literal shared `global` workspace.
+ */
+export const FS_SHARED_GROUP_KEY = '__shared__';
+
+/**
+ * Display label of the shared VirtualFS partition group.
+ */
+export const FS_SHARED_GROUP_LABEL = 'Shared';
+
+/**
+ * Stable group key of the trailing VirtualFS group carrying Realm-less
+ * literal/pinned partitions (ticket 7571ce5).
+ */
+export const FS_WORKSPACES_GROUP_KEY = '__workspaces__';
+
+/**
+ * Display label of the trailing Realm-less VirtualFS partition group.
+ */
+export const FS_WORKSPACES_GROUP_LABEL = 'Workspaces';
+
+/**
+ * Minimal structural shape the VirtualFS partition grouping needs from one
+ * operator partition entry: the internal addressing key, its display label,
+ * its Realm membership, and its partition kind. Keeps the helper decoupled
+ * from the full store `FsWorkspacePartition` contract while staying satisfied
+ * by it.
+ */
+export interface FsPartitionGroupable {
+  /** Internal VirtualFS snapshot key. */
+  readonly key: string;
+  /** Operator display label. */
+  readonly label: string;
+  /** Realm membership, or `null` for shared/literal partitions. */
+  readonly realmId: string | null;
+  /** Partition kind. */
+  readonly kind: 'global' | 'realm-global' | 'agent' | 'workspace';
+}
+
+/**
+ * One rendered VirtualFS explorer partition group: the shared group, a
+ * registered Realm (with its record), a synthetic group for an unregistered
+ * Realm id (`realm: null`), or the trailing Realm-less workspaces group.
+ * `partitions` is ordered realm-global → agent → workspace, then by label.
+ */
+export interface FsPartitionGroup<T extends FsPartitionGroupable = FsPartitionGroupable> {
+  /** Stable group key: `FS_SHARED_GROUP_KEY`, a Realm id, or `FS_WORKSPACES_GROUP_KEY`. */
+  readonly key: string;
+  /** Display label (Realm name, or the synthetic key). */
+  readonly label: string;
+  /** Registry Realm record, or `null` for the shared/synthetic groups. */
+  readonly realm: RealmRecord | null;
+  /** Member partitions in presentation order. */
+  readonly partitions: T[];
+}
+
+/**
+ * Presentation rank of one partition kind inside its group: realm-global
+ * first, then agents, then literal workspaces.
+ */
+const FS_PARTITION_KIND_RANK: Readonly<Record<FsPartitionGroupable['kind'], number>> = Object.freeze({
+  global: 0,
+  'realm-global': 1,
+  agent: 2,
+  workspace: 3
+});
+
+/**
+ * Groups the operator VirtualFS partition listing by Realm (ticket 7571ce5)
+ * with a stable ordering:
+ * 1. the shared group (`FS_SHARED_GROUP_KEY`) first;
+ * 2. one group per registry Realm in registry order (the store seeds Generic
+ *    first), including Realms whose partition list is empty;
+ * 3. an unregistered Realm id renders under its own raw realm id (a trailing
+ *    synthetic group, never dropped and never silently re-labeled);
+ * 4. Realm-less literal/pinned partitions fold into the trailing
+ *    `FS_WORKSPACES_GROUP_KEY` group;
+ * 5. inside every group, partitions sort realm-global → agent → workspace,
+ *    then by label, so a same-id pair in two Realms renders one pill per
+ *    Realm with a deterministic order.
+ *
+ * @param partitions - Operator partitions in store listing order.
+ * @param realms - Realm records in registry order.
+ * @returns Grouped projection; empty input yields `[]`.
+ *
+ * @example
+ * ```typescript
+ * const groups = groupFsPartitionsByRealm(sandboxStore.fsWorkspacePartitions, sandboxStore.realms);
+ * groups.map(group => [group.label, group.partitions.length]);
+ * ```
+ */
+export function groupFsPartitionsByRealm<T extends FsPartitionGroupable>(
+  partitions: readonly T[] | null | undefined,
+  realms: readonly RealmRecord[] | null | undefined
+): FsPartitionGroup<T>[] {
+  const list = Array.isArray(partitions) ? partitions : [];
+  const records = Array.isArray(realms) ? realms : [];
+  const recordById = new Map(records.map((realm) => [realm.id, realm]));
+  const groups = new Map<string, FsPartitionGroup<T>>();
+  const firstSeen = new Map<string, number>();
+
+  const ensureGroup = (key: string, label: string, realm: RealmRecord | null): FsPartitionGroup<T> => {
+    let group = groups.get(key);
+    if (!group) {
+      group = { key, label, realm, partitions: [] };
+      groups.set(key, group);
+      firstSeen.set(key, firstSeen.size);
+    }
+    return group;
+  };
+
+  for (const partition of list) {
+    if (!partition || typeof partition.key !== 'string' || !partition.key) continue;
+    if (partition.realmId) {
+      const realm = recordById.get(partition.realmId) ?? null;
+      ensureGroup(partition.realmId, realm ? realm.name : partition.realmId, realm).partitions.push(partition);
+      continue;
+    }
+    if (partition.kind === 'global') {
+      ensureGroup(FS_SHARED_GROUP_KEY, FS_SHARED_GROUP_LABEL, null).partitions.push(partition);
+      continue;
+    }
+    ensureGroup(FS_WORKSPACES_GROUP_KEY, FS_WORKSPACES_GROUP_LABEL, null).partitions.push(partition);
+  }
+
+  const groupRank = (group: FsPartitionGroup<T>): { rank: number; secondary: number } => {
+    if (group.key === FS_SHARED_GROUP_KEY) return { rank: 0, secondary: 0 };
+    if (group.key === FS_WORKSPACES_GROUP_KEY) return { rank: 3, secondary: 0 };
+    const registryIndex = records.findIndex((realm) => realm.id === group.key);
+    if (registryIndex >= 0) return { rank: 1, secondary: registryIndex };
+    return { rank: 2, secondary: firstSeen.get(group.key) ?? 0 };
+  };
+
+  for (const group of groups.values()) {
+    group.partitions.sort((a, b) => {
+      const kindDelta = (FS_PARTITION_KIND_RANK[a.kind] ?? 9) - (FS_PARTITION_KIND_RANK[b.kind] ?? 9);
+      if (kindDelta !== 0) return kindDelta;
+      return String(a.label).localeCompare(String(b.label));
+    });
+  }
+
+  return Array.from(groups.values()).sort((a, b) => {
+    const rankA = groupRank(a);
+    const rankB = groupRank(b);
+    if (rankA.rank !== rankB.rank) return rankA.rank - rankB.rank;
+    return rankA.secondary - rankB.secondary;
+  });
 }
 
 /**

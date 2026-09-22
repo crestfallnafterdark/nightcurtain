@@ -1449,8 +1449,14 @@ test('23. ArchiveDownloadReceipt, fsSnapshot/activeFsFiles, and downloadFile mat
     'The fictional store-local ArchiveDownloadReceipt must be deleted'
   );
   // Implementation code legitimately passes `archiveName` to the archive factory,
-  // so the negative proof is scoped to the declared store surface.
-  const declaredBlocks = contractSource.match(/export (?:interface|type) [A-Za-z0-9_]+[\s\S]*?\n\}/g) || [];
+  // so the negative proof is scoped to the declared store surface — excluding
+  // the operator VirtualFS partition contract (ticket 7571ce5), whose resolved
+  // `fileCount` is a listing field, not a fictional receipt field.
+  const surfaceSource = contractSource.replace(
+    /\/\*\*(?:(?!\*\/)[\s\S])*\*\/\s*export interface FsWorkspacePartition \{[\s\S]*?\n\}\n/,
+    ''
+  );
+  const declaredBlocks = surfaceSource.match(/export (?:interface|type) [A-Za-z0-9_]+[\s\S]*?\n\}/g) || [];
   assert.doesNotMatch(declaredBlocks.join('\n'), /archiveName|fileCount|totalBytes/, 'Fictional receipt fields must not reappear in the declared store surface');
 
   // VFS projections use FileRecord, not FileListItem aliases; downloadFile returns its receipt.
@@ -4257,7 +4263,12 @@ test('59. [7571ce5] the operator partition listing addresses realm-global and sa
     assert.ok(shared, 'the shared global partition is listed');
     assert.strictEqual(shared.kind, 'global');
     assert.strictEqual(shared.realmId, null);
-    assert.strictEqual(shared.fileCount, 1, 'the shared partition counts only its own file');
+    assert.strictEqual(
+      shared.fileCount,
+      Object.keys(store.fsSnapshot['global']).length,
+      'the shared partition counts its own resolved container'
+    );
+    assert.ok(store.fsSnapshot['global']['/shared.md'], 'the shared file is present in the shared container');
 
     // 2. Realm-global partitions: reachable per realm, uploadable even when empty.
     const alphaGlobal = byKey.get(realmGlobalA);
@@ -4306,6 +4317,13 @@ test('59. [7571ce5] the operator partition listing addresses realm-global and sa
     assert.strictEqual(store.fsSnapshot[realmGlobalB]['/uploaded.md'].content, 'uploaded');
     const refreshed = new Map(store.fsWorkspacePartitions.map((partition) => [partition.key, partition]));
     assert.strictEqual(refreshed.get(realmGlobalB).fileCount, 1, 'the uploaded realm-global partition count updates');
+
+    // 5b. The realm-global partition is downloadable through the operator
+    //     surface without falling back to the shared global container.
+    const separate = await store.downloadWorkspaceFilesSeparately(realmGlobalB);
+    assert.strictEqual(separate.count, 1, 'the realm-global partition downloads exactly its own file set');
+    const archive = await store.downloadWorkspaceArchive(realmGlobalA);
+    assert.strictEqual(archive.filesCount, 1, 'the realm-global partition archives exactly its own file set');
 
     // 6. Agent-facing realm opacity stays intact: the public listing never
     //    carries a canonical key, and the same-id label still projects once.

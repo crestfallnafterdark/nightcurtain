@@ -73,7 +73,7 @@
  * ```
  */
 
-import { AgentRuntime, createAgentIdentityKey } from '../runtime/index.ts';
+import { AgentRuntime, createAgentIdentityKey, parseAgentIdentityKey } from '../runtime/index.ts';
 import type { AgentConfig, AgentConfigUpdate, AgentIdentityPort, AgentIdentityProjection, AgentIdentityScope, AgentState, AuthorityDescriptor, InternalPrincipal, LaunchHistoryEntry, ScheduleResult, TurnExecutionOptions, TurnExecutionResult, TurnInput, UnsubscribeFn } from '../runtime/index.ts';
 import type { Agent, TurnBundle } from '../runtime/agent/index.ts';
 import type { ModelInterface, ProviderInterface } from '../inference/index.ts';
@@ -1074,6 +1074,50 @@ export interface SeparateDownloadReceipt {
  * ```
  */
 export type ProgressCallback = (current: number, total: number, fileName: string) => void;
+
+/**
+ * Partition kind of one operator-facing VirtualFS workspace entry
+ * (ticket 7571ce5): the literal shared `global` workspace, a Realm's
+ * realm-global partition (`realm:<realmId>:global`), an active agent's
+ * resolved private workspace, or any other literal/pinned/orphaned workspace
+ * key carried by the snapshot.
+ */
+export type FsWorkspacePartitionKind = 'global' | 'realm-global' | 'agent' | 'workspace';
+
+/**
+ * One operator-facing VirtualFS workspace partition (ticket 7571ce5): the
+ * resolved internal snapshot key an operator surface must address, a
+ * realm-qualified display label, the Realm the partition belongs to, the
+ * partition kind, and the file count read from the resolved key.
+ *
+ * This is the operator projection of the VirtualFS snapshot: unlike the
+ * agent-facing `allWorkspaces` labels it deliberately carries the internal
+ * storage key (and the Realm id/name) so the operator explorer can select,
+ * view, upload into, and download a specific partition — including
+ * realm-global partitions and the same bare agent id live in two Realms.
+ * Agent-visible listings and receipts must never consume this projection.
+ *
+ * @example
+ * ```typescript
+ * for (const partition of sandboxStore.fsWorkspacePartitions) {
+ *   console.log(`${partition.label} [${partition.kind}] — ${partition.fileCount} file(s)`);
+ * }
+ * ```
+ */
+export interface FsWorkspacePartition {
+  /** Internal VirtualFS snapshot key; operator addressing only, never agent-visible. */
+  readonly key: string;
+  /** Operator display label (realm-qualified for Realm-scoped partitions). */
+  readonly label: string;
+  /** Realm membership of the partition, or `null` for shared/literal workspaces. */
+  readonly realmId: string | null;
+  /** Registered Realm display name when resolvable, else `null`. */
+  readonly realmName: string | null;
+  /** Partition kind. */
+  readonly kind: FsWorkspacePartitionKind;
+  /** File count of the resolved partition (`key`), never of a projected label. */
+  readonly fileCount: number;
+}
 
 /**
  * Receipt returned upon resetting narrative events for a partition (`resetAgentEvents`).
@@ -3137,6 +3181,132 @@ export class SandboxStore {
   }
 
   /**
+   * Operator-facing partition listing of the VirtualFS snapshot (ticket
+   * 7571ce5): the literal shared `global` workspace, every registered Realm's
+   * realm-global partition, every active registration's resolved private
+   * workspace, and every remaining literal/pinned/orphaned snapshot key. Each
+   * entry carries the internal snapshot key for exact addressing, a
+   * realm-qualified display label, the Realm id/name, the partition kind, and
+   * the file count read from the resolved key.
+   *
+   * The agent-facing `allWorkspaces` projection stays separate and
+   * realm-opaque; operator surfaces (the Virtual Filesystem explorer) consume
+   * this listing instead, so realm-global partitions are reachable and the
+   * same bare agent id live in two Realms yields two distinct partitions.
+   * Realm-global and empty agent partitions are listed even when the snapshot
+   * carries no bytes yet, so they can be selected and uploaded into.
+   *
+   * @example
+   * ```typescript
+   * for (const partition of sandboxStore.fsWorkspacePartitions) {
+   *   console.log(`${partition.label} [${partition.kind}] — ${partition.fileCount} file(s)`);
+   * }
+   * ```
+   */
+  get fsWorkspacePartitions(): ReadonlyArray<FsWorkspacePartition> {
+    const partitions: FsWorkspacePartition[] = [];
+    const seen = new Set<string>();
+    const register = (key: string, label: string, realmId: string | null, kind: FsWorkspacePartitionKind): void => {
+      if (!key || seen.has(key)) return;
+      seen.add(key);
+      partitions.push(Object.freeze({
+        key,
+        label,
+        realmId,
+        realmName: realmId ? this.#realmDisplayName(realmId) : null,
+        kind,
+        fileCount: this.#fsPartitionFileCount(key)
+      }));
+    };
+
+    // Active registrations first: the projected private workspace key (an
+    // explicit pin, the canonical identity key, or the legacy bare id) labels
+    // the snapshot key it actually owns. The agent projection is read as the
+    // reactive dependency of this listing (the identity port itself is not
+    // reactive), and it doubles as the active-registration guard.
+    const activeIds = new Set(this.agents.map((agent) => (agent && typeof agent.id === 'string' ? agent.id : '')).filter(Boolean));
+    const projections = (this.#identityPort ? this.#identityPort.listAgentIdentities() : [])
+      .filter((projection) => Boolean(projection) && activeIds.has(projection.id));
+    const projectionByKey = new Map<string, AgentIdentityProjection>();
+    for (const projection of projections) {
+      const key = resolveAgentPrivateWorkspaceKey(projection);
+      if (!key || isReservedWorkspaceKey(key) || projectionByKey.has(key)) continue;
+      projectionByKey.set(key, projection);
+    }
+
+    register('global', 'global', null, 'global');
+
+    for (const key of Object.keys(this.fsSnapshot)) {
+      if (key === 'global') continue;
+      const projection = projectionByKey.get(key);
+      if (projection) {
+        register(key, this.#agentPartitionLabel(projection), this.#projectionRealmId(projection), 'agent');
+        continue;
+      }
+      const realmGlobalRealmId = this.#realmGlobalPartitionRealmId(key);
+      if (realmGlobalRealmId) {
+        register(key, `${this.#realmDisplayName(realmGlobalRealmId)} · global`, realmGlobalRealmId, 'realm-global');
+        continue;
+      }
+      const canonical = parseAgentIdentityKey(key);
+      if (canonical) {
+        // Orphaned canonical key (a recycled/removed registration): keep its
+        // bytes reachable for the operator instead of collapsing them onto
+        // the shared `global` label.
+        register(
+          key,
+          canonical.realmId ? `${this.#realmDisplayName(canonical.realmId)} · ${canonical.agentId}` : canonical.agentId,
+          canonical.realmId,
+          'agent'
+        );
+        continue;
+      }
+      // Ordinary literal/pinned workspace key: pass through verbatim.
+      register(key, key, null, 'workspace');
+    }
+
+    // Upload targets with no bytes yet: every active registration's partition
+    // and every registered Realm's realm-global partition.
+    for (const projection of projections) {
+      const key = resolveAgentPrivateWorkspaceKey(projection);
+      if (!key || isReservedWorkspaceKey(key)) continue;
+      register(key, this.#agentPartitionLabel(projection), this.#projectionRealmId(projection), 'agent');
+    }
+    // Legacy/identity-port-less registrations: the bare id is the private
+    // workspace key when no projection resolved one, keeping the pre-Wave-I
+    // pill parity for hosts without an identity port.
+    const projectedIds = new Set(projections.map((projection) => projection.id));
+    for (const agent of this.agents) {
+      const id = agent && typeof agent.id === 'string' ? agent.id : '';
+      if (!id || projectedIds.has(id)) continue;
+      const rawRealm = agent.config && typeof agent.config.realmId === 'string' ? agent.config.realmId.trim() : '';
+      const realmId = rawRealm || null;
+      register(id, realmId ? `${this.#realmDisplayName(realmId)} · ${id}` : id, realmId, 'agent');
+    }
+    for (const realm of this.realms) {
+      register(realmGlobalWorkspaceKey(realm.id), `${realm.name} · global`, realm.id, 'realm-global');
+    }
+
+    return partitions;
+  }
+
+  /**
+   * Operator partition descriptor of `activeFsWorkspace` (ticket 7571ce5):
+   * the listed partition the current selection addresses, or `null` when the
+   * selection resolves to no listed partition (a stale literal label).
+   *
+   * @example
+   * ```typescript
+   * const partition = sandboxStore.activeFsPartition;
+   * console.log(partition ? `${partition.label} (${partition.fileCount})` : 'unlisted workspace');
+   * ```
+   */
+  get activeFsPartition(): FsWorkspacePartition | null {
+    const key = this.#resolveFsSnapshotKey(this.activeFsWorkspace) || 'global';
+    return this.fsWorkspacePartitions.find((partition) => partition.key === key) ?? null;
+  }
+
+  /**
    * Set of all available workspace IDs across the sandbox (`'global'`, active agent IDs, partitioned directories).
    * 
    * @example
@@ -4714,8 +4884,15 @@ export class SandboxStore {
 
   /**
    * Changes the active workspace filter in the VirtualFS Explorer tab.
+   *
+   * Operator surfaces pass a partition key from `fsWorkspacePartitions` (an
+   * internal snapshot key) so a realm-global partition or a same-id agent in
+   * two Realms is addressed exactly (ticket 7571ce5). Legacy callers keep the
+   * historical verbatim behavior: a public label is stored as-is and the read
+   * paths (`activeFsFiles`, `activeFsPartition`) resolve it through the unique
+   * registration when one exists.
    * 
-   * @param workspaceId - Workspace ID to focus (e.g. `'global'`, `'agent-scout'`).
+   * @param workspaceId - Partition key or workspace label to focus (e.g. `'global'`, `'realm:<id>:global'`).
    * 
    * @example
    * ```typescript
@@ -7771,6 +7948,73 @@ export class SandboxStore {
     const canonicalKey = projection && typeof projection.key === 'string' && projection.key ? projection.key : null;
     if (canonicalKey && canonicalKey !== publicLabel && this.fsSnapshot[canonicalKey]) return canonicalKey;
     return publicLabel;
+  }
+
+  /**
+   * File count of one operator partition key (ticket 7571ce5): the number of
+   * entries in the snapshot container addressed by the internal key itself,
+   * never the count of a projected label.
+   *
+   * @param workspaceKey - Internal VirtualFS snapshot key.
+   * @returns File count of the resolved partition.
+   */
+  #fsPartitionFileCount(workspaceKey: string): number {
+    const container = this.fsSnapshot[workspaceKey];
+    return container && typeof container === 'object' ? Object.keys(container).length : 0;
+  }
+
+  /**
+   * Registered Realm display name of one realm id (ticket 7571ce5), falling
+   * back to the raw id when the registry no longer carries a record.
+   *
+   * @param realmId - Realm id.
+   * @returns Display name, or the raw realm id.
+   */
+  #realmDisplayName(realmId: string): string {
+    const record = this.realms.find((realm) => realm.id === realmId);
+    return record && typeof record.name === 'string' && record.name ? record.name : realmId;
+  }
+
+  /**
+   * Trimmed Realm membership of an identity projection, or `null` when the
+   * registration is ungrouped/system-scope (ticket 7571ce5).
+   *
+   * @param projection - Frozen identity projection.
+   * @returns Realm id, or `null`.
+   */
+  #projectionRealmId(projection: AgentIdentityProjection): string | null {
+    const raw = typeof projection.realmId === 'string' ? projection.realmId.trim() : '';
+    return raw || null;
+  }
+
+  /**
+   * Operator display label of one active registration's partition (ticket
+   * 7571ce5): realm-qualified (`<realmName> · <agentId>`) for a Realm-bound
+   * registration, the bare agent id otherwise. Two same-id registrations in
+   * different Realms therefore never share a pill label.
+   *
+   * @param projection - Frozen identity projection.
+   * @returns Realm-qualified display label.
+   */
+  #agentPartitionLabel(projection: AgentIdentityProjection): string {
+    const realmId = this.#projectionRealmId(projection);
+    return realmId ? `${this.#realmDisplayName(realmId)} · ${projection.id}` : projection.id;
+  }
+
+  /**
+   * Realm id encoded in a realm-global partition key
+   * (`realm:<realmId>:global`, the VirtualFS alias convention), or `null` for
+   * every other key (ticket 7571ce5).
+   *
+   * @param workspaceKey - Candidate internal workspace key.
+   * @returns Realm id, or `null`.
+   */
+  #realmGlobalPartitionRealmId(workspaceKey: string): string | null {
+    const prefix = 'realm:';
+    const suffix = ':global';
+    if (!workspaceKey.startsWith(prefix) || !workspaceKey.endsWith(suffix)) return null;
+    const realmId = workspaceKey.slice(prefix.length, workspaceKey.length - suffix.length);
+    return realmId || null;
   }
 
   /**
