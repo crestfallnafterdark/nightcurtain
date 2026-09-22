@@ -120,7 +120,7 @@ test.describe('04: Turn Execution & Chat Log Rendering', () => {
     await expect(systemEditArea).toHaveValue(/Operational Directive:\n- /);
     const editedDirective = 'Multi-line directive line one.\n\nLine three with indentation:\n    indented detail.';
     await systemEditArea.fill(editedDirective);
-    await systemCard.locator('.inline-edit-wrap .btn-save').click();
+    await systemCard.locator('.btn-save').click();
     await expect(systemCard.locator('.inline-edit-textarea')).toHaveCount(0);
     expect(await systemCard.locator('.system-body p').evaluate((el) => el.textContent)).toBe(editedDirective);
 
