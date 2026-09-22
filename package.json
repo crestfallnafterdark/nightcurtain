@@ -1,8 +1,8 @@
 {
-  "name": "ai-story",
+  "name": "nightcurtain",
   "private": true,
   "version": "0.0.0",
-  "description": "AI story engine with an encapsulated multi-agent sandbox.",
+  "description": "A browser-native studio for multi-agent AI story worlds.",
   "author": "crestfalln <crestfallnafterdark@gmail.com>",
   "license": "MIT",
   "type": "module",
