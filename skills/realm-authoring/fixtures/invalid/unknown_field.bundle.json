@@ -1,0 +1,22 @@
+{
+  "formatVersion": 1,
+  "template": {
+    "formatVersion": 1,
+    "id": "bad_field_fixture",
+    "name": "Bad Field Fixture",
+    "description": "Red fixture: a misspelled agent-spec field must fail closed instead of being dropped.",
+    "agents": [
+      {
+        "key": "worker",
+        "idPattern": "worker",
+        "name": "Worker",
+        "role": "Worker",
+        "prompt": [{ "kind": "text", "text": "Work." }],
+        "toolProfile": { "preset": "readonly" },
+        "privileged": false,
+        "privileges": false
+      }
+    ]
+  },
+  "files": {}
+}

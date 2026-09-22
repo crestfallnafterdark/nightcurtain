@@ -1,0 +1,101 @@
+{
+  "formatVersion": 1,
+  "id": "session_zero",
+  "name": "Session Zero",
+  "description": "Generator realm: Architect authors Realm template bundles; Genesis produces hydration packages for imported templates.",
+  "notes": "Both members are privileged so either can read the other's private workspace in-realm (/agents/<id>/...). The publishing authorities are declared per agent and stay inert until the operator approves them per agent in the mandatory launch review; privilege alone never grants them.",
+  "inputs": [
+    {
+      "id": "assignment",
+      "label": "Assignment",
+      "help": "What to author (Architect) or hydrate (Genesis): the experience, its audience, and any must-haves.",
+      "required": true
+    },
+    {
+      "id": "target_template",
+      "label": "Target template id",
+      "help": "The template id Genesis must hydrate. Leave empty when Architect is authoring a new bundle; Genesis then reads the newest note under /global/handoff/.",
+      "multiline": false
+    }
+  ],
+  "agents": [
+    {
+      "key": "architect",
+      "idPattern": "architect",
+      "name": "Architect",
+      "role": "Realm template author",
+      "prompt": [
+        { "kind": "file", "path": "prompts/operational_rules.md" },
+        { "kind": "file", "path": "prompts/architect_protocol.md" },
+        { "kind": "input", "inputId": "assignment" },
+        { "kind": "input", "inputId": "target_template" }
+      ],
+      "toolProfile": {
+        "tools": [
+          "read_file",
+          "write_file",
+          "replace_file_content",
+          "write_json",
+          "json_patch",
+          "query_json",
+          "concat_files",
+          "list_files",
+          "grep",
+          "send_message",
+          "read_message",
+          "list_inbox",
+          "whoami"
+        ]
+      },
+      "privileged": true,
+      "authorities": ["@template:authority"]
+    },
+    {
+      "key": "genesis",
+      "idPattern": "genesis",
+      "name": "Genesis",
+      "role": "Hydration package generator",
+      "prompt": [
+        { "kind": "file", "path": "prompts/operational_rules.md" },
+        { "kind": "file", "path": "prompts/genesis_protocol.md" },
+        { "kind": "input", "inputId": "assignment" },
+        { "kind": "input", "inputId": "target_template" }
+      ],
+      "toolProfile": {
+        "tools": [
+          "read_file",
+          "write_file",
+          "replace_file_content",
+          "write_json",
+          "json_patch",
+          "query_json",
+          "concat_files",
+          "list_files",
+          "grep",
+          "send_message",
+          "read_message",
+          "list_inbox",
+          "whoami"
+        ]
+      },
+      "privileged": true,
+      "authorities": ["@hydration:authority"]
+    }
+  ],
+  "seed": {
+    "files": [
+      {
+        "path": "handoff/README.md",
+        "target": "realm",
+        "origin": "fixed",
+        "source": { "file": "files/handoff_readme.md" }
+      },
+      {
+        "path": "handoff/notes.md",
+        "target": "realm",
+        "origin": "user",
+        "brief": "Optional operator notes for this generation session (attached at launch; absent notes are skipped)."
+      }
+    ]
+  }
+}

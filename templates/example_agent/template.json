@@ -1,0 +1,41 @@
+{
+  "id": "example_agent",
+  "name": "Example Agent",
+  "description": "Minimal reference bundle: one unprivileged zero-tool agent composed from a protocol file and three inputs (two launch-provided, one resolved from a default file). Also serves as the pipeline fixture for the realm template suites.",
+  "formatVersion": 1,
+  "inputs": [
+    {
+      "id": "briefing",
+      "label": "Briefing",
+      "help": "The task briefing handed to the agent at launch."
+    },
+    {
+      "id": "directives",
+      "label": "Directives",
+      "help": "Operating directives that constrain the response.",
+      "default": "Be concise, explicit, and consistent."
+    },
+    {
+      "id": "house_style",
+      "label": "House style",
+      "help": "Style text resolved from the bundle's default file unless overridden at launch.",
+      "defaultFile": "inputs/house_style.md"
+    }
+  ],
+  "agents": [
+    {
+      "key": "assistant",
+      "idPattern": "assistant",
+      "name": "Assistant",
+      "role": "Reference agent for the format-v1 primitives",
+      "prompt": [
+        { "kind": "file", "path": "prompts/protocol.md" },
+        { "kind": "input", "inputId": "briefing" },
+        { "kind": "input", "inputId": "directives" },
+        { "kind": "input", "inputId": "house_style" }
+      ],
+      "toolProfile": { "tools": [] },
+      "privileged": false
+    }
+  ]
+}

@@ -1,0 +1,45 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# API Keys & Secrets
+api-key
+.env*
+.aider*
+
+# Agent runtime state
+.opencode/
+.agents/*
+!.agents/skills/
+
+# Ephemeral & Bloat Files
+telemetry.log
+data/
+scratch/
+sandbox_world/
+playwright-report/
+test-results/
+tests/e2e/screenshots/
+.playwright/
+coverage/

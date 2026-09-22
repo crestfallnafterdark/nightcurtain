@@ -1,0 +1,15 @@
+{
+  "formatVersion": 1,
+  "templateId": "authoring_demo",
+  "templateVersion": "sha256:b9aa0a16ab57e0842e2c82304a1d621c7b1639c59a5e6a1ae9b1a0b938e9d890",
+  "inputs": {
+    "briefingx": "A value for an input the template never declared."
+  },
+  "files": [
+    {
+      "path": "lore/topic.md",
+      "target": "realm",
+      "content": "Lore for the undeclared-input red fixture.\n"
+    }
+  ]
+}

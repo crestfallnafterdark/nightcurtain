@@ -1,0 +1,15 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/tsdoc/v0/tsdoc.schema.json",
+  "extends": ["@microsoft/api-extractor/extends/tsdoc-base.json"],
+  "tagDefinitions": [
+    { "tagName": "@module", "syntaxKind": "block" },
+    { "tagName": "@mayImport", "syntaxKind": "block", "allowMultiple": true },
+    { "tagName": "@mustNotImport", "syntaxKind": "block", "allowMultiple": true },
+    { "tagName": "@invariant", "syntaxKind": "block", "allowMultiple": true },
+    { "tagName": "@decision", "syntaxKind": "block", "allowMultiple": true }
+  ],
+  "supportForTags": {
+    "@module": true, "@mayImport": true, "@mustNotImport": true,
+    "@invariant": true, "@decision": true
+  }
+}

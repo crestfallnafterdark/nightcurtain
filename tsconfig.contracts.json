@@ -1,0 +1,16 @@
+{
+  "extends": "./jsconfig.json",
+  "compilerOptions": {
+    // Sandbox surfaces are all `.ts`, which are checked regardless of
+    // skipLibCheck; the flag only suppresses third-party declarations (e.g.
+    // @deepgram/sdk `.d.mts`) whose Node-builtin resolution (`@types/node`
+    // absent) is out of scope for this gate.
+    "skipLibCheck": true,
+    "strict": true,
+    "checkJs": false,
+    "noEmit": true,
+    "types": [],
+    "lib": ["ESNext", "DOM", "DOM.Iterable"]
+  },
+  "include": ["src/lib/sandbox/**/*.d.ts", "src/lib/sandbox/**/*.ts"]
+}

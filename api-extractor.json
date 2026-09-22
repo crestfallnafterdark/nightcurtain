@@ -1,0 +1,38 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/api-extractor/v7/api-extractor.schema.json",
+  "projectFolder": ".",
+  "mainEntryPointFilePath": "<projectFolder>/src/lib/sandbox/modelConfig.d.ts",
+  "compiler": {
+    "tsconfigFilePath": "<projectFolder>/jsconfig.json"
+  },
+  "apiReport": {
+    "enabled": true,
+    "reportFolder": "<projectFolder>/test-results/api-extractor-pilot/modelConfig/",
+    "reportTempFolder": "<projectFolder>/test-results/api-extractor-pilot/.temp/modelConfig/"
+  },
+  "docModel": {
+    "enabled": false
+  },
+  "dtsRollup": {
+    "enabled": false
+  },
+  "tsdocMetadata": {
+    "enabled": false
+  },
+  "messages": {
+    "extractorMessageReporting": {
+      "ae-missing-release-tag": {
+        "logLevel": "none"
+      },
+      "ae-undocumented": {
+        "logLevel": "error"
+      },
+      "ae-forgotten-export": {
+        "logLevel": "warning"
+      },
+      "ae-unresolved-link": {
+        "logLevel": "none"
+      }
+    }
+  }
+}

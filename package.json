@@ -1,0 +1,58 @@
+{
+  "name": "ai-story",
+  "private": true,
+  "version": "0.0.0",
+  "description": "AI story engine with an encapsulated multi-agent sandbox.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "node tests/runner.js",
+    "test:unit": "node --test tests/unit/*.js",
+    "test:integration": "node --test tests/integration/*.js",
+    "test:e2e": "playwright test",
+    "typecheck": "node scripts/typecheck.mjs",
+    "lint": "eslint \"src/lib/sandbox/**/*.{js,ts,d.ts}\"",
+    "lint:sandbox": "eslint \"src/lib/sandbox/**/*.{js,ts,d.ts}\"",
+    "lint:docs": "eslint --config eslint.tsdoc.config.js \"src/lib/sandbox/**/*.{d.ts,ts}\"",
+    "verify": "node scripts/verify_all.mjs",
+    "verify:contracts": "node scripts/verify_sandbox_contracts.js --enforce-boundaries",
+    "verify:contract-types": "tsc --noEmit -p tsconfig.contracts.json",
+    "verify:module-contracts": "node scripts/verify_module_contracts.js",
+    "api:reports": "node scripts/api_reports.mjs --write",
+    "verify:api-reports": "node scripts/api_reports.mjs --check",
+    "api:extract": "api-extractor run --local --config api-extractor.json",
+    "gate:arch": "depcruise src --config .dependency-cruiser.cjs",
+    "gate:arch:json": "depcruise src --config .dependency-cruiser.cjs --output-type json"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@microsoft/api-extractor": "^7.59.1",
+    "@playwright/test": "^1.63.0",
+    "@sveltejs/vite-plugin-svelte": "^7.2.0",
+    "dependency-cruiser": "^18.3.1",
+    "eslint": "^10.10.0",
+    "eslint-plugin-tsdoc": "^0.5.3",
+    "globals": "^17.12.0",
+    "svelte": "^5.56.8",
+    "svelte-check": "4.7.6",
+    "typescript": "5.9.3",
+    "typescript-eslint": "^8.70.0",
+    "vite": "^8.2.0"
+  },
+  "dependencies": {
+    "@premai/api-sdk": "^1.0.65",
+    "buffer": "^6.0.3",
+    "dompurify": "^3.4.13",
+    "fast-json-patch": "^3.1.1",
+    "jsonpath-plus": "^10.4.0",
+    "marked": "^18.0.9",
+    "vite-plugin-top-level-await": "^1.6.0",
+    "vite-plugin-wasm": "^3.6.0"
+  }
+}

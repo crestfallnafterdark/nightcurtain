@@ -1,0 +1,84 @@
+# Sandbox Durable Notes — Quirks & Accepted Exceptions
+
+**Status:** ACTIVE · **Last verified:** 2026-09-22.
+
+Durable engine notes: intentional quirks and accepted exceptions for the sandbox substrate. The per-module contract record is the generated ICD set ([`generated/modules/INDEX.md`](generated/modules/INDEX.md)).
+
+## Sandbox shape (rules)
+
+- **36 folder modules**; `index.ts` (store: `index.svelte.ts`) is the sole importable surface; deep imports into module folders are banned (verifier + dependency-cruiser). No hand-written `.d.ts` pairs, no `@contractExports`, **no default exports**.
+- **Gate chain:** verifier (default + `--enforce-boundaries`) · module-contracts (Tier 1 + graph truth) · `verify:contract-types` (strict) · `verify:api-reports` (0 drift) · `gate:arch` (**0 errors / 0 warnings**) · `lint:sandbox` (0 problems) · `lint:docs` (0) · `typecheck` ratchets (`tsc` **0 total / 0 sandbox**; svelte-check ≤96); `npm test` = 92 suites (includes the 7 gate cases).
+- End state: all modules `--strict` clean; explicit `any` only at PremProvider's SDK boundary (see exceptions).
+
+## Intentional behavioral quirks (do not "fix" without a decision)
+
+1. **OpenAIProvider**: `max_tokens` is hardcoded `100000` (`config.maxTokens` ignored); malformed SSE frames are silently skipped; tool-args JSON parse failure falls back to `{raw}`. Wire behavior is pinned by suites.
+2. **turnExecutionEngine**: `onChunk` is delivered **twice** per chunk (provider options + engine loop) — tests pin the double delivery.
+3. **turnExecutionEngine**: `PRECALL_ALLOWLIST` is an unexported frozen `Set` (frozen properties, mutable contents); the gate uses `.has` only and fails closed.
+4. **messagingBus**: envelope metadata is `Record<string, unknown>`; `broadcast`/`recipients` are conditionally absent on p2p; non-string `metadata.type` falls back to `'message'`; trust is never persisted (`registeredAgents` carries no `privileged`).
+5. **virtualFs**: read `offset`/`limit`/`nextOffset` are **UTF-16 code units** while `totalBytes` is UTF-8 bytes; non-raw read envelopes own `toString`/`valueOf`; `normalizeVirtualPath` accepts `null | undefined`.
+6. **virtualFs privilege seam**: null-prototype options, flag stripping, first-bind principal, permission staging *before* authorization — load-bearing, copy verbatim.
+7. **worldClock**: `syncFromVirtualFs` normalizes absent/non-finite `updatedAt` to `Date.now()`.
+8. **runtimeScheduler**: privilege derives **only** from explicit context (`options`/object-form identity flags are ignored); malformed snapshot records (non-string ids, non-finite scalars) are skipped/normalized on import.
+9. **runtime/agent + agentLifecycle**: `Object.defineProperty` snapshots, `setPrototypeOf` Set facade, intrinsic `Agent.prototype.*.call` dispatch, opaque identity channels — hardening is structural and tested.
+10. **runtime/agent**: partial telemetry (constructor and `fromSnapshot`) is normalized over defaults; `lastSentContext` is copied, never aliased.
+11. **sandboxStore**: runes are `$state` only (no `$derived`/`$effect`); module-level singleton with eager instance + `getSandboxStore()`.
+12. **triggerQueue**: `TRIGGER_TYPES` is one frozen object reference-shared by queue/dispatcher/scheduler (identity-compared in tests) — not a TS `enum`.
+13. **tools/normalizers**: `normalizeToolName === getCanonToolName`; legacy prototype-key resolution is literal (`'toString'` → `['toString']`).
+14. **sandboxPersistence**: `redoStack` is the entity `TurnBundle` stack (typed `unknown[]`); restore receipts are per-subsystem and carry failure details atomically.
+15. **PremProvider**: dual-form constructor KEK fallback asymmetry, enclave-client promise sharing with failure eviction, and 6 SDK-boundary `any` pins (see exceptions).
+16. **agentLifecycle**: kill/purge evict the *resolved* workspace key (`config.workspaceId || config.workspace || agentId`), never the raw agent id; realm-aware eviction and Realm deletion are delivered (store-level deletion refuses non-empty realms; the operator recursive override purges/empties members) — see the Realm model section below.
+17. **worldClock**: the realm-global clock partition and VFS sync target key is exactly `realm:<realmId>:global` (ungrouped callers keep `global`); realm binding is read from the optional `realmId` field on the injected identity projection (the runtime producer fills it on every launch; `realmBypass` is spec-gated to the director).
+18. **agentLifecycle claim-aware launch/eviction**: for resolved non-authority principals, launch denies a resolved workspace key already claimed by another registered record (active or recycled), own-id keys whose VFS workspace already exists, and every reserved key shape (`global`, `public`, `realm:<realmId>:global` — canonical predicate `isReservedWorkspaceKey` exported from `virtualFs`); mutating eviction (kill/purge/`emptyRecycleBin`) deletes a resolved workspace key only when the dying record is the last claimant. Consequences: a non-authority creator cannot spawn a second child into a workspace claimed by the first while the claim stands; an own-id relaunch is denied while its workspace still exists; without an injected VFS the shadow check is inert (no bytes to shadow) while claim confinement still applies.
+19. **Realm substrate scoping**: realm-bound callers are confined to `realm:<realmId>:global` (VFS alias-resolves `global`/`public`/`/global/` prefixes) plus their own workspace; identified ungrouped callers never span `realm:`-prefixed partitions (ungrouped privileged keeps only the legacy non-realm span); bypass = exact internal principal or hardcoded director. worldClock mutating single-target ops deny out of scope, while `getTime`/`queryEvents` silently narrow (their contracts have no failure branch); VFS `exportSnapshot` is refused for realm-bound callers (operator-level operation); VFS enumeration fails closed when a caller context is supplied but unresolvable, while context-free substrate calls keep the legacy spans.
+20. **Realm moves and schedule ownership** (superseded by membership immutability): changing/clearing `realmId` is denied for every caller — Realm membership is immutable after launch (terminate + relaunch to move), and generic lifecycle authority including `*` changes nothing; launch placement by lifecycle-authority callers uses the strict camelCase `realmId` composition key only (tool-spawned params are inert); `RuntimeScheduler`/`TriggerQueue` receive the identity port at the composition root and the `schedule` tool path forwards the trusted principal.
+
+These are also enforced by module `@invariant`/`@decision` tags and the suites/repros — prefer the module surfaces over line references here.
+
+## Realm model & agent-visible surfaces
+
+Durable rules for realm isolation; enforced by module tags + suites/repros.
+
+- **Agent workspace view**: agent tool I/O is private-by-default — `/` is the caller's resolved private workspace (`config.workspaceId || id`); `/global` mounts the shared workspace with the prefix stripped before storage (legacy `/global/<path>` records stay readable); `/agents/<id>` mounts peers only for cross-workspace authority **within the caller's scope** (root never crosses realms; denied pairs never list). Caller-supplied `workspaceId`/`workspace_id`/`src_*`/`dest_*` claims are inert at the agent boundary; host/API explicit-workspace semantics are unchanged.
+- **Realm opacity**: no `realm:` vocabulary, realm id, or realm field on any agent-visible surface — enforced by identity ACL, never obscurity (exact-id cross-scope attempts deny uniformly). The director occupies a reserved **system scope** distinct from the ungrouped `null` scope and is never listed or addressable by non-bypass callers; reserved ids are engine-bootstrap-only; `ensureDirector` rebuilds from `DIRECTOR_SPEC` and never adopts a non-spec record. Bypass is one-way (a bypass sender spans; a non-bypass sender reaches same-scope, non-bypass recipients only). `spawn_agent`/`list_agents` receipts are bounded projections, never raw `Agent` entities.
+- **Realm model**: membership is immutable after launch (no move/ungroup for any caller); every non-director agent belongs to a realm, with the seeded `realm_generic` ("Generic", renamable, undeletable at the registry boundary); deletion refuses active/recycled members, and the operator `{recursive:true}` override purges/empties them before removing the record (fail-closed report). Agent ids are realm-opaque (plain `{agentId}`; the `{realm}` placeholder is retired) with staged uniqueness — duplicates within a realm and cross-realm duplicates are denied until the realm-local namespacing follow-up. Generic re-seed ordering is snapshot-authoritative except the seeded/missing case (Generic first).
+- **Accepted low residuals** (filed in the tracker): caller-supplied `realm:` vocabulary can echo in reserved-shape denial text, and an agent-chosen id containing `realm:` echoes in its spawn receipt and peer listings — with no realm-state/authority oracle; `whoami` echoes operator-pinned physical keys while `list_agents` labels them `global`; the Realm-settings delete dialog still counts members exact-string.
+
+## Template format & runtime registry
+
+Durable rules for template transport and the runtime registry (the format contract lives in the generated `realmCatalog` ICDs + code); enforced by module tags + suites/repros.
+
+- **Template transport & version** (`realmCatalog`): `templateBundleVersion` is `sha256:` over a canonical byte stream — the spec re-serialized as UTF-8 JSON with recursively sorted keys and no insignificant whitespace, then referenced bundle files in lexicographic path order with `<pathLength>:<path>\n<contentLength>:<content>` framing (UTF-8 byte lengths). `parseTemplateBundle`/`serializeTemplateBundle` are closed-shape and byte-stable; the store passes the effective bundle version as `currentVersion` to hydration validation (mismatch fails closed unless `allowVersionMismatch`, which reports a receipt warning).
+- **Reserved names**: `__proto__`/`constructor`/`prototype` are rejected wherever a template string keys a record (input ids, agent keys, requirement ids, any path segment); duplicate `path`+`target` seed slots are rejected at validation.
+- **Effective catalog** (`sandboxStore`): shipped (embedded) → host-injected (`realmTemplateBundles` option) → imported, replacing in place by template id; deleting an import restores the previous revision (shipped fallback). Imports persist as canonical transport JSON (`importedRealmTemplates`) under 2 MiB/bundle and 3 MiB/total caps with typed errors and rollback on persistence failure. Templates declaring non-empty `toolContract`/`providers` import and review fine but launch fails closed (`ERR_TEMPLATE_PROVIDERS_UNSUPPORTED`) until provider support lands.
+- **Instance provenance** (`realmRegistry`): `RealmRecord.instance` stores `templateId`, effective `templateVersion`, optional `packageDigest`, per-input `inputHashes`, written `seedPaths`, and `launchedAt` — hashes/paths only, never raw input values; `resolvedTools` is reserved for future provider support.
+- **Baked history** (`agentLifecycle`): `LaunchAgentOptions.history` seeds `[system, ...declared]` with launch-generated message ids (INV-7) and `metadata.source='template'`; no model call, no turn trigger, snapshot-stable.
+- **Seed resolution** (`sandboxStore`): `seedRealm` resolves named targets realm-scoped (`(realmId, agentId)`) and trim-consistent with the registry; a same-id member of another realm is never selected ; reserved `global`/`public` seed path roots are rejected, never re-rooted.
+- **Deferred**: provider resolution + derived call-name collision enforcement (`a.b` vs `a_b`) are not yet implemented; the review surface must pass `currentVersion` to hydration validation and disclose `initialPrompt`/`triggerPolicy` in previews.
+
+## Publishing meta-capabilities & generators
+
+Durable rules for publishing authorities (the format contract lives in the generated `realmCatalog` ICDs + code); enforced by module tags + suites/repros.
+
+- **Explicit-only publishing authorities** (`toolDefinitions` + `runtime` + `turnExecutionEngine`): `@template:authority` (import bundles) and `@hydration:authority` (submit packages) require the exact explicit grant on the frozen descriptor — the wildcard `'*'`, `privileged`, tool profiles, spawn/update selectors, and every legacy channel deliberately do not imply them (the INV-9 exception). Publishing tools live in a separate `PUBLISHING_TOOL_REGISTRY` (never `TOOL_REGISTRY`/`getSandboxToolsSchema`); their schemas are exposed at turn time only to exact-authority holders (custom-tool exposure discipline). Grants are operator-only (`grantTemplateAuthority`/`grantHydrationAuthority` + revokes), emit audit events, drop on kill/purge, persist additively (`metaAuthorityGrants`), and hydrate through the composition-root restore; the root system director is engine-composed with both.
+- **Template-declared authorities** (`realmCatalog` + `sandboxStore`): `AgentSpec.authorities` is a declaration only — inert data; validation accepts unknown ids, launch fails closed (`ERR_TEMPLATE_AUTHORITY_UNSUPPORTED`). Approvals are per agent at launch (`authorityApprovals`; absent = declined; approvals beyond declarations rejected) and apply under the operator principal. `trustAuthorities: true` persists the exact approved set (`templateAuthorityTrust`) only on a fully successful launch; later launches auto-approve exact matches only (deltas are not auto-approved); `clearTemplateAuthorityTrust` removes the override without revoking already-applied grants.
+- **Publishing tools** (`tools/descriptors/realmTools.ts`): `import_realm_template` / `submit_hydration_package` accept an inline manifest or `manifest_file`, resolve `{sourceFile}` refs under the caller's existing workspace view (caps per file/total), reuse the template registry/validation paths (shadowing, effective `currentVersion`), and take `dry_run` — the identical resolve→validate pipeline with zero side effects. Candidates are session-only (`listPendingInstancePayloads`/`getPendingInstancePayload`/`clearPendingInstancePayload`) and attach at launch through the existing `{package}` seam.
+- **File-sourced plumbing** (`virtualFs` + `tools/descriptors/vfsTools.ts`): `write_file` (`source_file`/`append`), `replace_file_content` (`replacement_source_file`), `write_json` (`data_source_file`), `json_patch` (`value_file`), `query_json` (`output_file`), and `concat_files` (35th canonical tool). Sources resolve under the caller's existing view (no new read powers), inline+file are mutually exclusive, writes are atomic, and there is no shell/exec surface.
+- **Session Zero** (`templates/session_zero`): the shipped generator realm — Architect (`@template:authority`) and Genesis (`@hydration:authority`), both `privileged: true` for in-realm peer workspace reads (`/agents/<id>/...`), canonical handoff via `/global/...`. Publishing tool names are deliberately outside the tool taxonomy: no `toolProfile` selector can expose or authorize them.
+- **Deferred**: provider resolution is not yet implemented; per-instance editing of `fixed` content stays out by format §4. The portable skill + standalone validator live under `skills/realm-authoring/` and `scripts/validate_realm_artifacts.mjs`.
+
+## Accepted exceptions (with rationale)
+
+| # | Exception | Rationale |
+|---|---|---|
+| 1 | PremProvider 6 × `any` (RvencClient boundary) | Vendor SDK is untyped there; pinned by a ratified decision. The eslint override is file-scoped so any new un-sanctioned `any` still fails. |
+| 2 | `preserve-caught-error` lint rule OFF for sandbox | The rule would require `throw new X(msg, { cause })`; sandbox error classes are contract-visible (asserted/serialized shapes, the redaction policy). **Kept as intended — contracts are not changed for lint.** Documented in `eslint.config.js`. |
+| 3 | `sandboxPersistence` unreachable no-bus fallback cast | Defensive legacy/duck-snapshot path; unreachable under declared types. Precise typing would delete a robustness path. |
+| 4 | `svelte-check` baseline ≤96 | Non-sandbox Svelte diagnostics (sandbox modules are clean); `tsc` is now **0 total / 0 sandbox** (`TSC_ERROR_BASELINE = 0`). Ratchet policy freezes the ceiling. |
+| 5 | Telemetry hardened-container bypass | Open, on-hold, non-blocking issue (in-process only); preserved per the no-behavior-change rule. |
+
+## Follow-ups
+
+- **Test colocation** (`<module>/__tests__/`) is deferred; tracked in the issue tracker.
+- **UI TypeScript migration** — the 11 `components/sandbox/*.svelte` files remain plain JS; tracked in the issue tracker.
+- **Non-sandbox lint scope** stays sandbox-only (`lint:sandbox`); recorded decision: non-sandbox lint remains advisory.

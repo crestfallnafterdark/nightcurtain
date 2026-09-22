@@ -1,0 +1,33 @@
+{
+  "comment": "Red/green expectations for scripts/validate_realm_artifacts.mjs. Run: node skills/realm-authoring/fixtures/run_fixtures.mjs",
+  "cases": [
+    { "file": "valid/authoring_demo.bundle.json", "expectExit": 0 },
+    { "file": "valid/authoring_demo.package.json", "template": "valid/authoring_demo.bundle.json", "expectExit": 0 },
+    { "file": "invalid/unknown_field.bundle.json", "expectExit": 1, "expectCode": "ERR_TEMPLATE_INVALID" },
+    { "file": "invalid/dangling_prompt.bundle.json", "expectExit": 1, "expectCode": "ERR_TEMPLATE_INVALID" },
+    {
+      "file": "invalid/missing_generated_slot.package.json",
+      "template": "valid/authoring_demo.bundle.json",
+      "expectExit": 1,
+      "expectCode": "ERR_HYDRATION_PACKAGE"
+    },
+    {
+      "file": "invalid/undeclared_input.package.json",
+      "template": "valid/authoring_demo.bundle.json",
+      "expectExit": 1,
+      "expectCode": "ERR_HYDRATION_PACKAGE"
+    },
+    {
+      "file": "invalid/fixed_slot.package.json",
+      "template": "valid/authoring_demo.bundle.json",
+      "expectExit": 1,
+      "expectCode": "ERR_HYDRATION_PACKAGE"
+    },
+    {
+      "file": "invalid/stale_version.package.json",
+      "template": "valid/authoring_demo.bundle.json",
+      "expectExit": 1,
+      "expectCode": "ERR_HYDRATION_VERSION_MISMATCH"
+    }
+  ]
+}

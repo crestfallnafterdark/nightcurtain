@@ -1,0 +1,119 @@
+{
+  "formatVersion": 1,
+  "template": {
+    "formatVersion": 1,
+    "id": "authoring_demo",
+    "name": "Authoring Demo",
+    "description": "Minimal two-agent realm used by the realm-authoring skill to exercise every format-v1 authoring surface.",
+    "notes": "Fixture: prompt parts, input origins, fixed and generated seed slots, baked history, and a capability requirement.",
+    "hydration": {
+      "brief": "Produce the generated briefing input and the shared lore seed file described by the template."
+    },
+    "inputs": [
+      {
+        "id": "topic",
+        "label": "Topic",
+        "help": "The subject the realm is about; supplied by the operator at launch.",
+        "required": true
+      },
+      {
+        "id": "briefing",
+        "label": "Generated briefing",
+        "origin": "generated",
+        "required": true,
+        "brief": "One paragraph framing the topic for both agents."
+      }
+    ],
+    "agents": [
+      {
+        "key": "host",
+        "idPattern": "demo-host",
+        "name": "Host",
+        "role": "Facilitator",
+        "prompt": [
+          { "kind": "file", "path": "prompts/host.md" },
+          { "kind": "input", "inputId": "briefing" },
+          { "kind": "text", "text": "Keep every turn grounded in the shared lore file." },
+          { "kind": "input", "inputId": "topic" }
+        ],
+        "toolProfile": {
+          "tools": ["read_message", "send_message", "read_file", "write_file", "text.similarity", "whoami"]
+        },
+        "privileged": false,
+        "history": [
+          {
+            "role": "assistant",
+            "content": [{ "kind": "text", "text": "Session open. Waiting for the briefing." }]
+          }
+        ],
+        "triggerPolicy": "mail-driven"
+      },
+      {
+        "key": "scribe",
+        "idPattern": "demo-scribe",
+        "name": "Scribe",
+        "role": "Recorder",
+        "prompt": [
+          { "kind": "file", "path": "prompts/scribe.md" },
+          { "kind": "input", "inputId": "briefing" },
+          { "kind": "input", "inputId": "topic" }
+        ],
+        "toolProfile": { "preset": "readonly_collaborator" },
+        "privileged": false,
+        "initialPrompt": "Record the key points from the shared lore file."
+      }
+    ],
+    "seed": {
+      "files": [
+        {
+          "path": "lore/topic.md",
+          "target": "realm",
+          "origin": "generated",
+          "brief": "A short shared lore paragraph about the topic."
+        },
+        {
+          "path": "notes/host.md",
+          "target": { "agent": "host" },
+          "origin": "fixed",
+          "source": { "file": "files/host_note.md" }
+        }
+      ],
+      "directive": {
+        "targetAgentKey": "host",
+        "text": "Open the session: introduce the topic to the Scribe and point to the shared lore file."
+      }
+    },
+    "toolContract": {
+      "requirements": [
+        {
+          "id": "text.similarity",
+          "brief": "0..1 similarity between two texts",
+          "io": {
+            "in": { "a": "string", "b": "string" },
+            "out": { "score": "number" }
+          },
+          "required": false,
+          "range": "^1"
+        }
+      ]
+    },
+    "providers": [
+      {
+        "kind": "mcp",
+        "id": "acme-similarity",
+        "transport": {
+          "kind": "stdio",
+          "command": "npx",
+          "args": ["-y", "@acme/similarity-mcp"]
+        },
+        "provides": [{ "capability": "text.similarity", "tool": "similarity" }],
+        "authRef": "acme_similarity_key"
+      }
+    ]
+  },
+  "files": {
+    "files/host_note.md": "# Facilitator note\n\nKeep turns short and hand the floor back to the Scribe after every claim.\n",
+    "prompts/host.md": "# Host protocol\n\nYou facilitate a two-agent session. Open with the generated briefing, ground claims in `/global/lore/topic.md`, and hand off to the Scribe when a point is settled.\n",
+    "prompts/scribe.md": "# Scribe protocol\n\nYou record the session. After each Host turn, read the shared lore file and append the settled points to `/global/lore/topic.md`.\n"
+  }
+}

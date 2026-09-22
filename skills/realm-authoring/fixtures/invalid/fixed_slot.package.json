@@ -1,0 +1,20 @@
+{
+  "formatVersion": 1,
+  "templateId": "authoring_demo",
+  "templateVersion": "sha256:b9aa0a16ab57e0842e2c82304a1d621c7b1639c59a5e6a1ae9b1a0b938e9d890",
+  "inputs": {
+    "briefing": "A briefing that arrives with an entry for a fixed slot."
+  },
+  "files": [
+    {
+      "path": "lore/topic.md",
+      "target": "realm",
+      "content": "Lore for the fixed-slot red fixture.\n"
+    },
+    {
+      "path": "notes/host.md",
+      "target": { "agent": "host" },
+      "content": "This slot is fixed and ships in the bundle; a package must not carry it.\n"
+    }
+  ]
+}

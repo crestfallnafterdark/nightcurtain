@@ -1,0 +1,15 @@
+{
+  "formatVersion": 1,
+  "templateId": "authoring_demo",
+  "templateVersion": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "inputs": {
+    "briefing": "A briefing hydrated against an older template revision."
+  },
+  "files": [
+    {
+      "path": "lore/topic.md",
+      "target": "realm",
+      "content": "Lore pinned to a stale template version.\n"
+    }
+  ]
+}

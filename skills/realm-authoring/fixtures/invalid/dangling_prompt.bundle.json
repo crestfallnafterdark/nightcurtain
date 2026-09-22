@@ -1,0 +1,23 @@
+{
+  "formatVersion": 1,
+  "template": {
+    "formatVersion": 1,
+    "id": "dangling_prompt_fixture",
+    "name": "Dangling Prompt Fixture",
+    "description": "Red fixture: a prompt file part that the bundle files do not carry must fail closed.",
+    "agents": [
+      {
+        "key": "worker",
+        "idPattern": "worker",
+        "name": "Worker",
+        "role": "Worker",
+        "prompt": [{ "kind": "file", "path": "prompts/missing.md" }],
+        "toolProfile": { "preset": "readonly" },
+        "privileged": false
+      }
+    ]
+  },
+  "files": {
+    "prompts/other.md": "# Other protocol\n\nThis file is shipped but never referenced.\n"
+  }
+}
