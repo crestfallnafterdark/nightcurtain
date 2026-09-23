@@ -514,13 +514,15 @@ Sanitized canonical parameter object
 
 ### `RealmEffectiveTemplateView` — interface
 
-Structural view of one effective catalog template: the frozen template, its bundle file bodies, and the canonical content version.
+Structural view of one effective catalog template: the authored template (format v1 or v2), its bundle file bodies, and the canonical authored-form content version.
+
+The port serves the **authored** template, never a normalized projection: the publishing tools validate a format-v2 payload against a v2 template directly and a legacy v1 package against the catalog's v1 read shim, so a format-v2 import no longer fails the tools' format-v1 validation closed.
 
 #### Members
 
 - **`files`** — Bundle file bodies the template references.
-- **`template`** — The effective (shipped or imported) template.
-- **`version`** — Canonical content version (`sha256:<hex>`).
+- **`template`** — The effective (shipped or imported) authored template.
+- **`version`** — Canonical authored-form content version (`sha256:<hex>`).
 
 ### `RealmPublishingPort` — interface
 
@@ -531,7 +533,7 @@ The composition root (the sandbox store) implements this port over its real Wave
 #### Members
 
 - **`getEffectiveTemplateBundle`** — Resolves one effective catalog template by id.
-- **`importTemplate`** — Imports one canonical transport bundle through the host registry.
+- **`importTemplate`** — Imports one canonical authored transport bundle through the host registry.
 - **`previewTemplateImport`** — Computes the would-be import receipt (caps, shadow labels, effective budget) without mutating the registry, the persisted snapshot, or trust.
 - **`storePendingInstancePayload`** — Stores (or replaces) the session-only pending instance payload for a template id. Never persisted; the launch attach path stays `{ package }`.
 

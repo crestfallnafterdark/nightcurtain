@@ -10,7 +10,7 @@
 
 ## 1. Overview & Execution Architecture
 
-The Agentic Sandbox Studio unit and integration test suites run under the native Node.js test runner (`node --test`) using strict assertions (`node:assert/strict`). The test suite comprises **46 unit test suites** and **46 integration test suites**, executing with zero mocks for core application classes.
+The Agentic Sandbox Studio unit and integration test suites run under the native Node.js test runner (`node --test`) using strict assertions (`node:assert/strict`). The test suite comprises **47 unit test suites** and **46 integration test suites**, executing with zero mocks for core application classes.
 
 > **Canonical inventory.** The per-file suite inventory is maintained in [Testing Strategy — §4 Test Suite Inventory](testing_strategy.md#4-test-suite-inventory--classification); this document covers architecture and verification semantics.
 

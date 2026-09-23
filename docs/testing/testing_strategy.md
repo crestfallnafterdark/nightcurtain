@@ -23,7 +23,7 @@ graph TD
     end
 
     subgraph L1["Tier 1: Atomic Unit & Contract Testing (node --test)"]
-        UNIT["46 Unit Suites (tests/unit/)<br/>• Pure Functions & Algorithms<br/>• DeepSeek Reasoning Hygiene (INV-REASONING-STRING)<br/>• JSON Pointers, Parsers, Preset Catalog, LoRA Tags<br/>• Module Contracts & Provider Adapters"]
+        UNIT["48 Unit Suites (tests/unit/)<br/>• Pure Functions & Algorithms<br/>• DeepSeek Reasoning Hygiene (INV-REASONING-STRING)<br/>• JSON Pointers, Parsers, Preset Catalog, LoRA Tags<br/>• Module Contracts & Provider Adapters"]
     end
 
     L1 --> L2
@@ -101,7 +101,7 @@ The master runner executes all Unit and Integration suites in strict sub-process
 // Sample output format from tests/runner.js:
 // ======================================================================
 //   AGENTIC SANDBOX STUDIO MASTER TEST SUITE RUNNER
-//   Total Suites: 92 (46 Unit, 46 Integration)
+//   Total Suites: 94 (48 Unit, 46 Integration)
 // ======================================================================
 //   [Unit       ] deepseek_provider_test.js                  ✔ PASS (42ms)
 //   [Unit       ] deepseek_reasoning_hygiene_test.js         ✔ PASS (18ms)
@@ -153,9 +153,11 @@ The project includes **92 native test suites** (46 unit, 46 integration) and **8
 | [`precall_gate_adversarial_test.js`](../../tests/unit/precall_gate_adversarial_test.js) | `src/lib/sandbox/tools/descriptors/precallTools.ts` | Forbidden-precall gate adversarial coverage, allowlist resolution. |
 | [`prem_provider_test.js`](../../tests/unit/prem_provider_test.js) | `src/lib/sandbox/inference/PremProvider/index.ts` | Prem adapter, encryption envelope, `listModels()` status validation. |
 | [`preset_catalog_module_test.js`](../../tests/unit/preset_catalog_module_test.js) | `src/lib/sandbox/presetCatalog/` | Catalog seed/CRUD/persistence, active pointer + fallback default, immutability, event isolation. |
-| [`realm_catalog_module_test.js`](../../tests/unit/realm_catalog_module_test.js) | `src/lib/sandbox/realmCatalog/index.ts` | Format v1: schema (origins/briefs/history/hydration), hydration-package validation, canonical transport + per-bundle `templateVersion`, composed baked history, origin-aware seed resolution, reserved-name/duplicate-slot rejection, per-agent `authorities` declarations (known vocabulary + unsupported-id gate, version-hash coverage). |
-| [`realm_content_pipeline_test.js`](../../tests/unit/realm_content_pipeline_test.js) | `scripts/embed_realm_content.mjs` → `content.generated.ts` | Embed pipeline: UTF-8-only 256 KB/file cap, dangling-reference and unsafe-path rejection, `BAKED_TEMPLATE_BUNDLES` shape (demo + `session_zero`), `--check` freshness. |
-| [`realm_launcher_helpers_test.js`](../../tests/unit/realm_launcher_helpers_test.js) | `src/lib/components/sandbox/realmLauncherHelpers.ts` + `realmReviewHelpers.ts` | Launcher preview projection, preset binding display, seed row parsing/validation, target options, error descriptors; registry controls, source labels, generated-input badges, history preview; review completion (authority approvals/trust display, payload attach, files-dialog provenance). |
+| [`realm_catalog_module_test.js`](../../tests/unit/realm_catalog_module_test.js) | `src/lib/sandbox/realmCatalog/index.ts` | Canonical surface + legacy documents: demo fixture shape, deterministic/fail-closed materialization, literal ids/overrides, capability summaries, composition and baked history, canonical transport + per-bundle `templateVersion`, `hashText`, reserved-name hardening, per-agent `authorities` declarations, and the format-v1 schema through the read shim. |
+| [`realm_catalog_v2_module_test.js`](../../tests/unit/realm_catalog_v2_module_test.js) | `src/lib/sandbox/realmCatalog/index.ts` | Canonical format (decision `2ba3008`): totality-validated schema (inputs/placements/directives), positioned prompt/history injection with fileset selection, placement and directive resolution, payload validation + canonical digest, authored-form bundle versioning in either format, canonical transport round-trips, materialization, and the v1 read shim (template + legacy package conversion). |
+| [`realm_content_pipeline_test.js`](../../tests/unit/realm_content_pipeline_test.js) | `scripts/embed_realm_content.mjs` → `content.generated.ts` | Embed pipeline: catalog-validated manifests (format v2, legacy v1 through the read shim), v2 bundle references (prompt/history `file` parts, `defaultFile` prefills, placement `file` sources), UTF-8-only 256 KB/file cap, dangling-reference and unsafe-path rejection, `BAKED_TEMPLATE_BUNDLES` shape (demo plus the embedded bundles), `--check` freshness. |
+| [`realm_hydration_helpers_test.js`](../../tests/unit/realm_hydration_helpers_test.js) | `src/lib/components/sandbox/realmHydrationHelpers.ts` + `realmPayloadLibrary.ts` | Hydration workspace projections (input requirement reviews, attachment views, placement destinations, directive review), pin/digest cards, saved-payload naming/filenames and library lifecycle, Realm Manager rehydrate plans (fail-closed missing members, write groups, directives) and provenance detail views. |
+| [`realm_launcher_helpers_test.js`](../../tests/unit/realm_launcher_helpers_test.js) | `src/lib/components/sandbox/realmLauncherHelpers.ts` + `realmReviewHelpers.ts` | Launcher preview projection, preset binding display, seed row parsing/validation, target options, error descriptors; shape-tagged input drafts/usage map/attachment validation, prompt/history previews and provenance, placement/directive seed views; review completion (authority approvals/trust display, payload attach, files-dialog provenance, edited-slot payload assembly). |
 | [`realm_registry_module_test.js`](../../tests/unit/realm_registry_module_test.js) | `src/lib/sandbox/realmRegistry/index.ts` | Realm record CRUD, frozen records, change events, storage adapter, invalid-entry dropping, instance-provenance freeze/validation/patch. |
 | [`realm_store_ui_test.js`](../../tests/unit/realm_store_ui_test.js) | `src/lib/components/sandbox/realmGroups.ts` + `realmTemplateHelpers.ts` | Realm grouping order (Generic first), director pinning, orphan/empty-realm handling, `safeRealmColor` guard; template source labels, import/export/delete actions, review projection, provenance display helpers; candidate attach → review → launch → clear. |
 | [`retry_test.js`](../../tests/unit/retry_test.js) | `src/lib/sandbox/inference/retry/index.ts` | Retry/backoff policy, abort-listener hygiene, retryability classification. |
@@ -203,7 +205,7 @@ The project includes **92 native test suites** (46 unit, 46 integration) and **8
 | [`realm_identity_projection_test.js`](../../tests/integration/realm_identity_projection_test.js) | `AgentRuntime` + `runtime/agent` + `worldClock` | Realm identity projection (`realmId`/`realmBypass`), launch inheritance, immutable membership (all realm moves denied, operator included), snapshot round-trip, end-to-end clock sync target. |
 | [`realm_identity_matrix_test.js`](../../tests/integration/realm_identity_matrix_test.js) | `AgentRuntime` + `AgentLifecycleManager` + `MessagingBus` + `VirtualFS` + `WorldClock` + `RuntimeScheduler` | Cross-realm identity matrix: canonical `(realmId, agentId)` keys, same-literal-id pairs across realms stay distinct, scope-aware visibility/listings, cross-realm denial across mail/invoke/VFS/schedules/clock. |
 | [`realm_launch_seed_test.js`](../../tests/integration/realm_launch_seed_test.js) | `SandboxStore` + `realmCatalog` + `AgentRuntime` + `VirtualFS` | Template launch (ids/membership/grants/presets), rollback with no residue, seed into realm-global/member workspaces, operator-attributed directive. |
-| [`realm_publishing_tools_test.js`](../../tests/integration/realm_publishing_tools_test.js) | `ToolDispatcher` + `runtime` + `realmCatalog` + `SandboxStore` + `sandboxPersistence` | Publishing: `AgentSpec.authorities` shape/hash, explicit-grant-only `import_realm_template`/`submit_hydration_package` (wildcard/privileged denied, schema-exposure filtering), manifest `sourceFile` resolution + caps, `dry_run` zero side effects, launch approval/trust override, candidate lifecycle, persistence round-trip, kill/purge and smuggling denials. |
+| [`realm_publishing_tools_test.js`](../../tests/integration/realm_publishing_tools_test.js) | `ToolDispatcher` + `runtime` + `realmCatalog` + `SandboxStore` + `sandboxPersistence` | Publishing: `AgentSpec.authorities` shape/hash, explicit-grant-only `import_realm_template`/`submit_hydration_package` (wildcard/privileged denied, schema-exposure filtering), v1\|v2 transport import through the real catalog parser, v2 payloads and legacy v1 packages on one `validatePayload` path, `sourceFile` resolution + caps, canonical `payloadDigest` = launch provenance `packageDigest`, `dry_run` zero side effects, launch approval/trust override, candidate lifecycle, persistence round-trip, kill/purge and smuggling denials. |
 | [`realm_scheduler_scope_test.js`](../../tests/integration/realm_scheduler_scope_test.js) | `AgentRuntime` + `RuntimeScheduler` + `TriggerQueue` + `MessagingBus` | Realm-confined wake/cancel end-to-end: broadcast early-cancel cannot cross realms, foreign schedule/cancel denied, legacy parity. |
 | [`realm_template_multi_instance_test.js`](../../tests/integration/realm_template_multi_instance_test.js) | `SandboxStore` + `realmCatalog` + `AgentRuntime` + `VirtualFS` | One template, multiple realms in one store: per-realm ids/prompts/digests, package + seed isolation across realm-global/member workspaces, cross-instance denials, no turn/mail leakage. |
 | [`realm_tool_scope_conformance_test.js`](../../tests/integration/realm_tool_scope_conformance_test.js) | `ToolDispatcher` + `AgentRuntime` + `VirtualFS` + `MessagingBus` + `RuntimeScheduler` | Conformance: 35-tool classification table (fails on unclassified/unevaluated tools), correct-id adversarial matrix across mail/invoke/wait/kill/restore/VFS/schedules/clock, agent-visible receipt opacity, director sweep, realm-model sweep. |
@@ -241,6 +243,7 @@ The project includes **92 native test suites** (46 unit, 46 integration) and **8
 | [`06-agent-inspector-virtualfs.spec.js`](../../tests/e2e/06-agent-inspector-virtualfs.spec.js) | Inspector, VirtualFS & Handshake Demo | Telemetry metrics, timer scheduling, realm-grouped workspace partitions (shared + realm-global), VFS file creation, AST KeyPath query, Grep search, Handshake demo. |
 | [`07-settings-modal-parity.spec.js`](../../tests/e2e/07-settings-modal-parity.spec.js) | Catalog Settings Modal & Vault | Preset select/create/edit/activate, credential vault add/set-active, Escape and close behavior. |
 | [`08-responsive-visual-capture.spec.js`](../../tests/e2e/08-responsive-visual-capture.spec.js) | Responsive Capture Matrix | Multi-viewport screenshot generation (Desktop 1440x900, Tablet 768x1024, Mobile 375x812). |
+| [`09-realm-hydration-flow.spec.js`](../../tests/e2e/09-realm-hydration-flow.spec.js) | Hydration Workspace & Rehydrate | Hydration inputs/filesets/digest card, saved-payload lifecycle, launch → Realm Manager reopen → replace with the member roster preserved. |
 
 ---
 
@@ -262,8 +265,8 @@ sequenceDiagram
     G1-->>Dev: Gate 1 Passed (0 lint / sync errors)
 
     Dev->>G2: npm test (tests/runner.js)
-    Note over G2: Executes 92 suites (46 Unit, 46 Integration) under 120s timeout
-    G2-->>Dev: Gate 2 Passed (92/92 passed, 0 failures)
+    Note over G2: Executes 94 suites (48 Unit, 46 Integration) under 120s timeout
+    G2-->>Dev: Gate 2 Passed (94/94 passed, 0 failures)
 
     Dev->>G3: npm run build (vite build)
     Note over G3: Compiles Svelte 5 runes, WASM modules, top-level awaits

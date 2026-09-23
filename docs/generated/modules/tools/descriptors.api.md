@@ -1277,7 +1277,7 @@ export const grepDescriptor: Readonly<{
 export const import_realm_template: Readonly<{
     name: "import_realm_template";
     authority: "@template:authority";
-    description: "Import a realm template transport bundle ({ formatVersion: 1, template, files }) into the host's template registry. Provide exactly one of manifest (the transport object) or manifest_file (a caller-visible JSON file path); each files value is an inline string or { sourceFile: '<caller-visible path>' } resolved server-side under your workspace view (referenced bytes never enter context). dry_run: true runs the identical resolve/validate pipeline and returns the same typed receipt with zero side effects.";
+    description: "Import a realm template transport bundle ({ formatVersion: 1|2, template, files }) into the host's template registry. Provide exactly one of manifest (the transport object) or manifest_file (a caller-visible JSON file path); each files value is an inline string or { sourceFile: '<caller-visible path>' } resolved server-side under your workspace view (referenced bytes never enter context). A format-v1 bundle validates against the frozen v1 schema and normalizes to the format-v2 model; a format-v2 bundle validates directly. dry_run: true runs the identical resolve/validate pipeline and returns the same typed receipt with zero side effects.";
     schema: Readonly<{
         type: "object";
         properties: {
@@ -1318,6 +1318,7 @@ export const import_realm_template: Readonly<{
         tool: "import_realm_template";
         templateId: string;
         templateVersion: string;
+        sourceFormatVersion: 2 | 1;
         source: "imported";
         replacesShipped: boolean;
         replacedImport: boolean;
@@ -1334,7 +1335,7 @@ export const import_realm_template: Readonly<{
 export const importRealmTemplate: Readonly<{
     name: "import_realm_template";
     authority: "@template:authority";
-    description: "Import a realm template transport bundle ({ formatVersion: 1, template, files }) into the host's template registry. Provide exactly one of manifest (the transport object) or manifest_file (a caller-visible JSON file path); each files value is an inline string or { sourceFile: '<caller-visible path>' } resolved server-side under your workspace view (referenced bytes never enter context). dry_run: true runs the identical resolve/validate pipeline and returns the same typed receipt with zero side effects.";
+    description: "Import a realm template transport bundle ({ formatVersion: 1|2, template, files }) into the host's template registry. Provide exactly one of manifest (the transport object) or manifest_file (a caller-visible JSON file path); each files value is an inline string or { sourceFile: '<caller-visible path>' } resolved server-side under your workspace view (referenced bytes never enter context). A format-v1 bundle validates against the frozen v1 schema and normalizes to the format-v2 model; a format-v2 bundle validates directly. dry_run: true runs the identical resolve/validate pipeline and returns the same typed receipt with zero side effects.";
     schema: Readonly<{
         type: "object";
         properties: {
@@ -1375,6 +1376,7 @@ export const importRealmTemplate: Readonly<{
         tool: "import_realm_template";
         templateId: string;
         templateVersion: string;
+        sourceFormatVersion: 2 | 1;
         source: "imported";
         replacesShipped: boolean;
         replacedImport: boolean;
@@ -1391,7 +1393,7 @@ export const importRealmTemplate: Readonly<{
 export const importRealmTemplateDescriptor: Readonly<{
     name: "import_realm_template";
     authority: "@template:authority";
-    description: "Import a realm template transport bundle ({ formatVersion: 1, template, files }) into the host's template registry. Provide exactly one of manifest (the transport object) or manifest_file (a caller-visible JSON file path); each files value is an inline string or { sourceFile: '<caller-visible path>' } resolved server-side under your workspace view (referenced bytes never enter context). dry_run: true runs the identical resolve/validate pipeline and returns the same typed receipt with zero side effects.";
+    description: "Import a realm template transport bundle ({ formatVersion: 1|2, template, files }) into the host's template registry. Provide exactly one of manifest (the transport object) or manifest_file (a caller-visible JSON file path); each files value is an inline string or { sourceFile: '<caller-visible path>' } resolved server-side under your workspace view (referenced bytes never enter context). A format-v1 bundle validates against the frozen v1 schema and normalizes to the format-v2 model; a format-v2 bundle validates directly. dry_run: true runs the identical resolve/validate pipeline and returns the same typed receipt with zero side effects.";
     schema: Readonly<{
         type: "object";
         properties: {
@@ -1432,6 +1434,7 @@ export const importRealmTemplateDescriptor: Readonly<{
         tool: "import_realm_template";
         templateId: string;
         templateVersion: string;
+        sourceFormatVersion: 2 | 1;
         source: "imported";
         replacesShipped: boolean;
         replacedImport: boolean;
@@ -4144,7 +4147,7 @@ export const spawnAgentDescriptor: Readonly<{
 export const submit_hydration_package: Readonly<{
     name: "submit_hydration_package";
     authority: "@hydration:authority";
-    description: "Submit a hydration package for a realm template: { templateId, templateVersion?, inputs, files, provenance? } where inputs values and files entries may be inline or { sourceFile: '<caller-visible path>' } resolved server-side under your workspace view (referenced bytes never enter context). The host validates the resolved package against the effective template (slot coverage and template-version pin; mismatch fails closed) and stores a session-only pending candidate for the launch review. dry_run: true validates and reports the would-be package without storing a candidate.";
+    description: "Submit a hydration payload for a realm template: a format-v2 payload { formatVersion: 2, templateId, templateVersion?, inputs, provenance? } with shape-matched values ({ text } for a text input, { files: [{ path, content }] } for a files input) or a legacy format-v1 package { formatVersion: 1, templateId, templateVersion?, inputs, files, provenance? }. Provide exactly one of manifest (the payload object) or manifest_file (a caller-visible JSON file path); input bodies and file entries may be inline or { sourceFile: '<caller-visible path>' } resolved server-side under your workspace view (referenced bytes never enter context). The host validates the resolved payload against the effective template (required coverage, shape match, template-version pin; mismatch fails closed) and stores a session-only pending candidate for the launch review; the receipt carries the canonical payloadDigest (sha256:<hex> over the stored authored payload) that launch provenance reuses. dry_run: true validates and reports the would-be payload without storing a candidate.";
     schema: Readonly<{
         type: "object";
         properties: {
@@ -4185,6 +4188,8 @@ export const submit_hydration_package: Readonly<{
         tool: "submit_hydration_package";
         templateId: string;
         templateVersion: string;
+        sourceFormatVersion: 2 | 1;
+        payloadDigest: string;
         inputIds: string[];
         fileEntries: {
             path: string;
@@ -4204,7 +4209,7 @@ export const submit_hydration_package: Readonly<{
 export const submitHydrationPackage: Readonly<{
     name: "submit_hydration_package";
     authority: "@hydration:authority";
-    description: "Submit a hydration package for a realm template: { templateId, templateVersion?, inputs, files, provenance? } where inputs values and files entries may be inline or { sourceFile: '<caller-visible path>' } resolved server-side under your workspace view (referenced bytes never enter context). The host validates the resolved package against the effective template (slot coverage and template-version pin; mismatch fails closed) and stores a session-only pending candidate for the launch review. dry_run: true validates and reports the would-be package without storing a candidate.";
+    description: "Submit a hydration payload for a realm template: a format-v2 payload { formatVersion: 2, templateId, templateVersion?, inputs, provenance? } with shape-matched values ({ text } for a text input, { files: [{ path, content }] } for a files input) or a legacy format-v1 package { formatVersion: 1, templateId, templateVersion?, inputs, files, provenance? }. Provide exactly one of manifest (the payload object) or manifest_file (a caller-visible JSON file path); input bodies and file entries may be inline or { sourceFile: '<caller-visible path>' } resolved server-side under your workspace view (referenced bytes never enter context). The host validates the resolved payload against the effective template (required coverage, shape match, template-version pin; mismatch fails closed) and stores a session-only pending candidate for the launch review; the receipt carries the canonical payloadDigest (sha256:<hex> over the stored authored payload) that launch provenance reuses. dry_run: true validates and reports the would-be payload without storing a candidate.";
     schema: Readonly<{
         type: "object";
         properties: {
@@ -4245,6 +4250,8 @@ export const submitHydrationPackage: Readonly<{
         tool: "submit_hydration_package";
         templateId: string;
         templateVersion: string;
+        sourceFormatVersion: 2 | 1;
+        payloadDigest: string;
         inputIds: string[];
         fileEntries: {
             path: string;
@@ -4264,7 +4271,7 @@ export const submitHydrationPackage: Readonly<{
 export const submitHydrationPackageDescriptor: Readonly<{
     name: "submit_hydration_package";
     authority: "@hydration:authority";
-    description: "Submit a hydration package for a realm template: { templateId, templateVersion?, inputs, files, provenance? } where inputs values and files entries may be inline or { sourceFile: '<caller-visible path>' } resolved server-side under your workspace view (referenced bytes never enter context). The host validates the resolved package against the effective template (slot coverage and template-version pin; mismatch fails closed) and stores a session-only pending candidate for the launch review. dry_run: true validates and reports the would-be package without storing a candidate.";
+    description: "Submit a hydration payload for a realm template: a format-v2 payload { formatVersion: 2, templateId, templateVersion?, inputs, provenance? } with shape-matched values ({ text } for a text input, { files: [{ path, content }] } for a files input) or a legacy format-v1 package { formatVersion: 1, templateId, templateVersion?, inputs, files, provenance? }. Provide exactly one of manifest (the payload object) or manifest_file (a caller-visible JSON file path); input bodies and file entries may be inline or { sourceFile: '<caller-visible path>' } resolved server-side under your workspace view (referenced bytes never enter context). The host validates the resolved payload against the effective template (required coverage, shape match, template-version pin; mismatch fails closed) and stores a session-only pending candidate for the launch review; the receipt carries the canonical payloadDigest (sha256:<hex> over the stored authored payload) that launch provenance reuses. dry_run: true validates and reports the would-be payload without storing a candidate.";
     schema: Readonly<{
         type: "object";
         properties: {
@@ -4305,6 +4312,8 @@ export const submitHydrationPackageDescriptor: Readonly<{
         tool: "submit_hydration_package";
         templateId: string;
         templateVersion: string;
+        sourceFormatVersion: 2 | 1;
+        payloadDigest: string;
         inputIds: string[];
         fileEntries: {
             path: string;
@@ -5789,9 +5798,9 @@ export const writeJsonDescriptor: Readonly<{
 // <declarations>/tools/descriptors/messagingTools.d.ts:821:5 - (ae-forgotten-export) The symbol "ToolParams_2" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/precallTools.d.ts:136:5 - (ae-forgotten-export) The symbol "ToolParams_7" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/precallTools.d.ts:136:5 - (ae-forgotten-export) The symbol "ExecutionContext" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/realmTools.d.ts:226:5 - (ae-forgotten-export) The symbol "ToolParams_8" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/realmTools.d.ts:226:5 - (ae-forgotten-export) The symbol "PublishingFailure" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/realmTools.d.ts:460:9 - (ae-forgotten-export) The symbol "JsonSchemaDraft07" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/realmTools.d.ts:262:5 - (ae-forgotten-export) The symbol "ToolParams_8" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/realmTools.d.ts:262:5 - (ae-forgotten-export) The symbol "PublishingFailure" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/realmTools.d.ts:516:9 - (ae-forgotten-export) The symbol "JsonSchemaDraft07" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/schedulerTools.d.ts:227:5 - (ae-forgotten-export) The symbol "ToolParams_5" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/vfsTools.d.ts:713:5 - (ae-forgotten-export) The symbol "ToolParams" needs to be exported by the entry point index.d.ts
 ```
@@ -5982,7 +5991,9 @@ camelCase alias of `importRealmTemplateDescriptor`.
 
 `import_realm_template` descriptor — import a realm template transport bundle through the host's Wave T template registry.
 
-Args: exactly one of `manifest` (the transport object) or `manifest_file` (a caller-visible JSON file), plus optional `dry_run`. Bundle file values may be inline strings or `{ sourceFile }` references resolved server-side under the caller's workspace view. `dry_run: true` runs the identical resolve → validate → preview pipeline with zero side effects.
+Args: exactly one of `manifest` (the transport object) or `manifest_file` (a caller-visible JSON file), plus optional `dry_run`. The transport envelope declares `formatVersion` 1 or 2; bundle file values may be inline strings or `{ sourceFile }` references resolved server-side under the caller's workspace view. The resolved authored document validates through the catalog's own `parseTemplateBundle` (the same parser the registry uses) and the parser's canonical `serialized` transport travels to the port, so a format-v1 bundle is normalized through the read shim while a format-v2 bundle imports as authored. `dry_run: true` runs the identical resolve → validate → preview pipeline with zero side effects.
+
+Receipt: the store import receipt (`templateId`, authored `templateVersion`, shadow labels, effective byte budget, parser warnings) plus `sourceFormatVersion` (which authored format the transport declared), `fileCount`, `manifestSource`, `dryRun`, and `imported`.
 
 ### `inline_file_in_message` — variable
 
@@ -6288,9 +6299,11 @@ camelCase alias of `submitHydrationPackageDescriptor`.
 
 ### `submitHydrationPackageDescriptor` — variable
 
-`submit_hydration_package` descriptor — submit an instance content package for an effective catalog template.
+`submit_hydration_package` descriptor — submit an instance content payload for an effective catalog template.
 
-Args: exactly one of `manifest` or `manifest_file`, plus optional `dry_run`. Input values and file entries may be inline or `{ sourceFile }` references resolved server-side under the caller's workspace view. The resolved package is validated against the effective catalog template with the effective version as `currentVersion` (a mismatch fails closed), then stored as a session-only pending candidate. `dry_run: true` validates (slot coverage, version check, caps) and reports the would-be package without storing a candidate.
+Args: exactly one of `manifest` or `manifest_file`, plus optional `dry_run`. The manifest is a format-v2 payload (`formatVersion: 2`; shape-matched `{ text }` / `{ files }` values keyed by declared input id) or a legacy format-v1 package (absent `formatVersion`, or an explicit `1`; string input values and `{ path, target, content }` file entries). Input bodies and file entries may be inline or `{ sourceFile }` references resolved server-side under the caller's workspace view before validation, so the validated payload is always self-contained. The resolved payload is validated against the effective catalog template through the catalog's `validatePayload` (required coverage, shape match, effective version as `currentVersion`; a mismatch fails closed), then stored as a session-only pending candidate. `dry_run: true` runs the identical resolve → validate pipeline and reports the would-be payload without storing a candidate.
+
+Receipt: `templateId`, the pinned `templateVersion`, `sourceFormatVersion`, the canonical `payloadDigest` (`sha256:<hex>` over the stored authored payload — equal to the launch provenance `packageDigest` when the candidate is attached), the filled `inputIds`, the resolved destination `fileEntries` (declared placements consuming the supplied files inputs; fileset entries consumed only by prompt/history parts have no destination), `manifestSource`, `resolvedAt`, `stored`, `dryRun`, and any catalog review `warnings`.
 
 ### `TOOL_REGISTRY` — variable
 

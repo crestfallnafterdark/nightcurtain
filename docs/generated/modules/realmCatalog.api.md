@@ -20,38 +20,39 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 
 ## Invariants
 
-- `INV-FROZEN` — Every baked template, parsed bundle, resolved hydration, and every plan, composed prompt, composed history, resolved seed, or summary returned by the module's helpers is deeply frozen plain data; callers can never mutate module state through a returned reference.
-- `INV-DETERMINISM` — materializeTemplate, composeSystemPrompt, composeAgentHistory, resolveSeedManifest, templateBundleVersion, parseTemplateBundle, serializeTemplateBundle, and summarizeAgentCapabilities are pure: agent order is template order, part order is declared order, bundle files hash in lexicographic path order, no timestamps or randomness are introduced, and repeated calls with equal inputs return deep-equal results.
-- `INV-FAIL-CLOSED` — materializeTemplate validates the whole template before building any plan and rejects malformed or unknown fields, empty agent lists or prompt-part lists, duplicate keys, resolved ids, input ids, or requirement ids, empty or placeholder-bearing ids, reserved property names (`__proto__`/`constructor`/`prototype`) as identifiers or path segments, duplicate `path`+`target` seed slots, placeholder syntax (the retired `{realm}` token included), unknown presets, ambiguous or absent tool profiles, tool grants that are neither canonical tool names nor declared requirement ids, invalid optional fields, undeclared input references (prompts and history), missing bundle entries, required inputs that resolve empty, history entries that compose empty, seed targets that name unknown agent keys, unsafe seed paths, seed source/origin contradictions, a seed directive whose target declares no file, hydration entries that match no declared slot or target a fixed slot, missing generated slots, unknown id-override or input-value keys, and composition-cap violations.
-- `INV-ORIGINS` — Every content artifact declares an origin — inputs are `user` (default) or `generated` (requires a brief, rejects prefills), and seed slots are `fixed` (default; source required), `user` (source forbidden; absent slot skipped), or `generated` (source forbidden; brief required; missing slot fails closed). Absent origins default to the draft-compatible values, so the shipped draft templates stay valid unchanged.
-- `INV-COMPOSITION` — System prompts compose from parts in declared order — `file` and `text` parts contribute verbatim, an input resolving empty contributes nothing (unless declared `required`, which fails closed), contributing pieces join with a blank line, and per-referenced-input provenance records the id and value source (`launch`/`default`/`defaultFile`/`empty`) without duplicating value text; composition is capped at 64 parts and 200 KB per agent.
+- `INV-TOTALITY` — Template validation is closed-shape and total: every declared input is referenced at least once across prompt parts, history parts, placements, and directives (an unreferenced input is a template error), every reference resolves to a declared input, input ids and agent keys are unique, `files`-shape references name exactly one file with `path` while `text`-shape references must not carry one, placement sources and destinations match the referenced input's shape (`path` for text/bundle/one-file sources, `root` for multi-file filesets), directive references are `text`-shape, targets name declared agent keys or `realm`, paths are safe and free of reserved property names, and duplicate static destinations (same target + path, or same target + root) are rejected.
+- `INV-CONSUMPTION` — Inputs are the only variable content and every consumption is explicit at its use site — `agents[].prompt[]`/`agents[].history[]` inject an input at the exact declared position (`text` value, or one selected file of a `files` input), `placements[]` write the resolved value or fileset into a workspace at launch, and `directives[]` deliver an operator-attributed mailbox message at launch; contributing pieces join with a blank line, an optional empty value contributes nothing (a `required` empty value fails closed), a `files` input is never injected wholesale, and the schema imposes no part-count or composed-size caps.
+- `INV-PAYLOAD` — A payload is self-contained and inline-only — it repeats no paths and no targets, contains no external file references, pins the authored template version, carries only declared input ids with shape-matched values (`{ text }` or a non-empty fileset of safe, unique `{ path, content }` entries), rejects unknown keys and shape mismatches, requires every `required` input to be present and non-empty, and treats a pinned-version mismatch as a typed error unless `allowVersionMismatch` is explicitly passed (then reported as a review warning); `payloadDigest` hashes the payload's canonical sorted-key bytes.
+- `INV-SHIM` — Legacy format-v1 documents are accepted through a read shim: templates validate against the frozen v1 schema and convert to the canonical model (seed slots become placements plus per-slot single-file `files` inputs with a `path` destination, `fixed` inline sources become `default` prefills, `generated` becomes `required`, the template-level hydration brief seeds per-input briefs, and the seed directive becomes a literal directive), and v1 hydration packages convert against the normalized template (input values must name declared `text` inputs; file entries match placements by path + target and must resolve a `files` input); the authored-form bundle version is preserved so pre-migration pins stay valid, and a converted template that violates totality fails closed rather than carrying dead content.
+- `INV-VERSION` — The bundle version is `sha256:<hex>` over the authored-form spec (canonical, or the v1 spec for a legacy bundle) re-serialized as UTF-8 JSON with recursively sorted keys and no insignificant whitespace, then each referenced bundle file (prompt/history `file` parts, input `defaultFile` prefills, placement `file` sources) in lexicographic path order framed as `<pathLength>:<path>\n<contentLength>:<content>` (UTF-8 byte counts); `parseTemplateBundle` returns both the normalized template and the canonical authored `serialized` text, so a persisted bundle round-trips to a deep-equal parse with the same version.
+- `INV-FROZEN` — Every baked template, parsed bundle, validated payload, and every plan, composed prompt, composed history, resolved placement/directive, or summary returned by the module's helpers is deeply frozen plain data; callers can never mutate module state through a returned reference.
+- `INV-DETERMINISM` — materializeTemplate, composeSystemPrompt, composeAgentHistory, resolvePlacements, resolveDirectives, templateBundleVersion, parseTemplateBundle, serializeTemplateBundle, and summarizeAgentCapabilities are pure: agent order is template order, part order is declared order, bundle files hash in lexicographic path order, no timestamps or randomness are introduced, and repeated calls with equal inputs return deep-equal results.
+- `INV-FAIL-CLOSED` — materializeTemplate validates the whole template before building any plan and rejects malformed or unknown fields, empty agent lists or prompt-part lists, duplicate keys, resolved ids, input ids, or requirement ids, empty or placeholder-bearing ids, reserved property names (`__proto__`/`constructor`/`prototype`) as identifiers or path segments, placeholder syntax (the retired `{realm}` token included), unknown presets, ambiguous or absent tool profiles, tool grants that are neither canonical tool names nor declared requirement ids, invalid optional fields, undeclared input references (prompts and history), missing bundle entries, required inputs that resolve empty, history entries that compose empty, placement targets that name unknown agent keys, unsafe placement paths, placement destination collisions, directive targets that name unknown agent keys, unknown id-override or input-value keys, and fileset selection mismatches.
+- `INV-COMPOSITION` — System prompts compose from parts in declared order — `file` and `text` parts contribute verbatim, a `text` input resolving empty contributes nothing (unless declared `required`, which fails closed), a `files` input reference selects exactly one file by `path`, contributing pieces join with a blank line, and per-referenced-input provenance records the id and value source (`launch`/`default`/`defaultFile`/`empty`) without duplicating value text.
 - `INV-HISTORY` — A spec's declared history composes through the same part model and separator as prompts (missing `file` entries fail closed, empty inputs contribute nothing, an entry that composes empty is rejected), composes with the same launch/default/defaultFile input precedence as prompts, lands in the launch plan in declared order, and carries `source: 'template'` host-side provenance; message ids and seeding belong to the runtime, and no model call is made for baked entries.
-- `INV-BUNDLE-VERSION` — templateBundleVersion is `sha256:<hex>` over the canonical byte stream — the spec re-serialized as UTF-8 JSON with recursively sorted keys and no insignificant whitespace, then each referenced bundle file (prompt/history `file` parts, input `defaultFile` prefills, fixed seed `source.file` bodies) in lexicographic path order, each framed as `<pathLength>:<path>\n<contentLength>:<content>` with UTF-8 byte lengths — computed by a self-contained synchronous SHA-256 with no dependencies, no `crypto.subtle`, and no ambient I/O; baked and JSON-imported bundles hash identically, the same primitive backs the public `hashText` content-hash helper, and the pipeline's global `REALM_CONTENT_VERSION` keeps its own meaning (whole embedded payload freshness).
-- `INV-HYDRATION` — validateHydrationPackage is fail-closed: the closed envelope requires `formatVersion: 1`, a matching `templateId`, and a pinned `templateVersion`; input values must name declared inputs; file entries must match a declared `user`/`generated` slot by path+target with every `generated` slot present, no duplicates, no unknown entries, and no `fixed` entries; a pinned-version mismatch is a typed error unless `allowVersionMismatch` is explicitly passed, in which case it is reported as a review warning.
-- `INV-SEED-RESOLUTION` — A template's seed manifest resolves to file content at materialization by origin — `fixed` sources travel inline or from the supplied bundle files (a missing entry fails closed), `user`/`generated` slots resolve from supplied hydration entries (absent optional `user` slots are skipped; missing `generated` slots fail closed; unknown, duplicate, or fixed-targeting hydration entries are rejected); resolved targets stay template agent keys, because workspace writes and directive delivery belong to the seeding orchestration.
-- `INV-BAKED-BUNDLES` — The baked bundles (the demo fixture plus the generated embedded bundles) and every nested bundle file body are deeply frozen plain data; the generated content module is embedded at generation time by `scripts/embed_realm_content.mjs` and is never hand-edited, bundle files are the only source for `file` prompt parts, `defaultFile` prefills, and fixed seed `source.file` resolution, and the module performs no runtime file reads or `?raw` imports.
+- `INV-BUNDLE-VERSION` — templateBundleVersion is `sha256:<hex>` over the canonical byte stream — the authored spec re-serialized as UTF-8 JSON with recursively sorted keys and no insignificant whitespace, then each referenced bundle file (prompt/history `file` parts, input `defaultFile` prefills, placement `file` sources) in lexicographic path order, each framed as `<pathLength>:<path>\n<contentLength>:<content>` with UTF-8 byte lengths — computed by a self-contained synchronous SHA-256 with no dependencies, no `crypto.subtle`, and no ambient I/O; baked and JSON-imported bundles hash identically, legacy v1 pins stay reproducible, the same primitive backs the public `hashText` content-hash helper, and the pipeline's global `REALM_CONTENT_VERSION` keeps its own meaning (whole embedded payload freshness).
+- `INV-BAKED-BUNDLES` — The baked bundles (the demo fixture plus the generated embedded bundles) and every nested bundle file body are deeply frozen plain data; the generated content module is embedded at generation time by `scripts/embed_realm_content.mjs` and is never hand-edited, bundle files are the only source for prompt/history `file` parts, input `defaultFile` prefills, and placement `file` sources, and the module performs no runtime file reads or `?raw` imports.
 - `INV-OPAQUE-IDS` — Agent ids are realm-opaque and ordinary: `idPattern` values are literal ids (no placeholder is resolved), a per-key id override wins over the pattern, a resolved id is rejected only when it is empty or still carries a placeholder, and no id value is reserved or confers authority.
 - `INV-RESOLVED-GRANTS` — Plans and capability summaries carry tool grants resolved through the canonical tool-constants resolver; classification uses the canonical mutation vocabulary, the aggregate subagent-management selector expands to its canonical tools, and declared `toolContract` requirement ids surface in `grants` without a mutation classification (resolution of those requirements arrives with the providers integration).
 - `INV-PRIVILEGE-HONEST` — A privileged spec reports effective wildcard capability in its summary, matching the runtime authority derivation, so previews never understate what a launched agent can do.
-- `INV-DECLARED-AUTHORITIES` — `AgentSpec.authorities` declares publishing-grant requests as non-empty unique strings and is inert data — validation accepts identifiers unknown to the host (`KNOWN_AGENT_AUTHORITIES` lists the v1 set), `templateUnsupportedAuthorities()` reports declared-but-unknown ids for the launch gate to fail closed on, and materialization copies the declarations verbatim onto `RealmLaunchAgentPlan.authorities` (empty when none declared) without ever granting anything: approval and grant application belong exclusively to the launch seam.
+- `INV-DECLARED-AUTHORITIES` — `AgentSpec.authorities` declares publishing-grant requests as non-empty unique strings and is inert data — validation accepts identifiers unknown to the host (`KNOWN_AGENT_AUTHORITIES` lists the known set), `templateUnsupportedAuthorities()` reports declared-but-unknown ids for the launch gate to fail closed on, and materialization copies the declarations verbatim onto `RealmLaunchAgentPlan.authorities` (empty when none declared) without ever granting anything: approval and grant application belong exclusively to the launch seam.
 - `INV-NO-MODEL-LITERALS` — The catalog contains no model identifiers, endpoints, credentials, or provider implementations; model-preset ids pass through verbatim, tool selectors resolve through the canonical preset resolver, and `toolContract`/`providers` are requests that are accepted and shape-validated but never resolved or connected.
 
 ## Decisions
 
 - Agent ids materialize as trimmed literal strings with no realm-derived prefix; the retired `{realm}` placeholder is rejected at validation with a clear message, per-key overrides win over patterns, and every resolved id is ordinary — the historically reserved `director` identity included, because ids confer no authority under the principal model
 - A tool profile declares exactly one of a canonical preset name or an explicit tools list; presets resolve through the tool constants, explicit lists pass through in declared order, and the capability summary canonicalizes alias spellings before classification so the preview matches dispatcher authorization
-- Unknown fields on templates, agent specs, tool profiles, inputs, prompt parts, seed structures, history entries, hydration declarations, tool contracts, and provider requests are rejected rather than dropped, because a misspelled privilege, capability, input, or seed field must fail closed instead of silently launching a weaker or differently configured agent
+- Unknown fields on templates, agent specs, tool profiles, inputs, prompt parts, placements, directives, history entries, tool contracts, and provider requests are rejected rather than dropped, because a misspelled privilege, capability, input, or placement field must fail closed instead of silently launching a weaker or differently configured agent
 - A privileged spec implies wildcard capability in the summary (the runtime authority derivation appends the wildcard for privileged agents); wildcardSource reports whether the wildcard came from the declared profile or from privilege
 - A system prompt is declared as ordered parts (bundle file, template input, inline text) instead of a single reference: composition joins contributing pieces with a blank line, empty inputs are omitted, required inputs fail closed, and the kernel ships no policy content — whether a template includes refusal, lore, or directive text is entirely the template author's decision
 - Input values are launch-level (one value per declared input shared by every referencing agent); provenance records each referenced input's id and source (launch, default, defaultFile, empty) instead of duplicating value text, and an explicit empty launch value stays launch-sourced rather than silently falling back to a default
-- Seed manifests resolve inside the catalog (inline verbatim, bundle files resolved, missing entries failing closed) and carry template agent keys; the store's seedRealm orchestration owns workspace writes, path normalization, and directive delivery
-- Baked bundle content is embedded at generation time into `content.generated.ts` by `scripts/embed_realm_content.mjs` — a deterministic walk of `templates/<id>/template.json` inlining `prompts/**`, `inputs/**`, and `files/**` (UTF-8 text only, 256 KB per-file cap, fail-closed on malformed manifests, dangling references, oversized/binary files, and unsafe paths) with a sha256 `REALM_CONTENT_VERSION` over the canonical payload and a `--check` freshness mode; the catalog deep-freezes and exposes the generated bundles behind the demo fixture, and the store's default launch catalog is sourced from that accessor so the picker and the launch resolve one embedded source with no runtime file reads
-- Format v1 introduces per-artifact origins (`fixed`/`user`/`generated`), `hydration.brief`, baked `history`, and the `toolContract`/`providers` contract: absent origins default to `user` (inputs) and `fixed` (seed slots) so draft templates stay valid, a fixed seed slot requires a source while `user`/`generated` slots forbid one (generated requires a brief), explicit tool grants must be canonical tool names or declared requirement ids, and capability/provider requests are accepted and shape-validated but never resolved or connected (`templateRequiresProviders()` exposes the launch gate)
-- A bundle's content version is canonical and self-contained: the spec re-serialized as UTF-8 JSON with recursively sorted keys and no insignificant whitespace, then each referenced bundle file in lexicographic path order framed as `<pathLength>:<path>\n<contentLength>:<content>` (UTF-8 byte lengths), hashed by a pure synchronous SHA-256 with no platform crypto — so a baked bundle and the same bundle imported as JSON hash identically, and the version pins instance provenance independently of the pipeline's global `REALM_CONTENT_VERSION`
+- Placements and directives resolve inside the catalog (bundle files resolved, missing entries failing closed) and carry template agent keys; the store's seed orchestration owns workspace writes, path normalization, and directive delivery
+- Baked bundle content is embedded at generation time into `content.generated.ts` by `scripts/embed_realm_content.mjs` — a deterministic walk of `templates/<id>/template.json` inlining `prompts/**`, `inputs/**`, and `files/**` (UTF-8 text only, 256 KB per-file cap, fail-closed on malformed manifests, dangling references, oversized/binary files, and unsafe paths) with every manifest schema-validated through the real `normalizeTemplate` (canonical, or v1 through the read shim) and a sha256 `REALM_CONTENT_VERSION` over the canonical payload and a `--check` freshness mode; the catalog deep-freezes and exposes the generated bundles behind the demo fixture, and the store's default launch catalog is sourced from that accessor so the picker and the launch resolve one embedded source with no runtime file reads
+- A bundle's content version is canonical and self-contained: the authored spec re-serialized as UTF-8 JSON with recursively sorted keys and no insignificant whitespace, then each referenced bundle file in lexicographic path order framed as `<pathLength>:<path>\n<contentLength>:<content>` (UTF-8 byte lengths), hashed by a pure synchronous SHA-256 with no platform crypto — so a baked bundle and the same bundle imported as JSON hash identically, and the version pins instance provenance independently of the pipeline's global `REALM_CONTENT_VERSION`
 - Baked history composes through the prompt part model and is seeded without a model call: entries compose in declared order with a blank line, empty inputs contribute nothing, an entry that composes empty is rejected rather than seeded as an empty message, and composed messages carry `source: 'template'` for host-side provenance while message ids are generated at launch (INV-7)
-- Hydration packages match declared slots by path+target: `generated` slots are required, `user` slots are optional, `fixed` slots are forbidden, unknown/duplicate entries are rejected, input values must name declared inputs, and a pinned-version mismatch fails closed unless `allowVersionMismatch` is explicitly passed (then it is reported as a review warning) — review surfaces may pass the flag to obtain the warning, launch passes it only after user confirmation
-- Template-declared identifiers that become object keys (input ids, agent keys, requirement ids) and bundle/seed path segments reject the reserved property names `__proto__`/`constructor`/`prototype`, and identifier/slot records use own-property or null-prototype reads and writes, so a hostile or malformed template can never swallow or misroute a value through the prototype chain
-- A seed manifest rejects duplicate `path`+`target` slots at validation, because hydration matching is keyed by that pair and last-wins resolution would make a slot's origin (and requiredness) depend on declaration order
+- Payloads match declared inputs by id and shape: `text` values carry `{ text }`, `files` values carry a non-empty `{ files }` fileset, unknown/duplicate entries are rejected, every `required` input must be present and non-empty, and a pinned-version mismatch fails closed unless `allowVersionMismatch` is explicitly passed (then it is reported as a review warning) — review surfaces may pass the flag to obtain the warning, launch passes it only after user confirmation
+- Template-declared identifiers that become object keys (input ids, agent keys, requirement ids) and bundle/placement path segments reject the reserved property names `__proto__`/`constructor`/`prototype`, and identifier/slot records use own-property or null-prototype reads and writes, so a hostile or malformed template can never swallow or misroute a value through the prototype chain
+- A placement's static destinations are validated for duplicates (same target + path, or same target + root) at validation, because resolution is keyed by that pair and last-wins writes would make the written content depend on declaration order
 
 ## Surface
 
@@ -96,7 +97,7 @@ export type BundleFiles = Readonly<Record<string, string>>;
 export type CapabilityWildcardSource = 'profile' | 'privileged' | 'none';
 
 // @public
-export function composeAgentHistory(spec: RealmAgentSpec, inputs: RealmInputValues, files: BundleFiles): readonly RealmHistoryMessage[];
+export function composeAgentHistory(spec: RealmAgentSpec, inputs?: readonly RealmTemplateInput[], options?: RealmComposeOptions): readonly RealmHistoryMessage[];
 
 // @public
 export function composeSystemPrompt(parts: readonly PromptPart[], inputs?: readonly RealmTemplateInput[], options?: RealmComposeOptions): RealmComposedPrompt;
@@ -117,8 +118,13 @@ export const KNOWN_AGENT_AUTHORITIES: readonly string[];
 export function materializeTemplate(template: RealmTemplate, options: RealmMaterializeOptions): RealmLaunchPlan;
 
 // @public
+export function normalizeTemplate(candidate: unknown): RealmTemplate;
+
+// @public
 export interface ParsedTemplateBundle {
     files: BundleFiles;
+    serialized: string;
+    sourceFormatVersion: 1 | 2;
     template: RealmTemplate;
     version: string;
     warnings: readonly string[];
@@ -126,6 +132,9 @@ export interface ParsedTemplateBundle {
 
 // @public
 export function parseTemplateBundle(input: unknown): ParsedTemplateBundle;
+
+// @public
+export function payloadDigest(payload: unknown): string;
 
 // @public
 export interface PendingInstancePayload {
@@ -142,6 +151,7 @@ export type PromptPart = {
 } | {
     kind: 'input';
     inputId: string;
+    path?: string;
 } | {
     kind: 'text';
     text: string;
@@ -200,8 +210,16 @@ export interface RealmComposedPrompt {
 // @public
 export interface RealmComposeOptions {
     bundleFiles?: Readonly<Record<string, string>>;
-    hydrationFiles?: readonly ResolvedHydrationFile[];
-    inputValues?: Readonly<Record<string, string>>;
+    inputs?: RealmInputValues;
+}
+
+// @public
+export interface RealmDirective {
+    inputId?: string;
+    target: {
+        agent: string;
+    };
+    text?: string;
 }
 
 // @public
@@ -218,18 +236,22 @@ export interface RealmHistoryMessage {
 }
 
 // @public
-export interface RealmHydrationDeclaration {
-    brief: string;
-}
-
-// @public
 export interface RealmInputProvenance {
     inputId: string;
     source: RealmInputValueSource;
 }
 
 // @public
-export type RealmInputValues = Readonly<Record<string, string>>;
+export type RealmInputValue = {
+    shape: 'text';
+    text: string;
+} | {
+    shape: 'files';
+    files: readonly RealmPayloadFile[];
+};
+
+// @public
+export type RealmInputValues = Readonly<Record<string, RealmInputValue>>;
 
 // @public
 export type RealmInputValueSource = 'launch' | 'default' | 'defaultFile' | 'empty';
@@ -254,8 +276,9 @@ export interface RealmLaunchAgentPlan {
 // @public
 export interface RealmLaunchPlan {
     agents: readonly RealmLaunchAgentPlan[];
+    directives: readonly RealmResolvedDirective[];
+    placements: readonly RealmResolvedPlacement[];
     realmId: string;
-    seed?: RealmResolvedSeed;
     templateId: string;
 }
 
@@ -269,6 +292,47 @@ export interface RealmLaunchToolProfile {
 export interface RealmMaterializeOptions extends RealmComposeOptions {
     idOverrides?: Readonly<Record<string, string>>;
     realmId: string;
+}
+
+// @public
+export interface RealmPayload {
+    formatVersion: 2;
+    inputs: Readonly<Record<string, RealmPayloadInputValue>>;
+    provenance?: RealmPayloadProvenance;
+    templateId: string;
+    templateVersion: string;
+}
+
+// @public
+export interface RealmPayloadFile {
+    content: string;
+    path: string;
+}
+
+// @public
+export type RealmPayloadInputValue = {
+    text: string;
+} | {
+    files: readonly RealmPayloadFile[];
+};
+
+// @public
+export interface RealmPayloadProvenance {
+    generatedAt?: string;
+    model?: string;
+    producer?: string;
+    reviewedBy?: string;
+}
+
+// @public
+export interface RealmPlacement {
+    file?: string;
+    inputId?: string;
+    path?: string;
+    root?: string;
+    target: 'realm' | {
+        agent: string;
+    };
 }
 
 // @public
@@ -311,16 +375,13 @@ export interface RealmProviderStdioTransport {
 }
 
 // @public
-export interface RealmResolvedSeed {
-    directive?: {
-        targetAgentKey: string;
-        text: string;
-    };
-    files: readonly RealmResolvedSeedFile[];
+export interface RealmResolvedDirective {
+    targetAgentKey: string;
+    text: string;
 }
 
 // @public
-export interface RealmResolvedSeedFile {
+export interface RealmResolvedPlacement {
     content: string;
     path: string;
     target: 'realm' | {
@@ -329,26 +390,17 @@ export interface RealmResolvedSeedFile {
 }
 
 // @public
-export interface RealmSeedManifest {
-    directive?: {
-        targetAgentKey: string;
-        text: string;
-    };
-    files?: readonly RealmTemplateSeedFile[];
-}
-
-// @public
 export interface RealmTemplate {
     agents: RealmAgentSpec[];
     description: string;
-    formatVersion: 1;
-    hydration?: RealmHydrationDeclaration;
+    directives?: readonly RealmDirective[];
+    formatVersion: 2;
     id: string;
     inputs?: readonly RealmTemplateInput[];
     name: string;
     notes?: string;
+    placements?: readonly RealmPlacement[];
     providers?: readonly RealmProvider[];
-    seed?: RealmSeedManifest;
     toolContract?: RealmToolContract;
 }
 
@@ -361,23 +413,8 @@ export interface RealmTemplateInput {
     id: string;
     label: string;
     multiline?: boolean;
-    origin?: 'user' | 'generated';
     required?: boolean;
-}
-
-// @public
-export interface RealmTemplateSeedFile {
-    brief?: string;
-    origin?: 'fixed' | 'user' | 'generated';
-    path: string;
-    source?: {
-        file: string;
-    } | {
-        inline: string;
-    };
-    target: 'realm' | {
-        agent: string;
-    };
+    shape: 'text' | 'files';
 }
 
 // @public
@@ -399,25 +436,18 @@ export interface RealmToolRequirement {
 }
 
 // @public
-export interface ResolvedHydration {
-    files: readonly ResolvedHydrationFile[];
-    inputValues: RealmInputValues;
+export function resolveDirectives(directives: readonly RealmDirective[], inputs?: readonly RealmTemplateInput[], options?: RealmComposeOptions): readonly RealmResolvedDirective[];
+
+// @public
+export interface ResolvedPayload {
+    inputs: RealmInputValues;
     templateId: string;
     templateVersion: string;
     warnings: readonly string[];
 }
 
 // @public
-export interface ResolvedHydrationFile {
-    content: string;
-    path: string;
-    target: 'realm' | {
-        agent: string;
-    };
-}
-
-// @public
-export function resolveSeedManifest(manifest: RealmSeedManifest, options?: RealmComposeOptions): RealmResolvedSeed;
+export function resolvePlacements(placements: readonly RealmPlacement[], inputs?: readonly RealmTemplateInput[], options?: RealmComposeOptions): readonly RealmResolvedPlacement[];
 
 // @public
 export function serializeTemplateBundle(bundle: {
@@ -441,10 +471,13 @@ export function templateRequiresProviders(template: RealmTemplate | null | undef
 export function templateUnsupportedAuthorities(template: RealmTemplate | null | undefined): readonly string[];
 
 // @public
-export function validateHydrationPackage(template: RealmTemplate, pkg: unknown, opts?: {
+export function validatePayload(template: RealmTemplate, payload: unknown, opts?: {
     allowVersionMismatch?: boolean;
     currentVersion?: string;
-}): ResolvedHydration;
+}): ResolvedPayload;
+
+// @public
+export function validateTemplate(candidate: unknown): RealmTemplate;
 ```
 
 ## API docs
@@ -455,7 +488,7 @@ Publishing-authority ids a template agent spec may declare (Wave U, lane U-P). `
 
 ### `AgentCapabilitySummary` — interface
 
-Honest per-agent capability preview produced by `summarizeAgentCapabilities()`.
+Honest per-agent capability preview produced by `summarizeAgentCapabilitiesV1()`.
 
 `grants` is the effective canonical grant list after alias canonicalization and aggregate expansion (wildcard reported as `['*']`); `mutating` and `readOnly` partition the canonical grants against the canonical mutation vocabulary, and `unrecognized` names every declared grant that maps to no canonical tool. A privileged spec reports effective wildcard capability regardless of its declared profile, matching the runtime authority derivation, with `wildcardSource` naming the reason.
 
@@ -483,7 +516,7 @@ The list and every nested template/file body are deeply frozen; generated bundle
 
 ### `BakedTemplateBundle` — interface
 
-One baked Realm template bundle: a frozen template plus the bundle file bodies its `file` prompt parts, input `defaultFile` prefills, and seed `source.file` entries resolve against.
+One baked Realm template bundle: a frozen template plus the bundle file bodies its `file` prompt/history parts, input `defaultFile` prefills, and placement `file` sources resolve against.
 
 Bundle files are the only source for those references — the catalog performs no runtime file reads, and the generated module is embedded at build time by `scripts/embed_realm_content.mjs`. The shape is structurally identical to the sandbox store's launch-seam bundle (`RealmTemplateBundle`), so the store can consume the baked bundles directly while the two modules keep distinct names.
 
@@ -498,19 +531,19 @@ Bundle file bodies keyed by bundle-relative path (or hydration file content keye
 
 ### `CapabilityWildcardSource` — type alias
 
-Origin of the effective wildcard capability reported by `summarizeAgentCapabilities()`: the declared profile, the privilege flag, or neither.
+Origin of the effective wildcard capability reported by `summarizeAgentCapabilitiesV1()`: the declared profile, the privilege flag, or neither.
 
 ### `composeAgentHistory` — function
 
-Composes one agent spec's declared baked history into launch messages.
+Composes one format-v2 agent spec's declared baked history into launch messages.
 
-Entries compose in declared order using the same part model and separator as prompts: `file` parts resolve from `files` (a missing entry fails closed), `input` parts resolve from the supplied values (empty contributes nothing), and an entry that composes empty is rejected. Every composed message carries `source: 'template'` (host-side provenance for template-declared history); seeding message ids and seeding itself belong to the runtime.
+Entries compose in declared order using the same part model and separator as prompts: `file` parts resolve from `bundleFiles` (a missing entry fails closed), `input` parts resolve supplied → default → defaultFile → empty (empty contributes nothing), and an entry that composes empty is rejected. Every composed message carries `source: 'template'` (host-side provenance for template-declared history); seeding message ids and seeding itself belong to the runtime.
 
 #### Parameters
 
 - `spec` — Agent spec whose `history` is composed
-- `inputs` — Resolved input values keyed by declared input id
-- `files` — Bundle file bodies keyed by bundle-relative path
+- `inputs` — Declared template inputs referenced by `input` parts
+- `options` — Supplied input values and bundle file bodies
 
 #### Returns
 
@@ -523,27 +556,26 @@ import { composeAgentHistory } from './realmCatalog/index.ts';
 
 const history = composeAgentHistory(
   { key: 'gm', history: [{ role: 'assistant', content: [{ kind: 'text', text: 'Rain hammers the roof.' }] }] },
-  {},
-  {}
+  []
 );
 // history[0].content === 'Rain hammers the roof.'
 ```
 
 #### Throws
 
-- `Error` - When the spec, its history, the value/file records, a reference, or an empty entry is invalid
+- `Error` - When the spec, its history, the options, a reference, or an empty entry is invalid
 
 ### `composeSystemPrompt` — function
 
-Composes one agent's system prompt from its ordered prompt parts.
+Composes one format-v2 agent's system prompt from its ordered prompt parts.
 
-Parts contribute in declared order: `text` verbatim, `file` bodies resolved from `bundleFiles` (a missing entry fails closed), and `input` values resolved launch → default → defaultFile → empty. An input that resolves empty contributes nothing (unless declared `required`, which fails closed); contributing pieces join with a blank line. The result carries one provenance entry per referenced input, in first-reference order, recording the id and source without duplicating the value text.
+Parts contribute in declared order: `text` verbatim, `file` bodies resolved from `bundleFiles` (a missing entry fails closed), and `input` values resolved supplied → default → defaultFile → empty. A `text` input that resolves empty contributes nothing (a `required` empty value fails closed); a `files` input reference selects one file by `path` (a missing selection fails closed). Contributing pieces join with a blank line. The result carries one provenance entry per referenced input, in first-reference order, recording the id and source without duplicating the value text.
 
 #### Parameters
 
 - `parts` — Ordered prompt parts (validated structurally here)
 - `inputs` — Declared template inputs referenced by `input` parts
-- `options` — Launch input values and bundle file bodies
+- `options` — Supplied input values and bundle file bodies
 
 #### Returns
 
@@ -555,16 +587,16 @@ A deeply frozen composed prompt plus input provenance
 import { composeSystemPrompt } from './realmCatalog/index.ts';
 
 const composed = composeSystemPrompt(
-  [{ kind: 'text', text: 'Protocol.' }, { kind: 'input', inputId: 'directives' }],
-  [{ id: 'directives', label: 'Directives' }],
-  { inputValues: { directives: 'Be concise.' } }
+  [{ kind: 'input', inputId: 'lore', path: 'index.md' }],
+  [{ id: 'lore', label: 'Lore', shape: 'files' }],
+  { inputs: { lore: { shape: 'files', files: [{ path: 'index.md', content: 'Index.' }] } } }
 );
-// composed.systemPrompt === 'Protocol.\n\nBe concise.'
+// composed.systemPrompt === 'Index.'
 ```
 
 #### Throws
 
-- `Error` - When parts, inputs, options, references, or caps are invalid
+- `Error` - When parts, inputs, options, references, or file selections are invalid
 
 ### `DEMO_TEMPLATE` — variable
 
@@ -599,7 +631,7 @@ console.log(bundle?.template.name, Object.keys(bundle?.files ?? {}));
 
 Computes the `sha256:<hex>` content hash of a UTF-8 string.
 
-Shares the module's self-contained synchronous SHA-256 with templateBundleVersion, so callers that need to record content hashes (for example instance-provenance input hashes) do not need platform crypto, asynchronous `crypto.subtle`, or a deep import into this module.
+Shares the module's self-contained synchronous SHA-256 with templateBundleVersionV1, so callers that need to record content hashes (for example instance-provenance input hashes) do not need platform crypto, asynchronous `crypto.subtle`, or a deep import into this module.
 
 #### Parameters
 
@@ -632,12 +664,12 @@ Validation accepts any non-empty unique identifier in `AgentSpec.authorities`; i
 
 Materializes a template into a frozen launch plan.
 
-The whole template is validated before any plan is built, so a rejected template produces no partial output. Agent ids resolve as literal plain ids from `idPattern` with per-key `idOverrides` winning over the pattern; the realm id is membership metadata only and never prefixes an agent id (realm-opaque ids, Wave R ticket ff2202a). Tool profiles resolve through the canonical preset resolver, and each agent's system prompt is composed from its declared parts: `text` verbatim, `file` bodies resolved from `bundleFiles`, `input` values resolved launch → default → defaultFile → empty (an empty input contributes nothing, and a `required` empty input fails closed). The plan also carries the resolved seed manifest when the template declares one. Duplicate keys, duplicate resolved ids, retired placeholder patterns, unknown presets, ambiguous or absent tool profiles, undeclared input references, duplicate input ids, missing bundle entries, and unknown override or input-value keys are rejected. Agent ids are ordinary labels — no id is reserved, so any non-empty id is legal.
+The template normalizes first (a legacy format-v1 document shims to the canonical model), then the whole plan is built in one pass: agent ids resolve as literal plain ids from `idPattern` with per-key `idOverrides` winning over the pattern; each agent's system prompt composes from its declared parts (`text` verbatim, `file` bodies from `bundleFiles`, `input` values resolved supplied → default → defaultFile → empty, with `files` inputs selecting one named file and `required` empty values failing closed); baked history composes through the same part model; placements resolve to concrete workspace writes; and directives resolve to launch messages. Duplicate keys, duplicate resolved ids, retired placeholder patterns, unknown presets, ambiguous or absent tool profiles, undeclared input references, missing bundle entries, fileset selection mismatches, placement destination collisions, and unknown override or input keys are rejected.
 
 #### Parameters
 
-- `template` — Template to materialize
-- `options` — Target realm id, optional per-key id overrides, launch input values, and bundle files
+- `template` — Template to materialize (legacy format-v1 documents accepted)
+- `options` — Target realm id, optional per-key id overrides, supplied input values, and bundle files
 
 #### Returns
 
@@ -646,42 +678,71 @@ A deeply frozen, deterministic launch plan in template order
 #### Examples
 
 ```typescript
-import { DEMO_TEMPLATE, materializeTemplate } from './realmCatalog/index.ts';
+import { materializeTemplate } from './realmCatalog/index.ts';
 
 const plan = materializeTemplate(DEMO_TEMPLATE, { realmId: 'realm_1' });
-// plan.agents[0].agentId === 'coordinator' (never 'realm_1-coordinator')
+// plan.placements, plan.directives, plan.agents
 ```
 
 #### Throws
 
-- `Error` - When the template, options, resolved ids, composition, or seed are invalid
+- `Error` - When the template, options, resolved ids, composition, placements, or directives are invalid
+
+### `normalizeTemplate` — function
+
+Normalizes an authored template of either schema format into the canonical internal model.
+
+`formatVersion: 1` documents go through the read shim (validated v1, then converted and validated canonical); `formatVersion: 2` documents validate directly. Any other format version fails closed.
+
+#### Parameters
+
+- `candidate` — Candidate template (any value)
+
+#### Returns
+
+The validated canonical template
+
+#### Examples
+
+```typescript
+import { normalizeTemplate } from './realmCatalog/index.ts';
+
+const template = normalizeTemplate(DEMO_TEMPLATE); // v1 demo → v2 model
+template.formatVersion; // 2
+```
+
+#### Throws
+
+- `Error` - When the template is not an object, declares an unsupported format version, or fails its schema validation
 
 ### `ParsedTemplateBundle` — interface
 
-Parsed and validated canonical transport bundle produced by `parseTemplateBundle()`.
+Parsed and validated format-v2 transport bundle produced by `parseTemplateBundle()`.
 
-`version` is the per-bundle content version (templateBundleVersion semantics: the canonical template JSON plus each referenced bundle file, framed and hashed). `warnings` carries review notes; the transport envelope itself never silently drops fields.
+`template` is the normalized format-v2 model (a format-v1 bundle is shimmed); `serialized` is the canonical authored transport JSON (round-trips to a deep-equal parsed bundle with the same `version`), and `version` pins the authored content. `sourceFormatVersion` records which format the transport document declared.
 
 #### Members
 
-- **`files`** — Bundle file bodies keyed by bundle-relative path (deeply frozen).
-- **`template`** — The validated template (deeply frozen).
-- **`version`** — Per-bundle content version (`sha256:<hex>`).
+- **`files`** — Bundle file bodies keyed by bundle-relative path.
+- **`serialized`** — Canonical authored transport JSON text (stable round-trip input).
+- **`sourceFormatVersion`** — Format the authored transport document declared.
+- **`template`** — The validated, normalized format-v2 template.
+- **`version`** — Per-bundle content version over the authored transport form (`sha256:<hex>`).
 - **`warnings`** — Parse warnings (empty when none).
 
 ### `parseTemplateBundle` — function
 
-Parses and validates a canonical transport bundle.
+Parses and validates a canonical transport bundle of either authored format.
 
-Accepted input is the transport JSON as an object or as JSON text. The envelope is closed-shape (`{ formatVersion: 1, template, files }` on top of the validated format-v1 template and a string-valued files map), every referenced bundle file must be present, and the returned bundle is deeply frozen — pass a freshly parsed object (an imported payload), not a live application object graph, because freezing is intentional immutability.
+Accepted input is the transport JSON as an object or as JSON text. The envelope is closed-shape (`{ formatVersion, template, files }` with `formatVersion` 1 or 2, matching the template's declared version) and every referenced bundle file must be present. A `formatVersion: 1` template is validated against the frozen v1 schema, shimmed to the canonical model, and the returned bundle carries the authored v1 content version, so pins computed before the migration stay valid; a `formatVersion: 2` template validates directly. `serialized` is the canonical authored transport JSON and round-trips to a deep-equal parsed bundle with the same `version`.
 
 #### Parameters
 
-- `input` — Transport bundle object or JSON text
+- `input` — Transport bundle object or JSON text (either format)
 
 #### Returns
 
-The validated, deeply frozen `{ template, files, version, warnings }` bundle
+The validated, deeply frozen `{ template, files, version, sourceFormatVersion, serialized, warnings }` bundle
 
 #### Examples
 
@@ -689,12 +750,39 @@ The validated, deeply frozen `{ template, files, version, warnings }` bundle
 import { parseTemplateBundle, serializeTemplateBundle } from './realmCatalog/index.ts';
 
 const parsed = parseTemplateBundle(serializeTemplateBundle({ template: DEMO_TEMPLATE, files: {} }));
-parsed.template.id; // 'demo'
+parsed.template.formatVersion; // 2
 ```
 
 #### Throws
 
 - `RealmCatalogError` - `ERR_BUNDLE_FORMAT` for a malformed envelope/JSON text, `ERR_TEMPLATE_INVALID` for an invalid template or files map
+
+### `payloadDigest` — function
+
+Computes the canonical content digest of an authored payload.
+
+The digest is `sha256:<hex>` over the payload re-serialized as UTF-8 JSON with recursively sorted keys and no insignificant whitespace (the same canonicalization the bundle version uses), so it identifies the payload bytes independently of key order. Only plain JSON data is accepted.
+
+#### Parameters
+
+- `payload` — Payload value to digest
+
+#### Returns
+
+The digest string (`sha256:<64 lowercase hex>`)
+
+#### Examples
+
+```typescript
+import { payloadDigest } from './realmCatalog/index.ts';
+
+payloadDigest({ formatVersion: 2, templateId: 'demo', templateVersion: 'sha256:…', inputs: {} });
+// 'sha256:…'
+```
+
+#### Throws
+
+- `RealmCatalogError` (`ERR_HYDRATION_PACKAGE`) - When the value is not plain finite JSON data
 
 ### `PendingInstancePayload` — interface
 
@@ -713,7 +801,7 @@ The payload is the canonical inline hydration package the submitting tool valida
 
 One system-prompt part declared by a template agent spec.
 
-A part is one of three primitives: a bundle prompt file (`file`), a template-declared input (`input`), or inline text (`text`). Composition inserts parts in declared order; an empty input contributes nothing.
+A part is one of three primitives: a bundle prompt file (`file`), a template-declared input (`input`), or inline text (`text`). Composition inserts parts in declared order; an empty input contributes nothing. The optional `path` file selector is the format-v2 extension: a reference to a `files`-shape input must name exactly one file of the fileset (`path` required), and a reference to a `text`-shape input must not carry one (format-v1 validation rejects the field entirely).
 
 ### `REALM_CATALOG_ERROR_CODES` — variable
 
@@ -769,7 +857,7 @@ Carries a programmatic `code` (`RealmCatalogErrorCode`) and optional frozen `det
 import { RealmCatalogError, REALM_CATALOG_ERROR_CODES } from './realmCatalog/index.ts';
 
 try {
-  parseTemplateBundle({ formatVersion: 2 });
+  parseTemplateBundleV1({ formatVersion: 2 });
 } catch (error) {
   if (error instanceof RealmCatalogError) console.error(error.code);
 }
@@ -796,13 +884,24 @@ Composed system prompt for one agent plus the provenance of every input it refer
 
 ### `RealmComposeOptions` — interface
 
-Options accepted by the composition helpers.
+Options accepted by the format-v2 composition helpers.
 
 #### Members
 
 - **`bundleFiles`** — Bundle file bodies keyed by bundle-relative path.
-- **`hydrationFiles`** — Resolved hydration file entries matching declared `user`/`generated` seed slots.
-- **`inputValues`** — Launch-level input values keyed by declared input id.
+- **`inputs`** — Supplied input values keyed by declared input id (shape tagged).
+
+### `RealmDirective` — interface
+
+One format-v2 directive: an operator-attributed mailbox message delivered at launch.
+
+A directive names exactly one message source (`inputId` naming a `text` input, or literal `text`) and exactly one target agent key. An optional input that resolves empty delivers nothing.
+
+#### Members
+
+- **`inputId`** — Message source: a declared `text` input.
+- **`target`** — Destination: one template agent key.
+- **`text`** — Message source: literal text.
 
 ### `RealmHistoryEntry` — interface
 
@@ -827,14 +926,6 @@ One composed history message carried by a launch plan and passed to the runtime'
 - **`role`** — Message attribution copied from the declared entry.
 - **`source`** — Host-side provenance marker for template-declared history.
 
-### `RealmHydrationDeclaration` — interface
-
-Hydration declaration: the overall instruction a hydrator reads when producing a package for this template.
-
-#### Members
-
-- **`brief`** — Non-empty hydration brief.
-
 ### `RealmInputProvenance` — interface
 
 Provenance of one referenced template input: the declared id plus the source of the resolved value. The value text itself is never duplicated.
@@ -844,11 +935,13 @@ Provenance of one referenced template input: the declared id plus the source of 
 - **`inputId`** — Declared input id.
 - **`source`** — Where the composed value came from.
 
+### `RealmInputValue` — type alias
+
+One validated format-v2 input value: the declaration's shape tag plus the resolved content.
+
 ### `RealmInputValues` — type alias
 
-Resolved input values keyed by declared input id.
-
-Used by `composeAgentHistory()` (history parts resolve from this map) and by launch callers that pass one value per declared input to `materializeTemplate()`.
+Validated input values keyed by declared input id (supplied values only; defaults resolve at composition time).
 
 ### `RealmInputValueSource` — type alias
 
@@ -880,15 +973,16 @@ The record is deeply frozen and closed-shape: it carries only the fields declare
 
 ### `RealmLaunchPlan` — interface
 
-Deeply frozen launch plan produced by `materializeTemplate()`.
+Deeply frozen format-v2 launch plan produced by `materializeTemplate()`.
 
-The plan is deterministic: agent order is template order and every field is a pure function of the template plus the launch options.
+The plan is deterministic: agent order is template order, placement and directive order is declared order, and every field is a pure function of the template plus the launch options.
 
 #### Members
 
 - **`agents`** — Resolved agent plans, in template order.
+- **`directives`** — Resolved directives, in declared order (empty when none declared).
+- **`placements`** — Resolved workspace placements, in declared order (empty when none declared).
 - **`realmId`** — Target realm id, stored verbatim from the materialization options.
-- **`seed`** — Resolved seed manifest; absent when the template declares no seed.
 - **`templateId`** — Id of the template the plan was materialized from.
 
 ### `RealmLaunchToolProfile` — interface
@@ -910,6 +1004,58 @@ Launch options accepted by `materializeTemplate()`.
 
 - **`idOverrides`** — Per-agent-key id overrides; keys must name template agent keys.
 - **`realmId`** — Target realm id (membership metadata only; agent ids never embed it).
+
+### `RealmPayload` — interface
+
+A format-v2 payload: the structured input values for one template.
+
+The payload is self-contained and inline-only: it repeats no paths and no targets (destinations live only in the template), contains no external file references, and pins the template version it was produced against. Every `required` input must be present; unknown keys, shape mismatches, and duplicate fileset paths are rejected.
+
+#### Members
+
+- **`formatVersion`** — Schema format version; only `2` is accepted by the v2 surface.
+- **`inputs`** — Input values keyed by declared input id.
+- **`provenance`** — Optional provenance block.
+- **`templateId`** — Template id the payload targets.
+- **`templateVersion`** — Template version the payload was produced against (`sha256:<hex>`).
+
+### `RealmPayloadFile` — interface
+
+One file of a format-v2 payload fileset.
+
+#### Members
+
+- **`content`** — File content (UTF-8 text; may be empty).
+- **`path`** — Fileset-relative path (safe; unique within the fileset).
+
+### `RealmPayloadInputValue` — type alias
+
+One authored format-v2 payload input value: `{ text }` for a `text` input, `{ files }` for a `files` input (closed shape; exactly one member).
+
+### `RealmPayloadProvenance` — interface
+
+Optional payload provenance block (all fields optional non-empty strings; never secrets).
+
+#### Members
+
+- **`generatedAt`** — ISO-8601 production timestamp.
+- **`model`** — Producing model identifier, when one was used.
+- **`producer`** — Who produced the payload (hydrator, operator, or tool name).
+- **`reviewedBy`** — Who reviewed the payload, when reviewed.
+
+### `RealmPlacement` — interface
+
+One format-v2 placement: a declared destination for an input's value or a bundle file.
+
+A placement names exactly one source (`inputId` or `file`), one target (the Realm-global workspace or one template agent key), and exactly one destination: `path` writes a single value verbatim (a `text` input's value, a bundle file's body, or the single file of a one-file fileset), while `root` writes every file of a `files` input under the root prefix (`root + file.path`). Destinations live only in the template; a payload repeats no paths and no targets.
+
+#### Members
+
+- **`file`** — Source: a bundle file body.
+- **`inputId`** — Source: a declared template input.
+- **`path`** — Exact destination path (single-value sources and one-file filesets).
+- **`root`** — Directory prefix for every file of a `files` input.
+- **`target`** — Destination workspace: the Realm-global partition or one member's private workspace.
 
 ### `RealmProvider` — type alias
 
@@ -968,89 +1114,64 @@ Stdio transport of an MCP provider.
 - **`command`** — Executable to run.
 - **`kind`** — Transport discriminator.
 
-### `RealmResolvedSeed` — interface
+### `RealmResolvedDirective` — interface
 
-Resolved seed manifest carried by a launch plan: inline and bundle-file sources are resolved to content and the directive is copied verbatim.
-
-#### Members
-
-- **`directive`** — Directive copied from the manifest when declared.
-- **`files`** — Resolved files, in declared order (empty when the manifest declares none).
-
-### `RealmResolvedSeedFile` — interface
-
-One resolved seed file: destination, target, and the resolved content.
-
-Targets stay template agent keys — resolving keys to launched agent ids belongs to the seeding orchestration, not to the catalog.
+One resolved directive: the target agent key and the resolved message text.
 
 #### Members
 
-- **`content`** — Resolved content (inline verbatim, or the referenced bundle file body).
-- **`path`** — Destination path copied from the manifest.
+- **`targetAgentKey`** — Target template agent key.
+- **`text`** — Resolved message text (never empty; empty optional inputs deliver nothing).
+
+### `RealmResolvedPlacement` — interface
+
+One resolved placement: destination path, target, and the resolved content.
+
+Targets stay template agent keys — resolving keys to launched agent ids belongs to the launch orchestration, not to the catalog.
+
+#### Members
+
+- **`content`** — Resolved content (input value or bundle file body).
+- **`path`** — Destination path copied from the placement (or root-joined for filesets).
 - **`target`** — Destination workspace: the Realm-global partition or one template agent key.
-
-### `RealmSeedManifest` — interface
-
-Seed manifest declared by a template: files to write at launch plus an optional first directive delivered to one member.
-
-A directive is delivered together with its target's files (one operator seed call per target), so the manifest must declare at least one file for the directive's target agent; a directive-only manifest is rejected at validation rather than inventing a second delivery path.
-
-#### Members
-
-- **`directive`** — Optional first directive delivered to the named template agent key.
-- **`files`** — Files to seed, in declared order.
 
 ### `RealmTemplate` — interface
 
-A code-owned Realm template.
+A code-owned Realm template in format v2.
 
-Templates are frozen data: they declare the schema format version, optional hydration brief, optional template inputs, agent roles with ordered prompt parts and baked history, an optional seed manifest, and the optional capability contract. Domain content lives in bundle files referenced by prompt parts and seed sources; the kernel ships no policy content and no provider implementations.
+Templates are frozen data: they declare the schema format version, input requirements, agent roles with ordered prompt parts and baked history, placements, directives, and the optional capability contract. Domain content lives in bundle files referenced by prompt parts, placement `file` sources, and input `defaultFile` prefills; the kernel ships no policy content and no provider implementations. Validation is closed-shape and total: every declared input must be referenced at least once and every reference must resolve.
 
 #### Members
 
 - **`agents`** — Declared agent specs, in launch order; never empty.
 - **`description`** — Operator-facing description (may be empty).
-- **`formatVersion`** — Schema format version; only `1` is accepted.
-- **`hydration`** — Overall hydrator instruction.
+- **`directives`** — Declared launch directives, in delivery order.
+- **`formatVersion`** — Schema format version; only `2` is accepted by the v2 surface.
 - **`id`** — Stable template id.
-- **`inputs`** — Declared template inputs referenced by `input` parts.
+- **`inputs`** — Declared input requirements referenced by parts, placements, and directives.
 - **`name`** — Human-readable display name.
 - **`notes`** — Free-text author comments shown in the launcher.
+- **`placements`** — Declared workspace placements, in write order.
 - **`providers`** — Optional provider requests (shape-validated; never resolved in this wave).
-- **`seed`** — Optional seed manifest resolved by materialization.
 - **`toolContract`** — Optional capability requirements (shape-validated; never resolved in this wave).
 
 ### `RealmTemplateInput` — interface
 
-One template-declared editable input.
+One template-declared editable input in format v2.
 
-Inputs are launch-level: one value per input is used wherever any agent references it. `default` and `defaultFile` are mutually exclusive prefills (declaring both is rejected); a `required` input fails composition while it resolves empty. The kernel attaches no meaning to the text — an input may carry directives, lore, policy notes, or nothing at all.
+Inputs are the only variable content: one value per input is used wherever any agent, placement, or directive references it. `shape` selects the value domain — `text` is one UTF-8 string, `files` is an ordered fileset (`{ path, content }` entries; filesets only, no archives or base64). A `files` input is never injected wholesale: a prompt/history reference names one file (`path`), and a placement writes the fileset to a workspace (`root`) or, when the fileset holds exactly one file, to an exact `path`. `default`/`defaultFile` are text-only prefills and mutually exclusive; a `required` input fails closed while it resolves empty. `label`, `help`, and `multiline` are review/UI metadata.
 
 #### Members
 
-- **`brief`** — Hydration instruction; required for `generated` inputs, ignored otherwise.
-- **`default`** — Prefilled text (`user` origin only); absent or empty starts empty.
-- **`defaultFile`** — Alternative prefill resolved from a bundle file (`user` origin only); mutually exclusive with `default`.
+- **`brief`** — Production instruction for whoever fills the input (hydrator or operator).
+- **`default`** — Prefilled text (`text` shape only); absent or empty starts empty.
+- **`defaultFile`** — Alternative prefill resolved from a bundle file (`text` shape only); mutually exclusive with `default`.
 - **`help`** — Author commentary (provider notes, provenance, usage) shown with the field.
-- **`id`** — Stable per-template input id (unique within the template; referenced by `input` parts).
+- **`id`** — Stable per-template input id (unique within the template; referenced by parts, placements, and directives).
 - **`label`** — Human-readable field label.
-- **`multiline`** — UI hint: render as a multiline field (default true).
-- **`origin`** — Where the value comes from: `user` (operator-provided, the default) or `generated` (produced by a hydrator).
-- **`required`** — Whether composition fails closed while the resolved value is empty.
-
-### `RealmTemplateSeedFile` — interface
-
-One template-declared seed file slot: destination, target, origin, and origin-dependent content source.
-
-`path` is a workspace-relative destination (traversal and null bytes are rejected), `target` names the Realm-global workspace or one template agent key, and `origin` declares where the content comes from: `fixed` (shipped in the bundle; `source` required), `user` (attached at launch; `source` forbidden, absent slot skipped), or `generated` (filled from the hydration package; `source` forbidden, missing slot fails closed). The store's own seed payload type is `RealmSeedFile` (`{ path, content }`), the resolved write shape this declaration materializes into.
-
-#### Members
-
-- **`brief`** — Hydration instruction: required for `generated`, optional for `user`, ignored for `fixed`.
-- **`origin`** — Content origin (defaults to `fixed` when `source` is present).
-- **`path`** — Destination path (workspace-relative; traversal rejected).
-- **`source`** — Content source; required for `fixed` slots and forbidden for `user`/`generated` slots.
-- **`target`** — Destination workspace: the Realm-global partition or one member's private workspace.
+- **`multiline`** — UI hint: render as a multiline field (`text` shape only; default true).
+- **`required`** — Whether composition and placement fail closed while the input resolves empty (default `false`).
+- **`shape`** — Value domain: one text string or an ordered fileset.
 
 ### `RealmToolContract` — interface
 
@@ -1075,70 +1196,90 @@ Requirements are requests, never implementations: the capability id is namespace
 - **`range`** — Semver range of acceptable implementations.
 - **`required`** — Whether a missing implementation blocks launch (default `true`).
 
-### `ResolvedHydration` — interface
+### `resolveDirectives` — function
 
-Fully validated hydration package resolution produced by `validateHydrationPackage()`.
+Resolves a template's declared format-v2 directives into launch messages, in declared order.
 
-`templateVersion` is the version the package pinned; `inputValues` are the package's declared input values; `files` are the package's file entries in package order; `warnings` carries review-surface notes (for example an explicitly allowed version mismatch).
-
-#### Members
-
-- **`files`** — Package file entries in package order.
-- **`inputValues`** — Package input values keyed by declared input id.
-- **`templateId`** — Template id the package targets (equal to the validated template's id).
-- **`templateVersion`** — Template version the package pinned (`sha256:<hex>`).
-- **`warnings`** — Review warnings (empty when none).
-
-### `ResolvedHydrationFile` — interface
-
-One hydration file entry resolved from a package: the declared slot path and target plus the content the hydrator produced.
-
-#### Members
-
-- **`content`** — Slot content (may be empty).
-- **`path`** — Slot destination path (workspace-relative; matches a declared seed slot).
-- **`target`** — Destination workspace: the Realm-global partition or one template agent key.
-
-### `resolveSeedManifest` — function
-
-Resolves a template's seed manifest into file content, honoring each slot's declared origin.
-
-`fixed` slots resolve their declared source (inline verbatim; `source.file` from `bundleFiles`, missing entry failing closed). `user`/`generated` slots resolve from `hydrationFiles` matched by path and target: an absent optional `user` slot is skipped, while a missing `generated` slot fails closed. Hydration entries that match no declared slot, duplicate another entry, or target a `fixed` slot are rejected. Targets and the directive are copied as declared (template agent keys — resolving keys to launched agent ids belongs to the seeding orchestration).
+A literal `text` directive resolves verbatim. An `inputId` directive resolves a declared `text` input (a `files` input fails closed): an optional empty value delivers nothing, and a `required` empty value fails closed.
 
 #### Parameters
 
-- `manifest` — Seed manifest to resolve
-- `options` — Bundle file bodies and resolved hydration file entries
+- `directives` — Declared directives (validated structurally here)
+- `inputs` — Declared template inputs referenced by `inputId` directives
+- `options` — Supplied input values and bundle file bodies
 
 #### Returns
 
-A deeply frozen resolved seed (files in declared order)
+A deeply frozen resolved directive list
 
 #### Examples
 
 ```typescript
-import { resolveSeedManifest } from './realmCatalog/index.ts';
+import { resolveDirectives } from './realmCatalog/index.ts';
 
-const seed = resolveSeedManifest(
-  { files: [{ path: 'brief.md', target: 'realm', source: { inline: 'Brief.' } }] },
-  {}
-);
-// seed.files[0].content === 'Brief.'
+const directives = resolveDirectives([{ text: 'Begin.', target: { agent: 'gm' } }], []);
+// directives[0].text === 'Begin.'
 ```
 
 #### Throws
 
-- `Error` - When the manifest, options, a referenced bundle entry, or the hydration files are invalid
+- `Error` - When directives, inputs, options, references, shapes, or required values are invalid
 
-### `serializeTemplateBundle` — function
+### `ResolvedPayload` — interface
 
-Renders a template bundle as the canonical transport JSON.
+Fully validated payload resolution produced by `validatePayload()`.
 
-The output is deterministic: keys are recursively sorted, there is no insignificant whitespace, and the document re-parses to a deep-equal bundle with the same per-bundle version.
+`inputs` carries the supplied values keyed by declared input id (shape tagged); `warnings` carries review-surface notes (for example an explicitly allowed version mismatch).
+
+#### Members
+
+- **`inputs`** — Supplied input values keyed by declared input id.
+- **`templateId`** — Template id the payload targets (equal to the validated template's id).
+- **`templateVersion`** — Template version the payload pinned (`sha256:<hex>`).
+- **`warnings`** — Review warnings (empty when none).
+
+### `resolvePlacements` — function
+
+Resolves a template's declared format-v2 placements into concrete workspace writes, in declared order.
+
+A `file` source resolves its bundle body (a missing entry fails closed). A `text`-input source writes the resolved value to the placement `path` (an optional empty value writes nothing; a `required` empty value fails closed). A `files`-input source writes every fileset file under the placement `root` (`root` + `file.path`, a `/` separator inserted when the root omits one), or — with a `path` destination — writes the single file the fileset must hold (zero files writes nothing when optional; more than one fails closed). Destinations that collide at resolution time (including root/file overlaps) fail closed instead of silently overwriting.
 
 #### Parameters
 
-- `bundle` — Bundle to serialize (`{ template, files }`)
+- `placements` — Declared placements (validated structurally here)
+- `inputs` — Declared template inputs referenced by `inputId` placements
+- `options` — Supplied input values and bundle file bodies
+
+#### Returns
+
+A deeply frozen resolved placement list
+
+#### Examples
+
+```typescript
+import { resolvePlacements } from './realmCatalog/index.ts';
+
+const files = resolvePlacements(
+  [{ inputId: 'lore', target: 'realm', root: 'lore/' }],
+  [{ id: 'lore', label: 'Lore', shape: 'files' }],
+  { inputs: { lore: { shape: 'files', files: [{ path: 'a.md', content: 'A' }] } } }
+);
+// files[0].path === 'lore/a.md'
+```
+
+#### Throws
+
+- `Error` - When placements, inputs, options, references, destinations, or required values are invalid
+
+### `serializeTemplateBundle` — function
+
+Renders a template bundle as canonical transport JSON.
+
+The output is deterministic: keys are recursively sorted, there is no insignificant whitespace, and the document re-parses (via parseTemplateBundle) to a deep-equal parsed bundle with the same per-bundle version. A legacy format-v1 document serializes as a v1 envelope (stable round-trip); a canonical template serializes as a v2 envelope.
+
+#### Parameters
+
+- `bundle` — Bundle to serialize (`{ template, files }`; legacy format-v1 documents accepted)
 
 #### Returns
 
@@ -1180,11 +1321,11 @@ const preview = summarizeAgentCapabilities(DEMO_TEMPLATE.agents[1]);
 
 Computes the per-bundle content version of a template bundle.
 
-The canonical byte stream is deterministic and synchronous: the spec re-serialized as UTF-8 JSON with recursively sorted keys and no insignificant whitespace, then each referenced bundle file in lexicographic path order, each framed as `<pathLength>:<path>\n<contentLength>:<content>` (UTF-8 byte counts). Baked and JSON-imported bundles hash identically because both go through this same canonicalization.
+A canonical (`formatVersion: 2`) bundle hashes the spec plus its referenced bundle files (prompt/history `file` parts, input `defaultFile` prefills, placement `file` sources); a legacy `formatVersion: 1` document keeps the format-v1 byte stream exactly (the spec plus prompt/history `file` parts, `defaultFile` prefills, and fixed seed sources), so pins computed before the migration stay valid. The canonical framing is the same for both: the spec re-serialized as UTF-8 JSON with recursively sorted keys and no insignificant whitespace, then each referenced file in lexicographic path order framed as `<pathLength>:<path>\n<contentLength>:<content>` (UTF-8 byte counts). The template is hashed **in its authored format** — pass the authored template (or a parsed bundle's `serialized` text), not a normalized model, to reproduce a legacy pin.
 
 #### Parameters
 
-- `bundle` — Bundle to version (`{ template, files }`)
+- `bundle` — Bundle to version (`{ template, files }`; legacy format-v1 documents accepted)
 
 #### Returns
 
@@ -1207,11 +1348,11 @@ templateBundleVersion({ template: DEMO_TEMPLATE, files: {} });
 
 Reports whether a template declares capability needs: non-empty `toolContract.requirements` or non-empty `providers`.
 
-The launch gate uses this to fail closed with `ERR_TEMPLATE_PROVIDERS_UNSUPPORTED` until the providers wave lands, while import, parse, validation, and review all succeed. The helper is a pure shape query — the shape itself is validated by `validateTemplate()`/`parseTemplateBundle()`.
+The launch gate uses this to fail closed with `ERR_TEMPLATE_PROVIDERS_UNSUPPORTED` until the providers wave lands, while import, parse, validation, and review all succeed. The helper is a pure shape query — the shape itself is validated by `validateTemplateV1()`/`parseTemplateBundleV1()`.
 
 #### Parameters
 
-- `template` — Template (or `null`/`undefined`) to inspect
+- `template` — Template of either format (or `null`/`undefined`) to inspect
 
 #### Returns
 
@@ -1234,7 +1375,7 @@ The check is a pure shape query over `AgentSpec.authorities`: every declared ide
 
 #### Parameters
 
-- `template` — Template (or `null`/`undefined`) to inspect
+- `template` — Template of either format (or `null`/`undefined`) to inspect
 
 #### Returns
 
@@ -1249,46 +1390,59 @@ templateUnsupportedAuthorities({ ...DEMO_TEMPLATE });
 // []
 ```
 
-### `validateHydrationPackage` — function
+### `validatePayload` — function
 
-Validates a hydration package against a template's declared contract.
+Validates a payload (or a format-v1 hydration package) against a template's declared contract.
 
-Checks, in order: the template itself (typed `ERR_TEMPLATE_INVALID`); the closed package envelope (`formatVersion: 1`, `templateId` equal to the template id, `templateVersion`); declared input ids for `inputs`; one entry per `user`/`generated` slot matched by path+target (unknown/duplicate entries and `fixed`-slot entries rejected, every `generated` slot present); and the pinned version. When `opts.currentVersion` is supplied and differs from the package's `templateVersion`, the mismatch is a typed `ERR_HYDRATION_VERSION_MISMATCH` unless `opts.allowVersionMismatch` is `true`, in which case it is reported in `warnings` (review surfaces call with the flag; launch passes it only after explicit user confirmation).
+The template normalizes first (legacy v1 documents shim to the canonical model). The closed payload envelope requires a matching `templateId`, a `templateVersion` pin, and an `inputs` record keyed by declared input id whose values match each declaration's shape (`{ text }` / non-empty `{ files }` with unique safe paths); unknown keys and shape mismatches fail closed, and every `required` input must be present and non-empty. The pinned version is compared against `opts.currentVersion`: a mismatch is a typed `ERR_HYDRATION_VERSION_MISMATCH` unless `allowVersionMismatch` is `true`, in which case it is reported in `warnings`.
 
 #### Parameters
 
-- `template` — Template the package targets
-- `pkg` — Candidate hydration package (object)
+- `template` — Template the payload targets (legacy format-v1 documents accepted)
+- `payload` — Candidate payload (or legacy hydration package)
 - `opts` — Optional `currentVersion` (effective bundle version) and `allowVersionMismatch` confirmation
 
 #### Returns
 
-The deeply frozen resolved hydration package
+The deeply frozen resolved payload
 
 #### Examples
 
 ```typescript
-import { validateHydrationPackage } from './realmCatalog/index.ts';
+import { validatePayload } from './realmCatalog/index.ts';
 
-const resolved = validateHydrationPackage(DEMO_TEMPLATE, {
-  formatVersion: 1,
+const resolved = validatePayload(DEMO_TEMPLATE, {
+  formatVersion: 2,
   templateId: 'demo',
   templateVersion: 'sha256:…',
-  inputs: {},
-  files: []
+  inputs: {}
 }, { allowVersionMismatch: true });
 ```
 
 #### Throws
 
-- `RealmCatalogError` - `ERR_TEMPLATE_INVALID` for an invalid template, `ERR_HYDRATION_PACKAGE` for an invalid package, `ERR_HYDRATION_VERSION_MISMATCH` for a disallowed version mismatch
+- `RealmCatalogError` - `ERR_TEMPLATE_INVALID` for an invalid template, `ERR_HYDRATION_PACKAGE` for an invalid payload, `ERR_HYDRATION_VERSION_MISMATCH` for a disallowed version mismatch
+
+### `validateTemplate` — function
+
+Validates a whole format-v2 template against the closed schema shape.
+
+Beyond the structural checks, the cross-references fail closed here: the tool contract and provider requests validate (with requirement ids collected first so `toolProfile.tools` can reference them), every prompt/history `input` part, placement, and directive must resolve to a declared input with the right shape, input ids and requirement ids must be unique, every placement target and directive target must name a declared template agent key, and the format-v2 **totality** rule holds: every declared input is referenced at least once. Inputs that no surface consumes are template errors — an input can never have an implicit role.
+
+#### Parameters
+
+- `candidate` — Candidate template
+
+#### Returns
+
+The validated template reference
 
 ## Doc coverage
 
-- Top-level exports: 58
-- Declarations (exports + members): 195
-- Documented declarations: 195 / 195 (100%)
+- Top-level exports: 65
+- Declarations (exports + members): 211
+- Documented declarations: 211 / 211 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): `ToolPresetName`, `TriggerPolicy`
-- Unresolved `{@link}` targets (`ae-unresolved-link`): 0 (policy `none`; see `scripts/api_reports.mjs`)
+- Unresolved `{@link}` targets (`ae-unresolved-link`): 1 (policy `none`; see `scripts/api_reports.mjs`)

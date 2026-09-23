@@ -6,7 +6,7 @@ Durable working rules for any agent contributing to this repository. Program-spe
 ## 1. What this repo is
 AI story engine with an encapsulated multi-agent sandbox.
 - **Engine:** `src/lib/sandbox/` — runtime, inference adapters, credential vault, model configuration, preset catalog, virtualFs, messaging bus, world clock, trigger queue, invocation engine, domain agents, tools (incl. the Svelte 5 `sandboxStore`).
-- **App/UI:** `src/App.svelte` + `src/lib/components/sandbox/` (13 Svelte components + UI helpers and `markdown/`). No legacy stores/api/utils remain (§7).
+- **App/UI:** `src/App.svelte` + `src/lib/components/sandbox/` (14 Svelte components + UI helpers and `markdown/`). No legacy stores/api/utils remain (§7).
 - **History:** the legacy single-agent Storyteller UI/storage has been retired; `main` is sandbox-only.
 
 **System invariants** (enforced by the suites and the per-module ICDs, never by hand):
@@ -68,9 +68,9 @@ npm run lint:docs                          # TSDoc syntax gate over sandbox .ts:
 npm run typecheck                          # scripts/typecheck.mjs: jsconfig tsc + strict contracts tsc + svelte-check all run; ratchet baselines (tsc 0 total / 0 sandbox; contracts 0; svelte-check ≤96)
 timeout 90 node tests/unit/<suite>.js      # single suite (timeout 180 for heavy suites)
 timeout 90 node tests/audit/repros/<id>.test.js # audit repros (red-before-fix evidence; not part of npm test)
-timeout 600 npm test                       # 92 suites — single-flight: lead runs after each round lands + at convergence (includes contracts_gate_test)
+timeout 600 npm test                       # 94 suites — single-flight: lead runs after each round lands + at convergence (includes contracts_gate_test)
 npm run build
-npm run test:e2e                           # Playwright (8 specs) — outside the main gate
+npm run test:e2e                           # Playwright (9 specs) — outside the main gate
 node tests/qa/seed_vault.mjs               # QA: seed provider keys into the MCP profile (browser closed first)
 node tests/qa/provider_smoke.mjs           # Live pre-flight: 1 minimal completion for NanoGPT + DeepSeek; if it passes, provider-suite failures are code/test defects, not env
 ```
@@ -114,7 +114,7 @@ Mechanical facts (counts, file lists, command lists) are generated or omitted, n
 
 ## 7. Code & docs map
 - **Engine:** `src/lib/sandbox/` — 36 folder modules with `index.ts` surfaces (`runtime/`, `inference/`, `domain/`, `tools/`, `credentialVault/`, `modelConfig/`, `presetCatalog/`, `realmRegistry/`, `realmCatalog/`, `virtualFs/`, `messagingBus/`, `worldClock/`, `triggerQueue/`, `invocationEngine/`, `sandboxPersistence/`, `sandboxStore/index.svelte.ts`, …).
-- **App/UI:** the shell — `src/App.svelte`, `src/main.js`, `src/app.css`, and `src/lib/components/sandbox/` (13 Svelte components + `estimateTokens.ts`, `realmGroups.ts`, `realmLauncherHelpers.ts`, `realmReviewHelpers.ts`, `realmTemplateHelpers.ts`, `toolPresetResolve.ts` + `markdown/`). No legacy stores/api/utils remain.
+- **App/UI:** the shell — `src/App.svelte`, `src/main.js`, `src/app.css`, and `src/lib/components/sandbox/` (14 Svelte components + `estimateTokens.ts`, `realmGroups.ts`, `realmHydrationHelpers.ts`, `realmLauncherHelpers.ts`, `realmPayloadLibrary.ts`, `realmReviewHelpers.ts`, `realmTemplateHelpers.ts`, `toolPresetResolve.ts` + `markdown/`). No legacy stores/api/utils remain.
 - **Tests:** `tests/unit/`, `tests/integration/`, `tests/e2e/` (Playwright); runner `tests/runner.js`.
 - **Tooling:** `scripts/verify_sandbox_contracts.js`.
 - **Docs:** see §2 for the map; the generated ICDs (`docs/generated/modules/`) are the contract record.

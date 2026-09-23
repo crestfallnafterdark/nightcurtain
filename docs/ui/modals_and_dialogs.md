@@ -1,7 +1,7 @@
 # Modals, Dialogs & Action Input Architecture
 
 **Status:** CURRENT
-**Last verified:** 2026-09-22
+**Last verified:** 2026-09-23
 
 > [!NOTE]
 > This document specifies the modal dialogs and action dock in the `ai-story` Studio UI: `AgentLauncherModal.svelte`, `RecycleBinModal.svelte`, `SandboxSettingsModal.svelte`, `AgentSettingsPanel.svelte` (the live-edit tab, not a modal), and `SandboxActionInput.svelte` — all under `src/lib/components/sandbox/`.
@@ -18,8 +18,9 @@ flowchart TD
         subgraph ModalsArea ["Modal Dialogs (Layered Over Studio Root)"]
             Launcher["AgentLauncherModal.svelte\n(Provision new agent; binds a catalog preset, Realm membership)"]
             Recycle["RecycleBinModal.svelte\n(Inspect soft-killed agents, restore, permanent purge)"]
-            Realm["RealmSettingsModal.svelte\n(Create/rename/recolor Realm records, members, delete-ungroup semantics)"]
-            RealmLaunch["RealmLauncherModal.svelte\n(Template picker, per-agent privilege/capability preview, optional seed)"]
+            Realm["RealmSettingsModal.svelte\n(Create/rename/recolor Realm records, members, provenance detail, rehydrate entry, delete-ungroup semantics)"]
+            RealmLaunch["RealmLauncherModal.svelte\n(Hydration workspace: template picker, input requirements/filesets/directives, review payload digest + pin, saved-payload library, optional seed)"]
+            RealmRehydrate["RealmRehydrateModal.svelte\n(Reopen an existing Realm: replace content from a payload or write files manually)"]
             Settings["SandboxSettingsModal.svelte\n(Model presets + credential vault)"]
         end
 
@@ -137,11 +138,23 @@ Opened from the agent-drawer header (Realms button, with a count badge) or a Rea
 | :--- | :--- |
 | Create / rename / recolor / describe | Operator-only store calls; duplicate ids refused; `id`/`createdAt` immutable; hex-only accent colors (invalid values fall back, never reach CSS). |
 | Members list | Active + recycled members, read-only: Realm membership is immutable after launch — there are no “Move into Realm”/“Ungroup” affordances (terminate + relaunch into the target Realm instead). |
-| Provenance | For template-launched Realms, a read-only panel shows `templateId`, the effective `templateVersion`, the optional hydration-package digest, and the launch timestamp from `RealmRecord.instance` (hashes only — never raw input values). Manual Realms show nothing. |
+| Provenance | For template-launched Realms, a read-only panel shows `templateId`, the effective `templateVersion`, the optional hydration-package digest, and the launch timestamp from `RealmRecord.instance` (hashes only — never raw input values). Expandable detail lists the recorded per-input hashes and seeded placement paths. Manual Realms show nothing. |
+| Rehydrate / Replace content | Opens `RealmRehydrateModal.svelte` for the selected Realm: inspect the current payload provenance, then either replace the content from a saved or local payload, or write files manually. Realms without a provenance block still get the manual file-write mode. Closing the manager first avoids stacked dialogs. |
 | Delete | Inline confirmation: deletion is refused while active or recycled members exist (“terminate or delete members first”); the operator-only recursive override purges active members, empties recycled ones, then removes the record (fail-closed report). The seeded Generic Realm is never deletable. |
 | Validation | Store/orchestrator errors render in an inline error banner; Escape/backdrop/ARIA/focus-trap follow the modal conventions below. |
 
 Sidebar grouping follows the same registry data: groups render in registry order (Generic first) with member counts and accent dots; the director renders pinned as a separate system-scope entity; there is no Ungrouped section (every non-director agent belongs to a Realm).
+
+### 4.1 Rehydrate / Replace Modal (`RealmRehydrateModal.svelte`)
+
+The Realm manager's reopen path for an existing Realm's hydrated content (ticket 874182b, subsuming the one-shot seed gap of `074012c`). Members are never relaunched and membership never changes; only workspace content and directives are applied through the store's operator surfaces.
+
+| Area | Behavior |
+| :--- | :--- |
+| Current provenance | Always rendered first from `RealmRecord.instance` / `inputHashes` / `seedPaths` (hashes and paths only). A Realm without a provenance block renders a manual-only note instead. |
+| Replace from payload | For template-launched Realms whose template still resolves in the effective catalog: attach a payload from the session saved-payload library or a local `<templateId>.package.json` file. The payload validates through the real catalog `validatePayload` (mismatch fails closed unless explicitly confirmed) and resolves through `materializeTemplate`; the plan lists every placement write grouped by destination plus every resolved directive, with the payload digest and template pin. |
+| Apply | One `seedRealm` call per destination group (declared paths are overwritten) and one operator-attributed mailbox message per resolved directive; a template agent key with no active member fails closed before any write, and partial progress is reported instead of hidden. The overwrite requires an explicit confirmation checkbox. |
+| Write files manually | Reopenable seeding for any Realm: file rows (path + content), a member/Realm-global target, and an optional directive, validated by `validateSeedDraft` and written through `seedRealm` — reserved `/global`/`/public` roots are rejected, never re-rooted. |
 
 ## 5. Realm Launcher Modal (`RealmLauncherModal.svelte`)
 
@@ -149,20 +162,27 @@ Two-step wizard for launching a Realm from a template — shipped with the app o
 
 | Step | Behavior |
 | :--- | :--- |
-| Configure & Preview | Template picker from the effective catalog (`sandboxStore.listRealmTemplates()`: shipped + imported, each labelled `shipped` / `imported` / `imported · replaces shipped` with its effective `sha256:` version). Registry controls: **Import…** (file → `importRealmTemplate`, typed errors surfaced), **Export** (canonical JSON download), **Delete Import…** (imported only; deleting restores the shipped revision). Review: generated inputs render as editable fields with a `generated` badge + hydration brief; per-agent rows show the **privilege badge**, wildcard source, declared preset, model-preset binding (resolved against the real catalog, with “active default” / “not in catalog” markers), expandable mutating/read-only grant groups from `summarizeAgentCapabilities`, a read-only baked-history preview, and the declared file slots (path, target, origin) — each slot openable in a provenance-marked files dialog with editable `user`/`generated` content and read-only `fixed` content. Declared per-agent authorities render as approval checkboxes with the trust control (§5.1). Name/color/description prefilled; launch calls `launchRealmFromTemplate` with progress and rollback-aware errors; the new Realm appears in the sidebar immediately. |
+| Configure & Preview | Template picker from the effective catalog (`sandboxStore.listRealmTemplates()`: the normalized format-v2 model; shipped + imported, each labelled `shipped` / `imported` / `imported · replaces shipped` with its effective `sha256:` version). Registry controls: **Import…** (file → `importRealmTemplate`, typed errors surfaced), **Export** (canonical JSON download), **Delete Import…** (imported only; deleting restores the shipped revision). The **hydration workspace** renders the declared inputs per shape: `text` fields with label/help/required/multiline and the `default`/`defaultFile` prefill, and `files` fields where the operator attaches files (multiple or **Attach folder…**, preserving folder-relative paths) — each attachment carries its own fileset-relative `path` (safe, unique, editable), a display size, its concrete `root`-joined/path destinations, in-place **Replace…**, and removal. Every field shows its derived **usage map** (where the input lands: agent prompt/history `input` parts, placements, directives) and its declared placement mapping as template-level labels only; declared **directives** render with their bound input and catalog-resolved preview text (§5.2). Per-agent rows show the **privilege badge**, wildcard source, declared preset, model-preset binding (resolved against the real catalog, with “active default” / “not in catalog” markers), expandable mutating/read-only grant groups from `summarizeAgentCapabilities`, a composed-prompt preview with per-part provenance, baked history, and the declared **placements** (bundle-file and input destinations) openable in a provenance-marked files dialog. Declared per-agent authorities render as approval checkboxes with the trust control (§5.1). Name/color/description prefilled; launch calls `launchRealmFromTemplate` with the operator-assembled `inputs` (shape-tagged) plus an optional `payload`, with progress and rollback-aware errors; the new Realm appears in the sidebar immediately. |
 | Seed (optional) | File rows (path + content), target picker (Realm-global default, or a launched member), optional directive. Calls `seedRealm`; the receipt lists the workspace, written paths, and directive delivery. Partial-write failures list already-written paths. |
-| Validation | Inline, fail-closed: unknown/empty template, blank or duplicate realm name (trimmed, case-insensitive — launcher-local), malformed/duplicate/traversal/null-byte/root file paths, non-text content, empty file list, directive without a member recipient. |
+| Validation | Inline, fail-closed. Selection/name rules: unknown/empty template, blank or duplicate realm name (trimmed, case-insensitive — launcher-local). Operator-assembled inputs validate through the store's own v2 path: the effective values are synthesized into the canonical payload envelope and checked by the real `validatePayload`, surfacing typed classes — **missing required**, **pin mismatch**, **unknown input**, **shape mismatch** — with per-field inline errors. Fileset attachments additionally check what composition owns: a `path` placement writes exactly one file (any count for `root`), a prompt/history `path` selection names an attached file whenever the fileset is non-empty, and fileset paths are safe and unique. Failures and labels stay realm-opaque: no canonical workspace key is ever rendered. |
 
 Agent ids are realm-opaque: template/plan ids are plain (no realm prefix), the `{realm}` placeholder is retired, and duplicate resolved ids fail inline with a collision error (no auto-suffix; staged until realm-local namespacing).
 
-Helper logic lives in `realmLauncherHelpers.ts` (preview projection, preset-binding display, seed row parsing/validation, target options, error descriptors), `realmReviewHelpers.ts` (authority approvals/trust, payload attach, files-dialog provenance), and `realmTemplateHelpers.ts` (source labels, import/export/delete actions, generated-input and history/file-slot review projection, provenance formatting).
+Helper logic lives in `realmLauncherHelpers.ts` (preview projection, preset-binding display, the shape-tagged input drafts/usage map/attachment validation and the synthesized-envelope input projection, seed row parsing/validation, target options, error descriptors), `realmReviewHelpers.ts` (authority approvals/trust, payload attach, the review launch-payload resolution (`resolveRealmReviewLaunchPayload`: source verbatim while unedited, else the package rebuilt from the current slots), placement-based files-dialog provenance, prompt/history selection resolution), `realmTemplateHelpers.ts` (source labels, import/export/delete actions, provenance formatting), `realmHydrationHelpers.ts` (per-input requirement/placement projections, per-file attachment views, the catalog-resolved directive review, the pin/digest projection, and the rehydrate plan built over the real `validatePayload` + `materializeTemplate`), and `realmPayloadLibrary.ts` (the session saved-payload library).
 
 ### 5.1 Review completion & publishing authorities
 
-- **Review surfaces:** per-agent composed-prompt preview with per-part provenance (fixed/user/generated); editable history entries whose input-backed parts edit the launch input and re-compose through the real composer; a files dialog per declared slot with provenance labels (`bundle-inline`/`bundle-file`/`bundle-missing`/`attached payload`/`edited in review`/`absent`); disclosures for `initialPrompt`, `triggerPolicy`, `modelPresetId`, and `privileged`.
-- **Payload attach:** attach a hydration package from a local `<id>.package.json` file or from the session candidate list (`listPendingInstancePayloads`); a `templateVersion` mismatch warns and requires explicit confirmation; the attached package flows into `launchRealmFromTemplate({ package })`, and candidates can be cleared.
+- **Review surfaces:** per-agent composed-prompt preview with per-part provenance (bundle files are `fixed`, inputs carry their value source); history entries whose input-backed parts edit the launch input and re-compose through the real catalog composer (`composeSystemPrompt`/`composeAgentHistory`, so a `files` selection resolves the exact `path`); a files dialog per declared placement with provenance labels (`bundle-inline`/`bundle-file`/`bundle-missing`/`attached payload`/`launch value`/`absent`), `root` placements expanded per attached file, and `path`-destination conflicts flagged. Placements are read-only in the dialog — editing happens at the input field, the declared source; an explicitly edited slot view rebuilds the launch package from the current slots (`assembleRealmReviewPackage`) so the edit travels as the launch `payload`; the gate validates that exact package and blocks on a placement conflict or an unassemblable edit set instead of dropping the edits. Disclosures cover `initialPrompt`, `triggerPolicy`, `modelPresetId`, and `privileged`.
+- **Payload attach:** attach a hydration package from a local `<id>.package.json` file, from the session candidate list (`listPendingInstancePayloads`), or from the session saved-payload library (`realmPayloadLibrary`, §5.2); a `templateVersion` mismatch warns and requires explicit confirmation; the attached package flows into `launchRealmFromTemplate({ payload })` — verbatim while unedited, else the rebuilt reviewed package — where edited input values win per input over the package's values (`{ inputs }` merge), and candidates/saved payloads can be cleared or deleted.
 - **Declared authority approvals:** each agent's `authorities` are disclosed with per-agent checkboxes (unchecked by default); trust-auto-approved pairs render checked and locked with a distinct badge. A **trust this template** control persists the exact approved set and can be cleared (`clearTemplateAuthorityTrust`; clearing does not revoke already-applied grants). Launch gates rank: unknown authority declaration > payload error > unconfirmed version mismatch > preview error > unreviewed.
 - **Agent settings toggles:** `AgentSettingsPanel.svelte` exposes operator toggles for `@template:authority` / `@hydration:authority` (live `listMetaAuthorityGrants()` state, realm-exact grant/revoke), visually distinct from the `privileged` control.
+
+### 5.2 Hydration workspace, digest card & saved-payload library
+
+- **Pin & digest card:** the payload card renders the effective template pin (`sha256:` bundle version) and the canonical `payloadDigest` of the reviewed content (the launch package when one exists, else the synthesized envelope of the effective values), plus the content source and input/file counts. An undigestible value reports the failure inline instead of a fake hash.
+- **Directive review:** every declared directive renders with its target label, its bound input (or literal marker), and the message text resolved through the catalog's own `resolveDirectives` — an optional empty input delivers nothing, a required empty input reports the typed failure, and the preview can never disagree with the launch.
+- **Saved-payload library (`realmPayloadLibrary.ts`):** **Save payload…** names the current assembled payload in a session library (canonical digest + input/file summary); a saved payload can be attached to a launch, downloaded as the pretty-printed package JSON (safe filename), or deleted. The library is a process-wide module store shared with the Rehydrate modal, so a payload saved in the launcher is immediately attachable from the Realm Manager.
+- **Persistence boundary:** saved payloads are session-only, exactly like the submitted candidates. They are never written to storage; persisting them across reloads requires an additive snapshot field plus a store surface (proposed, not implemented).
 
 ## 6. Sandbox Settings Modal (`SandboxSettingsModal.svelte`)
 
@@ -203,10 +223,10 @@ Inside the Chat Studio pane the transcript notice card is canonical: a CSS rule 
 
 Modal dialogs implement the following where present in code:
 
-1. **Focus Trapping**: `AgentLauncherModal` and `RecycleBinModal` register a `keydown` handler that intercepts `Tab` / `Shift+Tab` to constrain navigation within the modal perimeter (`modalRef.querySelectorAll(...)`). `SandboxSettingsModal` does not implement a Tab-key trap.
-2. **Escape Dismissal**: Pressing `Escape` closes all three modals (`AgentLauncherModal`, `RecycleBinModal`, `SandboxSettingsModal`).
-3. **Backdrop Click**: Clicking the darkened translucent backdrop (`.modal-backdrop`) invokes the close handler in all three modals.
-4. **ARIA Attributes**: All three modals are annotated with `role="dialog"`, `aria-modal="true"`, and `aria-labelledby`.
+1. **Focus Trapping**: `AgentLauncherModal`, `RecycleBinModal`, `RealmLauncherModal`, and `RealmRehydrateModal` register a `keydown` handler that intercepts `Tab` / `Shift+Tab` to constrain navigation within the modal perimeter (`modalRef.querySelectorAll(...)`). `SandboxSettingsModal` does not implement a Tab-key trap.
+2. **Escape Dismissal**: Pressing `Escape` closes every modal (`AgentLauncherModal`, `RecycleBinModal`, `SandboxSettingsModal`, `RealmLauncherModal`, `RealmRehydrateModal`).
+3. **Backdrop Click**: Clicking the darkened translucent backdrop (`.modal-backdrop`) invokes the close handler in all three modals and in the Realm launcher/rehydrate modals.
+4. **ARIA Attributes**: All three modals are annotated with `role="dialog"`, `aria-modal="true"`, and `aria-labelledby`; the Realm launcher (`realm-launcher-title`) and rehydrate (`realm-rehydrate-title`) modals follow the same convention.
 
 ---
 
