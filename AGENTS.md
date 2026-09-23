@@ -83,6 +83,7 @@ node tests/qa/provider_smoke.mjs           # Live pre-flight: 1 minimal completi
 - **Permission first:** do not start tasks, spawn agents, push, or delete files without explicit user approval. Commits are **pre-approved** (standing permission) — keep them path-scoped; push and file deletion always require a fresh go-ahead.
 - **Orchestration model:** the lead agent acts as meta-director — it does not edit application code; changes are delegated to worker agents, and docs are lead-owned. Worker agents stay strictly within their assigned file sets.
 - **One writer per file.** Parallel agents may only work on disjoint file sets.
+- **Worktree policy:** default to serial work in the primary checkout. Multiple worktrees are allowed only when their file sets are provably disjoint and landing them requires **no manual merge** (no shared files, no shared generated artifacts such as ICDs, doc inventories, or test counts, no shared lockstep edits). If a manual merge would be needed, run the work serially in a single worktree instead.
 - **Path-scoped commits:** `git commit -m "…" -- <paths>`; stage new files with `git add --`; **never** `git add -A`; no amend/force/push; retry on `index.lock`.
 - **Scope proof:** every agent reports its allowed files, `git status --short`, `git show --stat HEAD`, and an attestation that nothing else was touched.
 - **Docs are separate commits** from code.
