@@ -173,7 +173,11 @@ async function createSessionZeroRun() {
         idPattern: 'keeper',
         name: 'Keeper',
         role: 'narrator',
-        prompt: [{ kind: 'file', path: 'prompts/keeper.md' }],
+        prompt: [
+          { kind: 'file', path: 'prompts/keeper.md' },
+          // Format-v2 totality: the declared premise input is consumed here.
+          { kind: 'input', inputId: 'premise' }
+        ],
         toolProfile: { tools: [] },
         privileged: false
       }
@@ -379,7 +383,10 @@ test('1. the baked session_zero bundle is a valid two-agent generator realm with
   // protocols (shared rules, per-agent procedure, launch inputs).
   const plan = materializeTemplate(template, {
     realmId: 'session_zero_probe',
-    inputValues: { assignment: 'Probe the protocols.', target_template: '' },
+    inputs: {
+      assignment: { shape: 'text', text: 'Probe the protocols.' },
+      target_template: { shape: 'text', text: '' }
+    },
     bundleFiles: bundle.files
   });
   const architectPrompt = plan.agents.find((agent) => agent.key === 'architect').systemPrompt;

@@ -44,9 +44,10 @@ import {
   BAKED_TEMPLATE_BUNDLES,
   DEMO_TEMPLATE,
   RealmCatalogError,
-  hashText,
+  normalizeTemplate,
+  payloadDigest,
   serializeTemplateBundle,
-  templateBundleVersion
+  templateBundleVersion,
 } from '../../src/lib/sandbox/realmCatalog/index.ts';
 import { VirtualFS } from '../../src/lib/sandbox/virtualFs/index.ts';
 import { MessagingBus } from '../../src/lib/sandbox/messagingBus/index.ts';
@@ -2302,7 +2303,14 @@ test('36. listRealmTemplates exposes the frozen baked launch catalog to the laun
   assert.ok(templates.length >= 1, 'the baked catalog is never empty');
   assert.ok(Object.isFrozen(templates), 'the returned list is frozen');
   assert.ok(templates.every((template) => Object.isFrozen(template)), 'every template is frozen');
-  assert.ok(templates.includes(DEMO_TEMPLATE), 'the baked demo fixture is registered for launch');
+  assert.ok(
+    templates.every((template) => template.formatVersion === 2),
+    'the picker exposes the normalized format-v2 template (inputs/placements/directives visible)'
+  );
+  assert.ok(
+    templates.some((template) => template.id === DEMO_TEMPLATE.id),
+    'the baked demo fixture is registered for launch'
+  );
   assert.deepStrictEqual(
     templates.map((template) => template.id),
     BAKED_TEMPLATE_BUNDLES.map((bundle) => bundle.template.id),
@@ -2668,7 +2676,10 @@ const UNIT_FIXTURE_BUNDLE = {
         idPattern: 'c4-unit-agent',
         name: 'Unit',
         role: 'worker',
-        prompt: [{ kind: 'text', text: 'Unit protocol.' }],
+        prompt: [
+          { kind: 'text', text: 'Unit protocol.' },
+          { kind: 'input', inputId: 'directives' }
+        ],
         toolProfile: { preset: 'readonly' },
         privileged: false
       }
@@ -2680,11 +2691,13 @@ const UNIT_FIXTURE_BUNDLE = {
 test('43. the launch-bundle seam exposes baked and injected bundles; invalid launch options reject before any record exists', async () => {
   sharedLocalStorage.clear();
 
-  // Baked bundle: the demo template with an empty file map.
+  // Baked bundle: the demo template with an empty file map, exposed through the
+  // normalized format-v2 view (the launcher reads inputs/placements/directives).
   const store = createSandboxStore({ autoBootstrapDirector: false, autoHydrate: false });
   const demoBundle = store.getRealmTemplateBundle(DEMO_TEMPLATE.id);
   assert.ok(demoBundle, 'the baked demo bundle resolves');
-  assert.strictEqual(demoBundle.template, DEMO_TEMPLATE);
+  assert.strictEqual(demoBundle.template.formatVersion, 2, 'the exposed template is the normalized v2 model');
+  assert.deepStrictEqual(demoBundle.template, normalizeTemplate(DEMO_TEMPLATE), 'the exposure normalizes the authored fixture');
   assert.deepStrictEqual(demoBundle.files, {}, 'the demo bundle ships no bundle files');
   assert.ok(Object.isFrozen(demoBundle), 'the bundle container is frozen');
   assert.ok(Object.isFrozen(demoBundle.files), 'the bundle file map is frozen');
@@ -3444,7 +3457,11 @@ test('50. import → export → re-import keeps one effective entry per id and a
     assert.strictEqual(receipt.source, 'imported');
     assert.strictEqual(receipt.replacesShipped, false, 'a new id shadows nothing');
     assert.strictEqual(receipt.replacedImport, false);
-    assert.deepStrictEqual(receipt.warnings, []);
+    assert.deepStrictEqual(
+      receipt.warnings,
+      ['bundle uses legacy format v1; it was normalized to the format v2 model'],
+      'a legacy-format import reports the shim warning'
+    );
     assert.ok(receipt.totalImportedBytes > 0, 'the receipt reports the effective import budget');
 
     // Effective catalog: the baked entries keep their order and the import is appended.
@@ -3523,7 +3540,11 @@ test('51. a shadowing import replaces the shipped bundle and delete restores it'
   const bakedIds = BAKED_TEMPLATE_BUNDLES.map((bundle) => bundle.template.id);
 
   try {
-    assert.strictEqual(store.getRealmTemplateBundle(DEMO_TEMPLATE.id).template, DEMO_TEMPLATE, 'shipped first');
+    assert.deepStrictEqual(
+      store.getRealmTemplateBundle(DEMO_TEMPLATE.id).template,
+      normalizeTemplate(DEMO_TEMPLATE),
+      'the shipped revision resolves first (normalized v2 view)'
+    );
 
     const receipt = store.importRealmTemplate(createShadowDemoBundle());
     assert.strictEqual(receipt.replacesShipped, true, 'the import shadows the shipped demo id');
@@ -3542,9 +3563,9 @@ test('51. a shadowing import replaces the shipped bundle and delete restores it'
     });
 
     assert.strictEqual(store.deleteRealmTemplate(DEMO_TEMPLATE.id), true, 'the import is deleted');
-    assert.strictEqual(
+    assert.deepStrictEqual(
       store.getRealmTemplateBundle(DEMO_TEMPLATE.id).template,
-      DEMO_TEMPLATE,
+      normalizeTemplate(DEMO_TEMPLATE),
       'the shipped revision resurfaces at its original position'
     );
     assert.deepStrictEqual(store.getRealmTemplateSource(DEMO_TEMPLATE.id), {
@@ -3595,10 +3616,10 @@ test('51. a shadowing import replaces the shipped bundle and delete restores it'
       );
       assert.strictEqual(injected.getRealmTemplateBundle('c4-unit-fixture').template.name, 'Injected Shadow');
       assert.strictEqual(injected.deleteRealmTemplate('c4-unit-fixture'), true);
-      assert.strictEqual(
+      assert.deepStrictEqual(
         injected.getRealmTemplateBundle('c4-unit-fixture').template,
-        UNIT_FIXTURE_BUNDLE.template,
-        'the injected revision resurfaces'
+        normalizeTemplate(UNIT_FIXTURE_BUNDLE.template),
+        'the injected revision resurfaces (normalized v2 view)'
       );
     } finally {
       injected.destroy();
@@ -3737,8 +3758,16 @@ test('52. package launch writes generated files, merges inputs, seeds history, a
     assert.strictEqual(instance.templateId, 'unit-package');
     assert.strictEqual(instance.templateVersion, version);
     assert.ok(instance.packageDigest.startsWith('sha256:'), 'the package digest is a content hash');
-    assert.strictEqual(instance.inputHashes.brief, hashText('A generated brief.'));
-    assert.strictEqual(instance.inputHashes.tone, hashText('launch tone'), 'the explicit launch value wins the merge');
+    assert.strictEqual(
+      instance.inputHashes.brief,
+      payloadDigest({ shape: 'text', text: 'A generated brief.' }),
+      'the generated brief hash covers the canonical tagged value'
+    );
+    assert.strictEqual(
+      instance.inputHashes.tone,
+      payloadDigest({ shape: 'text', text: 'launch tone' }),
+      'the explicit launch value wins the merge'
+    );
     assert.deepStrictEqual(
       instance.seedPaths,
       ['/lore/world.md', '/rules/base.md', '/notes/tone.md'],
@@ -3785,7 +3814,10 @@ test('52. package launch writes generated files, merges inputs, seeds history, a
     await assert.rejects(
       () => store.launchRealmFromTemplate('unit-package', { package: fixedEntryPackage }),
       (err) => err instanceof RealmCatalogError && err.code === 'ERR_HYDRATION_PACKAGE'
-        && /fixed seed slot/.test(err.message)
+        // Fixed content never attaches: a fixed file-source slot reports
+        // "fixed placement", while a fixed inline slot shims to a defaulted
+        // text input and fails the files-entry shape gate instead.
+        && /targets fixed placement|targets text input 'seed_2'/.test(err.message)
     );
     const missingGenerated = createUnitPackage(version, {
       files: createUnitPackage(version).files.filter((file) => file.path !== 'lore/world.md')
@@ -3793,7 +3825,7 @@ test('52. package launch writes generated files, merges inputs, seeds history, a
     await assert.rejects(
       () => store.launchRealmFromTemplate('unit-package', { package: missingGenerated }),
       (err) => err instanceof RealmCatalogError && err.code === 'ERR_HYDRATION_PACKAGE'
-        && /missing the required generated seed slot/.test(err.message)
+        && /required input 'seed_0' \(lore\/world\.md\) is missing from the payload/.test(err.message)
     );
     await assert.rejects(
       () => store.launchRealmFromTemplate('unit-package', { package: createUnitPackage(version), allowVersionMismatch: 'yes' }),
@@ -3974,7 +4006,11 @@ test('55. a quota failure rolls import/delete back with the typed persistence er
     // Both mutations rolled back: the import survives, the shadow never applied.
     assert.strictEqual(store.exportRealmTemplate(templateId), exportedBefore);
     assert.strictEqual(store.getRealmTemplateSource(templateId).source, 'imported');
-    assert.strictEqual(store.getRealmTemplateBundle(DEMO_TEMPLATE.id).template, DEMO_TEMPLATE);
+    assert.deepStrictEqual(
+      store.getRealmTemplateBundle(DEMO_TEMPLATE.id).template,
+      normalizeTemplate(DEMO_TEMPLATE),
+      'the rolled-back shadow never replaced the shipped revision'
+    );
     assert.deepStrictEqual(store.listRealmTemplates().map((template) => template.id), templatesBefore);
     assert.deepStrictEqual(store.realms.map((realm) => realm.id), realmsBefore);
     const persisted = JSON.parse(sharedLocalStorage.getItem('ai_storyteller_sandbox_state_v1'));
@@ -4341,6 +4377,378 @@ test('59. [7571ce5] the operator partition listing addresses realm-global and sa
   } finally {
     store.destroy();
     runtime.destroy();
+  }
+});
+
+// 60-63. Format v2 (decision 2ba3008): the store launch path consumes
+//     placements, directives, and payloads, and retires origin seeding
+// ============================================================================
+
+/** Offline preset id keeping the v2 directive wake turns off the network. */
+const V2_OFFLINE_PRESET_ID = 'preset_v2_offline';
+
+/**
+ * Fresh format-v2 launch fixture: one `files` input with a realm-root
+ * placement, one `text` input with a member single-file placement, a literal
+ * directive, an input-backed directive, and a defaulted prompt input.
+ *
+ * @returns {object} Transport bundle (`{ formatVersion, template, files }`).
+ */
+function createV2LaunchBundle() {
+  return {
+    formatVersion: 2,
+    template: {
+      formatVersion: 2,
+      id: 'unit-v2-launch',
+      name: 'V2 Launch',
+      description: 'Format-v2 launch fixture.',
+      inputs: [
+        { id: 'lore', label: 'Lore corpus', shape: 'files', required: true },
+        { id: 'opening', label: 'Opening scene', shape: 'text', required: true },
+        { id: 'kickoff', label: 'Kickoff', shape: 'text' },
+        { id: 'house_style', label: 'House style', shape: 'text', default: 'Terse.' }
+      ],
+      agents: [
+        {
+          key: 'writer',
+          idPattern: 'v2-writer',
+          name: 'Writer',
+          role: 'writer',
+          prompt: [
+            { kind: 'file', path: 'prompts/writer.md' },
+            { kind: 'input', inputId: 'house_style' }
+          ],
+          toolProfile: { tools: [] },
+          privileged: false
+        }
+      ],
+      placements: [
+        { inputId: 'lore', target: 'realm', root: 'lore/' },
+        { inputId: 'opening', target: { agent: 'writer' }, path: 'notes/opening.md' }
+      ],
+      directives: [
+        { text: 'Begin the session.', target: { agent: 'writer' } },
+        { inputId: 'kickoff', target: { agent: 'writer' } }
+      ]
+    },
+    files: { 'prompts/writer.md': 'Writer protocol.' }
+  };
+}
+
+/**
+ * Builds a format-v2 payload for the v2 launch fixture.
+ *
+ * @param {string} templateVersion - Pinned template version.
+ * @param {object} [overrides] - Field overrides.
+ * @returns {object} Payload object.
+ */
+function createV2Payload(templateVersion, overrides = {}) {
+  return {
+    formatVersion: 2,
+    templateId: 'unit-v2-launch',
+    templateVersion,
+    inputs: {
+      lore: {
+        files: [
+          { path: 'a.md', content: 'Lore A' },
+          { path: 'sub/b.md', content: 'Lore B' }
+        ]
+      },
+      opening: { text: 'The gate opens.' },
+      kickoff: { text: 'Kick off now.' }
+    },
+    ...overrides
+  };
+}
+
+test('60. a format-v2 launch writes root and single-file placements, delivers independent directives, and records v2 provenance', async () => {
+  sharedLocalStorage.clear();
+  const store = createSandboxStore({ autoBootstrapDirector: false, autoHydrate: false });
+  const bundle = createV2LaunchBundle();
+
+  try {
+    store.getPresetCatalog().savePreset({
+      id: V2_OFFLINE_PRESET_ID,
+      name: 'v2 offline',
+      isCustom: true,
+      modelConfig: { providerId: 'openai', modelId: 'v2-offline', url: 'http://127.0.0.1:1/v1' }
+    });
+    const importReceipt = store.importRealmTemplate(bundle);
+    assert.deepStrictEqual(importReceipt.warnings, [], 'a format-v2 bundle imports without shim warnings');
+    const version = importReceipt.templateVersion;
+    assert.strictEqual(
+      store.getRealmTemplateBundle('unit-v2-launch').template.formatVersion,
+      2,
+      'the effective template is already the v2 model'
+    );
+    const payload = createV2Payload(version);
+
+    const receipt = await store.launchRealmFromTemplate('unit-v2-launch', {
+      payload,
+      presetBindings: { writer: V2_OFFLINE_PRESET_ID },
+      name: 'V2 Realm'
+    });
+    const realmId = receipt.realm.id;
+
+    // Realm-root placement: every fileset file lands under the declared root.
+    const globalKey = `realm:${realmId}:global`;
+    assert.strictEqual(store.fsSnapshot[globalKey]['/lore/a.md'].content, 'Lore A');
+    assert.strictEqual(store.fsSnapshot[globalKey]['/lore/sub/b.md'].content, 'Lore B');
+    // Member single-file placement: the text input lands at the declared path.
+    const memberKey = `realm:${realmId}:v2-writer`;
+    assert.strictEqual(store.fsSnapshot[memberKey]['/notes/opening.md'].content, 'The gate opens.');
+    // The defaulted prompt input composes with the file body.
+    const writer = store.agents.find((agent) => agent.id === 'v2-writer');
+    assert.strictEqual(writer.config.systemPrompt, 'Writer protocol.\n\nTerse.');
+
+    // Directives deliver independently (literal + input-resolved), in declared
+    // order, operator-attributed and realm-opaque.
+    const directives = store.messages.filter(
+      (message) => message.from === 'human' && message.to === 'v2-writer' && message.content !== ''
+    );
+    assert.deepStrictEqual(
+      directives.map((message) => message.content),
+      ['Begin the session.', 'Kick off now.'],
+      'both directives delivered in declared order'
+    );
+
+    // Provenance: authored pin, payload digest, canonical tagged input hashes.
+    const instance = receipt.realm.instance;
+    assert.strictEqual(instance.templateVersion, version);
+    assert.strictEqual(instance.packageDigest, payloadDigest(payload), 'the attached payload is digested canonically');
+    assert.strictEqual(
+      instance.inputHashes.lore,
+      payloadDigest({ shape: 'files', files: payload.inputs.lore.files }),
+      'the fileset hash covers the canonical tagged fileset'
+    );
+    assert.strictEqual(
+      instance.inputHashes.opening,
+      payloadDigest({ shape: 'text', text: payload.inputs.opening.text })
+    );
+    assert.strictEqual(instance.inputHashes.house_style, undefined, 'defaults are not supplied values');
+    assert.deepStrictEqual(
+      [...instance.seedPaths].sort(),
+      ['/lore/a.md', '/lore/sub/b.md', '/notes/opening.md'],
+      'placement paths actually written are recorded'
+    );
+
+    // seed: false skips placements and directives entirely.
+    const skipped = await store.launchRealmFromTemplate('unit-v2-launch', {
+      payload: createV2Payload(version, { inputs: { ...payload.inputs, kickoff: { text: 'Skipped kickoff.' } } }),
+      presetBindings: { writer: V2_OFFLINE_PRESET_ID },
+      seed: false,
+      name: 'V2 Realm Skipped'
+    });
+    assert.deepStrictEqual(skipped.realm.instance.seedPaths, [], 'a skipped seed records no paths');
+    assert.strictEqual(
+      store.fsSnapshot[`realm:${skipped.realm.id}:global`],
+      undefined,
+      'a skipped seed writes nothing'
+    );
+    assert.strictEqual(
+      store.messages.some((message) => message.content === 'Skipped kickoff.'),
+      false,
+      'a skipped seed delivers no directive'
+    );
+  } finally {
+    store.destroy();
+    sharedLocalStorage.clear();
+  }
+});
+
+test('61. operator-assembled shape-tagged inputs synthesize the payload path and win over a payload per key', async () => {
+  sharedLocalStorage.clear();
+  const store = createSandboxStore({ autoBootstrapDirector: false, autoHydrate: false });
+  const bundle = createV2LaunchBundle();
+
+  try {
+    store.getPresetCatalog().savePreset({
+      id: V2_OFFLINE_PRESET_ID,
+      name: 'v2 offline',
+      isCustom: true,
+      modelConfig: { providerId: 'openai', modelId: 'v2-offline', url: 'http://127.0.0.1:1/v1' }
+    });
+    const version = store.importRealmTemplate(bundle).templateVersion;
+    const realmsBefore = store.realms.map((realm) => realm.id);
+
+    // A missing required input fails the synthesized payload closed before any
+    // realm record exists.
+    await assert.rejects(
+      () => store.launchRealmFromTemplate('unit-v2-launch', {
+        inputs: { opening: { shape: 'text', text: 'Only the opening.' } }
+      }),
+      (err) => err instanceof RealmCatalogError && err.code === 'ERR_HYDRATION_PACKAGE'
+        && /required input 'lore'/.test(err.message)
+    );
+    // Unknown keys and shape mismatches fail closed at the store boundary.
+    await assert.rejects(
+      () => store.launchRealmFromTemplate('unit-v2-launch', {
+        inputs: { ghost: { shape: 'text', text: 'x' } }
+      }),
+      (err) => err.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_INVALID_PARAMS
+        && /unknown input 'ghost'/.test(err.message)
+    );
+    await assert.rejects(
+      () => store.launchRealmFromTemplate('unit-v2-launch', {
+        inputs: { opening: { shape: 'files', files: [] } }
+      }),
+      (err) => err.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_INVALID_PARAMS
+        && /must be \{ shape: 'text', text \}/.test(err.message)
+    );
+    assert.deepStrictEqual(store.realms.map((realm) => realm.id), realmsBefore, 'rejected inputs create no record');
+
+    // Operator-assembled inputs alone drive the launch (no payload attached).
+    const assembled = await store.launchRealmFromTemplate('unit-v2-launch', {
+      inputs: {
+        lore: { shape: 'files', files: [{ path: 'index.md', content: 'Lore index.' }] },
+        opening: { shape: 'text', text: 'Assembled opening.' },
+        kickoff: { shape: 'text', text: 'Assembled kickoff.' }
+      },
+      presetBindings: { writer: V2_OFFLINE_PRESET_ID },
+      name: 'Assembled Realm'
+    });
+    assert.strictEqual(
+      store.fsSnapshot[`realm:${assembled.realm.id}:global`]['/lore/index.md'].content,
+      'Lore index.'
+    );
+    assert.strictEqual(
+      store.fsSnapshot[`realm:${assembled.realm.id}:v2-writer`]['/notes/opening.md'].content,
+      'Assembled opening.'
+    );
+    assert.ok(
+      store.messages.some((message) => message.content === 'Assembled kickoff.'),
+      'the assembled input-backed directive delivers'
+    );
+    assert.strictEqual(
+      assembled.realm.instance.packageDigest,
+      undefined,
+      'operator-assembled inputs carry no payload digest (nothing was attached)'
+    );
+    assert.deepStrictEqual(
+      Object.keys(assembled.realm.instance.inputHashes).sort(),
+      ['kickoff', 'lore', 'opening'],
+      'every supplied value is hashed'
+    );
+    assert.strictEqual(
+      assembled.realm.instance.inputHashes.lore,
+      payloadDigest({ shape: 'files', files: [{ path: 'index.md', content: 'Lore index.' }] }),
+      'the assembled fileset hash covers the canonical tagged value'
+    );
+
+    // Payload inputs are the base; explicit `inputs` win per key.
+    const merged = await store.launchRealmFromTemplate('unit-v2-launch', {
+      payload: createV2Payload(version),
+      inputs: { kickoff: { shape: 'text', text: 'Operator kickoff.' } },
+      presetBindings: { writer: V2_OFFLINE_PRESET_ID },
+      name: 'Merged Realm'
+    });
+    assert.ok(
+      store.messages.some((message) => message.content === 'Operator kickoff.'),
+      'the explicit value wins the merge for the directive input'
+    );
+    assert.strictEqual(
+      store.fsSnapshot[`realm:${merged.realm.id}:v2-writer`]['/notes/opening.md'].content,
+      'The gate opens.',
+      'payload values remain the base for keys the explicit record does not override'
+    );
+  } finally {
+    store.destroy();
+    sharedLocalStorage.clear();
+  }
+});
+
+test('62. legacy inputValues fill text inputs only and fail closed on files declarations', async () => {
+  sharedLocalStorage.clear();
+  const store = createSandboxStore({ autoBootstrapDirector: false, autoHydrate: false });
+  const bundle = createV2LaunchBundle();
+
+  try {
+    const version = store.importRealmTemplate(bundle).templateVersion;
+    const realmsBefore = store.realms.map((realm) => realm.id);
+
+    await assert.rejects(
+      () => store.launchRealmFromTemplate('unit-v2-launch', { inputValues: { lore: 'plain text' } }),
+      (err) => err.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_INVALID_PARAMS
+        && /targets files input 'lore'/.test(err.message)
+        && /inputs \(or a payload\)/.test(err.message),
+      'a string inputValues record must never silently fill a files declaration'
+    );
+    assert.deepStrictEqual(store.realms.map((realm) => realm.id), realmsBefore, 'nothing was created');
+
+    // A legacy string record still fills text inputs (and the synthesized
+    // payload validates completeness), while the files input may travel
+    // through the shape-tagged `inputs` option in the same launch.
+    const receipt = await store.launchRealmFromTemplate('unit-v2-launch', {
+      inputValues: { opening: 'Legacy opening.', kickoff: 'Legacy kickoff.' },
+      inputs: { lore: { shape: 'files', files: [{ path: 'legacy.md', content: 'Legacy lore.' }] } },
+      seed: false,
+      name: 'Legacy Inputs Realm'
+    });
+    assert.ok(receipt.realm, 'text inputs and a files input may be combined across the two records');
+    assert.strictEqual(
+      receipt.realm.instance.inputHashes.opening,
+      payloadDigest({ shape: 'text', text: 'Legacy opening.' }),
+      'the legacy value hashes as its canonical tagged form'
+    );
+
+    // The same key through both records fails closed (one value per input).
+    await assert.rejects(
+      () => store.launchRealmFromTemplate('unit-v2-launch', {
+        inputs: { opening: { shape: 'text', text: 'A' } },
+        inputValues: { opening: 'B' }
+      }),
+      (err) => err.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_INVALID_PARAMS
+        && /supplied through both inputs and inputValues/.test(err.message)
+    );
+
+    // `payload` and its legacy alias `package` are mutually exclusive.
+    await assert.rejects(
+      () => store.launchRealmFromTemplate('unit-v2-launch', {
+        payload: createV2Payload(version),
+        package: createV2Payload(version)
+      }),
+      (err) => err.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_INVALID_PARAMS
+        && /either payload or its legacy alias package/.test(err.message)
+    );
+  } finally {
+    store.destroy();
+    sharedLocalStorage.clear();
+  }
+});
+
+test('63. a format-v2 payload pin mismatch fails closed unless allowVersionMismatch confirms it', async () => {
+  sharedLocalStorage.clear();
+  const store = createSandboxStore({ autoBootstrapDirector: false, autoHydrate: false });
+  const bundle = createV2LaunchBundle();
+
+  try {
+    const version = store.importRealmTemplate(bundle).templateVersion;
+    const realmsBefore = store.realms.map((realm) => realm.id);
+    const mismatched = createV2Payload(`sha256:${'0'.repeat(64)}`);
+
+    await assert.rejects(
+      () => store.launchRealmFromTemplate('unit-v2-launch', { payload: mismatched }),
+      (err) => err instanceof RealmCatalogError && err.code === 'ERR_HYDRATION_VERSION_MISMATCH'
+    );
+    assert.deepStrictEqual(store.realms.map((realm) => realm.id), realmsBefore, 'a mismatch creates no record');
+
+    const allowed = await store.launchRealmFromTemplate('unit-v2-launch', {
+      payload: mismatched,
+      allowVersionMismatch: true,
+      seed: false,
+      name: 'V2 Allowed Mismatch'
+    });
+    assert.ok(
+      Array.isArray(allowed.warnings) && allowed.warnings.some((warning) => /version/.test(warning)),
+      'the allowed mismatch rides the receipt as a warning'
+    );
+    assert.strictEqual(
+      allowed.realm.instance.templateVersion,
+      version,
+      'provenance records the effective authored version, not the mismatched pin'
+    );
+  } finally {
+    store.destroy();
     sharedLocalStorage.clear();
   }
 });

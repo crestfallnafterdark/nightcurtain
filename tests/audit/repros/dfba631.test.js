@@ -49,7 +49,7 @@ function createFixtureTemplate(id) {
     description: 'Transport-envelope repro fixture.',
     hydration: { brief: 'Produce the opening lore.' },
     inputs: [
-      { id: 'premise', label: 'Premise', origin: 'generated', brief: 'One generated premise.' }
+      { id: 'premise', label: 'Premise', brief: 'One generated premise.' }
     ],
     seed: {
       files: [
@@ -62,7 +62,11 @@ function createFixtureTemplate(id) {
         idPattern: `${id}-architect`,
         name: 'Architect',
         role: 'author',
-        prompt: [{ kind: 'text', text: 'You author templates.' }],
+        prompt: [
+          { kind: 'text', text: 'You author templates.' },
+          // Format-v2 totality: the declared input is consumed here.
+          { kind: 'input', inputId: 'premise' }
+        ],
         toolProfile: { tools: ['read_file'] },
         privileged: false,
         authorities: [AGENT_AUTHORITIES.TEMPLATE]

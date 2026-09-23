@@ -44,7 +44,7 @@ import {
   SandboxStore
 } from '../../src/lib/sandbox/sandboxStore/index.svelte.ts';
 import {
-  hashText,
+  payloadDigest,
   templateBundleVersion
 } from '../../src/lib/sandbox/realmCatalog/index.ts';
 
@@ -73,7 +73,10 @@ const PERSIST_TEMPLATE = Object.freeze({
     role: 'keeper',
     prompt: [
       { kind: 'file', path: 'prompts/keeper.md' },
-      { kind: 'input', inputId: 'premise' }
+      { kind: 'input', inputId: 'premise' },
+      // Format-v2 totality: every declared input must be consumed, so the
+      // optional tone input is referenced as a prompt part.
+      { kind: 'input', inputId: 'tone' }
     ],
     toolProfile: { tools: [] },
     privileged: false
@@ -240,8 +243,16 @@ test('1. an imported bundle, its package-launched realm, and provenance survive 
     assert.ok(Object.isFrozen(hydratedRealm.instance), 'hydrated provenance is frozen');
     assert.equal(instance.templateVersion, PERSIST_VERSION, 'the provenance pins the fixture version');
     assert.ok(instance.packageDigest.startsWith('sha256:'), 'the package digest is recorded');
-    assert.equal(instance.inputHashes.premise, hashText('the salt flats'));
-    assert.equal(instance.inputHashes.tone, hashText('launch tone'), 'the explicit launch value won the merge');
+    assert.equal(
+      instance.inputHashes.premise,
+      payloadDigest({ shape: 'text', text: 'the salt flats' }),
+      'the generated premise hash covers the canonical tagged value'
+    );
+    assert.equal(
+      instance.inputHashes.tone,
+      payloadDigest({ shape: 'text', text: 'launch tone' }),
+      'the explicit launch value won the merge'
+    );
     assert.deepEqual(instance.seedPaths, ['/lore/world.md', '/notes/keeper.md']);
 
     assert.equal(

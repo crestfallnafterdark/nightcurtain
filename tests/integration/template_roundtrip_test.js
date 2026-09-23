@@ -34,10 +34,11 @@ import assert from 'node:assert/strict';
 import {
   BAKED_TEMPLATE_BUNDLES,
   DEMO_TEMPLATE,
-  hashText,
   materializeTemplate,
+  normalizeTemplate,
+  payloadDigest,
   serializeTemplateBundle,
-  templateBundleVersion
+  templateBundleVersion,
 } from '../../src/lib/sandbox/realmCatalog/index.ts';
 import {
   SANDBOX_STORE_ERROR_CODES,
@@ -223,17 +224,17 @@ test('2. a realm launched from the round-tripped bundle pins the version and com
       assert.equal(instance.templateVersion, expectedVersion, `${label}: provenance pins the round-tripped version`);
       assert.equal(
         instance.inputHashes.subject,
-        hashText('the lighthouse'),
-        `${label}: provenance records the input hash, never the value`
+        payloadDigest({ shape: 'text', text: 'the lighthouse' }),
+        `${label}: provenance records the tagged input hash, never the value`
       );
       assert.deepEqual(instance.seedPaths, ['/notes/start.md'], `${label}: the fixed seed path is recorded`);
 
       // The launched member composes exactly like the catalog materialization
-      // of the same effective bundle.
+      // of the same effective bundle (normalized v2 template + tagged input).
       const bundle = store.getRealmTemplateBundle(ROUNDTRIP_ID);
       const expected = materializeTemplate(bundle.template, {
         realmId: receipt.realm.id,
-        inputValues: launchInputs,
+        inputs: { subject: { shape: 'text', text: launchInputs.subject } },
         bundleFiles: bundle.files
       });
       const member = store.agents.find((agent) => agent.id === 'te-roundtrip-writer');
@@ -297,7 +298,9 @@ test('3. an imported id replaces a shipped id at launch and delete restores the 
   const store = createStore();
   try {
     const shippedBundle = store.getRealmTemplateBundle(DEMO_TEMPLATE.id);
-    const shippedVersion = templateBundleVersion({ template: shippedBundle.template, files: shippedBundle.files });
+    const shippedVersion = templateBundleVersion(
+      BAKED_TEMPLATE_BUNDLES.find((bundle) => bundle.template.id === DEMO_TEMPLATE.id)
+    );
     const shadow = createShadowDemoBundle();
     const shadowVersion = templateBundleVersion({ template: shadow.template, files: shadow.files });
 
@@ -349,7 +352,11 @@ test('3. an imported id replaces a shipped id at launch and delete restores the 
       replacesShipped: false,
       templateVersion: shippedVersion
     });
-    assert.equal(store.getRealmTemplateBundle(DEMO_TEMPLATE.id).template, DEMO_TEMPLATE, 'the shipped revision resurfaces');
+    assert.deepEqual(
+      store.getRealmTemplateBundle(DEMO_TEMPLATE.id).template,
+      normalizeTemplate(DEMO_TEMPLATE),
+      'the shipped revision resurfaces (normalized v2 view)'
+    );
     assert.equal(store.deleteRealmTemplate(DEMO_TEMPLATE.id), false, 'the shipped revision has no delete path');
 
     const restoredReceipt = await store.launchRealmFromTemplate(DEMO_TEMPLATE.id, { name: 'Restored Shipped Realm' });

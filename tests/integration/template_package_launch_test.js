@@ -37,12 +37,12 @@ import assert from 'node:assert/strict';
 
 import {
   RealmCatalogError,
-  hashText,
   materializeTemplate,
+  payloadDigest,
   serializeTemplateBundle,
   templateBundleVersion,
   templateRequiresProviders,
-  validateHydrationPackage
+  validatePayload
 } from '../../src/lib/sandbox/realmCatalog/index.ts';
 import {
   SANDBOX_STORE_ERROR_CODES,
@@ -195,13 +195,14 @@ test('1. a package launch composes generated inputs and seeds realm-global and m
       'the generated premise and the explicit launch value compose in declared order'
     );
 
-    // Cross-check against the pure catalog materialization of the same inputs.
+    // Cross-check against the pure catalog materialization of the same inputs
+    // (the store exposes the normalized v2 template; the legacy package
+    // converts through `validatePayload` and explicit values win per key).
     const bundle = store.getRealmTemplateBundle(PACKAGE_ID);
-    const resolved = validateHydrationPackage(bundle.template, pkg, { currentVersion: PACKAGE_VERSION });
+    const resolved = validatePayload(bundle.template, pkg, { currentVersion: PACKAGE_VERSION });
     const expected = materializeTemplate(bundle.template, {
       realmId,
-      inputValues: { tone: 'launch tone', premise: 'A city under a sleeping sun.' },
-      hydrationFiles: resolved.files,
+      inputs: { ...resolved.inputs, tone: { shape: 'text', text: 'launch tone' } },
       bundleFiles: bundle.files
     });
     assert.equal(narrator.config.systemPrompt, expected.agents[0].systemPrompt, 'launch matches materialization');
@@ -223,8 +224,16 @@ test('1. a package launch composes generated inputs and seeds realm-global and m
     const instance = receipt.realm.instance;
     assert.ok(instance, 'the receipt realm carries provenance');
     assert.ok(instance.packageDigest.startsWith('sha256:'), 'the package digest is a content hash');
-    assert.equal(instance.inputHashes.premise, hashText('A city under a sleeping sun.'));
-    assert.equal(instance.inputHashes.tone, hashText('launch tone'), 'the explicit launch value wins over the package');
+    assert.equal(
+      instance.inputHashes.premise,
+      payloadDigest({ shape: 'text', text: 'A city under a sleeping sun.' }),
+      'the generated premise hash covers the canonical tagged value'
+    );
+    assert.equal(
+      instance.inputHashes.tone,
+      payloadDigest({ shape: 'text', text: 'launch tone' }),
+      'the explicit launch value wins over the package'
+    );
     assert.deepEqual(
       instance.seedPaths,
       ['/lore/world.md', '/rules/base.md', '/notes/member.md', '/dossier/entry.md'],
@@ -269,7 +278,7 @@ test('2. required-missing, fixed-entry, and unmatched package entries reject typ
       () => store.launchRealmFromTemplate(PACKAGE_ID, { package: missingGenerated }),
       (err) => err instanceof RealmCatalogError
         && err.code === 'ERR_HYDRATION_PACKAGE'
-        && /missing the required generated seed slot 'lore\/world.md'/.test(err.message)
+        && /required input 'seed_0' \(lore\/world\.md\) is missing from the payload/.test(err.message)
     );
 
     const fixedEntry = createPackage({
@@ -279,7 +288,10 @@ test('2. required-missing, fixed-entry, and unmatched package entries reject typ
       () => store.launchRealmFromTemplate(PACKAGE_ID, { package: fixedEntry }),
       (err) => err instanceof RealmCatalogError
         && err.code === 'ERR_HYDRATION_PACKAGE'
-        && /fixed seed slot/.test(err.message)
+        // Fixed content never attaches: a fixed file-source slot reports
+        // "fixed placement", while a fixed inline slot shims to a defaulted
+        // text input and fails the files-entry shape gate instead.
+        && /targets fixed placement|targets text input 'seed_2'/.test(err.message)
     );
 
     const unmatchedEntry = createPackage({
@@ -289,15 +301,15 @@ test('2. required-missing, fixed-entry, and unmatched package entries reject typ
       () => store.launchRealmFromTemplate(PACKAGE_ID, { package: unmatchedEntry }),
       (err) => err instanceof RealmCatalogError
         && err.code === 'ERR_HYDRATION_PACKAGE'
-        && /does not match any declared seed slot/.test(err.message)
+        && /does not match any declared placement/.test(err.message)
     );
 
     // The pure catalog validator agrees with the store gate.
     const bundle = store.getRealmTemplateBundle(PACKAGE_ID);
     expectCatalogThrow(
-      () => validateHydrationPackage(bundle.template, missingGenerated, { currentVersion: PACKAGE_VERSION }),
+      () => validatePayload(bundle.template, missingGenerated, { currentVersion: PACKAGE_VERSION }),
       'ERR_HYDRATION_PACKAGE',
-      /missing the required generated seed slot/
+      /required input 'seed_0'/
     );
 
     assert.deepEqual(store.realms.map((realm) => realm.id), realmsBefore, 'rejected packages create no realm record');
@@ -323,11 +335,11 @@ test('3. a pinned-version mismatch fails closed by default and launches with all
     // Review surface: the mismatch is a typed error unless the reviewer
     // explicitly allows it, in which case it is reported as a warning.
     expectCatalogThrow(
-      () => validateHydrationPackage(bundle.template, mismatched, { currentVersion: PACKAGE_VERSION }),
+      () => validatePayload(bundle.template, mismatched, { currentVersion: PACKAGE_VERSION }),
       'ERR_HYDRATION_VERSION_MISMATCH',
       /allowVersionMismatch/
     );
-    const review = validateHydrationPackage(bundle.template, mismatched, {
+    const review = validatePayload(bundle.template, mismatched, {
       currentVersion: PACKAGE_VERSION,
       allowVersionMismatch: true
     });

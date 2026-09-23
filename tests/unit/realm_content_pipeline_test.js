@@ -4,7 +4,11 @@
  *   template bundle embed pipeline and the baked-bundle accessor. Extended for
  *   Wave T (ticket c19fb5d): history file references are collected by the
  *   generator, and format-v1 origins/history materialize through the real
- *   catalog against generated fixture bundles.
+ *   catalog against generated fixture bundles. Migrated to format v2 (decision
+ *   ticket 2ba3008): the generator validates every manifest through the real
+ *   `normalizeTemplate` (v2 directly, v1 through the read shim) and collects
+ *   the v2 bundle references (prompt/history `file` parts, input `defaultFile`
+ *   prefills, placement `file` sources).
  *
  *   Covered behavior:
  *   1. The committed `content.generated.ts` is fresh (`--check` green) and the
@@ -13,20 +17,23 @@
  *      are byte-identical.
  *   2. Every baked bundle (demo fixture + generated bundles) carries only
  *      `prompts/**`, `inputs/**`, `files/**` text files and cross-validates
- *      through the real `materializeTemplate` with `bundleFiles` — composition
- *      and seed resolution included — as deeply frozen data.
- *   3. The generator fails closed with a precise message on a bad manifest,
- *      a missing referenced file (prompt, defaultFile, seed source, and history
- *      content included), an oversized file, a binary/invalid-UTF-8 file, a
- *      traversal path, an absolute path, and bad CLI usage.
+ *      through the real `normalizeTemplate`/`materializeTemplate` with
+ *      `bundleFiles` — composition, fileset selection, and placements included
+ *      — as deeply frozen data.
+ *   3. The generator fails closed with a precise message on a bad manifest
+ *      (schema-validated through the real catalog), a missing referenced file
+ *      (prompt, defaultFile, placement file, seed source, and history content
+ *      included), an oversized file, a binary/invalid-UTF-8 file, a traversal
+ *      path, an absolute path, and bad CLI usage.
  *   4. Freshness is red on a source edit and green after regeneration (proven
  *      on a `/tmp` copy so the committed module is never touched), and a
  *      content change changes `REALM_CONTENT_VERSION`.
  *   5. The generated module is data-only (header + one type import + the
  *      version constant + the bundle list) and carries no secret material or
  *      absolute paths.
- *   6. History references embed and materialize through the real catalog, and
- *      format-v1 seed origins (fixed/user/generated) resolve end-to-end.
+ *   6. Format-v2 history, fileset selections, and placements embed and
+ *      materialize through the real catalog end-to-end, and legacy format-v1
+ *      seed sources still embed through the read shim.
  *
  *   These tests pin pipeline mechanics, never the bundle wording.
  */
@@ -44,7 +51,8 @@ import {
   DEMO_TEMPLATE,
   REALM_CONTENT_VERSION,
   getBakedTemplateBundle,
-  materializeTemplate
+  materializeTemplate,
+  normalizeTemplate
 } from '../../src/lib/sandbox/realmCatalog/index.ts';
 
 /** Repository root. */
@@ -99,7 +107,7 @@ function runGenerator(args) {
 }
 
 /**
- * Builds a minimal valid manifest referencing one prompt file.
+ * Builds a minimal valid format-v2 manifest referencing one prompt file.
  *
  * @param {string} id Template id (must match the bundle directory).
  * @returns {object} Manifest literal.
@@ -109,7 +117,7 @@ function baseManifest(id) {
     id,
     name: `Fixture ${id}`,
     description: 'pipeline fixture',
-    formatVersion: 1,
+    formatVersion: 2,
     agents: [
       {
         key: 'agent',
@@ -122,6 +130,17 @@ function baseManifest(id) {
       }
     ]
   };
+}
+
+/**
+ * Builds the same minimal fixture against the legacy (format-v1) schema, so
+ * the generator's v1 read-shim path stays covered.
+ *
+ * @param {string} id Template id (must match the bundle directory).
+ * @returns {object} Legacy manifest literal.
+ */
+function baseV1Manifest(id) {
+  return { ...baseManifest(id), formatVersion: 1 };
 }
 
 /**
@@ -239,9 +258,13 @@ test('2. every baked bundle is frozen text-only data that materializes with its 
     }
     assert.ok(!Object.keys(bundle.files).includes('template.json'), 'the manifest is a field, not a bundle file');
 
-    // Referenced bundle files resolve, including defaultFile prefills and seed
-    // sources: materialization fails closed when anything is missing.
-    for (const input of bundle.template.inputs ?? []) {
+    // The authored manifest normalizes through the real catalog (v2 directly,
+    // the demo fixture through the v1 read shim); referenced bundle files
+    // resolve, including defaultFile prefills and placement file sources:
+    // materialization fails closed when anything is missing.
+    const template = normalizeTemplate(bundle.template);
+    assert.equal(template.id, bundle.template.id);
+    for (const input of template.inputs ?? []) {
       if (input.defaultFile !== undefined) {
         assert.ok(
           Object.prototype.hasOwnProperty.call(bundle.files, input.defaultFile),
@@ -249,33 +272,29 @@ test('2. every baked bundle is frozen text-only data that materializes with its 
         );
       }
     }
-    for (const file of bundle.template.seed?.files ?? []) {
-      // `user`/`generated` slots carry no `source` (their bytes arrive at
-      // launch or from a hydration package); only `fixed` sources must embed.
-      if (file.source && 'file' in file.source) {
+    for (const placement of template.placements ?? []) {
+      if (placement.file !== undefined) {
         assert.ok(
-          Object.prototype.hasOwnProperty.call(bundle.files, file.source.file),
-          `${bundle.template.id}: seed source '${file.source.file}' is embedded`
+          Object.prototype.hasOwnProperty.call(bundle.files, placement.file),
+          `${bundle.template.id}: placement file '${placement.file}' is embedded`
         );
       }
     }
 
-    const requiredValues = Object.fromEntries(
-      (bundle.template.inputs ?? [])
-        .filter((input) => input.required === true)
-        .map((input) => [input.id, `required-${input.id}`])
-    );
-    // Generated seed slots are hydrated at launch: supply a synthetic body per
-    // generated slot so cross-validation exercises the success path (test 6
-    // pins the missing-hydration failure separately).
-    const hydrationFiles = (bundle.template.seed?.files ?? [])
-      .filter((file) => (file.origin ?? 'fixed') === 'generated')
-      .map((file) => ({ path: file.path, target: file.target, content: `Generated ${file.path} body.` }));
-    const plan = materializeTemplate(bundle.template, {
+    // Supply every required input with a shape-matched value so
+    // cross-validation exercises the success path; optional inputs resolve to
+    // empty and contribute nothing.
+    const inputs = {};
+    for (const input of template.inputs ?? []) {
+      if (input.required !== true) continue;
+      inputs[input.id] = input.shape === 'files'
+        ? { shape: 'files', files: [{ path: 'required.md', content: `Required ${input.id} body.` }] }
+        : { shape: 'text', text: `Required ${input.id} value.` };
+    }
+    const plan = materializeTemplate(template, {
       realmId: 'realm_pipeline_probe',
-      inputValues: requiredValues,
-      bundleFiles: bundle.files,
-      hydrationFiles
+      inputs,
+      bundleFiles: bundle.files
     });
     assert.equal(plan.templateId, bundle.template.id);
     assert.equal(plan.realmId, 'realm_pipeline_probe');
@@ -285,9 +304,13 @@ test('2. every baked bundle is frozen text-only data that materializes with its 
       assert.ok(typeof agentPlan.systemPrompt === 'string' && agentPlan.systemPrompt.length > 0,
         `${bundle.template.id}/${agentPlan.key}: composed prompt from bundle files`);
     }
+    for (const placement of plan.placements) {
+      assert.equal(typeof placement.content, 'string', `${bundle.template.id}: placement content is a string`);
+      assert.ok(placement.path.length > 0, `${bundle.template.id}: placement resolves a destination`);
+    }
 
     // A prompt file part's body must reach the composed prompt verbatim.
-    for (const spec of bundle.template.agents) {
+    for (const spec of template.agents) {
       for (const part of spec.prompt) {
         if (part.kind === 'file' && bundle.files[part.path].trim().length > 0) {
           const agentPlan = plan.agents.find((candidate) => candidate.key === spec.key);
@@ -324,9 +347,9 @@ test('3. the generator fails closed on bad bundles, files, and CLI usage', () =>
     {
       name: 'manifest without agents',
       setup: (root) => writeBundle(root, 'no_agents', {
-        manifest: { id: 'no_agents', name: 'No agents', description: '', formatVersion: 1 }
+        manifest: { id: 'no_agents', name: 'No agents', description: '', formatVersion: 2 }
       }),
-      pattern: /bundle 'no_agents': 'agents' must be a non-empty array/
+      pattern: /bundle 'no_agents': template agents must be a non-empty array/
     },
     {
       name: 'manifest id mismatching the directory',
@@ -338,9 +361,20 @@ test('3. the generator fails closed on bad bundles, files, and CLI usage', () =>
     {
       name: 'unsupported formatVersion',
       setup: (root) => writeBundle(root, 'old_format', {
-        manifest: { ...baseManifest('old_format'), formatVersion: 2 }
+        manifest: { ...baseManifest('old_format'), formatVersion: 3 }
       }),
-      pattern: /formatVersion must be 1 \(got '2'\)/
+      pattern: /bundle 'old_format': template formatVersion must be 1 or 2 \(got '3'\)/
+    },
+    {
+      name: 'v2 totality violation (an input nothing consumes)',
+      setup: (root) => writeBundle(root, 'orphan_input', {
+        manifest: {
+          ...baseManifest('orphan_input'),
+          inputs: [{ id: 'orphan', label: 'Orphan', shape: 'text' }]
+        },
+        files: { 'prompts/protocol.md': 'Protocol.' }
+      }),
+      pattern: /bundle 'orphan_input': template input 'orphan' is never referenced/
     },
     {
       name: 'missing referenced prompt file',
@@ -352,17 +386,37 @@ test('3. the generator fails closed on bad bundles, files, and CLI usage', () =>
       setup: (root) => writeBundle(root, 'missing_default', {
         manifest: {
           ...baseManifest('missing_default'),
-          inputs: [{ id: 'prefill', label: 'Prefill', defaultFile: 'inputs/prefill.md' }]
+          inputs: [{ id: 'prefill', label: 'Prefill', shape: 'text', defaultFile: 'inputs/prefill.md' }],
+          agents: [
+            {
+              ...baseManifest('missing_default').agents[0],
+              prompt: [
+                { kind: 'file', path: 'prompts/protocol.md' },
+                { kind: 'input', inputId: 'prefill' }
+              ]
+            }
+          ]
         },
         files: { 'prompts/protocol.md': 'Protocol.' }
       }),
       pattern: /referenced bundle file 'inputs\/prefill\.md' is not embedded/
     },
     {
-      name: 'missing referenced seed source',
+      name: 'missing referenced placement file',
+      setup: (root) => writeBundle(root, 'missing_placement', {
+        manifest: {
+          ...baseManifest('missing_placement'),
+          placements: [{ file: 'files/notes.md', target: 'realm', path: 'notes.md' }]
+        },
+        files: { 'prompts/protocol.md': 'Protocol.' }
+      }),
+      pattern: /referenced bundle file 'files\/notes\.md' is not embedded/
+    },
+    {
+      name: 'missing referenced legacy seed source (v1 shim)',
       setup: (root) => writeBundle(root, 'missing_seed', {
         manifest: {
-          ...baseManifest('missing_seed'),
+          ...baseV1Manifest('missing_seed'),
           seed: { files: [{ path: 'notes.md', target: 'realm', source: { file: 'files/notes.md' } }] }
         },
         files: { 'prompts/protocol.md': 'Protocol.' }
@@ -432,10 +486,10 @@ test('3. the generator fails closed on bad bundles, files, and CLI usage', () =>
       pattern: /must not contain '\.\.' path segments/
     },
     {
-      name: 'traversal in a seed source',
+      name: 'traversal in a legacy seed source (v1 shim)',
       setup: (root) => writeBundle(root, 'traversal_seed', {
         manifest: {
-          ...baseManifest('traversal_seed'),
+          ...baseV1Manifest('traversal_seed'),
           seed: { files: [{ path: 'notes.md', target: 'realm', source: { file: '../escape.md' } }] }
         },
         files: { 'prompts/protocol.md': 'Protocol.' }
@@ -563,10 +617,11 @@ test('5. the committed generated module is data-only, secret-free, and path-free
 });
 
 // ============================================================================
-// 6. Format-v1 history + origins through the real generator and catalog
+// 6. Format-v2 history, fileset selections, and placements through the real
+//    generator and catalog
 // ============================================================================
 
-test('6. history references embed and origin-aware slots materialize through the real catalog', () => {
+test('6. v2 history, fileset selections, and placements embed and materialize through the real catalog', () => {
   const scratch = createScratchDir('history');
   const root = path.join(scratch, 'templates');
   const files = {
@@ -576,16 +631,24 @@ test('6. history references embed and origin-aware slots materialize through the
   const manifest = {
     id: 'opener_fixture',
     name: 'Opener Fixture',
-    description: 'format-v1 pipeline fixture',
-    formatVersion: 1,
-    inputs: [{ id: 'scene', label: 'Scene', origin: 'generated', brief: 'opening scene' }],
+    description: 'format-v2 pipeline fixture',
+    formatVersion: 2,
+    inputs: [
+      { id: 'scene', label: 'Scene', shape: 'text', brief: 'opening scene', required: true },
+      { id: 'lore', label: 'Lore corpus', shape: 'files', brief: 'world lore' },
+      { id: 'notes', label: 'Notes', shape: 'files', brief: 'optional notes' }
+    ],
     agents: [
       {
         key: 'gm',
         idPattern: 'gm',
         name: 'GM',
         role: 'narrator',
-        prompt: [{ kind: 'file', path: 'prompts/protocol.md' }, { kind: 'input', inputId: 'scene' }],
+        prompt: [
+          { kind: 'file', path: 'prompts/protocol.md' },
+          { kind: 'input', inputId: 'scene' },
+          { kind: 'input', inputId: 'lore', path: 'index.md' }
+        ],
         toolProfile: { tools: [] },
         privileged: false,
         history: [
@@ -596,12 +659,10 @@ test('6. history references embed and origin-aware slots materialize through the
         ]
       }
     ],
-    seed: {
-      files: [
-        { path: 'lore/world.md', target: 'realm', origin: 'generated', brief: 'world lore' },
-        { path: 'notes.md', target: 'realm', origin: 'user' }
-      ]
-    }
+    placements: [
+      { inputId: 'lore', target: 'realm', root: 'lore/' },
+      { inputId: 'notes', target: 'realm', path: 'notes.md' }
+    ]
   };
   writeBundle(root, 'opener_fixture', { manifest, files });
 
@@ -614,29 +675,66 @@ test('6. history references embed and origin-aware slots materialize through the
   const checked = runGenerator(['--check', '--root', root, '--out', out]);
   assert.equal(checked.status, 0, 'the generated fixture module is check-green');
 
+  const inputs = {
+    scene: { shape: 'text', text: 'A storm at sea.' },
+    lore: {
+      shape: 'files',
+      files: [
+        { path: 'index.md', content: 'Index body.' },
+        { path: 'deep.md', content: 'Deep body.' }
+      ]
+    }
+  };
   const plan = materializeTemplate(manifest, {
     realmId: 'realm_pipeline_history',
-    inputValues: { scene: 'A storm at sea.' },
-    bundleFiles: files,
-    hydrationFiles: [{ path: 'lore/world.md', target: 'realm', content: 'World lore body.' }]
+    inputs,
+    bundleFiles: files
   });
   assert.deepEqual(plan.agents[0].history, [
     { role: 'assistant', content: 'Rain hammers the roof.\n\nA storm at sea.', source: 'template' }
   ]);
+  assert.match(plan.agents[0].systemPrompt, /Index body\./, 'the fileset selection reaches the prompt');
   assert.deepEqual(
-    plan.seed.files.map((file) => [file.path, file.content]),
-    [['lore/world.md', 'World lore body.']],
-    'the generated slot resolves and the absent optional user slot is skipped'
+    plan.placements.map((placement) => [placement.path, placement.content]),
+    [['lore/index.md', 'Index body.'], ['lore/deep.md', 'Deep body.']],
+    'the fileset root placement resolves and the absent optional path placement is skipped'
   );
   assert.ok(Object.isFrozen(plan.agents[0].history), 'plan history is frozen');
 
   assert.throws(
     () => materializeTemplate(manifest, {
       realmId: 'realm_pipeline_history',
-      inputValues: { scene: 'A storm at sea.' },
+      inputs: { lore: inputs.lore },
       bundleFiles: files
     }),
-    /seed slot 'lore\/world\.md' is generated but no hydration file was supplied/,
-    'a missing generated slot fails closed through the real catalog'
+    /input 'scene' is required and resolves empty/,
+    'a missing required input fails closed through the real catalog'
+  );
+
+  assert.throws(
+    () => materializeTemplate(manifest, {
+      realmId: 'realm_pipeline_history',
+      inputs: {
+        ...inputs,
+        notes: { shape: 'files', files: [{ path: 'a.md', content: 'A' }, { path: 'b.md', content: 'B' }] }
+      },
+      bundleFiles: files
+    }),
+    /declares a path destination but the fileset holds 2 files/,
+    'a multi-file fileset cannot resolve to a single path destination'
+  );
+
+  const withNotes = materializeTemplate(manifest, {
+    realmId: 'realm_pipeline_history',
+    inputs: {
+      ...inputs,
+      notes: { shape: 'files', files: [{ path: 'only.md', content: 'Only note.' }] }
+    },
+    bundleFiles: files
+  });
+  assert.deepEqual(
+    withNotes.placements.map((placement) => [placement.path, placement.content]),
+    [['lore/index.md', 'Index body.'], ['lore/deep.md', 'Deep body.'], ['notes.md', 'Only note.']],
+    'a one-file fileset writes the exact path destination'
   );
 });

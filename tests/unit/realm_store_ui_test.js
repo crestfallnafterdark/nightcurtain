@@ -24,6 +24,12 @@
  *   candidate attach/clear surface feeding the review and attaching at launch,
  *   and the operator publishing-authority toggles
  *   (`realmReviewHelpers.ts` + `sandboxStore`).
+ *
+ *   Format v2 (ticket a71198f) adds the v2 launcher input projection exercised
+ *   against the real store: the required-input block, the operator-assembled
+ *   shape-tagged `inputs` payload a real launch accepts, the placement writes
+ *   it produces, the typed shape-mismatch refusal, and an edited review slot
+ *   whose assembled package lands the edited content in the seeded file.
  */
 
 import '../test_env.js';
@@ -54,7 +60,7 @@ import {
   describeRealmTemplateSource,
   formatRealmLaunchTimestamp
 } from '../../src/lib/components/sandbox/realmTemplateHelpers.ts';
-import { buildRealmInputDrafts } from '../../src/lib/components/sandbox/realmLauncherHelpers.ts';
+import { buildRealmV2InputDrafts, setRealmV2InputFiles, setRealmV2InputText, validateRealmV2InputDrafts } from '../../src/lib/components/sandbox/realmLauncherHelpers.ts';
 import {
   applyMetaAuthorityToggle,
   assembleRealmAuthorityApprovals,
@@ -65,10 +71,9 @@ import {
   buildRealmAuthorityReviewAgents,
   buildRealmPendingPayloadViews,
   buildRealmReviewFileSlots,
-  buildRealmReviewInputValues,
   describeRealmAuthorityTrust,
   previewRealmReviewPackage,
-  resolveRealmReviewInputDisplay
+  resolveRealmReviewLaunchPayload
 } from '../../src/lib/components/sandbox/realmReviewHelpers.ts';
 import {
   createSandboxStore,
@@ -78,7 +83,8 @@ import { createAgentIdentityKey } from '../../src/lib/sandbox/runtime/index.ts';
 import {
   DEMO_TEMPLATE,
   serializeTemplateBundle,
-  templateBundleVersion
+  templateBundleVersion,
+  validatePayload
 } from '../../src/lib/sandbox/realmCatalog/index.ts';
 
 /**
@@ -336,11 +342,10 @@ test('9. template catalog entries carry the store source labels and only imports
     assert.strictEqual(canDeleteRealmTemplate(shippedEntries[0]), false);
     const demoEntry = shippedEntries.find((entry) => entry.id === DEMO_TEMPLATE.id);
     assert.ok(demoEntry, 'the baked demo entry is listed');
-    const demoBundle = store.getRealmTemplateBundle(DEMO_TEMPLATE.id);
     assert.strictEqual(
       demoEntry.templateVersion,
-      templateBundleVersion(demoBundle),
-      'the label carries the effective bundle content version'
+      templateBundleVersion({ template: DEMO_TEMPLATE, files: {} }),
+      'the label carries the effective authored bundle content version'
     );
 
     const receipt = store.importRealmTemplate(uiBundle('ui-import'));
@@ -390,7 +395,10 @@ test('9. template catalog entries carry the store source labels and only imports
       .find((entry) => entry.id === DEMO_TEMPLATE.id);
     assert.strictEqual(restored.source, 'shipped');
     assert.strictEqual(restored.sourceLabel, 'shipped');
-    assert.strictEqual(restored.templateVersion, templateBundleVersion(demoBundle));
+    assert.strictEqual(
+      restored.templateVersion,
+      templateBundleVersion({ template: DEMO_TEMPLATE, files: {} })
+    );
     assert.strictEqual(store.deleteRealmTemplate(DEMO_TEMPLATE.id), false, 'shipped revisions have no delete path');
   } finally {
     store.destroy();
@@ -592,8 +600,8 @@ test('13. a real template launch feeds the provenance panel its effective versio
     const byKey = Object.fromEntries(view.rows.map((row) => [row.key, row.value]));
     assert.strictEqual(
       byKey.templateVersion,
-      templateBundleVersion(store.getRealmTemplateBundle(DEMO_TEMPLATE.id)),
-      'the panel shows the effective bundle version the launch recorded'
+      templateBundleVersion({ template: DEMO_TEMPLATE, files: {} }),
+      'the panel shows the effective authored bundle version the launch recorded'
     );
     assert.strictEqual(byKey.packageDigest, undefined, 'no package row without an attached package');
     assert.match(byKey.launchedAt, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC$/);
@@ -791,7 +799,7 @@ test('15. a session candidate feeds the review and attaches at launch, then clea
     const bundle = uiPayloadBundle();
     store.importRealmTemplate(bundle);
     const effective = store.getRealmTemplateBundle(bundle.template.id);
-    const version = templateBundleVersion(effective);
+    const version = templateBundleVersion({ template: bundle.template, files: {} });
 
     // The candidate crosses the real publishing port (the tool's store seam).
     store.getRealmPublishingPort().storePendingInstancePayload({
@@ -820,11 +828,11 @@ test('15. a session candidate feeds the review and attaches at launch, then clea
     const candidate = store.getPendingInstancePayload(bundle.template.id);
     assert.ok(candidate, 'the candidate is retrievable per template id');
 
-    // Review projections resolve inputs and file slots from the candidate.
-    const drafts = buildRealmInputDrafts(effective.template.inputs, effective.files);
-    assert.deepStrictEqual(buildRealmReviewInputValues(drafts, candidate.payload), { topic: 'Tides' });
-    assert.strictEqual(resolveRealmReviewInputDisplay(drafts[0], candidate.payload), 'Tides');
-    const slots = buildRealmReviewFileSlots(effective.template, effective.files, { payload: candidate.payload });
+    // Review projections resolve inputs and file slots from the candidate. The
+    // review helpers normalize the authored format-v1 fixture to the model the
+    // store exposes; the launch below attaches through the real store path.
+    assert.deepStrictEqual(candidate.payload.inputs, { topic: 'Tides' }, 'the candidate carries the authored inputs');
+    const slots = buildRealmReviewFileSlots(bundle.template, effective.files, { payload: candidate.payload });
     assert.deepStrictEqual(slots.map((slot) => slot.contentSource), ['payload', 'payload']);
     assert.strictEqual(slots[0].content, 'Generated lore.');
     assert.strictEqual(slots[1].content, 'Tone notes.');
@@ -836,7 +844,7 @@ test('15. a session candidate feeds the review and attaches at launch, then clea
       slots
     });
     assert.strictEqual(assembly.package, candidate.payload, 'an unedited candidate attaches verbatim');
-    const preview = previewRealmReviewPackage(effective.template, assembly.package, { currentVersion: version });
+    const preview = previewRealmReviewPackage(bundle.template, assembly.package, { currentVersion: version });
     assert.strictEqual(preview.ok, true, preview.error);
     assert.strictEqual(preview.mismatch, false);
 
@@ -1014,4 +1022,212 @@ test('17. [7571ce5] FS operator partitions group by realm with shared first and 
   // Degenerate input stays safe and empty-friendly.
   assert.deepStrictEqual(groupModule.groupFsPartitionsByRealm([], realms), []);
   assert.deepStrictEqual(groupModule.groupFsPartitionsByRealm(null, null), []);
+});
+
+// 18. Format-v2 launcher inputs through the real store (ticket a71198f)
+// ============================================================================
+
+/**
+ * Builds a format-v2 transport bundle exercising the launcher's input
+ * requirements: a required text input, a defaulted text input, a files input
+ * with a path placement, and prompt/history references.
+ *
+ * @returns {object} Transport bundle.
+ */
+function uiV2Bundle() {
+  return {
+    formatVersion: 2,
+    template: {
+      formatVersion: 2,
+      id: 'u-v2-bundle',
+      name: 'V2 Bundle',
+      description: 'Format-v2 operator inputs fixture.',
+      inputs: [
+        { id: 'topic', label: 'Topic', shape: 'text', required: true },
+        { id: 'tone', label: 'Tone', shape: 'text', default: 'Noir.' },
+        { id: 'notes', label: 'Notes', shape: 'files', brief: 'Attach notes.' }
+      ],
+      agents: [
+        {
+          key: 'writer',
+          idPattern: 'u-v2-writer',
+          name: 'Writer',
+          role: 'writer',
+          prompt: [
+            { kind: 'text', text: 'Write.' },
+            { kind: 'input', inputId: 'topic' },
+            { kind: 'input', inputId: 'tone' }
+          ],
+          history: [
+            { role: 'assistant', content: [{ kind: 'input', inputId: 'topic' }, { kind: 'text', text: 'Acknowledged.' }] }
+          ],
+          toolProfile: { tools: [] },
+          privileged: false
+        }
+      ],
+      placements: [
+        { file: 'files/readme.md', target: 'realm', path: 'notes/README.md' },
+        { inputId: 'notes', target: 'realm', path: 'notes/handoff.md' },
+        { inputId: 'tone', target: { agent: 'writer' }, path: 'style/tone.md' }
+      ]
+    },
+    files: { 'files/readme.md': 'Readme body.' }
+  };
+}
+
+test('18. the v2 launcher projection validates and feeds a real store launch', async () => {
+  sharedLocalStorage.clear();
+  const store = createSandboxStore({ autoBootstrapDirector: false, autoHydrate: false });
+  try {
+    const bundle = uiV2Bundle();
+    store.importRealmTemplate(bundle);
+    const effective = store.getRealmTemplateBundle(bundle.template.id);
+    const version = templateBundleVersion({ template: bundle.template, files: bundle.files });
+    assert.strictEqual(store.getRealmTemplateSource(bundle.template.id).templateVersion, version);
+
+    // The launcher drafts render from the normalized v2 model the store
+    // exposes, and the required input fails closed through the synthesized
+    // catalog envelope before any Realm record exists.
+    const drafts = buildRealmV2InputDrafts(effective.template, effective.files);
+    assert.deepStrictEqual(drafts.map((draft) => draft.shape), ['text', 'text', 'files']);
+    const blocked = validateRealmV2InputDrafts(effective.template, drafts, {
+      currentVersion: version,
+      bundleFiles: effective.files
+    });
+    assert.strictEqual(blocked.ok, false);
+    assert.strictEqual(blocked.code, 'missing-required');
+    assert.match(blocked.fieldErrors.topic, /required/);
+
+    // Filling the required text input and attaching one fileset file yields
+    // the exact explicit `inputs` payload the store accepts.
+    const filled = drafts.map((draft) => {
+      if (draft.id === 'topic') return setRealmV2InputText(draft, 'A topic.');
+      if (draft.id === 'notes') {
+        return setRealmV2InputFiles(draft, [{ path: 'handoff.md', content: 'Notes body.', name: 'handoff.md' }]);
+      }
+      return draft;
+    });
+    const projection = validateRealmV2InputDrafts(effective.template, filled, {
+      currentVersion: version,
+      bundleFiles: effective.files
+    });
+    assert.strictEqual(projection.ok, true, projection.error);
+    assert.deepStrictEqual(projection.launchInputs, {
+      topic: { shape: 'text', text: 'A topic.' },
+      notes: { shape: 'files', files: [{ path: 'handoff.md', content: 'Notes body.' }] }
+    });
+
+    const receipt = await store.launchRealmFromTemplate(bundle.template.id, {
+      name: 'V2 Launch',
+      inputs: projection.launchInputs
+    });
+    assert.deepStrictEqual(receipt.agents.map((agent) => agent.id), ['u-v2-writer']);
+    assert.strictEqual(
+      store.agents.find((agent) => agent.id === 'u-v2-writer').config.systemPrompt,
+      'Write.\n\nA topic.\n\nNoir.',
+      'the explicit input and the declared default compose into the launched prompt'
+    );
+    const globalKey = `realm:${receipt.realm.id}:global`;
+    const memberKey = `realm:${receipt.realm.id}:u-v2-writer`;
+    assert.strictEqual(store.fsSnapshot[globalKey]['/notes/README.md'].content, 'Readme body.');
+    assert.strictEqual(store.fsSnapshot[globalKey]['/notes/handoff.md'].content, 'Notes body.');
+    assert.strictEqual(store.fsSnapshot[memberKey]['/style/tone.md'].content, 'Noir.');
+    assert.ok(receipt.realm.instance.seedPaths.includes('/notes/handoff.md'));
+
+    // A shape mismatch through the same path fails closed with the typed
+    // class before any second Realm record exists.
+    const mismatched = validateRealmV2InputDrafts(effective.template, filled, {
+      currentVersion: version,
+      bundleFiles: effective.files,
+      payload: {
+        formatVersion: 2,
+        templateId: bundle.template.id,
+        templateVersion: version,
+        inputs: {
+          topic: { files: [{ path: 'a.md', content: 'A' }] },
+          notes: { files: [{ path: 'handoff.md', content: 'N' }] }
+        }
+      }
+    });
+    assert.strictEqual(mismatched.code, 'shape-mismatch');
+    assert.match(mismatched.fieldErrors.topic, /unknown field 'files'/);
+  } finally {
+    store.destroy();
+    sharedLocalStorage.clear();
+  }
+});
+
+test('19. an edited review slot launches through the assembled package and lands in the seeded file', async () => {
+  sharedLocalStorage.clear();
+  const store = createSandboxStore({ autoBootstrapDirector: false, autoHydrate: false });
+  try {
+    const bundle = uiPayloadBundle();
+    store.importRealmTemplate(bundle);
+    const version = templateBundleVersion({ template: bundle.template, files: {} });
+    const source = {
+      formatVersion: 1,
+      templateId: bundle.template.id,
+      templateVersion: version,
+      inputs: { topic: 'Tides' },
+      files: [
+        { path: 'lore/world.md', target: 'realm', content: 'Generated lore.' },
+        { path: 'notes/tone.md', target: { agent: 'writer' }, content: 'Tone notes.' }
+      ]
+    };
+
+    // The review edits the generated realm slot; the resolved launch payload
+    // is the rebuilt package, never the unedited source. Canonical slots are
+    // read-only, so the edit is expressed on the slot view directly.
+    const slots = buildRealmReviewFileSlots(bundle.template, {}, { payload: source }).map(
+      (slot) => (slot.path === 'lore/world.md'
+        ? { ...slot, edited: true, content: 'Edited lore.', contentSource: 'review' }
+        : slot)
+    );
+    const resolved = resolveRealmReviewLaunchPayload({
+      templateId: bundle.template.id,
+      templateVersion: version,
+      source,
+      slots
+    });
+    assert.strictEqual(resolved.edited, true);
+    assert.strictEqual(resolved.blocked, false, resolved.error);
+    assert.notStrictEqual(resolved.payload, source, 'an edited review rebuilds the package');
+
+    // The assembled payload validates through the real catalog with the edit
+    // present in the resolved values.
+    const validated = validatePayload(bundle.template, resolved.payload, { currentVersion: version });
+    assert.strictEqual(validated.templateId, bundle.template.id);
+    const filesetFiles = Object.values(validated.inputs).flatMap((value) => (
+      value.shape === 'files' ? value.files : []
+    ));
+    assert.ok(
+      filesetFiles.some((file) => file.path === 'lore/world.md' && file.content === 'Edited lore.'),
+      'the edited slot content resolves through the real catalog'
+    );
+
+    // The real launch writes the edited content into the placed file.
+    const receipt = await store.launchRealmFromTemplate(bundle.template.id, {
+      name: 'Edited Realm',
+      payload: resolved.payload
+    });
+    const globalKey = `realm:${receipt.realm.id}:global`;
+    const memberKey = `realm:${receipt.realm.id}:u-payload-writer`;
+    assert.strictEqual(
+      store.fsSnapshot[globalKey]['/lore/world.md'].content,
+      'Edited lore.',
+      'the edited slot content lands in the seeded file'
+    );
+    assert.strictEqual(
+      store.fsSnapshot[memberKey]['/notes/tone.md'].content,
+      'Tone notes.',
+      'unedited slots keep the payload content'
+    );
+    assert.strictEqual(
+      store.agents.find((agent) => agent.id === 'u-payload-writer').config.systemPrompt,
+      'Write.\n\nTides'
+    );
+  } finally {
+    store.destroy();
+    sharedLocalStorage.clear();
+  }
 });

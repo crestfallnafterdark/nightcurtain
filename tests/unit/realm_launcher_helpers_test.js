@@ -1,29 +1,29 @@
 /**
  * @file tests/unit/realm_launcher_helpers_test.js
- * @description Wave B B3 (ticket b309e02): zero-mock unit tests for the Realm
- * launcher UI helpers (`realmLauncherHelpers.ts`) — the per-agent capability
- * preview projection built over the real `realmCatalog`, the preset-binding
- * display model over a real `presetCatalog`, seed file-row parsing and draft
- * validation, seed-target options, and the launch/seed error descriptions.
- * Wave C C4 (ticket f1eb48a) adds the v3 launch surface: input drafts
- * (defaults/defaultFile/reset/required presence semantics), `inputValues`
- * assembly and launch-draft validation, the compact seed summary, and the
- * composed-prompt preview built over the real `composeSystemPrompt`.
- * The parser rejects seed paths addressing the reserved `global`/`public`
- * workspace roots (V18 F-V18-1) so the UI fails inline instead of letting the
- * legacy VirtualFS prefix routing divert the write, and the duplicate-name
- * guard (`isRealmNameTaken`) is shared by the launcher wizard and the Realm
- * manager create form (V18 F-V18-3).
- * Wave T (ticket 2b5db57) adds the minimal review surface: origin-typed input
- * drafts (generated proposals stay editable), the read-only baked-history
- * preview built over the real `composeAgentHistory`, and the read-only seed
- * file-slot listing.
- * Wave U review completion (ticket 458e727) adds the completed review
- * projections from `realmReviewHelpers.ts`: per-part prompt provenance,
- * source-editable baked history, the files-dialog slot provenance, payload
- * assembly/validation against the effective template version, declared
- * authority decisions with the trust override, the mandatory launch gate, the
- * preview disclosures, and the operator publishing-authority toggle state.
+ * @description Zero-mock unit tests for the Realm launcher UI helpers
+ * (`realmLauncherHelpers.ts` / `realmReviewHelpers.ts`) — the per-agent
+ * capability preview projection built over the real `realmCatalog`, the
+ * preset-binding display model over a real `presetCatalog`, seed file-row
+ * parsing and draft validation, seed-target options, and the launch/seed error
+ * descriptions. The parser rejects seed paths addressing the reserved
+ * `global`/`public` workspace roots (V18 F-V18-1) so the UI fails inline
+ * instead of letting the legacy VirtualFS prefix routing divert the write, and
+ * the duplicate-name guard (`isRealmNameTaken`) is shared by the launcher
+ * wizard and the Realm manager create form (V18 F-V18-3).
+ *
+ * The launcher input surface is the canonical shape-tagged model: text/files
+ * input drafts with attachments, the derived per-input usage map, the
+ * synthesized-envelope input validation with typed failures, fileset
+ * attachment checks, placement/directive seed views, and the placement-based
+ * files dialog with prompt/history selection resolution. The review
+ * projections cover per-part prompt provenance, source-editable baked history,
+ * the files-dialog slot provenance, payload assembly/validation against the
+ * effective template version (legacy format-v1 packages included through the
+ * read shim), declared authority decisions with the trust override, the
+ * mandatory launch gate, the preview disclosures, and the operator
+ * publishing-authority toggle state. The review launch-payload resolution is
+ * pinned too: an edited slot rebuilds the launch package and the assembled
+ * payload validates through the real catalog with the edited content present.
  */
 
 import '../test_env.js';
@@ -31,24 +31,30 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  assembleRealmInputValues,
+  assembleRealmV2Inputs,
   buildRealmHistoryPreview,
-  buildRealmInputDrafts,
+  buildRealmInputAttachment,
+  buildRealmInputUsageMap,
   buildRealmPreviewProjection,
   buildRealmPromptPreview,
   buildRealmSeedSlotViews,
   buildRealmSeedSummary,
+  buildRealmV2InputDrafts,
   buildSeedTargetOptions,
   describeRealmLaunchError,
   describeRealmPresetBinding,
   describeRealmSeedError,
   describeSeedWorkspace,
-  isRealmInputEditable,
   isRealmNameTaken,
   parseSeedFileRows,
-  resetRealmInputField,
-  validateRealmInputDrafts,
+  resetRealmV2InputDraft,
+  sanitizeRealmAttachmentPath,
+  setRealmV2InputFiles,
+  setRealmV2InputText,
+  uniqueRealmAttachmentPath,
+  validateRealmInputAttachments,
   validateRealmLaunchDraft,
+  validateRealmV2InputDrafts,
   validateSeedDraft
 } from '../../src/lib/components/sandbox/realmLauncherHelpers.ts';
 import {
@@ -65,17 +71,22 @@ import {
   buildRealmPayloadFilename,
   buildRealmPendingPayloadViews,
   buildRealmReviewFileSlots,
-  buildRealmReviewInputValues,
   describeRealmAuthorityTrust,
   describeRealmLaunchGate,
   parseRealmPayloadFileText,
   previewRealmReviewPackage,
   realmReviewSlotKey,
-  resolveRealmReviewInputDisplay,
+  resolveRealmReviewLaunchPayload,
   serializeRealmPendingPayload
 } from '../../src/lib/components/sandbox/realmReviewHelpers.ts';
 import { formatRealmLaunchTimestamp } from '../../src/lib/components/sandbox/realmTemplateHelpers.ts';
-import { DEMO_TEMPLATE, materializeTemplate, summarizeAgentCapabilities, templateBundleVersion } from '../../src/lib/sandbox/realmCatalog/index.ts';
+import {
+  DEMO_TEMPLATE,
+  materializeTemplate,
+  summarizeAgentCapabilities,
+  templateBundleVersion,
+  validatePayload
+} from '../../src/lib/sandbox/realmCatalog/index.ts';
 import { createPresetCatalog } from '../../src/lib/sandbox/presetCatalog/index.ts';
 import { MUTATING_TOOLS, READ_ONLY_TOOLS, SANDBOX_TOOLS } from '../../src/lib/sandbox/tools/constants/index.ts';
 
@@ -582,123 +593,12 @@ test('17. isRealmNameTaken shares the launcher duplicate-name rule with the Real
     'malformed records are skipped, real collisions still match'
   );
 });
-
-// ============================================================================
-// 18-21. Wave C v3 launcher inputs, seed summary, and composed prompt preview
-// ============================================================================
-
-test('18. input drafts prefill from defaults/defaultFile, reset, and assemble only edited fields', () => {
-  const drafts = buildRealmInputDrafts(FIXTURE_TEMPLATE.inputs, FIXTURE_FILES);
-  assert.deepStrictEqual(drafts.map((draft) => draft.id), ['directives', 'lore', 'mandate']);
-
-  const [directives, lore, mandate] = drafts;
-  assert.strictEqual(directives.value, 'Default directive.', 'a declared default prefills the field');
-  assert.strictEqual(directives.dirty, false, 'prefilled fields start untouched');
-  assert.strictEqual(directives.multiline, true, 'multiline defaults on');
-  assert.strictEqual(lore.value, 'Bundle lore.', 'defaultFile resolves from the bundle files');
-  assert.strictEqual(lore.defaultResolved, true);
-  assert.strictEqual(mandate.value, '', 'a required input without a default starts empty');
-  assert.strictEqual(mandate.required, true);
-  assert.strictEqual(mandate.multiline, false, 'multiline:false renders a single-line field');
-  assert.strictEqual(mandate.label, 'Mandate');
-
-  assert.deepStrictEqual(assembleRealmInputValues(drafts), {}, 'untouched fields stay out of the payload');
-  assert.deepStrictEqual(
-    assembleRealmInputValues([{ ...directives, value: '', dirty: true }, lore]),
-    { directives: '' },
-    'an explicitly cleared field is present with an empty value'
-  );
-  const edited = drafts.map((draft) => draft.id === 'mandate' ? { ...draft, value: 'Do it.', dirty: true } : draft);
-  assert.deepStrictEqual(assembleRealmInputValues(edited), { mandate: 'Do it.' });
-
-  const reset = resetRealmInputField(
-    { ...directives, value: 'Changed', dirty: true },
-    FIXTURE_TEMPLATE.inputs[0],
-    FIXTURE_FILES
-  );
-  assert.strictEqual(reset.value, 'Default directive.', 'reset restores the template default');
-  assert.strictEqual(reset.dirty, false, 'reset restores untouched presence semantics');
-
-  const unresolved = buildRealmInputDrafts(FIXTURE_TEMPLATE.inputs, {});
-  assert.strictEqual(unresolved[1].value, '', 'a missing defaultFile prefill starts empty');
-  assert.strictEqual(unresolved[1].defaultResolved, false, 'the unresolved prefill is flagged');
-  const resolvedByReset = resetRealmInputField(unresolved[1], FIXTURE_TEMPLATE.inputs[1], FIXTURE_FILES);
-  assert.strictEqual(resolvedByReset.value, 'Bundle lore.', 'reset re-resolves the defaultFile prefill');
-
-  assert.deepStrictEqual(buildRealmInputDrafts(null, null), [], 'a template without inputs has no fields');
-  assert.deepStrictEqual(
-    buildRealmInputDrafts([null, { label: 'No id' }, { id: 'ok', label: 'Ok' }], null).map((draft) => draft.id),
-    ['ok'],
-    'malformed declarations are skipped'
-  );
-});
-
-test('19. required inputs fail closed with inline field errors; launch draft carries inputValues', () => {
-  const drafts = buildRealmInputDrafts(FIXTURE_TEMPLATE.inputs, FIXTURE_FILES);
-
-  const missing = validateRealmInputDrafts(drafts);
-  assert.strictEqual(missing.ok, false);
-  assert.match(missing.fieldErrors.mandate, /required/);
-  assert.deepStrictEqual(missing.inputValues, {}, 'untouched fields stay out of the payload');
-
-  const filled = drafts.map((draft) => draft.id === 'mandate' ? { ...draft, value: 'M', dirty: true } : draft);
-  const valid = validateRealmInputDrafts(filled);
-  assert.strictEqual(valid.ok, true);
-  assert.deepStrictEqual(valid.inputValues, { mandate: 'M' });
-
-  const cleared = filled.map((draft) => draft.id === 'mandate' ? { ...draft, value: '   ', dirty: true } : draft);
-  assert.strictEqual(validateRealmInputDrafts(cleared).ok, false, 'an explicit empty value blocks a required input');
-
-  const untouchedDefault = validateRealmInputDrafts([
-    { id: 'directives', label: 'Directives', required: true, value: 'Default directive.', dirty: false }
-  ]);
-  assert.strictEqual(untouchedDefault.ok, true, 'a required field with a non-empty default passes untouched');
-
-  const blocked = validateRealmLaunchDraft({
-    templateId: FIXTURE_TEMPLATE.id,
-    name: 'Fixture Realm',
-    templateIds: [FIXTURE_TEMPLATE.id],
-    realms: [],
-    inputDrafts: drafts
-  });
-  assert.strictEqual(blocked.ok, false);
-  assert.match(blocked.error, /required/);
-  assert.match(blocked.fieldErrors.mandate, /required/);
-
-  const launched = validateRealmLaunchDraft({
-    templateId: FIXTURE_TEMPLATE.id,
-    name: 'Fixture Realm',
-    templateIds: [FIXTURE_TEMPLATE.id],
-    realms: [],
-    inputDrafts: filled
-  });
-  assert.strictEqual(launched.ok, true);
-  assert.deepStrictEqual(launched.inputValues, { mandate: 'M' });
-
-  const malformed = validateRealmLaunchDraft({
-    templateId: FIXTURE_TEMPLATE.id,
-    name: 'Fixture Realm',
-    templateIds: [FIXTURE_TEMPLATE.id],
-    realms: [],
-    inputDrafts: 'nope'
-  });
-  assert.strictEqual(malformed.ok, false);
-  assert.match(malformed.error, /drafts are malformed/);
-
-  const noInputs = validateRealmLaunchDraft({
-    templateId: DEMO_TEMPLATE.id,
-    name: 'Demo Copy',
-    templateIds: [DEMO_TEMPLATE.id],
-    realms: []
-  });
-  assert.strictEqual(noInputs.ok, true);
-  assert.deepStrictEqual(noInputs.inputValues, {}, 'an input-less template assembles an empty payload');
-});
-
-test('20. the seed summary counts files, lists targets in order, and previews the directive', () => {
-  const summary = buildRealmSeedSummary(FIXTURE_TEMPLATE);
+test('20. the seed summary counts placements, lists targets in order, and previews the directive', () => {
+  const summary = buildRealmSeedSummary(V2_TEMPLATE);
   assert.strictEqual(summary.declaresSeed, true);
-  assert.strictEqual(summary.fileCount, 3);
+  assert.strictEqual(summary.fileCount, 4, 'one entry per declared placement');
+  assert.strictEqual(summary.placementCount, 4);
+  assert.strictEqual(summary.directiveCount, 2);
   assert.deepStrictEqual(
     summary.targetLabels,
     ['Realm-global workspace', 'Lead (lead)', 'Scribe (scribe)'],
@@ -707,8 +607,10 @@ test('20. the seed summary counts files, lists targets in order, and previews th
   assert.deepStrictEqual(summary.directive, {
     targetAgentKey: 'lead',
     targetLabel: 'Lead (lead)',
-    preview: 'Begin the seeded session.'
-  });
+    preview: 'input "Briefing"',
+    },
+    'an input-backed directive previews its input label'
+  );
 
   assert.deepStrictEqual(buildRealmSeedSummary(DEMO_TEMPLATE), {
     declaresSeed: false,
@@ -724,53 +626,70 @@ test('20. the seed summary counts files, lists targets in order, and previews th
   });
 
   const longDirective = buildRealmSeedSummary({
-    ...FIXTURE_TEMPLATE,
-    seed: { ...FIXTURE_TEMPLATE.seed, directive: { targetAgentKey: 'lead', text: 'x'.repeat(200) } }
+    ...V2_TEMPLATE,
+    directives: [{ text: 'x'.repeat(200), target: { agent: 'lead' } }]
   });
   assert.strictEqual(longDirective.directive.preview.length, 121, 'the preview caps at 120 chars plus the ellipsis');
   assert.ok(longDirective.directive.preview.endsWith('…'));
 
+  // Legacy documents convert through the read shim and render natively.
+  const legacy = buildRealmSeedSummary(FIXTURE_TEMPLATE);
+  assert.strictEqual(legacy.declaresSeed, true);
+  assert.strictEqual(legacy.fileCount, 3, 'the v1 seed slots become placements');
+  assert.deepStrictEqual(
+    legacy.targetLabels,
+    ['Realm-global workspace', 'Lead (lead)', 'Scribe (scribe)']
+  );
+  assert.deepStrictEqual(legacy.directive, {
+    targetAgentKey: 'lead',
+    targetLabel: 'Lead (lead)',
+    preview: 'Begin the seeded session.'
+  });
+
+  // A legacy document the shim cannot normalize renders no seed instead of throwing.
   const unknownTarget = buildRealmSeedSummary({
     ...FIXTURE_TEMPLATE,
     seed: { files: [{ path: 'a.md', target: { agent: 'ghost' }, source: { inline: 'x' } }] }
   });
-  assert.deepStrictEqual(unknownTarget.targetLabels, ['ghost'], 'an unknown target key falls back to the raw key');
+  assert.strictEqual(unknownTarget.declaresSeed, false, 'an unresolvable legacy target fails closed');
 });
 
 test('21. the prompt preview matches the materialized system prompt and reports missing bundles inline', () => {
-  const spec = FIXTURE_TEMPLATE.agents[0];
-  const inputValues = { mandate: 'M' };
-  const preview = buildRealmPromptPreview(spec.prompt, FIXTURE_TEMPLATE.inputs, {
-    inputValues,
-    bundleFiles: FIXTURE_FILES
+  const spec = V2_TEMPLATE.agents[0];
+  const inputs = {
+    briefing: { shape: 'text', text: 'M' },
+    tone: { shape: 'text', text: 'Noir.' },
+    house_style: { shape: 'text', text: 'Terse.' },
+    roster: { shape: 'files', files: [{ path: 'index.md', content: 'Index.' }] }
+  };
+  const preview = buildRealmPromptPreview(spec.prompt, V2_TEMPLATE.inputs, {
+    inputs,
+    bundleFiles: V2_FILES
   });
 
   assert.strictEqual(preview.ok, true);
   assert.strictEqual(preview.bundleUnavailable, false);
   assert.strictEqual(preview.error, '');
-  assert.strictEqual(
-    preview.systemPrompt,
-    'Lead protocol body.\n\nDefault directive.\n\nBundle lore.\n\nM\n\nTail.'
-  );
+  assert.strictEqual(preview.systemPrompt, 'Lead protocol.\n\nM\n\nNoir.\n\nTerse.\n\nIndex.');
 
-  const plan = materializeTemplate(FIXTURE_TEMPLATE, {
-    realmId: 'realm_c4',
-    inputValues,
-    bundleFiles: FIXTURE_FILES
+  const plan = materializeTemplate(V2_TEMPLATE, {
+    realmId: 'realm_l4',
+    inputs,
+    bundleFiles: V2_FILES
   });
   assert.strictEqual(preview.systemPrompt, plan.agents[0].systemPrompt, 'the preview is the materialized prompt');
   assert.deepStrictEqual(preview.inputProvenance, plan.agents[0].inputProvenance);
 
   const emptyInput = buildRealmPromptPreview(
-    [{ kind: 'text', text: 'A' }, { kind: 'input', inputId: 'directives' }],
-    [{ id: 'directives', label: 'Directives' }],
-    { inputValues: { directives: '   ' } }
+    [{ kind: 'text', text: 'A' }, { kind: 'input', inputId: 'tone' }],
+    [{ id: 'tone', label: 'Tone', shape: 'text' }],
+    { inputs: { tone: { shape: 'text', text: '   ' } } }
   );
   assert.strictEqual(emptyInput.ok, true);
   assert.strictEqual(emptyInput.systemPrompt, 'A', 'an empty input contributes nothing');
 
-  const missingBundle = buildRealmPromptPreview(spec.prompt, FIXTURE_TEMPLATE.inputs, {
-    inputValues,
+  const missingBundle = buildRealmPromptPreview(spec.prompt, V2_TEMPLATE.inputs, {
+    inputs,
     bundleFiles: {}
   });
   assert.strictEqual(missingBundle.ok, false);
@@ -779,16 +698,16 @@ test('21. the prompt preview matches the materialized system prompt and reports 
   assert.match(missingBundle.error, /prompts\/lead\.md/);
 
   const missingDefaultFile = buildRealmPromptPreview(
-    [{ kind: 'input', inputId: 'lore' }],
-    FIXTURE_TEMPLATE.inputs,
+    [{ kind: 'input', inputId: 'house_style' }],
+    V2_TEMPLATE.inputs,
     { bundleFiles: {} }
   );
   assert.strictEqual(missingDefaultFile.bundleUnavailable, true, 'an unresolved defaultFile is a bundle state');
-  assert.match(missingDefaultFile.error, /files\/lore\.md/);
+  assert.match(missingDefaultFile.error, /inputs\/style\.md/);
 
-  const requiredEmpty = buildRealmPromptPreview(spec.prompt, FIXTURE_TEMPLATE.inputs, {
-    inputValues: { mandate: '' },
-    bundleFiles: FIXTURE_FILES
+  const requiredEmpty = buildRealmPromptPreview(spec.prompt, V2_TEMPLATE.inputs, {
+    inputs: { ...inputs, briefing: { shape: 'text', text: '' } },
+    bundleFiles: V2_FILES
   });
   assert.strictEqual(requiredEmpty.ok, false);
   assert.strictEqual(requiredEmpty.bundleUnavailable, false, 'a composition error is not a bundle state');
@@ -857,83 +776,27 @@ const REVIEW_FILES = {
   'files/extra.md': 'Extra rules.'
 };
 
-test('22. input drafts carry the declared origin and generated proposals stay editable', () => {
-  const drafts = buildRealmInputDrafts(REVIEW_TEMPLATE.inputs, REVIEW_FILES);
-  const [premise, tone, lore] = drafts;
-
-  assert.strictEqual(premise.origin, 'generated');
-  assert.strictEqual(premise.brief, 'One falsifiable premise.');
-  assert.strictEqual(premise.required, true);
-  assert.strictEqual(premise.value, '', 'a generated input carries no prefill');
-  assert.strictEqual(premise.defaultResolved, true);
-  assert.strictEqual(isRealmInputEditable(premise), true, 'a generated proposal stays reviewer-editable');
-  assert.strictEqual(tone.origin, 'user');
-  assert.strictEqual(tone.brief, '', 'a user input carries no hydration brief');
-  assert.strictEqual(tone.value, 'Noir.');
-  assert.strictEqual(lore.origin, 'user');
-  assert.strictEqual(lore.value, 'Bundle lore.', 'defaultFile prefills resolve for user inputs');
-  assert.strictEqual(isRealmInputEditable(lore), true);
-  assert.strictEqual(isRealmInputEditable(null), false);
-  assert.strictEqual(isRealmInputEditable({}), false, 'a malformed draft has no field to edit');
-
-  // A generated input is a proposal: an edit travels explicitly, while the
-  // untouched field stays out of the payload and blocks a required launch.
-  const edited = drafts.map((draft) => draft.id === 'premise'
-    ? { ...draft, value: 'Edited premise.', dirty: true }
-    : draft);
-  assert.deepStrictEqual(assembleRealmInputValues(edited), { premise: 'Edited premise.' });
-  assert.deepStrictEqual(assembleRealmInputValues(drafts), {}, 'untouched generated inputs stay out of the payload');
-  const blocked = validateRealmInputDrafts(drafts);
-  assert.strictEqual(blocked.ok, false);
-  assert.match(blocked.fieldErrors.premise, /required/);
-  const valid = validateRealmInputDrafts(edited);
-  assert.strictEqual(valid.ok, true);
-  assert.deepStrictEqual(valid.inputValues, { premise: 'Edited premise.' });
-
-  // Reset restores the declared origin metadata, not just the text.
-  const reset = resetRealmInputField(edited[0], REVIEW_TEMPLATE.inputs[0], REVIEW_FILES);
-  assert.strictEqual(reset.value, '');
-  assert.strictEqual(reset.dirty, false);
-  assert.strictEqual(reset.origin, 'generated');
-  assert.strictEqual(reset.brief, 'One falsifiable premise.');
-
-  // The fixture is a valid format-v1 template: the real catalog materializes it.
-  const plan = materializeTemplate(REVIEW_TEMPLATE, {
-    realmId: 'realm_review',
-    inputValues: { premise: 'A premise.' },
-    bundleFiles: REVIEW_FILES,
-    hydrationFiles: [
-      { path: 'lore/world.md', target: 'realm', content: 'Generated world lore.' },
-      { path: 'notes/tone.md', target: { agent: 'narrator' }, content: 'User tone notes.' }
-    ]
-  });
-  assert.strictEqual(plan.agents[0].systemPrompt, 'Narrator protocol.\n\nA premise.\n\nNoir.\n\nBundle lore.');
-});
-
 test('23. the history preview composes role-tagged messages through the real catalog', () => {
-  const spec = REVIEW_TEMPLATE.agents[0];
-  const preview = buildRealmHistoryPreview(spec, REVIEW_TEMPLATE.inputs, {
-    inputValues: { premise: 'A premise.' },
-    bundleFiles: REVIEW_FILES
+  const spec = V2_TEMPLATE.agents[0];
+  const preview = buildRealmHistoryPreview(spec, V2_TEMPLATE.inputs, {
+    inputs: { briefing: { shape: 'text', text: 'A premise.' } },
+    bundleFiles: V2_FILES
   });
 
   assert.strictEqual(preview.ok, true);
   assert.strictEqual(preview.bundleUnavailable, false);
   assert.strictEqual(preview.error, '');
   assert.deepStrictEqual(preview.entries, [
-    { role: 'assistant', roleLabel: 'Agent', content: 'A premise.\n\nRain on the window.' },
-    { role: 'user', roleLabel: 'Operator', content: 'Order body.\n\nNoir.' },
-    { role: 'assistant', roleLabel: 'Agent', content: 'Bundle lore.' }
+    { role: 'assistant', roleLabel: 'Agent', content: 'A premise.\n\nReady.' }
   ]);
 
-  const plan = materializeTemplate(REVIEW_TEMPLATE, {
-    realmId: 'realm_review',
-    inputValues: { premise: 'A premise.' },
-    bundleFiles: REVIEW_FILES,
-    hydrationFiles: [
-      { path: 'lore/world.md', target: 'realm', content: 'Generated world lore.' },
-      { path: 'notes/tone.md', target: { agent: 'narrator' }, content: 'User tone notes.' }
-    ]
+  const plan = materializeTemplate(V2_TEMPLATE, {
+    realmId: 'realm_l4',
+    inputs: {
+      briefing: { shape: 'text', text: 'A premise.' },
+      roster: { shape: 'files', files: [{ path: 'index.md', content: 'Index.' }] }
+    },
+    bundleFiles: V2_FILES
   });
   assert.deepStrictEqual(
     preview.entries.map((entry) => ({ role: entry.role, content: entry.content })),
@@ -941,46 +804,42 @@ test('23. the history preview composes role-tagged messages through the real cat
     'the preview is exactly the history the launch seeds'
   );
 
-  // Explicit review values win over declared defaults and defaultFile prefills.
-  const overridden = buildRealmHistoryPreview(spec, REVIEW_TEMPLATE.inputs, {
-    inputValues: { premise: 'P', tone: 'Launch tone', lore: 'Launch lore' },
-    bundleFiles: REVIEW_FILES
+  // Explicit review values win over declared defaults.
+  const overridden = buildRealmHistoryPreview(spec, V2_TEMPLATE.inputs, {
+    inputs: { briefing: { shape: 'text', text: 'P' } },
+    bundleFiles: V2_FILES
   });
-  assert.deepStrictEqual(overridden.entries.map((entry) => entry.content), [
-    'P\n\nRain on the window.',
-    'Order body.\n\nLaunch tone',
-    'Launch lore'
-  ]);
+  assert.deepStrictEqual(overridden.entries.map((entry) => entry.content), ['P\n\nReady.']);
 
   // No declared history is a valid empty preview.
-  const noHistory = buildRealmHistoryPreview({ ...spec, history: undefined }, REVIEW_TEMPLATE.inputs, {});
+  const noHistory = buildRealmHistoryPreview({ ...spec, history: undefined }, V2_TEMPLATE.inputs, {});
   assert.strictEqual(noHistory.ok, true);
   assert.deepStrictEqual(noHistory.entries, []);
 
   // Missing bundle entries are a bundle state, not a composition error.
-  const missing = buildRealmHistoryPreview(spec, REVIEW_TEMPLATE.inputs, {
-    inputValues: { premise: 'P' },
-    bundleFiles: {}
-  });
+  const missingSpec = {
+    ...spec,
+    history: [{ role: 'user', content: [{ kind: 'file', path: 'files/order.md' }] }]
+  };
+  const missing = buildRealmHistoryPreview(missingSpec, V2_TEMPLATE.inputs, { bundleFiles: {} });
   assert.strictEqual(missing.ok, false);
   assert.strictEqual(missing.bundleUnavailable, true);
   assert.match(missing.error, /files\/order\.md/);
-  assert.match(missing.error, /files\/lore\.md/);
 
   // Undeclared input references fail closed with the catalog's own rule.
   const undeclared = buildRealmHistoryPreview(
     { ...spec, history: [{ role: 'assistant', content: [{ kind: 'input', inputId: 'ghost' }] }] },
-    REVIEW_TEMPLATE.inputs,
-    { bundleFiles: REVIEW_FILES }
+    V2_TEMPLATE.inputs,
+    { bundleFiles: V2_FILES }
   );
   assert.strictEqual(undeclared.ok, false);
   assert.match(undeclared.error, /undeclared input "ghost"/);
 
   // An entry that composes empty is rejected instead of previewed as empty.
   const empty = buildRealmHistoryPreview(
-    { ...spec, history: [{ role: 'assistant', content: [{ kind: 'input', inputId: 'premise' }] }] },
-    REVIEW_TEMPLATE.inputs,
-    { inputValues: { premise: '   ' }, bundleFiles: REVIEW_FILES }
+    { ...spec, history: [{ role: 'assistant', content: [{ kind: 'input', inputId: 'tone' }] }] },
+    V2_TEMPLATE.inputs,
+    { inputs: { tone: { shape: 'text', text: '   ' } }, bundleFiles: V2_FILES }
   );
   assert.strictEqual(empty.ok, false);
   assert.strictEqual(empty.bundleUnavailable, false);
@@ -989,51 +848,6 @@ test('23. the history preview composes role-tagged messages through the real cat
   const malformed = buildRealmHistoryPreview(null, null, null);
   assert.strictEqual(malformed.ok, false);
   assert.ok(malformed.error.length > 0, 'malformed input fails inline, never throws');
-});
-
-test('24. the seed slot list projects path, target, origin, and source labels', () => {
-  const slots = buildRealmSeedSlotViews(REVIEW_TEMPLATE);
-
-  assert.deepStrictEqual(
-    slots.map((slot) => slot.path),
-    ['lore/world.md', 'notes/tone.md', 'rules/base.md', 'rules/extra.md'],
-    'slots render in declared order'
-  );
-  assert.deepStrictEqual(slots.map((slot) => slot.origin), ['generated', 'user', 'fixed', 'fixed']);
-  assert.deepStrictEqual(slots.map((slot) => slot.targetKind), ['realm', 'agent', 'realm', 'realm']);
-  assert.deepStrictEqual(slots.map((slot) => slot.targetLabel), [
-    'Realm-global workspace',
-    'Narrator (narrator)',
-    'Realm-global workspace',
-    'Realm-global workspace'
-  ]);
-  assert.strictEqual(slots[1].targetKey, 'narrator');
-  assert.deepStrictEqual(slots.map((slot) => slot.sourceLabel), [
-    'filled from the hydration package',
-    'attached at launch',
-    'inline bundle content',
-    'bundle file files/extra.md'
-  ]);
-  assert.deepStrictEqual(slots.map((slot) => slot.brief), ['World lore.', 'Tone notes.', '', '']);
-
-  assert.deepStrictEqual(buildRealmSeedSlotViews(DEMO_TEMPLATE), [], 'the demo template declares no seed');
-  assert.deepStrictEqual(buildRealmSeedSlotViews(null), []);
-
-  const malformed = buildRealmSeedSlotViews({
-    ...REVIEW_TEMPLATE,
-    seed: {
-      files: [
-        null,
-        { path: '' },
-        { path: 'ok.md', target: 'realm' },
-        { path: 'x.md', target: { agent: 'ghost' }, origin: 'user' }
-      ]
-    }
-  });
-  assert.deepStrictEqual(malformed.map((slot) => slot.path), ['ok.md', 'x.md'], 'malformed slots are skipped');
-  assert.strictEqual(malformed[0].origin, 'fixed', 'an absent origin defaults to fixed');
-  assert.strictEqual(malformed[0].sourceLabel, 'bundle content', 'an absent fixed source is labeled honestly');
-  assert.strictEqual(malformed[1].targetLabel, 'ghost', 'an unknown agent key falls back to the raw key');
 });
 
 // ============================================================================
@@ -1058,41 +872,44 @@ function reviewPayload(templateVersion = templateBundleVersion({ template: REVIE
 }
 
 test('25. prompt part provenance resolves each part with its origin and source editability', () => {
-  const spec = REVIEW_TEMPLATE.agents[0];
-  const view = buildRealmPartProvenanceViews(spec.prompt, REVIEW_TEMPLATE.inputs, {
-    inputValues: REVIEW_INPUT_VALUES,
-    bundleFiles: REVIEW_FILES
+  const spec = V2_TEMPLATE.agents[0];
+  const inputs = {
+    briefing: { shape: 'text', text: 'A premise.' },
+    house_style: { shape: 'text', text: 'Terse.' },
+    roster: { shape: 'files', files: [{ path: 'index.md', content: 'Index.' }] }
+  };
+  const view = buildRealmPartProvenanceViews(spec.prompt, V2_TEMPLATE.inputs, {
+    inputs,
+    bundleFiles: V2_FILES
   });
 
   assert.strictEqual(view.ok, true);
   assert.strictEqual(view.bundleUnavailable, false);
-  assert.deepStrictEqual(view.parts.map((part) => part.kind), ['file', 'input', 'input', 'input']);
+  assert.deepStrictEqual(view.parts.map((part) => part.kind), ['file', 'input', 'input', 'input', 'input']);
   assert.deepStrictEqual(
     view.parts.map((part) => part.origin),
-    ['fixed', 'generated', 'user', 'user'],
-    'bundle files are fixed, inputs carry their declared origin'
+    ['fixed', 'generated', 'fixed', 'fixed', 'generated'],
+    'bundle files are fixed, required inputs render generated, prefilled inputs render fixed'
   );
   assert.deepStrictEqual(
     view.parts.map((part) => part.editable),
-    [false, true, true, true],
+    [false, true, true, true, true],
     'only input parts are editable (at their launch-value source)'
   );
-  assert.strictEqual(view.parts[0].path, 'prompts/narrator.md');
-  assert.strictEqual(view.parts[0].content, 'Narrator protocol.');
+  assert.strictEqual(view.parts[0].path, 'prompts/lead.md');
+  assert.strictEqual(view.parts[0].content, 'Lead protocol.');
   assert.strictEqual(view.parts[1].content, 'A premise.');
   assert.strictEqual(view.parts[2].content, 'Noir.');
-  assert.strictEqual(view.parts[3].content, 'Bundle lore.');
-  assert.deepStrictEqual(
-    view.parts[0].label,
-    'bundle file prompts/narrator.md'
-  );
+  assert.strictEqual(view.parts[3].content, 'Terse.');
+  assert.strictEqual(view.parts[4].content, 'Index.');
+  assert.deepStrictEqual(view.parts[0].label, 'bundle file prompts/lead.md');
   assert.strictEqual(view.parts[2].inputLabel, 'Tone');
-  assert.strictEqual(view.parts[1].required, true, 'the generated premise is declared required');
+  assert.strictEqual(view.parts[1].required, true, 'the required briefing renders required');
 
   // The contributing parts are exactly the catalog-composed prompt.
-  const composed = buildRealmPromptPreview(spec.prompt, REVIEW_TEMPLATE.inputs, {
-    inputValues: REVIEW_INPUT_VALUES,
-    bundleFiles: REVIEW_FILES
+  const composed = buildRealmPromptPreview(spec.prompt, V2_TEMPLATE.inputs, {
+    inputs,
+    bundleFiles: V2_FILES
   });
   assert.strictEqual(
     view.parts.filter((part) => !part.empty).map((part) => part.content).join('\n\n'),
@@ -1103,17 +920,17 @@ test('25. prompt part provenance resolves each part with its origin and source e
   // An empty input contributes nothing and stays visible.
   const emptyInput = buildRealmPartProvenanceViews(
     [{ kind: 'text', text: 'A' }, { kind: 'input', inputId: 'tone' }],
-    REVIEW_TEMPLATE.inputs,
-    { inputValues: { tone: '   ' }, bundleFiles: REVIEW_FILES }
+    V2_TEMPLATE.inputs,
+    { inputs: { tone: { shape: 'text', text: '   ' } }, bundleFiles: V2_FILES }
   );
   assert.strictEqual(emptyInput.ok, true);
   assert.strictEqual(emptyInput.parts[1].empty, true);
 
   // Missing bundle entries are a bundle state, not a silent empty part.
-  const missing = buildRealmPartProvenanceViews(spec.prompt, REVIEW_TEMPLATE.inputs, { bundleFiles: {} });
+  const missing = buildRealmPartProvenanceViews(spec.prompt, V2_TEMPLATE.inputs, { bundleFiles: {} });
   assert.strictEqual(missing.ok, false);
   assert.strictEqual(missing.bundleUnavailable, true);
-  assert.match(missing.error, /prompts\/narrator\.md/);
+  assert.match(missing.error, /prompts\/lead\.md/);
   assert.deepStrictEqual(missing.parts, []);
 
   assert.deepStrictEqual(buildRealmPartProvenanceViews(null, null, null), {
@@ -1125,38 +942,30 @@ test('25. prompt part provenance resolves each part with its origin and source e
 });
 
 test('26. the history editor composes through the real catalog and edits input-backed entries at source', () => {
-  const spec = REVIEW_TEMPLATE.agents[0];
-  const view = buildRealmHistoryEditorViews(spec, REVIEW_TEMPLATE.inputs, {
-    inputValues: REVIEW_INPUT_VALUES,
-    bundleFiles: REVIEW_FILES
+  const spec = V2_TEMPLATE.agents[0];
+  const inputs = {
+    briefing: { shape: 'text', text: 'A premise.' },
+    roster: { shape: 'files', files: [{ path: 'index.md', content: 'Index.' }] }
+  };
+  const view = buildRealmHistoryEditorViews(spec, V2_TEMPLATE.inputs, {
+    inputs,
+    bundleFiles: V2_FILES
   });
 
   assert.strictEqual(view.ok, true);
-  assert.deepStrictEqual(view.entries.map((entry) => entry.role), ['assistant', 'user', 'assistant']);
-  assert.deepStrictEqual(view.entries.map((entry) => entry.roleLabel), ['Agent', 'Operator', 'Agent']);
-  assert.deepStrictEqual(view.entries.map((entry) => entry.content), [
-    'A premise.\n\nRain on the window.',
-    'Order body.\n\nNoir.',
-    'Bundle lore.'
-  ]);
-  assert.deepStrictEqual(
-    view.entries.map((entry) => entry.editable),
-    [true, true, true],
-    'every declared entry references an editable input in this fixture'
-  );
-  assert.deepStrictEqual(view.entries[0].inputIds, ['premise']);
+  assert.deepStrictEqual(view.entries.map((entry) => entry.role), ['assistant']);
+  assert.deepStrictEqual(view.entries.map((entry) => entry.roleLabel), ['Agent']);
+  assert.deepStrictEqual(view.entries.map((entry) => entry.content), ['A premise.\n\nReady.']);
+  assert.deepStrictEqual(view.entries.map((entry) => entry.editable), [true]);
+  assert.deepStrictEqual(view.entries[0].inputIds, ['briefing']);
   assert.deepStrictEqual(view.entries[0].parts.map((part) => part.origin), ['generated', 'fixed']);
   assert.deepStrictEqual(view.entries[0].parts.map((part) => part.editable), [true, false]);
 
   // The editor content is exactly what the launch seeds.
-  const plan = materializeTemplate(REVIEW_TEMPLATE, {
-    realmId: 'realm_review',
-    inputValues: REVIEW_INPUT_VALUES,
-    bundleFiles: REVIEW_FILES,
-    hydrationFiles: [
-      { path: 'lore/world.md', target: 'realm', content: 'Generated world lore.' },
-      { path: 'notes/tone.md', target: { agent: 'narrator' }, content: 'User tone notes.' }
-    ]
+  const plan = materializeTemplate(V2_TEMPLATE, {
+    realmId: 'realm_l4',
+    inputs,
+    bundleFiles: V2_FILES
   });
   assert.deepStrictEqual(
     view.entries.map((entry) => entry.content),
@@ -1165,17 +974,17 @@ test('26. the history editor composes through the real catalog and edits input-b
   );
 
   // Editing the referenced input changes the composed entry (source editing).
-  const edited = buildRealmHistoryEditorViews(spec, REVIEW_TEMPLATE.inputs, {
-    inputValues: { premise: 'Edited premise.' },
-    bundleFiles: REVIEW_FILES
+  const edited = buildRealmHistoryEditorViews(spec, V2_TEMPLATE.inputs, {
+    inputs: { ...inputs, briefing: { shape: 'text', text: 'Edited premise.' } },
+    bundleFiles: V2_FILES
   });
-  assert.strictEqual(edited.entries[0].content, 'Edited premise.\n\nRain on the window.');
+  assert.strictEqual(edited.entries[0].content, 'Edited premise.\n\nReady.');
   assert.strictEqual(edited.entries[0].parts[0].content, 'Edited premise.');
 
   // A fixed-only entry renders read-only.
   const fixed = buildRealmHistoryEditorViews(
     { ...spec, history: [{ role: 'assistant', content: [{ kind: 'text', text: 'Fixed opener.' }] }] },
-    REVIEW_TEMPLATE.inputs,
+    V2_TEMPLATE.inputs,
     {}
   );
   assert.strictEqual(fixed.ok, true);
@@ -1183,14 +992,18 @@ test('26. the history editor composes through the real catalog and edits input-b
   assert.strictEqual(fixed.entries[0].content, 'Fixed opener.');
 
   // Missing bundle entries and undeclared references fail closed inline.
-  const missing = buildRealmHistoryEditorViews(spec, REVIEW_TEMPLATE.inputs, { bundleFiles: {} });
+  const missingSpec = {
+    ...spec,
+    history: [{ role: 'user', content: [{ kind: 'file', path: 'files/order.md' }] }]
+  };
+  const missing = buildRealmHistoryEditorViews(missingSpec, V2_TEMPLATE.inputs, { bundleFiles: {} });
   assert.strictEqual(missing.ok, false);
   assert.strictEqual(missing.bundleUnavailable, true);
   assert.match(missing.error, /files\/order\.md/);
 
   const undeclared = buildRealmHistoryEditorViews(
     { ...spec, history: [{ role: 'assistant', content: [{ kind: 'input', inputId: 'ghost' }] }] },
-    REVIEW_TEMPLATE.inputs,
+    V2_TEMPLATE.inputs,
     {}
   );
   assert.strictEqual(undeclared.ok, false, 'the catalog rejects the undeclared reference');
@@ -1202,78 +1015,9 @@ test('26. the history editor composes through the real catalog and edits input-b
     bundleUnavailable: false,
     error: ''
   });
-  const noHistory = buildRealmHistoryEditorViews({ ...spec, history: undefined }, REVIEW_TEMPLATE.inputs, {});
+  const noHistory = buildRealmHistoryEditorViews({ ...spec, history: undefined }, V2_TEMPLATE.inputs, {});
   assert.strictEqual(noHistory.ok, true);
   assert.deepStrictEqual(noHistory.entries, []);
-});
-
-test('27. the files dialog resolves slot content and provenance per origin', () => {
-  const payload = reviewPayload();
-  const slots = buildRealmReviewFileSlots(REVIEW_TEMPLATE, REVIEW_FILES, { payload });
-
-  assert.deepStrictEqual(
-    slots.map((slot) => slot.path),
-    ['lore/world.md', 'notes/tone.md', 'rules/base.md', 'rules/extra.md'],
-    'slots render in declared order'
-  );
-  assert.deepStrictEqual(slots.map((slot) => slot.origin), ['generated', 'user', 'fixed', 'fixed']);
-  assert.deepStrictEqual(
-    slots.map((slot) => slot.contentSource),
-    ['payload', 'payload', 'bundle-inline', 'bundle-file']
-  );
-  assert.deepStrictEqual(slots.map((slot) => slot.sourceLabel), [
-    'attached payload',
-    'attached payload',
-    'inline bundle content',
-    'bundle file files/extra.md'
-  ]);
-  assert.deepStrictEqual(slots.map((slot) => slot.editable), [true, true, false, false]);
-  assert.deepStrictEqual(slots.map((slot) => slot.required), [true, false, false, false]);
-  assert.strictEqual(slots[0].content, 'Generated world lore.');
-  assert.strictEqual(slots[1].content, 'User tone notes.');
-  assert.strictEqual(slots[2].content, 'Fixed rules.');
-  assert.strictEqual(slots[3].content, 'Extra rules.');
-  assert.strictEqual(slots[1].targetLabel, 'Narrator (narrator)');
-  assert.strictEqual(slots[0].brief, 'World lore.');
-
-  // Review edits win over the payload and are marked.
-  const key = realmReviewSlotKey('realm', 'lore/world.md');
-  assert.strictEqual(key, 'realm|lore/world.md');
-  const edited = buildRealmReviewFileSlots(REVIEW_TEMPLATE, REVIEW_FILES, {
-    payload,
-    edits: { [key]: 'Edited world lore.' }
-  });
-  assert.strictEqual(edited[0].content, 'Edited world lore.');
-  assert.strictEqual(edited[0].contentSource, 'review');
-  assert.strictEqual(edited[0].edited, true);
-  assert.strictEqual(edited[1].contentSource, 'payload', 'other slots keep the payload content');
-
-  // A fixed slot can never be edited through review edits.
-  const fixedEdit = buildRealmReviewFileSlots(REVIEW_TEMPLATE, REVIEW_FILES, {
-    edits: { [realmReviewSlotKey('realm', 'rules/base.md')]: 'override' }
-  });
-  assert.strictEqual(fixedEdit[2].content, 'Fixed rules.', 'fixed slots ignore review edits');
-  assert.strictEqual(fixedEdit[2].editable, false);
-
-  // No payload and no edits: user/generated slots read as absent.
-  const absent = buildRealmReviewFileSlots(REVIEW_TEMPLATE, REVIEW_FILES, {});
-  assert.deepStrictEqual(absent.map((slot) => slot.contentSource), ['absent', 'absent', 'bundle-inline', 'bundle-file']);
-
-  // A missing fixed bundle source is reported honestly, never guessed.
-  const missing = buildRealmReviewFileSlots(REVIEW_TEMPLATE, {}, {});
-  assert.strictEqual(missing[3].contentSource, 'bundle-missing');
-  assert.match(missing[3].sourceLabel, /missing/);
-  assert.strictEqual(missing[3].content, '');
-
-  // A member-targeted edit key round-trips through the canonical slot key.
-  const memberEdit = buildRealmReviewFileSlots(REVIEW_TEMPLATE, REVIEW_FILES, {
-    edits: { 'agent:narrator|notes/tone.md': 'Member tone.' }
-  });
-  assert.strictEqual(memberEdit[1].content, 'Member tone.');
-  assert.strictEqual(memberEdit[1].contentSource, 'review');
-
-  assert.deepStrictEqual(buildRealmReviewFileSlots(DEMO_TEMPLATE, {}, {}), [], 'a seed-less template has no slots');
-  assert.deepStrictEqual(buildRealmReviewFileSlots(null, null, null), []);
 });
 
 test('28. the review attaches an unedited source verbatim and rebuilds only edited or reviewed payloads', () => {
@@ -1291,10 +1035,11 @@ test('28. the review attaches an unedited source verbatim and rebuilds only edit
   assert.strictEqual(verbatim.package, source, 'an unedited candidate attaches verbatim (the digest stays the submitter\'s)');
   assert.strictEqual(verbatim.fileCount, 2);
 
-  const rebuiltSlots = buildRealmReviewFileSlots(REVIEW_TEMPLATE, REVIEW_FILES, {
-    payload: source,
-    edits: { 'realm|lore/world.md': 'Edited world lore.' }
-  });
+  const rebuiltSlots = buildRealmReviewFileSlots(REVIEW_TEMPLATE, REVIEW_FILES, { payload: source }).map(
+    (slot) => (slot.path === 'lore/world.md'
+      ? { ...slot, edited: true, content: 'Edited world lore.', contentSource: 'review' }
+      : slot)
+  );
   const rebuilt = assembleRealmReviewPackage({
     templateId: REVIEW_TEMPLATE.id,
     templateVersion: version,
@@ -1313,12 +1058,13 @@ test('28. the review attaches an unedited source verbatim and rebuilds only edit
   assert.strictEqual(rebuilt.package.templateVersion, version);
 
   // A review-built package from edits alone (no candidate attached).
-  const editSlots = buildRealmReviewFileSlots(REVIEW_TEMPLATE, REVIEW_FILES, {
-    edits: {
-      'realm|lore/world.md': 'Solo lore.',
-      'agent:narrator|notes/tone.md': 'Solo tone.'
-    }
-  });
+  const editSlots = buildRealmReviewFileSlots(REVIEW_TEMPLATE, REVIEW_FILES, {}).map(
+    (slot) => (slot.path === 'lore/world.md'
+      ? { ...slot, edited: true, content: 'Solo lore.', contentSource: 'review' }
+      : slot.path === 'notes/tone.md'
+        ? { ...slot, edited: true, content: 'Solo tone.', contentSource: 'review' }
+        : slot)
+  );
   const built = assembleRealmReviewPackage({
     templateId: REVIEW_TEMPLATE.id,
     templateVersion: version,
@@ -1364,7 +1110,7 @@ test('29. the package preview validates against the effective version and surfac
     files: [...reviewPayload(version).files, { path: 'rules/base.md', target: 'realm', content: 'nope' }]
   }, { currentVersion: version });
   assert.strictEqual(fixedEntry.ok, false);
-  assert.match(fixedEntry.error, /fixed seed slot/);
+  assert.match(fixedEntry.error, /targets text input/);
   assert.strictEqual(fixedEntry.code, 'ERR_HYDRATION_PACKAGE');
 
   const missingGenerated = previewRealmReviewPackage(REVIEW_TEMPLATE, {
@@ -1374,7 +1120,7 @@ test('29. the package preview validates against the effective version and surfac
     files: [{ path: 'notes/tone.md', target: { agent: 'narrator' }, content: 'Tone.' }]
   }, { currentVersion: version });
   assert.strictEqual(missingGenerated.ok, false);
-  assert.match(missingGenerated.error, /generated seed slot/);
+  assert.match(missingGenerated.error, /is missing from the payload/);
 
   const undeclaredInput = previewRealmReviewPackage(REVIEW_TEMPLATE, {
     ...reviewPayload(version),
@@ -1390,56 +1136,6 @@ test('29. the package preview validates against the effective version and surfac
     error: '',
     code: ''
   });
-});
-
-test('30. payload source parsing, candidate views, and input display projections', () => {
-  const parsed = parseRealmPayloadFileText('{"formatVersion":1,"templateId":"x"}');
-  assert.strictEqual(parsed.ok, true);
-  assert.strictEqual(parsed.value.templateId, 'x');
-  assert.match(parseRealmPayloadFileText('').error, /empty/);
-  assert.match(parseRealmPayloadFileText('{oops').error, /not valid JSON/);
-  assert.match(parseRealmPayloadFileText('[]').error, /JSON object/);
-  assert.match(parseRealmPayloadFileText(null).error, /empty/);
-
-  assert.strictEqual(buildRealmPayloadFilename('t-review-fixture'), 't-review-fixture.package.json');
-  assert.strictEqual(buildRealmPayloadFilename('../../evil'), 'evil.package.json');
-  assert.strictEqual(buildRealmPayloadFilename(''), 'realm-template.package.json');
-
-  const pending = [
-    {
-      templateId: REVIEW_TEMPLATE.id,
-      templateVersion: 'sha256:v',
-      resolvedAt: '2026-09-21T12:34:56.000Z',
-      payload: {
-        inputs: { premise: 'P', ignored: 42 },
-        files: [
-          { path: 'lore/world.md', target: 'realm', content: 'L' },
-          { path: 'notes/tone.md', target: { agent: 'narrator' }, content: 'T' },
-          { path: 'bad' }
-        ]
-      }
-    },
-    { templateId: 'other', templateVersion: 'sha256:o', resolvedAt: '2026-09-21T00:00:00.000Z', payload: {} }
-  ];
-  const views = buildRealmPendingPayloadViews(REVIEW_TEMPLATE.id, pending, formatRealmLaunchTimestamp);
-  assert.strictEqual(views.length, 1);
-  assert.strictEqual(views[0].templateVersion, 'sha256:v');
-  assert.strictEqual(views[0].inputCount, 1, 'non-string input values are not counted');
-  assert.strictEqual(views[0].fileCount, 2, 'malformed file entries are not counted');
-  assert.strictEqual(views[0].summary, '1 input · 2 files · resolved 2026-09-21 12:34:56 UTC');
-  assert.deepStrictEqual(buildRealmPendingPayloadViews('', pending, formatRealmLaunchTimestamp), []);
-  assert.deepStrictEqual(buildRealmPendingPayloadViews(REVIEW_TEMPLATE.id, null, formatRealmLaunchTimestamp), []);
-
-  // Input display: payload values show until the operator edits (edits win).
-  const drafts = buildRealmInputDrafts(REVIEW_TEMPLATE.inputs, REVIEW_FILES);
-  const payload = reviewPayload();
-  assert.deepStrictEqual(buildRealmReviewInputValues(drafts, payload), { premise: 'A premise.' });
-  assert.strictEqual(resolveRealmReviewInputDisplay(drafts[0], payload), 'A premise.');
-  assert.strictEqual(resolveRealmReviewInputDisplay(drafts[1], payload), 'Noir.', 'no payload value → the prefill shows');
-  const edited = drafts.map((draft) => (draft.id === 'premise' ? { ...draft, value: 'Edited', dirty: true } : draft));
-  assert.deepStrictEqual(buildRealmReviewInputValues(edited, payload), { premise: 'Edited' });
-  assert.strictEqual(resolveRealmReviewInputDisplay(edited[0], payload), 'Edited');
-  assert.deepStrictEqual(buildRealmReviewInputValues(null, null), {});
 });
 
 // Authority fixture: the Session Zero shape — one template-authoring agent and
@@ -1704,4 +1400,753 @@ test('34. pending payload downloads use sanitized filenames and canonical JSON t
   circular.self = circular;
   assert.strictEqual(JSON.parse(serializeRealmPendingPayload(circular)), null);
   assert.strictEqual(serializeRealmPendingPayload(Symbol('pending')), 'null\n');
+});
+
+// ============================================================================
+// 35-43. Format-v2 launcher inputs, usage map, and placement review (ticket a71198f)
+// ============================================================================
+
+/**
+ * Format-v2 launcher fixture (ticket a71198f): declared text inputs (required,
+ * `default`, `defaultFile`, single-line), declared files inputs (optional with
+ * a `path` placement, required with a `root` placement), prompt/history file
+ * selections, and input-backed plus literal directives — the shapes the v2
+ * launcher/review surfaces must render natively.
+ */
+const V2_TEMPLATE = {
+  id: 'l4-v2-fixture',
+  name: 'L4 V2 Fixture',
+  description: 'Format-v2 inputs, placements, and directives fixture.',
+  formatVersion: 2,
+  inputs: [
+    { id: 'briefing', label: 'Briefing', shape: 'text', help: 'The task briefing.', required: true },
+    { id: 'tone', label: 'Tone', shape: 'text', default: 'Noir.', multiline: false },
+    { id: 'house_style', label: 'House style', shape: 'text', defaultFile: 'inputs/style.md' },
+    { id: 'notes', label: 'Handoff notes', shape: 'files', help: 'Operator notes.', brief: 'Attach notes.' },
+    { id: 'roster', label: 'Roster files', shape: 'files', required: true }
+  ],
+  agents: [
+    {
+      key: 'lead',
+      idPattern: 'l4-lead',
+      name: 'Lead',
+      role: 'lead',
+      prompt: [
+        { kind: 'file', path: 'prompts/lead.md' },
+        { kind: 'input', inputId: 'briefing' },
+        { kind: 'input', inputId: 'tone' },
+        { kind: 'input', inputId: 'house_style' },
+        { kind: 'input', inputId: 'roster', path: 'index.md' }
+      ],
+      history: [
+        { role: 'assistant', content: [{ kind: 'input', inputId: 'briefing' }, { kind: 'text', text: 'Ready.' }] }
+      ],
+      toolProfile: { preset: 'readonly' },
+      privileged: false
+    },
+    {
+      key: 'scribe',
+      idPattern: 'l4-scribe',
+      name: 'Scribe',
+      role: 'scribe',
+      prompt: [{ kind: 'input', inputId: 'notes', path: 'notes.md' }],
+      toolProfile: { preset: 'readonly' },
+      privileged: false
+    }
+  ],
+  placements: [
+    { file: 'files/readme.md', target: 'realm', path: 'handoff/README.md' },
+    { inputId: 'notes', target: 'realm', path: 'handoff/notes.md' },
+    { inputId: 'roster', target: { agent: 'lead' }, root: 'roster/' },
+    { inputId: 'tone', target: { agent: 'scribe' }, path: 'style/tone.md' }
+  ],
+  directives: [
+    { inputId: 'briefing', target: { agent: 'lead' } },
+    { text: 'Begin.', target: { agent: 'scribe' } }
+  ]
+};
+
+/** Bundle file bodies the v2 fixture's prompt parts, placement sources, and prefills resolve against. */
+const V2_FILES = {
+  'prompts/lead.md': 'Lead protocol.',
+  'files/readme.md': 'Handoff readme.',
+  'inputs/style.md': 'Terse.'
+};
+
+/** The fixture's effective bundle version (authored-form pin). */
+const V2_VERSION = 'sha256:l4-v2-fixture';
+
+/** Builds one v2 payload envelope for the fixture. */
+function v2Payload(inputs, templateVersion = V2_VERSION) {
+  return {
+    formatVersion: 2,
+    templateId: V2_TEMPLATE.id,
+    templateVersion,
+    inputs
+  };
+}
+
+/** Assembles the fixture's drafts with every required input filled. */
+function filledV2Drafts() {
+  return buildRealmV2InputDrafts(V2_TEMPLATE, V2_FILES).map((draft) => {
+    if (draft.id === 'briefing') return setRealmV2InputText(draft, 'Write the story.');
+    if (draft.id === 'roster') {
+      return setRealmV2InputFiles(draft, [{ path: 'index.md', content: 'Index.', name: 'index.md' }]);
+    }
+    return draft;
+  });
+}
+
+test('35. the v2 usage map derives every prompt, history, placement, and directive site per input', () => {
+  const usage = buildRealmInputUsageMap(V2_TEMPLATE);
+
+  assert.deepStrictEqual(
+    [...usage.keys()],
+    ['briefing', 'tone', 'house_style', 'notes', 'roster'],
+    'every declared input carries a usage entry in declared order'
+  );
+  assert.strictEqual(usage.get('briefing').required, true);
+  assert.deepStrictEqual(
+    usage.get('briefing').sites.map((site) => site.kind),
+    ['prompt', 'history', 'directive'],
+    'briefing lands in the lead prompt, its baked history, and the input-backed directive'
+  );
+  assert.deepStrictEqual(
+    usage.get('roster').sites.map((site) => site.selection),
+    ['path', 'root'],
+    'roster is selected by path in the prompt and written under a root prefix'
+  );
+  assert.strictEqual(usage.get('notes').sites[0].path, 'notes.md', 'the prompt selection path is recorded');
+  assert.strictEqual(usage.get('tone').sites[1].targetLabel, 'Scribe (scribe)');
+  assert.strictEqual(usage.get('tone').sites[1].path, 'style/tone.md');
+  assert.strictEqual(usage.get('briefing').sites[0].label, 'System prompt part 2');
+  assert.strictEqual(usage.get('briefing').sites[1].label, 'Baked history entry 1 part 1');
+  assert.strictEqual(usage.get('briefing').summary, '1 system prompt reference · 1 baked history reference · 1 directive');
+  assert.strictEqual(usage.get('roster').summary, '1 system prompt reference · 1 placement');
+  assert.strictEqual(usage.get('house_style').summary, '1 system prompt reference');
+
+  // Realm opacity: every derived label is template-level, never a launched
+  // agent id or a canonical workspace key.
+  const rendered = JSON.stringify([...usage.values()]);
+  assert.ok(!rendered.includes('realm:'), 'no canonical workspace key appears in the usage map');
+  assert.ok(!rendered.includes('realm_l4'), 'no realm id appears in the usage map');
+
+  assert.strictEqual(buildRealmInputUsageMap(null).size, 0);
+  assert.strictEqual(buildRealmInputUsageMap({ formatVersion: 2, id: 'x', name: 'x', description: '' }).size, 0);
+});
+
+test('36. v2 input drafts project text and files requirements with prefills and usage', () => {
+  const drafts = buildRealmV2InputDrafts(V2_TEMPLATE, V2_FILES);
+  assert.deepStrictEqual(drafts.map((draft) => draft.shape), ['text', 'text', 'text', 'files', 'files']);
+
+  const [briefing, tone, houseStyle, notes, roster] = drafts;
+  assert.strictEqual(briefing.required, true);
+  assert.strictEqual(briefing.value, '', 'a required input without a prefill starts empty');
+  assert.strictEqual(briefing.multiline, true, 'multiline defaults on');
+  assert.strictEqual(briefing.help, 'The task briefing.');
+  assert.strictEqual(briefing.usage.sites.length, 3, 'drafts carry the derived usage map');
+  assert.strictEqual(tone.value, 'Noir.');
+  assert.strictEqual(tone.multiline, false);
+  assert.strictEqual(houseStyle.value, 'Terse.', 'defaultFile prefills resolve from the bundle');
+  assert.strictEqual(houseStyle.defaultResolved, true);
+  assert.strictEqual(notes.shape, 'files');
+  assert.strictEqual(notes.brief, 'Attach notes.');
+  assert.deepStrictEqual(notes.files, [], 'files drafts start with an empty fileset');
+  assert.strictEqual(roster.required, true);
+  assert.strictEqual(roster.multiline, false);
+
+  const unresolved = buildRealmV2InputDrafts(V2_TEMPLATE, {})[2];
+  assert.strictEqual(unresolved.value, '', 'a missing defaultFile prefill starts empty');
+  assert.strictEqual(unresolved.defaultResolved, false, 'the unresolved prefill is flagged');
+
+  // Format-v1 templates convert through the read shim: their authored inputs
+  // render as v2 text drafts with placement usage sites.
+  const shimmed = buildRealmV2InputDrafts(FIXTURE_TEMPLATE, FIXTURE_FILES);
+  assert.deepStrictEqual(
+    shimmed.map((draft) => draft.id),
+    ['directives', 'lore', 'mandate', 'seed_0', 'seed_2'],
+    'v1 inputs plus the shimmed fixed-inline seed slots render as drafts'
+  );
+  assert.ok(shimmed.every((draft) => draft.shape === 'text'), 'v1 inputs shim to text drafts');
+  assert.deepStrictEqual(
+    shimmed.map((draft) => draft.usage.sites.map((site) => site.kind)),
+    [['prompt'], ['prompt'], ['prompt'], ['placement'], ['placement']],
+    'v1 prompt references and fixed inline slots become prompt/placement usage'
+  );
+  assert.deepStrictEqual(buildRealmV2InputDrafts(null, null), []);
+  assert.deepStrictEqual(
+    buildRealmV2InputDrafts({ ...V2_TEMPLATE, inputs: [null, { label: 'No id' }, { id: 'ok', label: 'Ok', shape: 'text' }] })
+      .map((draft) => draft.id),
+    ['ok'],
+    'malformed declarations are skipped'
+  );
+});
+
+test('37. v2 draft edits, attachment helpers, and reset preserve the dirty presence semantics', () => {
+  const drafts = buildRealmV2InputDrafts(V2_TEMPLATE, V2_FILES);
+  const tone = drafts[1];
+  const edited = setRealmV2InputText(tone, 'Comic.');
+  assert.strictEqual(edited.value, 'Comic.');
+  assert.strictEqual(edited.dirty, true);
+  assert.strictEqual(tone.dirty, false, 'the source draft is never mutated');
+  assert.deepStrictEqual(assembleRealmV2Inputs([edited]), { tone: { shape: 'text', text: 'Comic.' } });
+  assert.deepStrictEqual(assembleRealmV2Inputs(drafts), {}, 'untouched fields stay out of the payload');
+
+  const reset = resetRealmV2InputDraft(edited, V2_TEMPLATE.inputs[1], V2_FILES);
+  assert.strictEqual(reset.value, 'Noir.', 'reset restores the declared default');
+  assert.strictEqual(reset.dirty, false, 'reset restores untouched presence semantics');
+
+  const notes = drafts[3];
+  const withFiles = setRealmV2InputFiles(notes, [
+    { path: 'notes.md', content: 'Notes.', name: 'notes.md' },
+    { path: 'extra.md', content: 'Extra.', name: '' }
+  ]);
+  assert.deepStrictEqual(
+    assembleRealmV2Inputs([withFiles]),
+    { notes: { shape: 'files', files: [{ path: 'notes.md', content: 'Notes.' }, { path: 'extra.md', content: 'Extra.' }] } }
+  );
+  const cleared = setRealmV2InputFiles(withFiles, []);
+  assert.deepStrictEqual(assembleRealmV2Inputs([cleared]), {}, 'an empty fileset cannot be expressed and stays out');
+  assert.deepStrictEqual(resetRealmV2InputDraft(withFiles, V2_TEMPLATE.inputs[3], V2_FILES).files, []);
+
+  // Attachment helpers: the file name becomes a safe fileset path, and
+  // duplicates gain a numeric suffix.
+  const attachment = buildRealmInputAttachment('notes/../evil.md', 'Body');
+  assert.strictEqual(attachment.path, 'evil.md');
+  assert.strictEqual(attachment.name, 'notes/../evil.md');
+  assert.strictEqual(attachment.content, 'Body');
+  assert.strictEqual(sanitizeRealmAttachmentPath('/abs/path.md'), 'abs/path.md');
+  assert.strictEqual(sanitizeRealmAttachmentPath('..'), '');
+  assert.strictEqual(sanitizeRealmAttachmentPath('a\0b'), '');
+  assert.strictEqual(buildRealmInputAttachment('', 'x').path, 'file.txt');
+  assert.strictEqual(uniqueRealmAttachmentPath(['notes.md'], 'notes.md'), 'notes-2.md');
+  assert.strictEqual(uniqueRealmAttachmentPath(['notes.md', 'notes-2.md'], 'notes.md'), 'notes-3.md');
+  assert.strictEqual(uniqueRealmAttachmentPath([], 'notes.md'), 'notes.md');
+});
+
+test('38. operator-assembled v2 values validate through the synthesized catalog envelope', () => {
+  const drafts = buildRealmV2InputDrafts(V2_TEMPLATE, V2_FILES);
+
+  const missing = validateRealmV2InputDrafts(V2_TEMPLATE, drafts, {
+    currentVersion: V2_VERSION,
+    bundleFiles: V2_FILES
+  });
+  assert.strictEqual(missing.ok, false);
+  assert.strictEqual(missing.code, 'missing-required');
+  assert.match(missing.fieldErrors.briefing, /required/);
+  assert.match(missing.fieldErrors.roster, /required/);
+  assert.deepStrictEqual(missing.launchInputs, {}, 'nothing travels while the required inputs are empty');
+
+  const filled = filledV2Drafts();
+  const ok = validateRealmV2InputDrafts(V2_TEMPLATE, filled, { currentVersion: V2_VERSION, bundleFiles: V2_FILES });
+  assert.strictEqual(ok.ok, true, ok.error);
+  assert.strictEqual(ok.code, '');
+  assert.deepStrictEqual(
+    Object.keys(ok.launchInputs).sort(),
+    ['briefing', 'roster'],
+    'edited fields plus required fields the payload does not provide travel explicitly'
+  );
+  assert.deepStrictEqual(ok.payload, {
+    formatVersion: 2,
+    templateId: V2_TEMPLATE.id,
+    templateVersion: V2_VERSION,
+    inputs: {
+      briefing: { text: 'Write the story.' },
+      roster: { files: [{ path: 'index.md', content: 'Index.' }] }
+    }
+  });
+  assert.strictEqual(ok.effectiveInputs.tone.shape, 'text');
+  assert.strictEqual(ok.effectiveInputs.tone.text, 'Noir.', 'declared defaults resolve into the effective view');
+  assert.strictEqual(ok.effectiveInputs.house_style.text, 'Terse.');
+  assert.strictEqual(ok.effectiveInputs.notes.shape, 'files');
+  assert.deepStrictEqual(ok.effectiveInputs.notes.files, []);
+  assert.deepStrictEqual(
+    ok.resolved.map((entry) => entry.source),
+    ['launch', 'default', 'defaultFile', 'empty', 'launch']
+  );
+
+  // Realm opacity: the projection's failure text and envelope never carry a
+  // canonical workspace key.
+  const rendered = JSON.stringify({ missing, ok });
+  assert.ok(!rendered.includes('realm:'), 'no canonical workspace key leaks through the projection');
+  assert.ok(!rendered.includes('realm_l4'), 'no realm id leaks through the projection');
+
+  assert.strictEqual(
+    validateRealmV2InputDrafts(null, drafts).code,
+    'invalid-template',
+    'no selection fails closed before any value is assembled'
+  );
+  const unversioned = validateRealmV2InputDrafts(V2_TEMPLATE, filled, { currentVersion: null, bundleFiles: V2_FILES });
+  assert.strictEqual(unversioned.code, 'pin-mismatch', 'an unversionable bundle blocks the launch');
+});
+
+test('39. attached payload failures surface typed (pin mismatch, unknown input, shape mismatch)', () => {
+  const filled = filledV2Drafts();
+
+  const mismatch = validateRealmV2InputDrafts(V2_TEMPLATE, filled, {
+    currentVersion: V2_VERSION,
+    bundleFiles: V2_FILES,
+    payload: v2Payload({ briefing: { text: 'B' }, roster: { files: [{ path: 'index.md', content: 'I' }] } }, 'sha256:other')
+  });
+  assert.strictEqual(mismatch.ok, false);
+  assert.strictEqual(mismatch.code, 'pin-mismatch');
+  assert.match(mismatch.error, /pins template version/);
+
+  const mismatchAllowed = validateRealmV2InputDrafts(V2_TEMPLATE, filled, {
+    currentVersion: V2_VERSION,
+    bundleFiles: V2_FILES,
+    allowVersionMismatch: true,
+    payload: v2Payload({ briefing: { text: 'B' }, roster: { files: [{ path: 'index.md', content: 'I' }] } }, 'sha256:other')
+  });
+  assert.strictEqual(mismatchAllowed.ok, true, mismatchAllowed.error);
+
+  const unknown = validateRealmV2InputDrafts(V2_TEMPLATE, filled, {
+    currentVersion: V2_VERSION,
+    bundleFiles: V2_FILES,
+    payload: v2Payload({
+      briefing: { text: 'B' },
+      roster: { files: [{ path: 'index.md', content: 'I' }] },
+      ghost: { text: 'x' }
+    })
+  });
+  assert.strictEqual(unknown.code, 'unknown-input');
+  assert.match(unknown.fieldErrors.ghost, /undeclared input/);
+
+  const shape = validateRealmV2InputDrafts(V2_TEMPLATE, filled, {
+    currentVersion: V2_VERSION,
+    bundleFiles: V2_FILES,
+    payload: v2Payload({
+      briefing: { files: [{ path: 'a.md', content: 'A' }] },
+      roster: { files: [{ path: 'index.md', content: 'I' }] }
+    })
+  });
+  assert.strictEqual(shape.code, 'shape-mismatch');
+  assert.match(shape.fieldErrors.briefing, /unknown field 'files'/);
+
+  // A payload-provided required input is not duplicated into the explicit
+  // launch values (the payload value applies; an edit would win per key).
+  const payloadOnly = validateRealmV2InputDrafts(V2_TEMPLATE, [], {
+    currentVersion: V2_VERSION,
+    bundleFiles: V2_FILES,
+    payload: v2Payload({ briefing: { text: 'B' }, roster: { files: [{ path: 'index.md', content: 'I' }] } })
+  });
+  assert.strictEqual(payloadOnly.ok, true, payloadOnly.error);
+  assert.deepStrictEqual(payloadOnly.launchInputs, {}, 'untouched fields stay omitted so the payload applies');
+  assert.deepStrictEqual(payloadOnly.effectiveInputs.briefing, { shape: 'text', text: 'B' });
+});
+
+test('40. fileset attachments validate against path placements, selections, and requiredness', () => {
+  const drafts = buildRealmV2InputDrafts(V2_TEMPLATE, V2_FILES);
+  const byId = Object.fromEntries(drafts.map((draft) => [draft.id, draft]));
+
+  // A root placement accepts any count (the prompt's "index.md" selection
+  // must still be present in the non-empty fileset).
+  const rosterRoot = setRealmV2InputFiles(byId.roster, [
+    { path: 'index.md', content: 'I', name: 'index.md' },
+    { path: 'b.md', content: 'B', name: 'b.md' }
+  ]);
+  assert.strictEqual(validateRealmInputAttachments(V2_TEMPLATE, [rosterRoot]).ok, true);
+
+  // A path placement writes exactly one file.
+  const notesTwo = setRealmV2InputFiles(byId.notes, [
+    { path: 'a.md', content: 'A', name: 'a.md' },
+    { path: 'b.md', content: 'B', name: 'b.md' }
+  ]);
+  const twoIssue = validateRealmInputAttachments(V2_TEMPLATE, [rosterRoot, notesTwo]);
+  assert.strictEqual(twoIssue.ok, false);
+  assert.strictEqual(twoIssue.issues[0].code, 'path-placement-count');
+  assert.match(twoIssue.fieldErrors.notes, /exactly one file/);
+  assert.strictEqual(
+    validateRealmInputAttachments(V2_TEMPLATE, [rosterRoot, setRealmV2InputFiles(byId.notes, [])]).ok,
+    true,
+    'an absent optional fileset writes nothing'
+  );
+
+  // The scribe prompt selects "notes.md": a non-empty fileset must carry it.
+  const selectionMissing = setRealmV2InputFiles(byId.notes, [{ path: 'other.md', content: 'O', name: 'other.md' }]);
+  const selectionIssue = validateRealmInputAttachments(V2_TEMPLATE, [rosterRoot, selectionMissing]);
+  assert.ok(selectionIssue.issues.some((issue) => issue.code === 'selection-missing'));
+  assert.strictEqual(
+    validateRealmInputAttachments(V2_TEMPLATE, [rosterRoot, setRealmV2InputFiles(byId.notes, [{ path: 'notes.md', content: 'N', name: 'notes.md' }])]).ok,
+    true
+  );
+
+  // Unsafe and duplicate fileset paths fail closed.
+  const unsafe = setRealmV2InputFiles(byId.notes, [{ path: '../escape.md', content: 'X', name: '' }]);
+  assert.strictEqual(validateRealmInputAttachments(V2_TEMPLATE, [unsafe]).issues[0].code, 'unsafe-path');
+  const duplicate = setRealmV2InputFiles(byId.notes, [
+    { path: 'notes.md', content: 'A', name: '' },
+    { path: 'notes.md', content: 'B', name: '' }
+  ]);
+  assert.ok(validateRealmInputAttachments(V2_TEMPLATE, [duplicate]).issues.some((issue) => issue.code === 'duplicate-path'));
+
+  // A required files input needs a non-empty fileset.
+  const emptyRoster = setRealmV2InputFiles(byId.roster, []);
+  const requiredIssue = validateRealmInputAttachments(V2_TEMPLATE, [emptyRoster]);
+  assert.strictEqual(requiredIssue.issues[0].code, 'required-empty');
+  assert.match(requiredIssue.fieldErrors.roster, /required/);
+  const emptyContent = setRealmV2InputFiles(byId.roster, [{ path: 'index.md', content: '  ', name: '' }]);
+  assert.strictEqual(validateRealmInputAttachments(V2_TEMPLATE, [emptyContent]).issues[0].code, 'required-empty');
+
+  assert.strictEqual(validateRealmInputAttachments(null, null).ok, true);
+});
+
+test('41. the v2 seed summary and slot views render placements and directives natively', () => {
+  const summary = buildRealmSeedSummary(V2_TEMPLATE);
+  assert.strictEqual(summary.declaresSeed, true);
+  assert.strictEqual(summary.placementCount, 4);
+  assert.strictEqual(summary.directiveCount, 2);
+  assert.strictEqual(summary.fileCount, 4);
+  assert.deepStrictEqual(
+    summary.targetLabels,
+    ['Realm-global workspace', 'Lead (lead)', 'Scribe (scribe)'],
+    'distinct placement targets in first-appearance order'
+  );
+  assert.deepStrictEqual(summary.directive, {
+    targetAgentKey: 'lead',
+    targetLabel: 'Lead (lead)',
+    preview: 'input "Briefing"'
+  });
+
+  const slots = buildRealmSeedSlotViews(V2_TEMPLATE);
+  assert.deepStrictEqual(slots.map((slot) => slot.path), ['handoff/README.md', 'handoff/notes.md', 'roster/', 'style/tone.md']);
+  assert.deepStrictEqual(slots.map((slot) => slot.origin), ['fixed', 'user', 'generated', 'fixed']);
+  assert.deepStrictEqual(slots.map((slot) => slot.targetKind), ['realm', 'realm', 'agent', 'agent']);
+  assert.deepStrictEqual(slots.map((slot) => slot.targetLabel), [
+    'Realm-global workspace',
+    'Realm-global workspace',
+    'Lead (lead)',
+    'Scribe (scribe)'
+  ]);
+  assert.deepStrictEqual(slots.map((slot) => slot.sourceLabel), [
+    'bundle file files/readme.md',
+    'input "Handoff notes" — exactly one attached file',
+    'input "Roster files" — every attached file under roster/',
+    'input "Tone" — inline template default'
+  ]);
+  assert.deepStrictEqual(slots.map((slot) => slot.brief), ['', 'Attach notes.', '', '']);
+  assert.ok(
+    !JSON.stringify(slots).includes('realm:'),
+    'placement labels never leak a canonical workspace key'
+  );
+
+  assert.deepStrictEqual(buildRealmSeedSummary({ ...V2_TEMPLATE, placements: [], directives: [] }), {
+    declaresSeed: false,
+    fileCount: 0,
+    targetLabels: [],
+    directive: null
+  });
+  assert.deepStrictEqual(buildRealmSeedSlotViews({ ...V2_TEMPLATE, placements: [] }), []);
+});
+
+test('42. the v2 files dialog resolves placements from launch values, payloads, and bundles', () => {
+  const explicit = {
+    briefing: { shape: 'text', text: 'Write.' },
+    notes: { shape: 'files', files: [{ path: 'notes.md', content: 'Notes.' }] },
+    roster: { shape: 'files', files: [{ path: 'index.md', content: 'Index.' }, { path: 'extra.md', content: 'Extra.' }] }
+  };
+  const slots = buildRealmReviewFileSlots(V2_TEMPLATE, V2_FILES, { inputs: explicit });
+  assert.deepStrictEqual(slots.map((slot) => slot.path), [
+    'handoff/README.md',
+    'handoff/notes.md',
+    'roster/index.md',
+    'roster/extra.md',
+    'style/tone.md'
+  ]);
+  assert.deepStrictEqual(slots.map((slot) => slot.contentSource), [
+    'bundle-file',
+    'input',
+    'input',
+    'input',
+    'bundle-inline'
+  ]);
+  assert.deepStrictEqual(slots.map((slot) => slot.content), [
+    'Handoff readme.',
+    'Notes.',
+    'Index.',
+    'Extra.',
+    'Noir.'
+  ]);
+  assert.deepStrictEqual(slots.map((slot) => slot.source), ['bundle', 'input', 'input', 'input', 'input']);
+  assert.ok(slots.every((slot) => slot.editable === false), 'v2 slots stay read-only — editing happens at the input');
+  assert.strictEqual(slots[1].inputId, 'notes');
+  assert.strictEqual(slots[1].inputLabel, 'Handoff notes');
+  assert.strictEqual(slots[2].required, true, 'the required roster input marks its placement slots');
+  assert.ok(slots.every((slot) => slot.conflict === false));
+  assert.ok(!JSON.stringify(slots).includes('realm:'), 'no canonical workspace key appears in slot labels');
+
+  // A root placement with no files attached renders one honest placeholder.
+  const emptyRoot = buildRealmReviewFileSlots(V2_TEMPLATE, V2_FILES, {
+    inputs: { roster: { shape: 'files', files: [] } }
+  });
+  assert.strictEqual(emptyRoot[2].path, 'roster/');
+  assert.strictEqual(emptyRoot[2].contentSource, 'absent');
+  assert.match(emptyRoot[2].sourceLabel, /no files attached/);
+
+  // A path placement with several files is flagged instead of guessing.
+  const conflict = buildRealmReviewFileSlots(V2_TEMPLATE, V2_FILES, {
+    inputs: {
+      notes: { shape: 'files', files: [{ path: 'a.md', content: 'A' }, { path: 'b.md', content: 'B' }] },
+      roster: { shape: 'files', files: [{ path: 'index.md', content: 'I' }] }
+    }
+  });
+  assert.strictEqual(conflict[1].conflict, true);
+  assert.match(conflict[1].sourceLabel, /needs exactly one/);
+
+  // An attached v2 payload resolves the input placements (bundle stays fixed).
+  const payload = v2Payload({
+    notes: { files: [{ path: 'notes.md', content: 'Payload notes.' }] },
+    roster: { files: [{ path: 'index.md', content: 'Payload index.' }] }
+  });
+  const fromPayload = buildRealmReviewFileSlots(V2_TEMPLATE, V2_FILES, { payload });
+  assert.strictEqual(fromPayload[1].content, 'Payload notes.');
+  assert.strictEqual(fromPayload[1].contentSource, 'payload');
+  assert.match(fromPayload[1].sourceLabel, /attached payload/);
+  assert.strictEqual(fromPayload[2].content, 'Payload index.');
+
+  // Explicit launch values win over the payload per input.
+  const merged = buildRealmReviewFileSlots(V2_TEMPLATE, V2_FILES, {
+    payload,
+    inputs: { notes: { shape: 'files', files: [{ path: 'notes.md', content: 'Launch notes.' }] } }
+  });
+  assert.strictEqual(merged[1].content, 'Launch notes.');
+  assert.strictEqual(merged[1].contentSource, 'input');
+  assert.strictEqual(merged[2].content, 'Payload index.', 'untouched inputs keep the payload value');
+
+  // A missing bundle file is reported honestly.
+  const missing = buildRealmReviewFileSlots(V2_TEMPLATE, {}, {});
+  assert.strictEqual(missing[0].contentSource, 'bundle-missing');
+  assert.match(missing[0].sourceLabel, /missing/);
+
+  assert.deepStrictEqual(buildRealmReviewFileSlots({ ...V2_TEMPLATE, placements: [] }, {}, {}), []);
+});
+
+test('43. v2 prompt and history projections resolve files selections through the real catalog', () => {
+  const spec = V2_TEMPLATE.agents[0];
+  const inputs = {
+    briefing: { shape: 'text', text: 'Write.' },
+    tone: { shape: 'text', text: 'Noir.' },
+    house_style: { shape: 'text', text: 'Terse.' },
+    roster: { shape: 'files', files: [{ path: 'index.md', content: 'Index.' }] }
+  };
+
+  const preview = buildRealmPromptPreview(spec.prompt, V2_TEMPLATE.inputs, { inputs, bundleFiles: V2_FILES });
+  assert.strictEqual(preview.ok, true, preview.error);
+  assert.strictEqual(preview.systemPrompt, 'Lead protocol.\n\nWrite.\n\nNoir.\n\nTerse.\n\nIndex.');
+
+  const plan = materializeTemplate(V2_TEMPLATE, { realmId: 'realm_l4', inputs, bundleFiles: V2_FILES });
+  assert.strictEqual(preview.systemPrompt, plan.agents[0].systemPrompt, 'the preview equals the materialized prompt');
+  assert.deepStrictEqual(preview.inputProvenance, plan.agents[0].inputProvenance);
+
+  const parts = buildRealmPartProvenanceViews(spec.prompt, V2_TEMPLATE.inputs, { inputs, bundleFiles: V2_FILES });
+  assert.strictEqual(parts.ok, true, parts.error);
+  assert.deepStrictEqual(parts.parts.map((part) => part.kind), ['file', 'input', 'input', 'input', 'input']);
+  assert.strictEqual(parts.parts[4].path, 'index.md');
+  assert.strictEqual(parts.parts[4].content, 'Index.', 'the selected fileset file resolves by path');
+  assert.strictEqual(parts.parts[4].label, 'input "Roster files" — "index.md"');
+  assert.strictEqual(parts.parts[1].required, true);
+
+  const history = buildRealmHistoryEditorViews(spec, V2_TEMPLATE.inputs, { inputs, bundleFiles: V2_FILES });
+  assert.strictEqual(history.ok, true, history.error);
+  assert.deepStrictEqual(
+    history.entries.map((entry) => entry.content),
+    plan.agents[0].history.map((message) => message.content),
+    'the history review equals the seeded history'
+  );
+
+  // The scribe's prompt selects one file of the optional fileset.
+  const scribe = V2_TEMPLATE.agents[1];
+  const scribePreview = buildRealmPromptPreview(scribe.prompt, V2_TEMPLATE.inputs, {
+    inputs: { notes: { shape: 'files', files: [{ path: 'notes.md', content: 'Notes.' }] } },
+    bundleFiles: V2_FILES
+  });
+  assert.strictEqual(scribePreview.systemPrompt, 'Notes.');
+  const noNotes = buildRealmPromptPreview(scribe.prompt, V2_TEMPLATE.inputs, { inputs: {}, bundleFiles: V2_FILES });
+  assert.strictEqual(noNotes.ok, true, 'an absent optional fileset contributes nothing');
+
+  const wrongSelection = buildRealmPromptPreview(scribe.prompt, V2_TEMPLATE.inputs, {
+    inputs: { notes: { shape: 'files', files: [{ path: 'other.md', content: 'Other.' }] } },
+    bundleFiles: V2_FILES
+  });
+  assert.strictEqual(wrongSelection.ok, false);
+  assert.match(wrongSelection.error, /has no file 'notes\.md'/);
+  assert.strictEqual(
+    buildRealmPartProvenanceViews(scribe.prompt, V2_TEMPLATE.inputs, {
+      inputs: { notes: { shape: 'files', files: [{ path: 'other.md', content: 'Other.' }] } },
+      bundleFiles: V2_FILES
+    }).ok,
+    false,
+    'a missing selection fails the part projection inline'
+  );
+});
+
+test('44. edited review slots assemble into the launch payload and validate with the edited content', () => {
+  const version = templateBundleVersion({ template: REVIEW_TEMPLATE, files: REVIEW_FILES });
+  const source = reviewPayload(version);
+
+  // Unedited: the source attaches verbatim (the digest stays the submitter's).
+  const uneditedSlots = buildRealmReviewFileSlots(REVIEW_TEMPLATE, REVIEW_FILES, { payload: source });
+  const unedited = resolveRealmReviewLaunchPayload({
+    templateId: REVIEW_TEMPLATE.id,
+    templateVersion: version,
+    source,
+    slots: uneditedSlots
+  });
+  assert.deepStrictEqual(unedited, { edited: false, payload: source, blocked: false, error: '' });
+
+  // Edited: the package is rebuilt from the current slots and the edited
+  // content survives real catalog validation against the effective template.
+  const editedSlots = buildRealmReviewFileSlots(REVIEW_TEMPLATE, REVIEW_FILES, { payload: source }).map(
+    (slot) => (slot.path === 'lore/world.md'
+      ? { ...slot, edited: true, content: 'Edited world lore.', contentSource: 'review' }
+      : slot)
+  );
+  const edited = resolveRealmReviewLaunchPayload({
+    templateId: REVIEW_TEMPLATE.id,
+    templateVersion: version,
+    source,
+    slots: editedSlots
+  });
+  assert.strictEqual(edited.edited, true);
+  assert.strictEqual(edited.blocked, false, edited.error);
+  assert.notStrictEqual(edited.payload, source, 'an edited review rebuilds the package');
+  assert.deepStrictEqual(
+    edited.payload.files,
+    [
+      { path: 'lore/world.md', target: 'realm', content: 'Edited world lore.' },
+      { path: 'notes/tone.md', target: { agent: 'narrator' }, content: 'User tone notes.' }
+    ],
+    'the assembled payload carries the edit and keeps unedited slot content'
+  );
+
+  const resolved = validatePayload(REVIEW_TEMPLATE, edited.payload, { currentVersion: version });
+  assert.strictEqual(resolved.templateId, REVIEW_TEMPLATE.id);
+  assert.deepStrictEqual(resolved.inputs.premise, { shape: 'text', text: 'A premise.' });
+  const filesetFiles = Object.values(resolved.inputs).flatMap((value) => (
+    value.shape === 'files' ? value.files : []
+  ));
+  assert.ok(
+    filesetFiles.some((file) => file.path === 'lore/world.md' && file.content === 'Edited world lore.'),
+    'the edited slot content resolves through the real catalog'
+  );
+  assert.ok(
+    filesetFiles.some((file) => file.path === 'notes/tone.md' && file.content === 'User tone notes.'),
+    'unedited slots keep the payload content'
+  );
+
+  // Edits with an unversionable bundle block instead of dropping the edits.
+  const unversioned = resolveRealmReviewLaunchPayload({
+    templateId: REVIEW_TEMPLATE.id,
+    templateVersion: null,
+    source,
+    slots: editedSlots
+  });
+  assert.strictEqual(unversioned.blocked, true);
+  assert.strictEqual(unversioned.payload, null);
+  assert.match(unversioned.error, /could not be assembled/);
+
+  // A declared placement conflict blocks the gate with the slot's own label.
+  const conflictSlots = buildRealmReviewFileSlots(V2_TEMPLATE, V2_FILES, {
+    inputs: {
+      notes: { shape: 'files', files: [{ path: 'a.md', content: 'A' }, { path: 'b.md', content: 'B' }] }
+    }
+  });
+  const conflict = resolveRealmReviewLaunchPayload({
+    templateId: V2_TEMPLATE.id,
+    templateVersion: V2_VERSION,
+    source: null,
+    slots: conflictSlots
+  });
+  assert.strictEqual(conflict.blocked, true);
+  assert.strictEqual(conflict.payload, null);
+  assert.match(conflict.error, /cannot resolve/);
+  assert.match(conflict.error, /needs exactly one/);
+
+  // No source and no edits attaches nothing (never a phantom package).
+  const nothing = resolveRealmReviewLaunchPayload({
+    templateId: REVIEW_TEMPLATE.id,
+    templateVersion: version,
+    source: null,
+    slots: uneditedSlots
+  });
+  assert.deepStrictEqual(nothing, { edited: false, payload: null, blocked: false, error: '' });
+});
+
+/**
+ * Red-first repro for ticket 0ea4c2b: the attachment gate must validate the
+ * *effective* filesets (attached payload values included), not the operator
+ * drafts alone — otherwise a payload that satisfies a required `files` input
+ * still blocks the launch with the required-empty error.
+ */
+test('45. payload-provided filesets satisfy the attachment gate (0ea4c2b)', () => {
+  const drafts = buildRealmV2InputDrafts(V2_TEMPLATE, V2_FILES);
+  const rosterDraft = drafts.find((draft) => draft.id === 'roster');
+
+  // A required files input with an empty draft but a payload-provided fileset
+  // passes the composition gate.
+  const satisfied = validateRealmInputAttachments(V2_TEMPLATE, drafts, {
+    inputs: {
+      roster: {
+        shape: 'files',
+        files: [
+          { path: 'index.md', content: 'Index.' },
+          { path: 'lore.md', content: 'Lore.' }
+        ]
+      }
+    }
+  });
+  assert.strictEqual(satisfied.ok, true, JSON.stringify(satisfied.issues));
+
+  // The same input with neither source still fails required-empty.
+  const missing = validateRealmInputAttachments(V2_TEMPLATE, drafts);
+  assert.ok(
+    missing.issues.some((issue) => issue.code === 'required-empty' && issue.inputId === 'roster'),
+    JSON.stringify(missing.issues)
+  );
+  assert.match(missing.fieldErrors.roster, /required/);
+
+  // An effective fileset of empty bodies still fails required-empty.
+  const emptyContent = validateRealmInputAttachments(V2_TEMPLATE, drafts, {
+    inputs: { roster: { shape: 'files', files: [{ path: 'index.md', content: '  ' }] } }
+  });
+  assert.strictEqual(emptyContent.issues[0].code, 'required-empty');
+  assert.match(emptyContent.issues[0].error, /empty/);
+
+  // The composition checks see the effective values too: an effective fileset
+  // missing the prompt's `path` selection fails, and two effective files for a
+  // `path` destination fail.
+  const selectionMissing = validateRealmInputAttachments(V2_TEMPLATE, drafts, {
+    inputs: { roster: { shape: 'files', files: [{ path: 'other.md', content: 'Other.' }] } }
+  });
+  assert.ok(
+    selectionMissing.issues.some((issue) => issue.code === 'selection-missing' && issue.path === 'index.md'),
+    JSON.stringify(selectionMissing.issues)
+  );
+
+  const pathCount = validateRealmInputAttachments(V2_TEMPLATE, drafts, {
+    inputs: {
+      roster: { shape: 'files', files: [{ path: 'index.md', content: 'Index.' }] },
+      notes: {
+        shape: 'files',
+        files: [
+          { path: 'a.md', content: 'A' },
+          { path: 'b.md', content: 'B' }
+        ]
+      }
+    }
+  });
+  assert.ok(
+    pathCount.issues.some((issue) => issue.code === 'path-placement-count' && issue.inputId === 'notes'),
+    JSON.stringify(pathCount.issues)
+  );
+
+  // Draft-only callers keep the exact previous behavior (no options argument).
+  const draftOnly = validateRealmInputAttachments(V2_TEMPLATE, [
+    setRealmV2InputFiles(rosterDraft, [{ path: 'index.md', content: 'Index.', name: 'index.md' }])
+  ]);
+  assert.strictEqual(draftOnly.ok, true, JSON.stringify(draftOnly.issues));
+  assert.strictEqual(
+    validateRealmInputAttachments(V2_TEMPLATE, [setRealmV2InputFiles(rosterDraft, [])]).issues[0].code,
+    'required-empty'
+  );
 });

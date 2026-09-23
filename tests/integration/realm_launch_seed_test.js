@@ -1075,9 +1075,14 @@ test('17. the default store carries the embedded example_agent bundle and compos
       briefing: 'The probe briefing.',
       directives: 'The probe directives.'
     };
+    // The store exposes the normalized format-v2 template, so the reference
+    // materialization uses the v2 entry point with shape-tagged inputs.
     const expected = materializeTemplate(bundle.template, {
       realmId: 'realm_probe',
-      inputValues,
+      inputs: {
+        briefing: { shape: 'text', text: inputValues.briefing },
+        directives: { shape: 'text', text: inputValues.directives }
+      },
       bundleFiles: bundle.files
     });
 
@@ -1117,7 +1122,8 @@ test('17. the default store carries the embedded example_agent bundle and compos
       { inputId: 'directives', source: 'launch' },
       { inputId: 'house_style', source: 'defaultFile' }
     ]);
-    assert.ok(!('seed' in expected), 'the bundle declares no seed');
+    assert.deepEqual(expected.placements, [], 'the bundle declares no placements');
+    assert.deepEqual(expected.directives, [], 'the bundle declares no directives');
   } finally {
     store.destroy();
   }

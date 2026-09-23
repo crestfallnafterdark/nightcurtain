@@ -258,12 +258,18 @@ test('2. each instance composes its own prompt from its own launch inputs', asyn
   try {
     const expectedOne = materializeTemplate(bundle.template, {
       realmId: realmOne,
-      inputValues: INPUT_ONE,
+      inputs: {
+        briefing: { shape: 'text', text: INPUT_ONE.briefing },
+        directives: { shape: 'text', text: INPUT_ONE.directives }
+      },
       bundleFiles: bundle.files
     });
     const expectedTwo = materializeTemplate(bundle.template, {
       realmId: realmTwo,
-      inputValues: INPUT_TWO,
+      inputs: {
+        briefing: { shape: 'text', text: INPUT_TWO.briefing },
+        directives: { shape: 'text', text: INPUT_TWO.directives }
+      },
       bundleFiles: bundle.files
     });
     const promptOne = instanceSnapshot(fixture, realmOne).config.systemPrompt;

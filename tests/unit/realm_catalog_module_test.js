@@ -1,9 +1,8 @@
 /**
  * @file tests/unit/realm_catalog_module_test.js
- * @description Isolated unit suite for the `realmCatalog` module: the Wave C
- * template schema (ticket 7bf251b) plus the Wave T format-v1 surface (ticket
- * c19fb5d — origins, briefs, baked history, hydration packages, bundle
- * transport/versioning, provider-requirement gate).
+ * @description Isolated unit suite for the `realmCatalog` module: the canonical
+ * template surface plus legacy format-v1 document coverage through the read
+ * shim (decision ticket 2ba3008).
  *
  * Contract coverage:
  *  1. Runtime export surface (baked template + baked bundles + the pure
@@ -16,31 +15,25 @@
  *     rejection.
  *  5. Optional spec-field pass-through and closed-shape plans.
  *  6. Fail-closed validation of options, templates, specs, prompt parts,
- *     inputs, seed manifests, and tool profiles.
+ *     inputs, legacy seed manifests, and tool profiles.
  *  7. Capability summaries: presets, aggregate expansion, wildcard, aliases,
  *     declared requirement ids, strict grant validation, privilege escalation,
  *     frozen deterministic output.
  *  8. Composition: declared order, verbatim pieces, empty-input omission,
  *     required rejection, default/defaultFile resolution, bundle files,
- *     provenance, caps, frozen deterministic output.
- *  9. Seed resolution: inline verbatim, bundle files, missing-entry failure,
- *     directive-without-target-file rejection, frozen deterministic output.
- * 10. Purity: explicit import surface only, no ambient I/O, re-export-only index.
- * 11. Baked bundles: demo fixture first, frozen generated bundles appended in
+ *     provenance, frozen deterministic output.
+ *  9. Purity: explicit import surface only, no ambient I/O, re-export-only index.
+ * 10. Baked bundles: demo fixture first, frozen generated bundles appended in
  *     sorted id order, accessor semantics, and a stable sha256 content version.
- * 12. Format v1 schema: input origins/briefs, seed-slot origin/source rules,
- *     history schema, hydration declaration, toolContract/providers shapes.
- * 13. Baked history: composition, empty-entry rejection, plan carriage, input
+ * 11. Legacy format-v1 schema (through the shim): input origins/briefs,
+ *     seed-slot origin/source rules, history schema, toolContract/providers.
+ * 12. Baked history: composition, empty-entry rejection, plan carriage, input
  *     precedence, missing-file failure, frozen deterministic output.
- * 14. Per-bundle versioning: canonical byte stream (independently reproduced
+ * 13. Per-bundle versioning: canonical byte stream (independently reproduced
  *     with node:crypto), baked vs JSON-imported identity, UTF-8 framing.
- * 15. Transport: parse/serialize round-trips, closed envelope, typed errors,
+ * 14. Transport: parse/serialize round-trips, closed envelope, typed errors,
  *     deep-frozen parsed bundles.
- * 16. Hydration packages: slot matching, generated coverage, fixed/unknown/
- *     duplicate rejection, input ids, version-mismatch policy.
- * 17. Origin-aware materialization: fixed/user/generated seed slots and the
- *     provider-requirement launch gate helper.
- * 18. Text hashing: `hashText` known vectors, unicode bytes, input rejection.
+ * 15. Text hashing: `hashText` known vectors, unicode bytes, input rejection.
  */
 
 import test from 'node:test';
@@ -64,13 +57,15 @@ import {
   hashText,
   materializeTemplate,
   parseTemplateBundle,
-  resolveSeedManifest,
+  resolveDirectives,
+  resolvePlacements,
   serializeTemplateBundle,
   summarizeAgentCapabilities,
   templateBundleVersion,
   templateRequiresProviders,
   templateUnsupportedAuthorities,
-  validateHydrationPackage
+  validatePayload,
+  validateTemplate
 } from '../../src/lib/sandbox/realmCatalog/index.ts';
 import {
   MUTATING_TOOLS,
@@ -95,6 +90,7 @@ const MODULE_FILES = [
   'compose.ts',
   'materialize.ts',
   'capabilities.ts',
+  'legacy.ts',
   'demo.ts',
   'bundles.ts'
 ];
@@ -159,26 +155,32 @@ test('1. runtime surface exports the demo template, the baked bundles, and the p
     'getBakedTemplateBundle',
     'hashText',
     'materializeTemplate',
+    'normalizeTemplate',
     'parseTemplateBundle',
-    'resolveSeedManifest',
+    'payloadDigest',
+    'resolveDirectives',
+    'resolvePlacements',
     'serializeTemplateBundle',
     'summarizeAgentCapabilities',
     'templateBundleVersion',
     'templateRequiresProviders',
     'templateUnsupportedAuthorities',
-    'validateHydrationPackage'
+    'validatePayload',
+    'validateTemplate'
   ]);
   assert.strictEqual(typeof composeSystemPrompt, 'function');
   assert.strictEqual(typeof composeAgentHistory, 'function');
   assert.strictEqual(typeof materializeTemplate, 'function');
-  assert.strictEqual(typeof resolveSeedManifest, 'function');
+  assert.strictEqual(typeof resolvePlacements, 'function');
+  assert.strictEqual(typeof resolveDirectives, 'function');
   assert.strictEqual(typeof summarizeAgentCapabilities, 'function');
   assert.strictEqual(typeof getBakedTemplateBundle, 'function');
   assert.strictEqual(typeof hashText, 'function');
   assert.strictEqual(typeof parseTemplateBundle, 'function');
   assert.strictEqual(typeof serializeTemplateBundle, 'function');
   assert.strictEqual(typeof templateBundleVersion, 'function');
-  assert.strictEqual(typeof validateHydrationPackage, 'function');
+  assert.strictEqual(typeof validatePayload, 'function');
+  assert.strictEqual(typeof validateTemplate, 'function');
   assert.strictEqual(typeof templateRequiresProviders, 'function');
   assert.strictEqual(typeof RealmCatalogError, 'function');
   assert.ok(Object.isFrozen(REALM_CATALOG_ERROR_CODES), 'the error-code dictionary is frozen');
@@ -191,9 +193,10 @@ test('1. runtime surface exports the demo template, the baked bundles, and the p
 
 test('2. demo template is the frozen two-agent fixture with inline text prompt parts', () => {
   assert.strictEqual(DEMO_TEMPLATE.id, 'demo');
-  assert.strictEqual(DEMO_TEMPLATE.formatVersion, 1);
+  assert.strictEqual(DEMO_TEMPLATE.formatVersion, 2);
   assert.ok(!('inputs' in DEMO_TEMPLATE), 'the demo declares no inputs');
-  assert.ok(!('seed' in DEMO_TEMPLATE), 'the demo declares no seed');
+  assert.ok(!('placements' in DEMO_TEMPLATE), 'the demo declares no placements');
+  assert.ok(!('directives' in DEMO_TEMPLATE), 'the demo declares no directives');
   assert.deepStrictEqual(DEMO_TEMPLATE.agents.map((spec) => spec.key), ['coordinator', 'worker']);
   assert.deepStrictEqual(
     DEMO_TEMPLATE.agents.map((spec) => spec.idPattern),
@@ -447,17 +450,18 @@ test('8. materializeTemplate fails closed on malformed options and overrides', (
   );
   assert.throws(() => materializeTemplate(valid, { realmId: 'r', idOverrides: { agent: '' } }), /idOverrides/);
   assert.throws(
-    () => materializeTemplate(valid, { realmId: 'r', inputValues: 'nope' }),
-    /inputValues must be a record/
+    () => materializeTemplate(valid, { realmId: 'r', inputs: 'nope' }),
+    /inputs must be a record/,
+    'supplied input values must be a shape-tagged record'
   );
   assert.throws(
-    () => materializeTemplate(valid, { realmId: 'r', inputValues: { ghost: 'x' } }),
+    () => materializeTemplate(valid, { realmId: 'r', inputs: { ghost: { shape: 'text', text: 'x' } } }),
     /undeclared input 'ghost'/,
     'an input value for an undeclared input fails closed'
   );
   assert.throws(
-    () => materializeTemplate(valid, { realmId: 'r', inputValues: { agent: 7 } }),
-    /inputValues\['agent'\] must be a string/
+    () => materializeTemplate(valid, { realmId: 'r', inputs: { agent: { shape: 'text', text: 7 } } }),
+    /text must be a string/
   );
   assert.throws(
     () => materializeTemplate(valid, { realmId: 'r', bundleFiles: 'nope' }),
@@ -480,15 +484,15 @@ test('9. materializeTemplate fails closed on malformed templates, inputs, and se
   assert.throws(() => materializeTemplate(template({ notes: '   ' }), { realmId: 'r' }), /notes/);
   assert.throws(
     () => materializeTemplate(template({ formatVersion: undefined }), { realmId: 'r' }),
-    /formatVersion must be 1/
+    /formatVersion must be 1 or 2/
   );
   assert.throws(
-    () => materializeTemplate(template({ formatVersion: 2 }), { realmId: 'r' }),
-    /formatVersion must be 1/
+    () => materializeTemplate(template({ formatVersion: 3 }), { realmId: 'r' }),
+    /formatVersion must be 1 or 2/
   );
   assert.throws(
     () => materializeTemplate(template({ formatVersion: '1' }), { realmId: 'r' }),
-    /formatVersion must be 1/
+    /formatVersion must be 1 or 2/
   );
   assert.throws(() => materializeTemplate(template({ agents: [] }), { realmId: 'r' }), /non-empty array/);
   assert.throws(() => materializeTemplate(template({ agents: 'nope' }), { realmId: 'r' }), /non-empty array/);
@@ -854,12 +858,12 @@ test('16. composition follows declared order, joins with a blank line, and resol
 
   const plan = materializeTemplate(tpl, {
     realmId: 'r',
-    inputValues: { lore: 'World lore.' },
+    inputs: { lore: { shape: 'text', text: 'World lore.' } },
     bundleFiles: { 'prompts/protocol.md': 'File protocol.' }
   });
   const again = materializeTemplate(tpl, {
     realmId: 'r',
-    inputValues: { lore: 'World lore.' },
+    inputs: { lore: { shape: 'text', text: 'World lore.' } },
     bundleFiles: { 'prompts/protocol.md': 'File protocol.' }
   });
 
@@ -883,10 +887,7 @@ test('16. composition follows declared order, joins with a blank line, and resol
 
 test('17. an empty input contributes nothing; required inputs fail closed while empty', () => {
   const tpl = template({
-    inputs: [
-      { id: 'optional', label: 'Optional' },
-      { id: 'unreferencedRequired', label: 'Unreferenced required', required: true }
-    ],
+    inputs: [{ id: 'optional', label: 'Optional' }],
     agents: [
       agentSpec({
         prompt: [
@@ -911,17 +912,17 @@ test('17. an empty input contributes nothing; required inputs fail closed while 
     /input 'directives' is required and resolves empty/
   );
   assert.throws(
-    () => materializeTemplate(requiredTpl, { realmId: 'r', inputValues: { directives: '   ' } }),
+    () => materializeTemplate(requiredTpl, { realmId: 'r', inputs: { directives: { shape: 'text', text: '   ' } } }),
     /required and resolves empty/,
     'a whitespace-only launch value is empty'
   );
   assert.throws(
-    () => materializeTemplate(requiredTpl, { realmId: 'r', inputValues: { directives: '' } }),
+    () => materializeTemplate(requiredTpl, { realmId: 'r', inputs: { directives: { shape: 'text', text: '' } } }),
     /required and resolves empty/,
     'an explicit empty launch value stays launch-sourced and blocks a required input'
   );
   assert.strictEqual(
-    materializeTemplate(requiredTpl, { realmId: 'r', inputValues: { directives: 'Go.' } }).agents[0].systemPrompt,
+    materializeTemplate(requiredTpl, { realmId: 'r', inputs: { directives: { shape: 'text', text: 'Go.' } } }).agents[0].systemPrompt,
     'A\n\nGo.'
   );
 
@@ -935,7 +936,7 @@ test('17. an empty input contributes nothing; required inputs fail closed while 
     inputs: [{ id: 'i', label: 'I', default: 'D' }],
     agents: [agentSpec({ prompt: [{ kind: 'text', text: 'A' }, { kind: 'input', inputId: 'i' }, { kind: 'text', text: 'B' }] })]
   });
-  const launchedEmpty = materializeTemplate(overridden, { realmId: 'r', inputValues: { i: '' } });
+  const launchedEmpty = materializeTemplate(overridden, { realmId: 'r', inputs: { i: { shape: 'text', text: '' } } });
   assert.strictEqual(launchedEmpty.agents[0].systemPrompt, 'A\n\nB');
   assert.deepStrictEqual(
     launchedEmpty.agents[0].inputProvenance,
@@ -969,7 +970,7 @@ test('18. default and defaultFile prefills resolve; a referenced missing bundle 
     /defaultFile 'files\/prefill\.md' is not present in the bundle files/
   );
 
-  const overridden = materializeTemplate(tpl, { realmId: 'r', inputValues: { fromFile: 'Launch.' } });
+  const overridden = materializeTemplate(tpl, { realmId: 'r', inputs: { fromFile: { shape: 'text', text: 'Launch.' } } });
   assert.strictEqual(overridden.agents[0].systemPrompt, 'Default text.\n\nLaunch.');
   assert.deepStrictEqual(overridden.agents[0].inputProvenance[1], { inputId: 'fromFile', source: 'launch' });
 
@@ -1019,7 +1020,7 @@ test('20. input provenance dedupes per input and follows first-reference order',
     ]
   });
 
-  const plan = materializeTemplate(tpl, { realmId: 'r', inputValues: { b: 'B.' } });
+  const plan = materializeTemplate(tpl, { realmId: 'r', inputs: { b: { shape: 'text', text: 'B.' } } });
   assert.strictEqual(plan.agents[0].systemPrompt, 'B.\n\nX\n\nA.\n\nB.');
   assert.deepStrictEqual(plan.agents[0].inputProvenance, [
     { inputId: 'b', source: 'launch' },
@@ -1029,148 +1030,17 @@ test('20. input provenance dedupes per input and follows first-reference order',
   assert.ok(Object.isFrozen(plan.agents[0].inputProvenance[0]), 'provenance entries must be frozen');
 
   const unused = template({ inputs: [{ id: 'unused', label: 'Unused' }], agents: [agentSpec()] });
-  const unusedPlan = materializeTemplate(unused, { realmId: 'r', inputValues: { unused: 'ignored' } });
-  assert.deepStrictEqual(
-    unusedPlan.agents[0].inputProvenance,
-    [],
-    'provenance covers referenced inputs only'
+  assert.throws(
+    () => materializeTemplate(unused, { realmId: 'r' }),
+    /never referenced/,
+    'a declared input no surface consumes fails totality instead of staying silently unused'
   );
 });
 
-test('21. seed manifests resolve inline and bundle-file content into the plan', () => {
-  const tpl = template({
-    seed: {
-      files: [
-        { path: 'brief.md', target: 'realm', source: { inline: 'Inline brief.' } },
-        { path: 'notes/plan.md', target: { agent: 'agent' }, source: { file: 'files/plan.md' } }
-      ],
-      directive: { targetAgentKey: 'agent', text: 'Begin.' }
-    }
-  });
-
-  const plan = materializeTemplate(tpl, { realmId: 'r', bundleFiles: { 'files/plan.md': 'Plan body.' } });
-  assert.deepStrictEqual(plan.seed, {
-    files: [
-      { path: 'brief.md', target: 'realm', content: 'Inline brief.' },
-      { path: 'notes/plan.md', target: { agent: 'agent' }, content: 'Plan body.' }
-    ],
-    directive: { targetAgentKey: 'agent', text: 'Begin.' }
-  });
-  assert.ok(Object.isFrozen(plan.seed), 'resolved seed must be frozen');
-  assert.ok(Object.isFrozen(plan.seed.files), 'resolved seed files must be frozen');
-  assert.ok(Object.isFrozen(plan.seed.files[1]), 'resolved seed file must be frozen');
-  assert.ok(Object.isFrozen(plan.seed.files[1].target), 'resolved seed target must be frozen');
-  assert.ok(Object.isFrozen(plan.seed.directive), 'resolved directive must be frozen');
-  assert.deepStrictEqual(
-    materializeTemplate(tpl, { realmId: 'r', bundleFiles: { 'files/plan.md': 'Plan body.' } }),
-    plan,
-    'seed resolution stays deterministic across calls'
-  );
-
-  assert.throws(
-    () => materializeTemplate(tpl, { realmId: 'r' }),
-    /seed file 'files\/plan\.md' \(files\[1\]\) is not present in the bundle files/
-  );
-
-  assert.ok(!('seed' in materializeTemplate(template(), { realmId: 'r' })), 'a seed-less template stays seed-less');
-
-  const emptyInline = template({
-    seed: { files: [{ path: 'empty.md', target: 'realm', source: { inline: '' } }] }
-  });
-  assert.strictEqual(
-    materializeTemplate(emptyInline, { realmId: 'r' }).seed.files[0].content,
-    '',
-    'empty inline content is a valid empty file'
-  );
-
-  const emptyManifest = materializeTemplate(template({ seed: {} }), { realmId: 'r' });
-  assert.deepStrictEqual(emptyManifest.seed, { files: [] }, 'a file-less manifest resolves to an empty list');
-});
-
-test('22. a seed directive must have a file for its target agent (fail closed, no second delivery path)', () => {
-  const directiveOnly = template({
-    seed: {
-      files: [{ path: 'brief.md', target: 'realm', source: { inline: 'Realm brief.' } }],
-      directive: { targetAgentKey: 'agent', text: 'Begin.' }
-    }
-  });
-  assert.throws(
-    () => materializeTemplate(directiveOnly, { realmId: 'r' }),
-    /directive targets agent 'agent' but declares no seed file for that target/,
-    'a directive for an agent without files is rejected at validation'
-  );
-
-  const emptyFiles = template({ seed: { files: [], directive: { targetAgentKey: 'agent', text: 'Begin.' } } });
-  assert.throws(
-    () => materializeTemplate(emptyFiles, { realmId: 'r' }),
-    /declares no seed file for that target/
-  );
-
-  const realmFileOnly = template({
-    seed: {
-      files: [{ path: 'notes.md', target: 'realm', source: { inline: 'Realm notes.' } }],
-      directive: { targetAgentKey: 'agent', text: 'Begin.' }
-    }
-  });
-  assert.throws(
-    () => materializeTemplate(realmFileOnly, { realmId: 'r' }),
-    /declares no seed file for that target/,
-    'a realm-global file does not satisfy the directive target'
-  );
-
-  // The valid shape: at least one file targets the directive's agent key.
-  const valid = template({
-    seed: {
-      files: [
-        { path: 'brief.md', target: 'realm', source: { inline: 'Realm brief.' } },
-        { path: 'orders/one.md', target: { agent: 'agent' }, source: { inline: 'Order.' } }
-      ],
-      directive: { targetAgentKey: 'agent', text: 'Begin.' }
-    }
-  });
-  const plan = materializeTemplate(valid, { realmId: 'r' });
-  assert.deepStrictEqual(plan.seed.directive, { targetAgentKey: 'agent', text: 'Begin.' });
-  assert.deepStrictEqual(
-    plan.seed.files.map((file) => file.target),
-    ['realm', { agent: 'agent' }]
-  );
-
-  // The standalone resolver validates the same rule.
-  assert.throws(
-    () => resolveSeedManifest({ directive: { targetAgentKey: 'agent', text: 'Begin.' } }),
-    /declares no seed file for that target/
-  );
-});
-
-test('23. composition caps: at most 64 parts and 200 KB per composed prompt', () => {
-  const exactly64 = Array.from({ length: MAX_PROMPT_PARTS }, (_, index) => ({ kind: 'text', text: `p${index}` }));
-  const plan = materializeTemplate(template({ agents: [agentSpec({ prompt: exactly64 })] }), { realmId: 'r' });
-  assert.strictEqual(plan.agents[0].systemPrompt.split('\n\n').length, MAX_PROMPT_PARTS);
-
-  const tooMany = Array.from({ length: MAX_PROMPT_PARTS + 1 }, () => ({ kind: 'text', text: 'x' }));
-  assert.throws(
-    () => materializeTemplate(template({ agents: [agentSpec({ prompt: tooMany })] }), { realmId: 'r' }),
-    /the cap is 64/
-  );
-
-  const atCap = 'x'.repeat(MAX_COMPOSED_PROMPT_CHARS);
-  const atCapPlan = materializeTemplate(
-    template({ agents: [agentSpec({ prompt: [{ kind: 'text', text: atCap }] })] }),
-    { realmId: 'r' }
-  );
-  assert.strictEqual(atCapPlan.agents[0].systemPrompt.length, MAX_COMPOSED_PROMPT_CHARS);
-
-  const overCap = 'x'.repeat(MAX_COMPOSED_PROMPT_CHARS + 1);
-  assert.throws(
-    () => materializeTemplate(template({ agents: [agentSpec({ prompt: [{ kind: 'text', text: overCap }] })] }), { realmId: 'r' }),
-    /the cap is 204800/
-  );
-});
-
-test('24. composeSystemPrompt and resolveSeedManifest are standalone, frozen, and fail closed', () => {
+test('24. composeSystemPrompt is standalone, frozen, and fail closed', () => {
   const composed = composeSystemPrompt(
     [{ kind: 'text', text: 'A' }, { kind: 'input', inputId: 'i' }],
-    [{ id: 'i', label: 'I', default: 'D' }]
+    [{ id: 'i', label: 'I', shape: 'text', default: 'D' }]
   );
   assert.deepStrictEqual(composed, {
     systemPrompt: 'A\n\nD',
@@ -1180,7 +1050,7 @@ test('24. composeSystemPrompt and resolveSeedManifest are standalone, frozen, an
   assert.ok(Object.isFrozen(composed.inputProvenance), 'composed provenance must be frozen');
   assert.notStrictEqual(composed, composeSystemPrompt(
     [{ kind: 'text', text: 'A' }, { kind: 'input', inputId: 'i' }],
-    [{ id: 'i', label: 'I', default: 'D' }]
+    [{ id: 'i', label: 'I', shape: 'text', default: 'D' }]
   ));
 
   assert.throws(() => composeSystemPrompt([], undefined), /non-empty array of prompt parts/);
@@ -1189,21 +1059,16 @@ test('24. composeSystemPrompt and resolveSeedManifest are standalone, frozen, an
     /references undeclared input 'ghost'/
   );
   assert.throws(
-    () => composeSystemPrompt([{ kind: 'text', text: 'A' }], undefined, { inputValues: { ghost: 'x' } }),
+    () => composeSystemPrompt(
+      [{ kind: 'text', text: 'A' }],
+      undefined,
+      { inputs: { ghost: { shape: 'text', text: 'x' } } }
+    ),
     /undeclared input 'ghost'/
   );
-  assert.throws(() => composeSystemPrompt([{ kind: 'text', text: 'A' }], undefined, 'nope'), /options must be an object/);
-
-  const resolved = resolveSeedManifest({
-    files: [{ path: 'a.md', target: 'realm', source: { inline: 'Body.' } }]
-  });
-  assert.deepStrictEqual(resolved, { files: [{ path: 'a.md', target: 'realm', content: 'Body.' }] });
-  assert.ok(Object.isFrozen(resolved), 'resolved seed must be frozen');
-  assert.deepStrictEqual(resolveSeedManifest({}), { files: [] }, 'an empty manifest resolves to an empty list');
-  assert.throws(() => resolveSeedManifest(null), /seed must be an object/);
   assert.throws(
-    () => resolveSeedManifest({ files: [{ path: 'a.md', target: 'realm', source: { file: 'missing.md' } }] }),
-    /not present in the bundle files/
+    () => composeSystemPrompt([{ kind: 'text', text: 'A' }], undefined, 'nope'),
+    /options must be an object/
   );
 });
 
@@ -1224,6 +1089,7 @@ test('25. module sources stay pure with an explicit import surface', () => {
     './compose.ts',
     './materialize.ts',
     './capabilities.ts',
+    './legacy.ts',
     './demo.ts',
     './bundles.ts',
     './content.generated.ts',
@@ -1302,6 +1168,21 @@ test('26. baked bundles: demo first, frozen generated bundles appended, lookup s
     'the generated bundles follow the demo fixture in sorted template id order'
   );
 
+  // The shipped generated bundles are format-v2 documents: the demo fixture
+  // stays the legacy v1 fixture, while every embedded bundle declares the v2
+  // schema (shaped inputs, placements) and carries no legacy block.
+  for (const bundle of BAKED_TEMPLATE_BUNDLES.slice(1)) {
+    assert.strictEqual(bundle.template.formatVersion, 2, `${bundle.template.id}: shipped bundles are format v2`);
+    assert.ok(!('seed' in bundle.template), `${bundle.template.id}: no legacy seed manifest`);
+    assert.ok(!('hydration' in bundle.template), `${bundle.template.id}: no legacy hydration block`);
+    for (const input of bundle.template.inputs ?? []) {
+      assert.ok(
+        input.shape === 'text' || input.shape === 'files',
+        `${bundle.template.id}: input '${input.id}' declares a v2 shape`
+      );
+    }
+  }
+
   for (const bundle of BAKED_TEMPLATE_BUNDLES) {
     assert.ok(Object.isFrozen(bundle.template), `${bundle.template.id}: template is deep-frozen`);
     assert.ok(Object.isFrozen(bundle.files), `${bundle.template.id}: file map is frozen`);
@@ -1320,104 +1201,6 @@ test('26. baked bundles: demo first, frozen generated bundles appended, lookup s
   assert.strictEqual(getBakedTemplateBundle(null), null, 'non-string ids resolve to null');
   assert.strictEqual(getBakedTemplateBundle(42), null, 'non-string ids resolve to null');
 });
-
-// ============================================================================
-// 12. Format v1 schema
-// ============================================================================
-
-test('27. input origins default to user; generated inputs require a brief and reject prefills', () => {
-  const accepted = [
-    [{ id: 'a', label: 'A' }],
-    [{ id: 'a', label: 'A', origin: 'user' }],
-    [{ id: 'a', label: 'A', origin: 'user', brief: 'author hint' }],
-    [{ id: 'a', label: 'A', origin: 'generated', brief: 'generate me' }],
-    [{ id: 'a', label: 'A', default: 'draft-compatible' }]
-  ];
-  for (const inputs of accepted) {
-    const plan = materializeTemplate(template({ inputs }), { realmId: 'r' });
-    assert.strictEqual(plan.agents.length, 1, `must accept ${JSON.stringify(inputs)}`);
-  }
-
-  const cases = [
-    [{ id: 'a', label: 'A', origin: 'fixed' }, /origin must be 'user' or 'generated'/],
-    [{ id: 'a', label: 'A', origin: 'generated' }, /must declare a brief for a generated input/],
-    [
-      { id: 'a', label: 'A', origin: 'generated', brief: 'g', default: 'x' },
-      /must not declare default or defaultFile for a generated input/
-    ],
-    [
-      { id: 'a', label: 'A', origin: 'generated', brief: 'g', defaultFile: 'f.md' },
-      /must not declare default or defaultFile for a generated input/
-    ],
-    [{ id: 'a', label: 'A', brief: '' }, /inputs\[0\] brief/]
-  ];
-  for (const [input, pattern] of cases) {
-    assert.throws(
-      () => materializeTemplate(template({ inputs: [input] }), { realmId: 'r' }),
-      pattern,
-      `must reject ${JSON.stringify(input)}`
-    );
-  }
-});
-
-test('28. seed slots: fixed requires a source; user/generated forbid one; generated requires a brief', () => {
-  const fixedPlan = materializeTemplate(
-    template({ seed: { files: [{ path: 'a.md', target: 'realm', source: { inline: 'x' } }] } }),
-    { realmId: 'r' }
-  );
-  assert.strictEqual(fixedPlan.seed.files[0].content, 'x', 'an absent origin defaults to fixed with a source');
-
-  const userPlan = materializeTemplate(
-    template({ seed: { files: [{ path: 'a.md', target: 'realm', origin: 'user' }] } }),
-    { realmId: 'r' }
-  );
-  assert.deepStrictEqual(userPlan.seed.files, [], 'an absent optional user slot is skipped');
-
-  const generatedPlan = materializeTemplate(
-    template({ seed: { files: [{ path: 'a.md', target: 'realm', origin: 'generated', brief: 'fill me' }] } }),
-    { realmId: 'r', hydrationFiles: [{ path: 'a.md', target: 'realm', content: 'generated body' }] }
-  );
-  assert.strictEqual(generatedPlan.seed.files[0].content, 'generated body');
-
-  const cases = [
-    [
-      { path: 'a.md', target: 'realm' },
-      /must declare a source for a fixed seed slot/
-    ],
-    [
-      { path: 'a.md', target: 'realm', origin: 'fixed' },
-      /must declare a source for a fixed seed slot/
-    ],
-    [
-      { path: 'a.md', target: 'realm', origin: 'user', source: { inline: 'x' } },
-      /must not declare a source for a user seed slot/
-    ],
-    [
-      { path: 'a.md', target: 'realm', origin: 'generated', brief: 'g', source: { inline: 'x' } },
-      /must not declare a source for a generated seed slot/
-    ],
-    [
-      { path: 'a.md', target: 'realm', origin: 'generated' },
-      /must declare a brief for a generated seed slot/
-    ],
-    [
-      { path: 'a.md', target: 'realm', origin: 'other', source: { inline: 'x' } },
-      /origin must be 'fixed', 'user', or 'generated'/
-    ],
-    [
-      { path: 'a.md', target: 'realm', origin: 'user', brief: '' },
-      /files\[0\] brief/
-    ]
-  ];
-  for (const [file, pattern] of cases) {
-    assert.throws(
-      () => materializeTemplate(template({ seed: { files: [file] } }), { realmId: 'r' }),
-      pattern,
-      `must reject ${JSON.stringify(file)}`
-    );
-  }
-});
-
 test('29. history entries validate as closed shapes and reference declared inputs', () => {
   const tpl = template({
     inputs: [{ id: 'opening', label: 'Opening', origin: 'generated', brief: 'opening scene' }],
@@ -1430,7 +1213,7 @@ test('29. history entries validate as closed shapes and reference declared input
       })
     ]
   });
-  const plan = materializeTemplate(tpl, { realmId: 'r', inputValues: { opening: 'Rain hammers the roof.' } });
+  const plan = materializeTemplate(tpl, { realmId: 'r', inputs: { opening: { shape: 'text', text: 'Rain hammers the roof.' } } });
   assert.deepStrictEqual(plan.agents[0].history, [
     { role: 'assistant', content: 'Rain hammers the roof.', source: 'template' },
     { role: 'user', content: 'Continue.', source: 'template' }
@@ -1487,7 +1270,15 @@ test('30. composeAgentHistory composes parts in order, omits empty inputs, and r
       { role: 'user', content: [{ kind: 'text', text: 'Begin.' }] }
     ]
   });
-  const history = composeAgentHistory(spec, { scene: 'Rain.', empty: '   ' }, { 'files/opener.md': 'The door opens.' });
+  const declarations = [
+    { id: 'scene', label: 'Scene', shape: 'text' },
+    { id: 'empty', label: 'Empty', shape: 'text' }
+  ];
+  const bundleFiles = { 'files/opener.md': 'The door opens.' };
+  const history = composeAgentHistory(spec, declarations, {
+    inputs: { scene: { shape: 'text', text: 'Rain.' }, empty: { shape: 'text', text: '   ' } },
+    bundleFiles
+  });
   assert.deepStrictEqual(history, [
     { role: 'assistant', content: 'Opening.\n\nThe door opens.\n\nRain.', source: 'template' },
     { role: 'user', content: 'Begin.', source: 'template' }
@@ -1495,32 +1286,39 @@ test('30. composeAgentHistory composes parts in order, omits empty inputs, and r
   assert.ok(Object.isFrozen(history), 'composed history must be frozen');
   assert.ok(Object.isFrozen(history[0]), 'composed history entries must be frozen');
   assert.deepStrictEqual(
-    composeAgentHistory(spec, { scene: 'Rain.', empty: '' }, { 'files/opener.md': 'The door opens.' }),
+    composeAgentHistory(spec, declarations, {
+      inputs: { scene: { shape: 'text', text: 'Rain.' }, empty: { shape: 'text', text: '' } },
+      bundleFiles
+    }),
     history,
     'composition stays deterministic'
   );
 
-  assert.deepStrictEqual(composeAgentHistory(agentSpec(), {}, {}), [], 'a history-less spec composes to nothing');
+  assert.deepStrictEqual(composeAgentHistory(agentSpec(), [], {}), [], 'a history-less spec composes to nothing');
 
   assert.throws(
-    () => composeAgentHistory(agentSpec({ history: [{ role: 'assistant', content: [{ kind: 'file', path: 'ghost.md' }] }] }), {}, {}),
+    () => composeAgentHistory(agentSpec({ history: [{ role: 'assistant', content: [{ kind: 'file', path: 'ghost.md' }] }] }), [], {}),
     /references bundle file 'ghost\.md' which is not present/,
     'a missing history file fails closed'
   );
   assert.throws(
-    () => composeAgentHistory(agentSpec({ history: [{ role: 'assistant', content: [{ kind: 'input', inputId: 'scene' }] }] }), {}, {}),
+    () => composeAgentHistory(
+      agentSpec({ history: [{ role: 'assistant', content: [{ kind: 'input', inputId: 'scene' }] }] }),
+      [{ id: 'scene', label: 'Scene', shape: 'text' }],
+      {}
+    ),
     /history\[0\] composes empty/,
     'an entry that composes empty is rejected'
   );
   assert.throws(
-    () => composeAgentHistory(null, {}, {}),
+    () => composeAgentHistory(null, [], {}),
     (error) => error instanceof RealmCatalogError
       && error.code === REALM_CATALOG_ERROR_CODES.ERR_TEMPLATE_INVALID
       && /spec must be an object/.test(error.message)
   );
-  assert.throws(() => composeAgentHistory(agentSpec(), 'nope', {}), /inputs must be a record/);
-  assert.throws(() => composeAgentHistory(agentSpec(), {}, 'nope'), /files must be a record/);
-  assert.throws(() => composeAgentHistory(agentSpec({ key: '' }), {}, {}), /spec key/);
+  assert.throws(() => composeAgentHistory(agentSpec(), 'nope', {}), /must be an array of template inputs/);
+  assert.throws(() => composeAgentHistory(agentSpec(), [], 'nope'), /options must be an object/);
+  assert.throws(() => composeAgentHistory(agentSpec({ key: '' }), [], {}), /spec key/);
 });
 
 test('31. materialized history resolves launch/default/defaultFile inputs like prompts do', () => {
@@ -1547,7 +1345,7 @@ test('31. materialized history resolves launch/default/defaultFile inputs like p
 
   const overridden = materializeTemplate(tpl, {
     realmId: 'r',
-    inputValues: { scene: 'Launch scene.' },
+    inputs: { scene: { shape: 'text', text: 'Launch scene.' } },
     bundleFiles: { 'inputs/prefill.md': 'Prefilled opener.' }
   });
   assert.strictEqual(overridden.agents[0].history[0].content, 'Launch scene.');
@@ -1572,106 +1370,21 @@ test('31. materialized history resolves launch/default/defaultFile inputs like p
 // 13. Tool contract / providers (accepted and validated, never resolved)
 // ============================================================================
 
-/**
- * Builds the consensus-test-shaped fixture used by the format-v1 tests.
- *
- * @param {object} [overrides] Template field overrides
- * @returns {object} Template literal
- */
-function consensusTemplate(overrides = {}) {
-  return {
-    id: 'consensus_test',
-    name: 'Consensus Test',
-    description: 'fixture',
-    formatVersion: 1,
-    hydration: { brief: 'Invent a motion and the opposing stances.' },
-    inputs: [
-      { id: 'motion', label: 'Motion', origin: 'generated', brief: 'One falsifiable claim.', required: true },
-      { id: 'rounds', label: 'Rounds', origin: 'user', default: '10' }
-    ],
-    agents: [
-      {
-        key: 'observer',
-        idPattern: 'observer',
-        name: 'Observer',
-        role: 'scorer',
-        prompt: [{ kind: 'text', text: 'Score each turn.' }, { kind: 'input', inputId: 'motion' }],
-        toolProfile: { tools: ['read_message', 'list_inbox', 'text.similarity'] },
-        privileged: false,
-        history: [
-          {
-            role: 'assistant',
-            content: [{ kind: 'text', text: 'The motion:' }, { kind: 'input', inputId: 'motion' }]
-          }
-        ]
-      }
-    ],
-    seed: {
-      files: [
-        { path: 'scoreboard.ndjson', target: 'realm', origin: 'fixed', source: { inline: '' } },
-        { path: 'lore/world.md', target: 'realm', origin: 'generated', brief: 'World lore.' },
-        { path: 'notes/private.md', target: { agent: 'observer' }, origin: 'user', brief: 'Optional notes.' }
-      ]
-    },
-    toolContract: {
-      requirements: [
-        {
-          id: 'text.similarity',
-          brief: '0..1 similarity between two texts',
-          io: { in: { a: 'string', b: 'string' }, out: { score: 'number' } },
-          required: true,
-          range: '^1',
-          prefer: ['acme/text-tools@^1']
-        }
-      ]
-    },
-    providers: [
-      { kind: 'pack', id: 'acme/text-tools', range: '^1', source: 'https://example.com/acme-text-tools' },
-      {
-        kind: 'mcp',
-        id: 'acme-scoring',
-        transport: { kind: 'http', url: 'https://mcp.example.com' },
-        provides: [{ capability: 'text.similarity', tool: 'similarity' }],
-        authRef: 'acme_scoring_key'
-      }
-    ],
-    ...overrides
-  };
-}
-
-/**
- * Builds a hydration package for the consensus fixture.
- *
- * @param {string} templateVersion Version to pin
- * @param {object} [overrides] Package field overrides
- * @returns {object} Package literal
- */
-function consensusPackage(templateVersion, overrides = {}) {
-  return {
-    formatVersion: 1,
-    templateId: 'consensus_test',
-    templateVersion,
-    inputs: { motion: 'Open-weight models match closed models by 2027.', rounds: '5' },
-    files: [{ path: 'lore/world.md', target: 'realm', content: 'World lore body.' }],
-    provenance: { hydrator: 'hydration builtin', generatedAt: '2026-09-21T00:00:00Z', reviewedBy: 'owner' },
-    ...overrides
-  };
-}
-
 test('32. toolContract and providers are accepted and shape-validated, never resolved', () => {
-  const tpl = consensusTemplate();
-  const plan = materializeTemplate(tpl, {
-    realmId: 'r',
-    inputValues: { motion: 'A motion.', rounds: '5' },
-    hydrationFiles: [{ path: 'lore/world.md', target: 'realm', content: 'Lore.' }]
+  const declared = template({
+    agents: [agentSpec({ toolProfile: { tools: ['read_file', 'text.similarity'] } })],
+    toolContract: {
+      requirements: [{ id: 'text.similarity', brief: 'sim', io: { in: {}, out: {} } }]
+    }
   });
-  assert.strictEqual(plan.agents[0].toolProfile.tools.includes('text.similarity'), true);
-  assert.deepStrictEqual(
-    plan.agents[0].history,
-    [{ role: 'assistant', content: 'The motion:\n\nA motion.', source: 'template' }]
+  const plan = materializeTemplate(declared, { realmId: 'r' });
+  assert.ok(
+    plan.agents[0].toolProfile.tools.includes('text.similarity'),
+    'a declared requirement id surfaces as a plan grant'
   );
+  assert.ok(plan.agents[0].toolProfile.tools.includes('read_file'));
 
-  assert.strictEqual(templateRequiresProviders(tpl), true, 'requirements and providers gate launch');
+  assert.strictEqual(templateRequiresProviders(declared), true, 'requirements and providers gate launch');
   assert.strictEqual(templateRequiresProviders(DEMO_TEMPLATE), false);
   assert.strictEqual(
     templateRequiresProviders({ ...DEMO_TEMPLATE, toolContract: { requirements: [] }, providers: [] }),
@@ -1752,13 +1465,6 @@ test('32. toolContract and providers are accepted and shape-validated, never res
   }
 
   // Requirement ids are valid grants only when declared by the same template.
-  const declared = template({
-    agents: [agentSpec({ toolProfile: { tools: ['text.similarity'] } })],
-    toolContract: {
-      requirements: [{ id: 'text.similarity', brief: 'sim', io: { in: {}, out: {} } }]
-    }
-  });
-  assert.strictEqual(materializeTemplate(declared, { realmId: 'r' }).agents[0].toolProfile.tools[0], 'text.similarity');
   assert.throws(
     () => materializeTemplate(template({ agents: [agentSpec({ toolProfile: { tools: ['text.similarity'] } })] }), { realmId: 'r' }),
     /neither a canonical tool name nor a declared toolContract requirement id/
@@ -1802,6 +1508,9 @@ function independentBundleVersion(bundle) {
       references.add(file.source.file);
     }
   }
+  for (const placement of bundle.template.placements ?? []) {
+    if (placement.file !== undefined) references.add(placement.file);
+  }
   let stream = JSON.stringify(sortKeys(bundle.template));
   for (const path of [...references].sort()) {
     const content = bundle.files[path];
@@ -1812,6 +1521,7 @@ function independentBundleVersion(bundle) {
 
 test('33. templateBundleVersion is canonical, deterministic, and identical for baked and imported bundles', () => {
   const baked = getBakedTemplateBundle('example_agent');
+  assert.strictEqual(baked.template.formatVersion, 2, 'the shipped bundle is a format-v2 document');
   const bakedVersion = templateBundleVersion(baked);
   assert.match(bakedVersion, /^sha256:[0-9a-f]{64}$/);
   assert.strictEqual(bakedVersion, independentBundleVersion(baked), 'matches the spec-defined byte stream');
@@ -1885,7 +1595,7 @@ test('33. templateBundleVersion is canonical, deterministic, and identical for b
 
 test('34. parseTemplateBundle and serializeTemplateBundle round-trip canonically with typed errors', () => {
   const bundle = {
-    template: consensusTemplate(),
+    template: template(),
     files: {}
   };
   const serialized = serializeTemplateBundle(bundle);
@@ -1893,21 +1603,21 @@ test('34. parseTemplateBundle and serializeTemplateBundle round-trip canonically
   assert.ok(serialized.startsWith('{"files":'), 'object keys are recursively sorted (files before formatVersion)');
 
   const parsed = parseTemplateBundle(serialized);
-  assert.strictEqual(parsed.template.id, 'consensus_test');
+  assert.strictEqual(parsed.template.id, 'tpl');
   assert.strictEqual(parsed.version, templateBundleVersion(bundle));
-  assert.deepStrictEqual(parsed.warnings, []);
+  assert.match(parsed.warnings[0] ?? '', /legacy format v1/, 'the v1 fixture reports its shim warning');
   assert.ok(Object.isFrozen(parsed), 'parsed bundle is frozen');
   assert.ok(Object.isFrozen(parsed.template), 'parsed template is frozen');
   assert.ok(Object.isFrozen(parsed.files), 'parsed files are frozen');
   assert.ok(Object.isFrozen(parsed.warnings), 'parsed warnings are frozen');
-  assert.strictEqual(serializeTemplateBundle(parsed), serialized, 're-serializing a parsed bundle is byte-stable');
+  assert.strictEqual(parsed.serialized, serialized, 'the parsed bundle carries the authored transport text');
   assert.strictEqual(
-    parseTemplateBundle(serializeTemplateBundle(parseTemplateBundle(serialized))).version,
+    parseTemplateBundle(parsed.serialized).version,
     parsed.version,
-    'parse → serialize → parse is version-stable'
+    're-parsing the authored text is version-stable'
   );
 
-  const fromObject = parseTemplateBundle({ formatVersion: 1, template: consensusTemplate(), files: {} });
+  const fromObject = parseTemplateBundle({ formatVersion: 1, template: template(), files: {} });
   assert.strictEqual(fromObject.version, parsed.version, 'object input parses identically to text input');
 
   const typed = (fn, code, pattern) => assert.throws(
@@ -1926,253 +1636,36 @@ test('34. parseTemplateBundle and serializeTemplateBundle round-trip canonically
     /must be an object/
   );
   typed(
-    () => parseTemplateBundle({ formatVersion: 1, template: consensusTemplate(), files: {}, extra: 1 }),
+    () => parseTemplateBundle({ formatVersion: 1, template: template(), files: {}, extra: 1 }),
     REALM_CATALOG_ERROR_CODES.ERR_BUNDLE_FORMAT,
     /carries unknown field 'extra'/
   );
   typed(
-    () => parseTemplateBundle({ formatVersion: 2, template: consensusTemplate(), files: {} }),
+    () => parseTemplateBundle({ formatVersion: 2, template: template(), files: {} }),
     REALM_CATALOG_ERROR_CODES.ERR_BUNDLE_FORMAT,
-    /formatVersion must be 1/
+    /does not match the template formatVersion/
   );
   typed(
-    () => parseTemplateBundle({ formatVersion: 1, template: consensusTemplate() }),
+    () => parseTemplateBundle({ formatVersion: 1, template: template() }),
     REALM_CATALOG_ERROR_CODES.ERR_BUNDLE_FORMAT,
     /must carry both template and files/
   );
   typed(
-    () => parseTemplateBundle({ formatVersion: 1, template: { ...consensusTemplate(), extra: 1 }, files: {} }),
+    () => parseTemplateBundle({ formatVersion: 1, template: { ...template(), extra: 1 }, files: {} }),
     REALM_CATALOG_ERROR_CODES.ERR_TEMPLATE_INVALID,
     /unknown field 'extra'/
   );
   typed(
-    () => parseTemplateBundle({ formatVersion: 1, template: consensusTemplate(), files: { 'a.md': 7 } }),
+    () => parseTemplateBundle({ formatVersion: 1, template: template(), files: { 'a.md': 7 } }),
     REALM_CATALOG_ERROR_CODES.ERR_TEMPLATE_INVALID,
     /must be a string/
   );
   typed(
-    () => parseTemplateBundle({ formatVersion: 1, template: consensusTemplate(), files: { '../escape.md': 'x' } }),
+    () => parseTemplateBundle({ formatVersion: 1, template: template(), files: { '../escape.md': 'x' } }),
     REALM_CATALOG_ERROR_CODES.ERR_TEMPLATE_INVALID,
     /must not contain '\.\.'/
   );
 });
-
-// ============================================================================
-// 16. Hydration packages
-// ============================================================================
-
-test('35. validateHydrationPackage matches slots by path+target and enforces the version policy', () => {
-  const tpl = consensusTemplate();
-  const version = templateBundleVersion({ template: tpl, files: {} });
-
-  const resolved = validateHydrationPackage(tpl, consensusPackage(version), { currentVersion: version });
-  assert.strictEqual(resolved.templateId, 'consensus_test');
-  assert.strictEqual(resolved.templateVersion, version);
-  assert.deepStrictEqual(resolved.inputValues, { motion: 'Open-weight models match closed models by 2027.', rounds: '5' });
-  assert.deepStrictEqual(resolved.files, [{ path: 'lore/world.md', target: 'realm', content: 'World lore body.' }]);
-  assert.deepStrictEqual(resolved.warnings, []);
-  assert.ok(Object.isFrozen(resolved), 'resolved hydration is frozen');
-  assert.ok(Object.isFrozen(resolved.files), 'resolved files are frozen');
-  assert.ok(Object.isFrozen(resolved.inputValues), 'resolved input values are frozen');
-
-  const withUserSlot = validateHydrationPackage(
-    tpl,
-    consensusPackage(version, {
-      files: [
-        { path: 'lore/world.md', target: 'realm', content: 'World lore body.' },
-        { path: 'notes/private.md', target: { agent: 'observer' }, content: 'Private notes.' }
-      ]
-    }),
-    { currentVersion: version }
-  );
-  assert.deepStrictEqual(
-    withUserSlot.files.map((file) => file.path),
-    ['lore/world.md', 'notes/private.md'],
-    'package entry order is preserved'
-  );
-
-  const noCheck = validateHydrationPackage(tpl, consensusPackage('sha256:other'), {});
-  assert.deepStrictEqual(noCheck.warnings, [], 'without currentVersion there is nothing to compare');
-
-  assert.throws(
-    () => validateHydrationPackage(tpl, consensusPackage('sha256:deadbeef'), { currentVersion: version }),
-    (error) => error instanceof RealmCatalogError
-      && error.code === REALM_CATALOG_ERROR_CODES.ERR_HYDRATION_VERSION_MISMATCH
-      && /pins template version/.test(error.message),
-    'a disallowed mismatch fails closed with a typed error'
-  );
-  const allowed = validateHydrationPackage(tpl, consensusPackage('sha256:deadbeef'), {
-    currentVersion: version,
-    allowVersionMismatch: true
-  });
-  assert.strictEqual(allowed.warnings.length, 1);
-  assert.match(allowed.warnings[0], /sha256:deadbeef/);
-  assert.match(allowed.warnings[0], /explicitly allowed/);
-
-  const cases = [
-    [
-      consensusPackage(version, { files: [{ path: 'ghost.md', target: 'realm', content: 'x' }] }),
-      /does not match any declared seed slot/
-    ],
-    [
-      consensusPackage(version, { files: [{ path: 'scoreboard.ndjson', target: 'realm', content: 'x' }] }),
-      /targets fixed seed slot/
-    ],
-    [
-      consensusPackage(version, {
-        files: [
-          { path: 'lore/world.md', target: 'realm', content: 'a' },
-          { path: 'lore/world.md', target: 'realm', content: 'b' }
-        ]
-      }),
-      /duplicates the entry/
-    ],
-    [consensusPackage(version, { files: [] }), /missing the required generated seed slot 'lore\/world\.md'/],
-    [consensusPackage(version, { inputs: { ghost: 'x' } }), /names undeclared input 'ghost'/],
-    [consensusPackage(version, { inputs: { motion: 7 } }), /inputs\['motion'\] must be a string/],
-    [consensusPackage(version, { templateId: 'other' }), /targets template 'other'/],
-    [consensusPackage(version, { formatVersion: 2 }), /formatVersion must be 1/],
-    [consensusPackage(version, { extra: 1 }), /hydration package carries unknown field 'extra'/],
-    [consensusPackage(version, { provenance: { extra: 1 } }), /provenance carries unknown field 'extra'/],
-    [consensusPackage(version, { provenance: { hydrator: 7 } }), /provenance hydrator/],
-    [
-      consensusPackage(version, { files: [{ path: 'lore/world.md', target: { agent: 'ghost' }, content: 'x' }] }),
-      /unknown template agent key 'ghost'/
-    ],
-    [
-      consensusPackage(version, { files: [{ path: 'lore/world.md', target: 'realm', content: 7 }] }),
-      /content must be a string/
-    ],
-    [
-      consensusPackage(version, { files: [{ path: 'lore/world.md', target: 'realm', content: 'x', extra: 1 }] }),
-      /files\[0\] carries unknown field 'extra'/
-    ]
-  ];
-  for (const [pkg, pattern] of cases) {
-    assert.throws(
-      () => validateHydrationPackage(tpl, pkg, { currentVersion: version }),
-      pattern,
-      `must reject ${JSON.stringify(pkg).slice(0, 120)}`
-    );
-  }
-
-  assert.throws(() => validateHydrationPackage(tpl, null, {}), /package must be an object/);
-  assert.throws(
-    () => validateHydrationPackage(tpl, consensusPackage(version), { currentVersion: version, extra: 1 }),
-    /options carries unknown field 'extra'/
-  );
-  assert.throws(
-    () => validateHydrationPackage({ ...tpl, extra: 1 }, consensusPackage(version), {}),
-    (error) => error instanceof RealmCatalogError
-      && error.code === REALM_CATALOG_ERROR_CODES.ERR_TEMPLATE_INVALID,
-    'an invalid template is a typed template error'
-  );
-});
-
-// ============================================================================
-// 17. Origin-aware materialization
-// ============================================================================
-
-test('36. materialization resolves seed origins and composes the hydrated instance', () => {
-  const tpl = consensusTemplate();
-  const version = templateBundleVersion({ template: tpl, files: {} });
-  const pkg = validateHydrationPackage(tpl, consensusPackage(version), { currentVersion: version });
-
-  const plan = materializeTemplate(tpl, {
-    realmId: 'realm_consensus',
-    inputValues: pkg.inputValues,
-    hydrationFiles: pkg.files
-  });
-  assert.deepStrictEqual(
-    plan.seed.files.map((file) => [file.path, file.content]),
-    [
-      ['scoreboard.ndjson', ''],
-      ['lore/world.md', 'World lore body.']
-    ],
-    'fixed and generated slots resolve; the absent optional user slot is skipped'
-  );
-  assert.deepStrictEqual(plan.agents[0].history, [
-    {
-      role: 'assistant',
-      content: 'The motion:\n\nOpen-weight models match closed models by 2027.',
-      source: 'template'
-    }
-  ]);
-  assert.deepStrictEqual(plan.agents[0].toolProfile.tools, ['read_message', 'list_inbox', 'text.similarity']);
-  assert.ok(Object.isFrozen(plan.seed), 'resolved seed is frozen');
-  assert.ok(Object.isFrozen(plan.agents[0].history), 'plan history is frozen');
-  assert.strictEqual(templateRequiresProviders(tpl), true, 'the store launch gate must block this template');
-
-  const withUserSlot = materializeTemplate(tpl, {
-    realmId: 'realm_consensus',
-    inputValues: pkg.inputValues,
-    hydrationFiles: [
-      ...pkg.files,
-      { path: 'notes/private.md', target: { agent: 'observer' }, content: 'Private notes.' }
-    ]
-  });
-  assert.deepStrictEqual(
-    withUserSlot.seed.files.map((file) => file.path),
-    ['scoreboard.ndjson', 'lore/world.md', 'notes/private.md'],
-    'a present user slot is written in declared order'
-  );
-
-  assert.throws(
-    () => materializeTemplate(tpl, { realmId: 'r', inputValues: pkg.inputValues }),
-    /seed slot 'lore\/world\.md' is generated but no hydration file was supplied/,
-    'a missing generated slot fails closed'
-  );
-  assert.throws(
-    () => materializeTemplate(tpl, {
-      realmId: 'r',
-      inputValues: pkg.inputValues,
-      hydrationFiles: [{ path: 'ghost.md', target: 'realm', content: 'x' }]
-    }),
-    /does not match any declared seed slot/
-  );
-  assert.throws(
-    () => materializeTemplate(tpl, {
-      realmId: 'r',
-      inputValues: pkg.inputValues,
-      hydrationFiles: [{ path: 'scoreboard.ndjson', target: 'realm', content: 'x' }]
-    }),
-    /targets a fixed seed slot/
-  );
-  assert.throws(
-    () => materializeTemplate(tpl, {
-      realmId: 'r',
-      inputValues: pkg.inputValues,
-      hydrationFiles: [
-        { path: 'lore/world.md', target: 'realm', content: 'a' },
-        { path: 'lore/world.md', target: 'realm', content: 'b' }
-      ]
-    }),
-    /duplicate the entry/
-  );
-  assert.throws(
-    () => materializeTemplate(tpl, { realmId: 'r', inputValues: pkg.inputValues, hydrationFiles: 'nope' }),
-    /must be an array of hydration file entries/
-  );
-  assert.throws(
-    () => materializeTemplate(tpl, {
-      realmId: 'r',
-      inputValues: pkg.inputValues,
-      hydrationFiles: [{ path: 'a.md', target: 'realm' }]
-    }),
-    /content must be a string/
-  );
-
-  // The standalone resolver applies the same origin rules.
-  assert.deepStrictEqual(
-    resolveSeedManifest(tpl.seed, { hydrationFiles: pkg.files }).files.map((file) => file.path),
-    ['scoreboard.ndjson', 'lore/world.md']
-  );
-  assert.throws(
-    () => resolveSeedManifest(tpl.seed, {}),
-    /generated but no hydration file was supplied/
-  );
-});
-
 // ============================================================================
 // 18. Content hashing
 // ============================================================================
@@ -2247,73 +1740,21 @@ test('38. reserved property names are rejected wherever a template string keys a
     );
   }
 
-  // A reserved input id cannot be smuggled in through a hydration package: the
-  // owning template is rejected before package slot/input matching runs.
+  // A reserved input id cannot be smuggled in through a payload: the owning
+  // template is rejected before input matching runs.
   assert.throws(
-    () => validateHydrationPackage(
+    () => validatePayload(
       template({ inputs: [{ id: '__proto__', label: 'P' }] }),
-      { formatVersion: 1, templateId: 'tpl', templateVersion: 'sha256:x', inputs: {}, files: [] },
-      {}
+      { formatVersion: 2, templateId: 'tpl', templateVersion: 'sha256:x', inputs: {} }
     ),
     /reserved property name/,
-    'the owning template is rejected before package validation'
+    'the owning template is rejected before payload validation'
   );
 
   // Safe names keep working, and a normal record read never falls through to
   // the prototype chain for an undeclared override.
   const plan = materializeTemplate(template({ agents: [agentSpec()] }), { realmId: 'r' });
   assert.strictEqual(plan.agents[0].agentId, 'agent');
-});
-
-test('39. duplicate path+target seed slots are rejected at validation (F3 dc2aa0c)', () => {
-  assert.throws(
-    () => materializeTemplate(
-      template({
-        seed: {
-          files: [
-            { path: 'notes.md', target: 'realm', source: { inline: 'a' } },
-            { path: 'notes.md', target: 'realm', source: { inline: 'b' } }
-          ]
-        }
-      }),
-      { realmId: 'r' }
-    ),
-    /duplicate seed slot 'notes\.md'/,
-    'two slots with the same path and target are rejected'
-  );
-  assert.throws(
-    () => parseTemplateBundle({
-      formatVersion: 1,
-      template: template({
-        seed: {
-          files: [
-            { path: 'a.md', target: 'realm', origin: 'generated', brief: 'g' },
-            { path: 'a.md', target: 'realm', origin: 'user', brief: 'u' }
-          ]
-        }
-      }),
-      files: {}
-    }),
-    /duplicate seed slot 'a\.md'/,
-    'the transport parser rejects the duplicate too'
-  );
-
-  // The same path in a different workspace is a distinct slot.
-  const plan = materializeTemplate(
-    template({
-      seed: {
-        files: [
-          { path: 'a.md', target: 'realm', source: { inline: 'realm copy' } },
-          { path: 'a.md', target: { agent: 'agent' }, source: { inline: 'private copy' } }
-        ]
-      }
-    }),
-    { realmId: 'r' }
-  );
-  assert.deepStrictEqual(
-    plan.seed.files.map((file) => [file.path, file.target]),
-    [['a.md', 'realm'], ['a.md', { agent: 'agent' }]]
-  );
 });
 
 // ============================================================================
