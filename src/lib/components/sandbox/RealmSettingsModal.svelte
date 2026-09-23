@@ -22,9 +22,10 @@
   import { sandboxStore, GENERIC_REALM_ID } from '../../sandbox/sandboxStore/index.svelte.ts';
   import { isRealmNameTaken } from './realmLauncherHelpers.ts';
   import { buildRealmProvenanceView } from './realmTemplateHelpers.ts';
+  import { buildRealmProvenanceDetailView } from './realmHydrationHelpers.ts';
   import { describeRealmDeletion, safeRealmColor } from './realmGroups.ts';
 
-  let { onclose = () => {}, realmId = null, onlaunchtemplate = () => {} } = $props();
+  let { onclose = () => {}, realmId = null, onlaunchtemplate = () => {}, onrehydrate = () => {} } = $props();
 
   let realms = $derived(sandboxStore.realms);
   // Selection is derived: an explicit operator choice wins, then the optional
@@ -60,6 +61,9 @@
   // Launch provenance panel (Wave T): reads RealmRecord.instance; a record
   // without a valid provenance block renders nothing.
   let provenance = $derived(buildRealmProvenanceView(selectedRealm));
+  // Provenance detail (ticket 874182b): per-input hashes and seeded paths
+  // recorded at launch — hashes and paths only, never raw values.
+  let provenanceDetail = $derived(buildRealmProvenanceDetailView(selectedRealm));
   let activeMembers = $derived(
     selectedRealm ? sandboxStore.agents.filter((agent) => agent.config?.realmId === selectedRealm.id) : []
   );
@@ -360,10 +364,56 @@
                 </div>
               {/each}
             </dl>
+            {#if provenanceDetail.inputRows.length > 0}
+              <details class="provenance-details">
+                <summary>Input hashes ({provenanceDetail.inputRows.length})</summary>
+                <ul class="provenance-detail-list">
+                  {#each provenanceDetail.inputRows as row (row.inputId)}
+                    <li class="provenance-detail-row">
+                      <span class="provenance-detail-label">{row.inputId}</span>
+                      <span class="provenance-detail-value font-mono">{row.shortHash}</span>
+                    </li>
+                  {/each}
+                </ul>
+              </details>
+            {/if}
+            {#if provenanceDetail.seedPaths.length > 0}
+              <details class="provenance-details">
+                <summary>Seeded paths ({provenanceDetail.seedPaths.length})</summary>
+                <ul class="provenance-detail-list">
+                  {#each provenanceDetail.seedPaths as path, index (index)}
+                    <li class="provenance-detail-row"><span class="provenance-detail-value font-mono">{path}</span></li>
+                  {/each}
+                </ul>
+              </details>
+            {/if}
             <p class="provenance-note">
               Recorded at launch: template revision, package digest, input hashes, and seeded paths — hashes and
               paths only, never raw input values. Provenance is descriptive metadata, never authority.
             </p>
+            <div class="section-actions">
+              <button type="button" class="btn-secondary" onclick={() => onrehydrate(selectedRealm)}>
+                Rehydrate / Replace content…
+              </button>
+            </div>
+          </div>
+        {:else}
+          <div class="settings-section-card">
+            <div class="section-card-header">
+              <div class="section-title-wrap">
+                <span class="section-badge">Content</span>
+                <h4 class="section-title">Realm content</h4>
+              </div>
+            </div>
+            <p class="provenance-note">
+              This Realm has no recorded launch provenance. You can still write files into its global workspace or a
+              member's workspace without relaunching anyone.
+            </p>
+            <div class="section-actions">
+              <button type="button" class="btn-secondary" onclick={() => onrehydrate(selectedRealm)}>
+                Write files…
+              </button>
+            </div>
           </div>
         {/if}
 
@@ -796,6 +846,41 @@
     font-size: 0.73rem;
     color: var(--text-muted);
     line-height: 1.4;
+  }
+
+  .provenance-details summary {
+    cursor: pointer;
+    font-size: 0.73rem;
+    font-weight: 600;
+    color: var(--text-muted);
+  }
+
+  .provenance-detail-list {
+    list-style: none;
+    margin: 0.3rem 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+  }
+
+  .provenance-detail-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 0.6rem;
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+  }
+
+  .provenance-detail-label {
+    font-weight: 600;
+    color: var(--text-muted);
+  }
+
+  .provenance-detail-value {
+    text-align: right;
+    word-break: break-all;
   }
 
   .member-list {

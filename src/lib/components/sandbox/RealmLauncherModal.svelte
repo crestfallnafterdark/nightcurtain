@@ -37,6 +37,15 @@
    * lists the written paths, workspace, and directive delivery; a partial-seed
    * failure reports the already-written paths instead of hiding them.
    *
+   * Hydration workspace (ticket 874182b): the input card is the first-class
+   * hydration surface — per-input label/brief/required/shape, per-file sizes and
+   * resolved placement destinations (root joins included), in-place file
+   * replacement, the full declared-directive review resolved through the
+   * catalog resolver, and a review-time template-pin + canonical payload-digest
+   * card. The payload card additionally exposes the session saved-payload
+   * library (`realmPayloadLibrary`): save the assembled payload under a name,
+   * attach a saved payload to the launch, download it, or delete it.
+   *
    * The launched Realm and its members appear in the sidebar immediately: the
    * store's reactive `realms`/`agents` projections drive the drawer grouping,
    * so the wizard does not need to touch the sidebar.
@@ -44,18 +53,32 @@
   import { sandboxStore } from '../../sandbox/sandboxStore/index.svelte.ts';
   import { triggerBrowserBlobDownload } from '../../sandbox/fsDownloadUtils/index.ts';
   import {
-    buildRealmInputDrafts,
+    buildRealmDirectiveReview,
+    buildRealmFileAttachmentViews,
+    buildRealmHydrationPinView,
+    buildRealmInputPlacementDestinations,
+    buildRealmSavedPayloadFilename
+  } from './realmHydrationHelpers.ts';
+  import { realmPayloadLibrary } from './realmPayloadLibrary.ts';
+  import {
+    buildRealmInputAttachment,
     buildRealmPreviewProjection,
     buildRealmPromptPreview,
     buildRealmSeedSummary,
+    buildRealmV2InputDrafts,
     buildSeedTargetOptions,
     describeRealmLaunchError,
     describeRealmPresetBinding,
     describeRealmSeedError,
     describeSeedWorkspace,
-    isRealmInputEditable,
-    resetRealmInputField,
+    isRealmV2InputEditable,
+    resetRealmV2InputDraft,
+    setRealmV2InputFiles,
+    setRealmV2InputText,
+    uniqueRealmAttachmentPath,
+    validateRealmInputAttachments,
     validateRealmLaunchDraft,
+    validateRealmV2InputDrafts,
     validateSeedDraft
   } from './realmLauncherHelpers.ts';
   import {
@@ -70,7 +93,6 @@
   } from './realmTemplateHelpers.ts';
   import {
     assembleRealmAuthorityApprovals,
-    assembleRealmReviewPackage,
     buildRealmAgentDisclosureRows,
     buildRealmAuthorityDecisions,
     buildRealmAuthorityDecisionKey,
@@ -80,13 +102,11 @@
     buildRealmPayloadFilename,
     buildRealmPendingPayloadViews,
     buildRealmReviewFileSlots,
-    buildRealmReviewInputValues,
     describeRealmAuthorityTrust,
     describeRealmLaunchGate,
     parseRealmPayloadFileText,
-    payloadInputValues,
     previewRealmReviewPackage,
-    resolveRealmReviewInputDisplay,
+    resolveRealmReviewLaunchPayload,
     serializeRealmPendingPayload
   } from './realmReviewHelpers.ts';
   import { safeRealmColor } from './realmGroups.ts';
@@ -156,8 +176,11 @@
   let realmName = $state('');
   let realmColor = $state('#7c9cff');
   let realmDescription = $state('');
-  let inputDrafts = $state(/** @type {import('./realmLauncherHelpers.ts').RealmInputFieldDraft[]} */([]));
+  let inputDrafts = $state(/** @type {import('./realmLauncherHelpers.ts').RealmInputDraft[]} */([]));
   let inputErrors = $state(/** @type {Record<string, string>} */({}));
+  // The files picker is shared: the draft id it targets is recorded on click.
+  let inputFilesInput = $state(/** @type {HTMLInputElement | null} */(null));
+  let activeFilesDraftId = $state('');
 
   // The launch bundle seam: the preview resolves the same bundle files the
   // store's launch materializes with (today the baked demo bundle has none).
@@ -178,8 +201,16 @@
   // Wave U review state (ticket 458e727): payload attachment, per-slot review
   // edits, declared-authority decisions, the trust override, the version
   // mismatch confirmation, and the mandatory review acknowledgement.
-  let payloadSourceKind = $state(/** @type {'none' | 'candidate' | 'file'} */('none'));
+  let payloadSourceKind = $state(/** @type {'none' | 'candidate' | 'saved' | 'file'} */('none'));
   let payloadCandidateId = $state('');
+  let payloadSavedId = $state('');
+  let savedPayloadName = $state('');
+  let savedPayloadError = $state('');
+  let libraryRevision = $state(0);
+  let folderFilesInput = $state(/** @type {HTMLInputElement | null} */(null));
+  let replaceFileInput = $state(/** @type {HTMLInputElement | null} */(null));
+  let activeReplaceDraftId = $state('');
+  let activeReplaceIndex = $state(-1);
   let payloadFileValue = $state(/** @type {Record<string, unknown> | null} */(null));
   let payloadFileName = $state('');
   let payloadFileError = $state('');
@@ -220,26 +251,32 @@
     );
   });
 
-  /** The attached payload value: the selected candidate or the parsed local file. */
+  /** The attached payload value: a submitted candidate, a saved payload, or the parsed local file. */
   let attachedPayload = $derived(
     payloadSourceKind === 'candidate' && payloadCandidateId === selectedTemplateId
       ? (sandboxStore.getPendingInstancePayload(selectedTemplateId)?.payload ?? null)
-      : payloadSourceKind === 'file'
-        ? payloadFileValue
-        : null
+      : payloadSourceKind === 'saved'
+        ? (realmPayloadLibrary.getRealmSavedPayload(payloadSavedId)?.payload ?? null)
+        : payloadSourceKind === 'file'
+          ? payloadFileValue
+          : null
   );
 
   let payloadSourceLabel = $derived(
     payloadSourceKind === 'candidate' && attachedPayload
       ? `candidate for "${selectedTemplateId}"`
-      : payloadSourceKind === 'file' && attachedPayload
-        ? (payloadFileName || 'local payload file')
-        : ''
+      : payloadSourceKind === 'saved' && attachedPayload
+        ? `saved payload "${realmPayloadLibrary.getRealmSavedPayload(payloadSavedId)?.name ?? payloadSavedId}"`
+        : payloadSourceKind === 'file' && attachedPayload
+          ? (payloadFileName || 'local payload file')
+          : ''
   );
 
-  /** String-valued inputs the attached payload provides. */
-  let payloadInputs = $derived(payloadInputValues(attachedPayload));
-  let payloadInputIds = $derived(new Set(Object.keys(payloadInputs)));
+  /** Saved payloads for the selected template (re-read after a library mutation). */
+  let savedPayloads = $derived.by(() => {
+    void libraryRevision;
+    return realmPayloadLibrary.listRealmSavedPayloads().filter((entry) => entry.templateId === selectedTemplateId);
+  });
 
   /** The persisted trust record for the selected template. */
   let trustRecord = $derived.by(() => {
@@ -256,55 +293,126 @@
     ...new Set(authorityAgents.flatMap((row) => row.unknownAuthorities.map((entry) => entry.authority)))
   ]);
 
-  /** Effective review input values (edits win, then the payload, then defaults). */
-  let reviewInputValues = $derived(buildRealmReviewInputValues(inputDrafts, attachedPayload));
+  // ---- Format-v2 launch inputs (ticket a71198f) ---------------------------
+
+  /**
+   * Operator-assembled input values validated through the store's own v2 path:
+   * the effective values are synthesized into the canonical payload envelope
+   * and validated by the real `validatePayload`, so missing required inputs,
+   * pin mismatches, unknown inputs, and shape mismatches surface with typed
+   * classes before any launch.
+   */
+  let inputProjection = $derived(validateRealmV2InputDrafts(selectedTemplate, inputDrafts, {
+    currentVersion: effectiveBundleVersion,
+    allowVersionMismatch: mismatchConfirmed,
+    payload: attachedPayload,
+    bundleFiles
+  }));
+
+  /**
+   * Fileset attachment issues `validatePayload` cannot see (placements/selections).
+   * Validated against the effective values (`inputProjection.effectiveInputs`) so
+   * a required fileset supplied by the attached payload satisfies the gate
+   * (ticket 0ea4c2b).
+   */
+  let attachmentValidation = $derived(validateRealmInputAttachments(selectedTemplate, inputDrafts, {
+    inputs: inputProjection.effectiveInputs
+  }));
+
+  /** Effective shape-tagged input values for the review projections. */
+  let reviewInputValues = $derived(inputProjection.effectiveInputs);
+
+  /**
+   * Declared-directive review resolved against the effective input values
+   * (directives are derived content, edited at their bound input).
+   */
+  let directiveReview = $derived(buildRealmDirectiveReview(selectedTemplate, reviewInputValues));
+
+  /** Input ids the attached payload provides (from the validated projection). */
+  let payloadInputIds = $derived(new Set(
+    inputProjection.resolved.filter((entry) => entry.source === 'payload').map((entry) => entry.id)
+  ));
 
   /** Review file slots with their resolved provenance and edits. */
   let fileSlots = $derived(buildRealmReviewFileSlots(selectedTemplate, bundleFiles, {
     payload: attachedPayload,
+    inputs: inputProjection.launchInputs,
     edits: fileEdits
   }));
   let editedFileSlotCount = $derived(fileSlots.filter((slot) => slot.edited).length);
+  let conflictedFileSlotCount = $derived(fileSlots.filter((slot) => slot.conflict).length);
 
-  /** The package the review would attach at launch. */
-  let reviewPackage = $derived(assembleRealmReviewPackage({
+  /**
+   * The payload the launch will actually send: the attached source verbatim
+   * while unedited, else the package rebuilt from the current review slots, so
+   * a "Edited — travels in the launch payload" slot can never be dropped.
+   * A placement conflict or an unassemblable edit set blocks the gate.
+   */
+  let reviewLaunchPayload = $derived(resolveRealmReviewLaunchPayload({
     templateId: selectedTemplateId,
     templateVersion: effectiveBundleVersion,
     source: attachedPayload,
     slots: fileSlots
   }));
+  let launchPayload = $derived(reviewLaunchPayload.payload);
 
-  /** Attached-package validation against the effective template contract. */
-  let payloadPreview = $derived(previewRealmReviewPackage(selectedTemplate, reviewPackage.package, {
+  /** Validation of the package that will actually launch (source or rebuilt package). */
+  let payloadPreview = $derived(previewRealmReviewPackage(selectedTemplate, launchPayload, {
     currentVersion: effectiveBundleVersion
   }));
 
-  /** Blocking payload problem (missing required generated slots, or invalid package). */
+  /**
+   * Review-time template pin + canonical payload digest card: the reviewed
+   * content is the launch package when one exists, else the synthesized
+   * envelope of the effective values.
+   */
+  let hydrationPinView = $derived.by(() => {
+    const reviewed = launchPayload
+      ?? (inputProjection.ok && inputProjection.payload ? inputProjection.payload : null);
+    return buildRealmHydrationPinView({
+      templateId: selectedTemplateId,
+      templateVersion: effectiveBundleVersion,
+      payload: reviewed ?? undefined,
+      sourceLabel: payloadSourceLabel || (reviewed ? 'assembled inputs' : 'no payload attached')
+    });
+  });
+
+  /** Blocking payload problem (unassemblable edits, placement conflict, invalid package, unreadable file). */
   let payloadBlockReason = $derived.by(() => {
-    const missingRequired = fileSlots
-      .filter((slot) => slot.required && slot.contentSource !== 'payload' && slot.contentSource !== 'review')
-      .map((slot) => slot.path);
-    if (missingRequired.length > 0) {
-      return `Required generated slots are not attached: ${missingRequired.join(', ')}. Attach a payload or fill them in the files dialog.`;
-    }
-    if (attachedPayload && !reviewPackage.attached) {
-      return 'The attached payload cannot be versioned against this template bundle, so it cannot travel with the launch.';
-    }
-    if (editedFileSlotCount > 0 && !reviewPackage.attached) {
-      return 'The reviewed file edits cannot be versioned against this template bundle, so they cannot travel with the launch.';
-    }
-    if (!payloadPreview.ok) return payloadPreview.error;
+    if (reviewLaunchPayload.blocked) return reviewLaunchPayload.error;
+    if (launchPayload && !payloadPreview.ok) return payloadPreview.error;
     return payloadFileError;
+  });
+
+  /** Blocking input/preview problem (typed input failure, attachment issue, preview failure). */
+  let previewBlockReason = $derived.by(() => {
+    if (!inputProjection.ok) return inputProjection.error;
+    if (!attachmentValidation.ok) return attachmentValidation.issues[0].error;
+    if (selectedTemplate && !preview.ok) return preview.error;
+    return '';
   });
 
   /** Mandatory review/launch gate projection. */
   let launchGate = $derived(describeRealmLaunchGate({
     reviewed: reviewAcknowledged,
-    previewError: selectedTemplate && !preview.ok ? preview.error : '',
+    previewError: previewBlockReason,
     payloadError: payloadBlockReason,
     mismatchUnconfirmed: payloadPreview.mismatch && !mismatchConfirmed,
     unknownAuthorities
   }));
+
+  /**
+   * Display value of one input for the review projections (effective text, or
+   * the attached fileset's paths).
+   *
+   * @param {string} inputId - Declared input id.
+   * @returns Display text.
+   */
+  function inputDisplayFor(inputId) {
+    const value = reviewInputValues[inputId];
+    if (!value) return '';
+    return value.shape === 'text' ? value.text : value.files.map((file) => file.path).join(', ');
+  }
 
   /** Review decisions for one declared pair (absent = declined). */
   function authorityDecision(agentKey, authority) {
@@ -352,9 +460,11 @@
   function resetReviewState(template) {
     payloadSourceKind = 'none';
     payloadCandidateId = '';
+    payloadSavedId = '';
     payloadFileValue = null;
     payloadFileName = '';
     payloadFileError = '';
+    savedPayloadError = '';
     fileEdits = {};
     filesDialogOpen = false;
     reviewAcknowledged = false;
@@ -387,8 +497,8 @@
     }
     realmName = template.name;
     realmDescription = template.description;
-    inputDrafts = buildRealmInputDrafts(
-      template.inputs ?? [],
+    inputDrafts = buildRealmV2InputDrafts(
+      template,
       sandboxStore.getRealmTemplateBundle(template.id)?.files ?? {}
     );
     inputErrors = {};
@@ -500,24 +610,229 @@
   }
 
   /**
-   * Records one input field edit: replaces the draft with an edited copy
-   * (dirty presence semantics) and clears its inline error.
+   * Records one text field edit on a format-v2 draft (dirty presence
+   * semantics) and clears its inline error.
    *
-   * @param {import('./realmLauncherHelpers.ts').RealmInputFieldDraft | null} draft - Edited draft.
+   * @param {import('./realmLauncherHelpers.ts').RealmInputDraft | null} draft - Edited draft.
    * @param {string} value - New field text.
    */
   function setInputValue(draft, value) {
     if (!draft || typeof draft.id !== 'string') return;
     inputDrafts = inputDrafts.map((entry) =>
-      entry.id === draft.id ? { ...entry, value, dirty: true } : entry
+      entry.id === draft.id ? setRealmV2InputText(entry, value) : entry
     );
-    if (inputErrors[draft.id]) {
+    clearInputError(draft.id);
+  }
+
+  /**
+   * Replaces the fileset of one files draft and clears its inline error.
+   *
+   * @param {import('./realmLauncherHelpers.ts').RealmInputDraft | null} draft - Edited draft.
+   * @param {Array<{ path: string, content: string, name: string }>} files - New attachments.
+   */
+  function setInputFiles(draft, files) {
+    if (!draft || typeof draft.id !== 'string') return;
+    inputDrafts = inputDrafts.map((entry) =>
+      entry.id === draft.id ? setRealmV2InputFiles(entry, files) : entry
+    );
+    clearInputError(draft.id);
+  }
+
+  /**
+   * Clears one inline input error and re-arms the review acknowledgement.
+   *
+   * @param {string} inputId - Declared input id.
+   */
+  function clearInputError(inputId) {
+    if (inputErrors[inputId]) {
       const next = { ...inputErrors };
-      delete next[draft.id];
+      delete next[inputId];
       inputErrors = next;
     }
     reviewAcknowledged = false;
     clearMessages();
+  }
+
+  /**
+   * Opens the shared file picker for one files draft.
+   *
+   * @param {import('./realmLauncherHelpers.ts').RealmInputDraft} draft - Target files draft.
+   */
+  function openInputFilePicker(draft) {
+    if (!draft || draft.shape !== 'files') return;
+    activeFilesDraftId = draft.id;
+    inputFilesInput?.click();
+  }
+
+  /**
+   * Reads every picked file as a text attachment and appends it to the active
+   * files draft: each attachment carries its own fileset-relative `path`
+   * (the file name, made unique) so `path` selections and `root` joins resolve
+   * deterministically.
+   *
+   * @param {Event} event - Change event of the shared file input.
+   */
+  async function handleInputFilesPick(event) {
+    const input = /** @type {HTMLInputElement | null} */ (event.currentTarget);
+    const picked = input && input.files ? [...input.files] : [];
+    const targetId = activeFilesDraftId;
+    activeFilesDraftId = '';
+    if (input) input.value = '';
+    if (picked.length === 0 || !targetId) return;
+    const draft = draftFor(targetId);
+    if (!draft || draft.shape !== 'files') return;
+    try {
+      const existing = draft.files.map((file) => file.path);
+      const attachments = [];
+      for (const file of picked) {
+        const content = await file.text();
+        const attachment = buildRealmInputAttachment(file.name, content);
+        attachments.push({
+          ...attachment,
+          path: uniqueRealmAttachmentPath(
+            [...existing, ...attachments.map((entry) => entry.path)],
+            attachment.path
+          )
+        });
+      }
+      setInputFiles(draft, [...draft.files, ...attachments]);
+    } catch (err) {
+      validationError = err && err.message ? err.message : 'The attached files could not be read.';
+    }
+  }
+
+  /**
+   * Opens the shared directory picker for one files draft. The `webkitdirectory`
+   * attribute is set imperatively so the template stays attribute-clean; picked
+   * files keep their folder-relative paths.
+   *
+   * @param {import('./realmLauncherHelpers.ts').RealmInputDraft} draft - Target files draft.
+   */
+  function openInputFolderPicker(draft) {
+    if (!draft || draft.shape !== 'files') return;
+    if (folderFilesInput) folderFilesInput.setAttribute('webkitdirectory', '');
+    activeFilesDraftId = draft.id;
+    folderFilesInput?.click();
+  }
+
+  /**
+   * Reads every file picked through the directory picker and appends it to the
+   * active files draft, preserving each file's folder-relative path (made
+   * unique); a picker that reports no relative path falls back to the file name.
+   *
+   * @param {Event} event - Change event of the hidden folder input.
+   */
+  async function handleFolderFilesPick(event) {
+    const input = /** @type {HTMLInputElement | null} */ (event.currentTarget);
+    const picked = input && input.files ? [...input.files] : [];
+    const targetId = activeFilesDraftId;
+    activeFilesDraftId = '';
+    if (input) input.value = '';
+    if (picked.length === 0 || !targetId) return;
+    const draft = draftFor(targetId);
+    if (!draft || draft.shape !== 'files') return;
+    try {
+      const existing = draft.files.map((file) => file.path);
+      const attachments = [];
+      for (const file of picked) {
+        const content = await file.text();
+        const relative = typeof file.webkitRelativePath === 'string' && file.webkitRelativePath.length > 0
+          ? file.webkitRelativePath
+          : file.name;
+        const attachment = buildRealmInputAttachment(relative, content);
+        attachments.push({
+          ...attachment,
+          path: uniqueRealmAttachmentPath(
+            [...existing, ...attachments.map((entry) => entry.path)],
+            attachment.path
+          )
+        });
+      }
+      setInputFiles(draft, [...draft.files, ...attachments]);
+    } catch (err) {
+      validationError = err && err.message ? err.message : 'The attached folder could not be read.';
+    }
+  }
+
+  /**
+   * Opens the hidden single-file picker to replace one attachment in place: the
+   * fileset path (the identity placements resolve against) is kept, only the
+   * body and source name are swapped.
+   *
+   * @param {import('./realmLauncherHelpers.ts').RealmInputDraft} draft - Target files draft.
+   * @param {number} index - Attachment index.
+   */
+  function openReplacementFilePicker(draft, index) {
+    if (!draft || draft.shape !== 'files') return;
+    activeFilesDraftId = draft.id;
+    activeReplaceIndex = index;
+    replaceFileInput?.click();
+  }
+
+  /**
+   * Replaces the active attachment's body with the picked file (path preserved).
+   *
+   * @param {Event} event - Change event of the hidden replace input.
+   */
+  async function handleReplacementFilePick(event) {
+    const input = /** @type {HTMLInputElement | null} */ (event.currentTarget);
+    const file = input && input.files ? input.files[0] : null;
+    const targetId = activeFilesDraftId;
+    const index = activeReplaceIndex;
+    activeFilesDraftId = '';
+    activeReplaceIndex = -1;
+    if (input) input.value = '';
+    if (!file || !targetId || index < 0) return;
+    const draft = draftFor(targetId);
+    if (!draft || draft.shape !== 'files' || index >= draft.files.length) return;
+    try {
+      const content = await file.text();
+      setInputFiles(draft, draft.files.map((entry, position) =>
+        position === index ? { ...entry, content, name: file.name } : entry
+      ));
+    } catch (err) {
+      validationError = err && err.message ? err.message : 'The replacement file could not be read.';
+    }
+  }
+
+  /**
+   * Updates one attachment's fileset path (the identity `path` selections and
+   * `root` placements resolve against).
+   *
+   * @param {import('./realmLauncherHelpers.ts').RealmInputDraft} draft - Files draft.
+   * @param {number} index - Attachment index.
+   * @param {string} path - New fileset-relative path.
+   */
+  function setAttachmentPath(draft, index, path) {
+    if (!draft || draft.shape !== 'files') return;
+    setInputFiles(draft, draft.files.map((file, position) =>
+      position === index ? { ...file, path } : file
+    ));
+  }
+
+  /**
+   * Updates one attachment's body text.
+   *
+   * @param {import('./realmLauncherHelpers.ts').RealmInputDraft} draft - Files draft.
+   * @param {number} index - Attachment index.
+   * @param {string} content - New body.
+   */
+  function setAttachmentContent(draft, index, content) {
+    if (!draft || draft.shape !== 'files') return;
+    setInputFiles(draft, draft.files.map((file, position) =>
+      position === index ? { ...file, content } : file
+    ));
+  }
+
+  /**
+   * Removes one attachment from a files draft.
+   *
+   * @param {import('./realmLauncherHelpers.ts').RealmInputDraft} draft - Files draft.
+   * @param {number} index - Attachment index.
+   */
+  function removeAttachment(draft, index) {
+    if (!draft || draft.shape !== 'files') return;
+    setInputFiles(draft, draft.files.filter((_, position) => position !== index));
   }
 
   /**
@@ -532,6 +847,43 @@
   }
 
   /**
+   * Placement destinations of one input draft (root/path mapping rendered by
+   * the fileset editor).
+   *
+   * @param {import('./realmLauncherHelpers.ts').RealmInputDraft} draft - Input draft.
+   * @returns Derived placement destinations.
+   */
+  function placementDestinationsFor(draft) {
+    return buildRealmInputPlacementDestinations(draft ? draft.usage : null);
+  }
+
+  /**
+   * Per-file attachment rows (size + resolved placement destinations) of one
+   * files draft.
+   *
+   * @param {import('./realmLauncherHelpers.ts').RealmInputDraft} draft - Input draft.
+   * @returns Per-file attachment views.
+   */
+  function attachmentViewsFor(draft) {
+    if (!draft || draft.shape !== 'files') return [];
+    return buildRealmFileAttachmentViews(draft, placementDestinationsFor(draft));
+  }
+
+  /**
+   * Display destination of one placement: a `path` writes its declared path, a
+   * `root` renders the prefix with a `<file path>` join marker.
+   *
+   * @param {import('./realmHydrationHelpers.ts').RealmInputPlacementDestination} placement - Placement destination.
+   * @returns Display text.
+   */
+  function placementPreview(placement) {
+    if (!placement || typeof placement.destination !== 'string') return '';
+    if (placement.mode !== 'root') return placement.destination;
+    const prefix = placement.destination.endsWith('/') ? placement.destination : `${placement.destination}/`;
+    return `${prefix}<file path>`;
+  }
+
+  /**
    * Counts editable history entries in one editor projection (the template
    * summary cannot host an arrow-function expression).
    *
@@ -543,29 +895,26 @@
   }
 
   /**
-   * Resets one input field to its template default (untouched presence
-   * semantics: the reset field is omitted from `inputValues` again).
+   * Resets one input draft to its template declaration (untouched presence
+   * semantics: the reset field is omitted from the explicit payload again).
    *
-   * @param {import('./realmLauncherHelpers.ts').RealmInputFieldDraft} draft - Draft to reset.
+   * An attached payload supplies this input's value at launch, so resetting a
+   * text field to the template default must travel explicitly to actually
+   * override it; a reset fileset is empty, which the format cannot express as
+   * an explicit override, so the payload value would still apply.
+   *
+   * @param {import('./realmLauncherHelpers.ts').RealmInputDraft} draft - Draft to reset.
    */
   function resetInputDraft(draft) {
     const declaration = selectedTemplate?.inputs?.find((input) => input.id === draft.id) ?? null;
     if (!declaration) return;
-    // An attached payload supplies this input's value at launch, so resetting
-    // to the template default must travel explicitly to actually override it.
     const payloadProvidesValue = payloadInputIds.has(draft.id);
     inputDrafts = inputDrafts.map((entry) => {
       if (entry.id !== draft.id) return entry;
-      const reset = resetRealmInputField(entry, declaration, bundleFiles);
-      return payloadProvidesValue ? { ...reset, dirty: true } : reset;
+      const reset = resetRealmV2InputDraft(entry, declaration, bundleFiles);
+      return payloadProvidesValue && reset.shape === 'text' ? { ...reset, dirty: true } : reset;
     });
-    if (inputErrors[draft.id]) {
-      const next = { ...inputErrors };
-      delete next[draft.id];
-      inputErrors = next;
-    }
-    reviewAcknowledged = false;
-    clearMessages();
+    clearInputError(draft.id);
   }
 
   function addSeedRow() {
@@ -591,6 +940,13 @@
     if (value === 'candidate') {
       payloadSourceKind = 'candidate';
       payloadCandidateId = '';
+      payloadSavedId = '';
+      payloadFileError = '';
+      return;
+    }
+    if (value === 'saved') {
+      payloadSourceKind = 'saved';
+      payloadSavedId = '';
       payloadFileError = '';
       return;
     }
@@ -601,6 +957,7 @@
     }
     payloadSourceKind = 'none';
     payloadCandidateId = '';
+    payloadSavedId = '';
     payloadFileValue = null;
     payloadFileName = '';
     payloadFileError = '';
@@ -706,11 +1063,107 @@
       : `No pending payload remained for "${view.templateId}".`;
   }
 
+  /**
+   * Saves the currently assembled payload into the session saved-payload
+   * library under the operator-supplied name. The saved bytes are the same
+   * canonical envelope the launch validates (`inputProjection.payload`, else
+   * the reviewed launch package), and the digest is the catalog's canonical
+   * `payloadDigest`.
+   */
+  function saveCurrentPayload() {
+    clearMessages();
+    savedPayloadError = '';
+    if (!selectedTemplate || !selectedTemplateId) {
+      savedPayloadError = 'Select a template before saving a payload.';
+      return;
+    }
+    const reviewed = inputProjection.ok && inputProjection.payload
+      ? inputProjection.payload
+      : (launchPayload && payloadPreview.ok ? launchPayload : null);
+    if (!reviewed) {
+      savedPayloadError = inputProjection.error || 'The current inputs do not assemble into a valid payload yet.';
+      return;
+    }
+    const version = effectiveBundleVersion
+      ?? (typeof reviewed.templateVersion === 'string' ? reviewed.templateVersion : '');
+    try {
+      const entry = realmPayloadLibrary.saveRealmPayload({
+        name: savedPayloadName,
+        templateId: selectedTemplateId,
+        templateVersion: version,
+        payload: reviewed
+      });
+      libraryRevision += 1;
+      savedPayloadName = '';
+      notice = `Saved payload "${entry.name}" (${entry.digest}) — ${entry.inputSummary}. Session-only: the named library lives until reload.`;
+    } catch (err) {
+      savedPayloadError = err && err.message ? err.message : 'The payload could not be saved.';
+    }
+  }
+
+  /**
+   * Attaches one saved payload from the session library.
+   *
+   * @param {import('./realmPayloadLibrary.ts').RealmSavedPayload} entry - Saved entry.
+   */
+  function attachSavedPayload(entry) {
+    clearMessages();
+    payloadSourceKind = 'saved';
+    payloadSavedId = entry.id;
+    payloadFileError = '';
+    reviewAcknowledged = false;
+    mismatchConfirmed = false;
+    reviewNotice = '';
+  }
+
+  /**
+   * Downloads one saved payload as the pretty-printed package JSON the local
+   * file source reads back.
+   *
+   * @param {import('./realmPayloadLibrary.ts').RealmSavedPayload} entry - Saved entry.
+   */
+  function downloadSavedPayload(entry) {
+    clearMessages();
+    try {
+      const filename = buildRealmSavedPayloadFilename(entry.name, entry.templateId);
+      const json = serializeRealmPendingPayload(entry.payload);
+      const receipt = triggerBrowserBlobDownload(new Blob([json], { type: 'application/json' }), filename);
+      if (receipt.success) {
+        notice = `Downloaded saved payload "${entry.name}" as ${filename}.`;
+      } else {
+        validationError = `Download of saved payload "${entry.name}" failed.`;
+      }
+    } catch (err) {
+      validationError = err && err.message ? err.message : 'The saved payload could not be downloaded.';
+    }
+  }
+
+  /**
+   * Deletes one saved payload and detaches it when it was the attached source.
+   *
+   * @param {import('./realmPayloadLibrary.ts').RealmSavedPayload} entry - Saved entry.
+   */
+  function deleteSavedPayload(entry) {
+    clearMessages();
+    const removed = realmPayloadLibrary.deleteRealmSavedPayload(entry.id);
+    libraryRevision += 1;
+    if (payloadSourceKind === 'saved' && payloadSavedId === entry.id) {
+      payloadSourceKind = 'none';
+      payloadSavedId = '';
+    }
+    reviewAcknowledged = false;
+    mismatchConfirmed = false;
+    notice = removed
+      ? `Deleted saved payload "${entry.name}".`
+      : `No saved payload "${entry.name}" remained.`;
+  }
+
   /** Detaches the current payload and re-arms the review acknowledgement. */
   function detachPayload() {
     clearMessages();
     payloadSourceKind = 'none';
     payloadCandidateId = '';
+    payloadSavedId = '';
     payloadFileValue = null;
     payloadFileName = '';
     payloadFileError = '';
@@ -872,11 +1325,13 @@
   }
 
   /**
-   * Validates the launch draft (name, uniqueness, required inputs) and
-   * launches the Realm from the selected template bundle; success advances to
-   * the seed step. When the template declares a seed and the toggle stays on,
-   * the store applies the seed atomically as part of the launch; the manual
-   * seed step remains available for post-launch edits.
+   * Validates the launch draft (selection, name, uniqueness, the
+   * operator-assembled format-v2 inputs through the store's own payload path,
+   * and the fileset attachments) and launches the Realm from the selected
+   * template bundle; success advances to the seed step. When the template
+   * declares a seed and the toggle stays on, the store applies the seed
+   * atomically as part of the launch; the manual seed step remains available
+   * for post-launch edits.
    *
    * @param {SubmitEvent} e - Form submit event.
    */
@@ -889,12 +1344,19 @@
       templateId: selectedTemplateId,
       name: realmName,
       templateIds: templates.map((template) => template.id),
-      realms: sandboxStore.realms,
-      inputDrafts
+      realms: sandboxStore.realms
     });
     if (!draft.ok) {
       validationError = draft.error;
       inputErrors = { ...draft.fieldErrors };
+      return;
+    }
+    inputErrors = {
+      ...inputProjection.fieldErrors,
+      ...attachmentValidation.fieldErrors
+    };
+    if (launchGate.disabled) {
+      validationError = launchGate.hint;
       return;
     }
     inputErrors = {};
@@ -902,15 +1364,12 @@
       validationError = preview.error;
       return;
     }
-    if (launchGate.disabled) {
-      validationError = launchGate.hint;
-      return;
-    }
 
     const authorityApprovals = assembleRealmAuthorityApprovals(selectedTemplate, authorityDecisions);
     const attachedSources = authorityAgents.length > 0
       ? authorityApprovals.map((entry) => `${entry.agentKey} → ${entry.authority}`)
       : [];
+    const launchInputs = inputProjection.launchInputs;
 
     isLaunching = true;
     try {
@@ -918,9 +1377,9 @@
         name: draft.name,
         color: safeRealmColor(realmColor) ?? undefined,
         description: realmDescription.trim() || undefined,
-        ...(Object.keys(draft.inputValues).length > 0 ? { inputValues: draft.inputValues } : {}),
+        ...(Object.keys(launchInputs).length > 0 ? { inputs: launchInputs } : {}),
         ...(seedSummary.declaresSeed && !seedAfterLaunch ? { seed: false } : {}),
-        ...(reviewPackage.attached && reviewPackage.package ? { package: reviewPackage.package } : {}),
+        ...(launchPayload ? { payload: launchPayload } : {}),
         ...(payloadPreview.mismatch && mismatchConfirmed ? { allowVersionMismatch: true } : {}),
         ...(authorityApprovals.length > 0 ? { authorityApprovals } : {}),
         ...(trustTemplate && authorityAgents.length > 0 ? { trustAuthorities: true } : {})
@@ -1171,38 +1630,142 @@
               <div class="section-card-header">
                 <div class="section-title-wrap">
                   <span class="section-badge">Inputs</span>
-                  <h4 class="section-title">Template inputs ({inputDrafts.length})</h4>
+                  <h4 class="section-title">Hydration workspace — inputs ({inputDrafts.length})</h4>
                 </div>
               </div>
               <p class="field-hint">
                 Launch-level values shared by every member that references them. An untouched field keeps the
-                template default; an edited or cleared field is sent explicitly (clearing a required field blocks
-                the launch).
+                attached payload's value, then the template default; an edited field is sent explicitly (clearing a
+                required field blocks the launch). Files inputs carry one or more attached files (or a whole folder),
+                each with its own fileset-relative path and root-mapped placement destinations.
               </p>
+              <input
+                bind:this={inputFilesInput}
+                class="visually-hidden"
+                type="file"
+                multiple
+                aria-label="Attach files to the selected template input"
+                onchange={handleInputFilesPick}
+              />
+              <input
+                bind:this={folderFilesInput}
+                class="visually-hidden"
+                type="file"
+                multiple
+                aria-label="Attach a folder to the selected template input"
+                onchange={handleFolderFilesPick}
+              />
+              <input
+                bind:this={replaceFileInput}
+                class="visually-hidden"
+                type="file"
+                aria-label="Replace the selected attached file"
+                onchange={handleReplacementFilePick}
+              />
               {#each inputDrafts as draft (draft.id)}
                 <div class="form-group">
                   <label for={`realm-input-${draft.id}`}>
                     {draft.label}{#if draft.required}<span class="req"> *</span>{/if}
-                    {#if draft.origin === 'generated'}
-                      <span class="origin-badge" title={draft.brief || 'Produced by hydration'}>generated</span>
-                    {/if}
+                    <span class="shape-badge">{draft.shape === 'files' ? 'files' : 'text'}</span>
                   </label>
-                  {#if draft.multiline}
+                  {#if draft.shape === 'files'}
+                    <div class="fileset-field">
+                      <div class="input-actions">
+                        <button type="button" class="btn-secondary btn-xs" onclick={() => openInputFilePicker(draft)}>
+                          Attach files…
+                        </button>
+                        <button type="button" class="btn-secondary btn-xs" onclick={() => openInputFolderPicker(draft)}>
+                          Attach folder…
+                        </button>
+                        {#if draft.files.length > 0}
+                          <span class="input-dirty-note">
+                            {draft.files.length} file{draft.files.length === 1 ? '' : 's'} attached
+                          </span>
+                        {/if}
+                      </div>
+                      {#if draft.files.length === 0}
+                        <span class="field-hint">No files attached — an absent optional fileset writes nothing.</span>
+                      {/if}
+                      {#if placementDestinationsFor(draft).length > 0}
+                        <ul class="placement-map">
+                          {#each placementDestinationsFor(draft) as placement, placementIndex (placementIndex)}
+                            <li class="placement-row">
+                              <span class="placement-mode">{placement.mode === 'root' ? 'root' : 'path'}</span>
+                              <span class="placement-target">{placement.targetLabel}</span>
+                              <span class="placement-destination font-mono">
+                                {placementPreview(placement)}
+                              </span>
+                            </li>
+                          {/each}
+                        </ul>
+                      {/if}
+                      {#each attachmentViewsFor(draft) as view (view.index)}
+                        <div class="attachment-row">
+                          <div class="attachment-head">
+                            <input
+                              type="text"
+                              class="input-field font-mono"
+                              value={draft.files[view.index].path}
+                              aria-label={`Attachment ${view.index + 1} fileset path`}
+                              oninput={(event) => setAttachmentPath(draft, view.index, event.currentTarget.value)}
+                            />
+                            <button
+                              type="button"
+                              class="btn-secondary btn-xs"
+                              onclick={() => openReplacementFilePicker(draft, view.index)}
+                              aria-label={`Replace attachment ${view.index + 1}`}
+                            >
+                              Replace…
+                            </button>
+                            <button
+                              type="button"
+                              class="btn-row-remove"
+                              onclick={() => removeAttachment(draft, view.index)}
+                              aria-label={`Remove attachment ${view.index + 1}`}
+                            >
+                              Remove
+                            </button>
+                          </div>
+                          <span class="field-hint">
+                            {view.sizeLabel}{view.name ? ` · from ${view.name}` : ' · typed fileset path'}
+                          </span>
+                          {#if view.destinations.length > 0}
+                            <span class="field-hint attachment-destinations">
+                              Writes:
+                              {#each view.destinations as destination, destinationIndex (destinationIndex)}
+                                <span class="font-mono">{destination}</span>{destinationIndex < view.destinations.length - 1 ? ', ' : ''}
+                              {/each}
+                            </span>
+                          {/if}
+                          <details class="attachment-content">
+                            <summary>Content ({draft.files[view.index].content.length} chars)</summary>
+                            <textarea
+                              rows="3"
+                              class="textarea-field font-mono"
+                              value={draft.files[view.index].content}
+                              aria-label={`Attachment ${view.index + 1} content`}
+                              oninput={(event) => setAttachmentContent(draft, view.index, event.currentTarget.value)}
+                            ></textarea>
+                          </details>
+                        </div>
+                      {/each}
+                    </div>
+                  {:else if draft.multiline}
                     <textarea
                       id={`realm-input-${draft.id}`}
-                      value={resolveRealmReviewInputDisplay(draft, attachedPayload)}
+                      value={inputDisplayFor(draft.id)}
                       rows="3"
                       class="textarea-field"
-                      disabled={!isRealmInputEditable(draft)}
+                      disabled={!isRealmV2InputEditable(draft)}
                       oninput={(event) => setInputValue(draft, event.currentTarget.value)}
                     ></textarea>
                   {:else}
                     <input
                       id={`realm-input-${draft.id}`}
                       type="text"
-                      value={resolveRealmReviewInputDisplay(draft, attachedPayload)}
+                      value={inputDisplayFor(draft.id)}
                       class="input-field"
-                      disabled={!isRealmInputEditable(draft)}
+                      disabled={!isRealmV2InputEditable(draft)}
                       oninput={(event) => setInputValue(draft, event.currentTarget.value)}
                     />
                   {/if}
@@ -1211,28 +1774,40 @@
                       Attached payload value — edit the field to override it explicitly.
                     </span>
                   {/if}
-                  {#if draft.origin === 'generated'}
-                    <span class="field-hint">
-                      Generated proposal — type, edit, or override it before launch.
-                    </span>
-                  {/if}
-                  {#if draft.origin === 'generated' && draft.brief}
-                    <span class="field-hint hydration-brief">Hydration brief: {draft.brief}</span>
+                  {#if draft.brief}
+                    <span class="field-hint hydration-brief">Brief: {draft.brief}</span>
                   {/if}
                   {#if draft.help}
                     <span class="field-hint">{draft.help}</span>
                   {/if}
-                  {#if !draft.defaultResolved}
+                  {#if draft.shape === 'text' && !draft.defaultResolved}
                     <span class="field-hint input-warning">
                       The template's default file is not in the launch bundle — the field starts empty.
                     </span>
                   {/if}
                   <div class="input-actions">
                     <button type="button" class="btn-secondary btn-xs" onclick={() => resetInputDraft(draft)}>
-                      Reset to template default
+                      {draft.shape === 'files' ? 'Clear attached files' : 'Reset to template default'}
                     </button>
                     {#if draft.dirty}
                       <span class="input-dirty-note">Edited — sent explicitly at launch.</span>
+                    {/if}
+                  </div>
+                  <div class="usage-map">
+                    <span class="usage-summary">Usage: {draft.usage.summary}</span>
+                    {#if draft.usage.sites.length > 0}
+                      <ul class="usage-list">
+                        {#each draft.usage.sites as site, index (index)}
+                          <li class="usage-row">
+                            <span class="usage-kind">{site.kind}</span>
+                            <span class="usage-label">{site.label}</span>
+                            {#if site.path}
+                              <span class="usage-path font-mono">{site.path}</span>
+                            {/if}
+                            <span class="usage-detail">{site.detail}</span>
+                          </li>
+                        {/each}
+                      </ul>
                     {/if}
                   </div>
                   {#if inputErrors[draft.id]}
@@ -1255,10 +1830,11 @@
                 {/if}
               </div>
               <p class="field-hint">
-                The reviewed instance content: generated input values plus <code>user</code>/<code>generated</code>
-                file slots. Attach a session candidate submitted through <code>submit_hydration_package</code>, or a
-                local <code>{buildRealmPayloadFilename(selectedTemplateId)}</code> file. The package is validated
-                against the effective template version before any launch; candidates are session-only.
+                The reviewed instance content: declared input values (<code>text</code> or <code>files</code>
+                shape). Attach a submitted session candidate, a named payload from the session library, or a local
+                <code>{buildRealmPayloadFilename(selectedTemplateId)}</code> file. The package is validated against
+                the effective template version before any launch; candidates and saved payloads are session-only.
+                Edited input values win per input over the attached package.
               </p>
               <div class="payload-source-row">
                 <select
@@ -1269,6 +1845,7 @@
                 >
                   <option value="none">No payload attached</option>
                   <option value="candidate" disabled={pendingPayloads.length === 0}>Submitted candidate…</option>
+                  <option value="saved" disabled={savedPayloads.length === 0}>Saved payload…</option>
                   <option value="file">Local payload file…</option>
                 </select>
                 {#if payloadSourceKind === 'file'}
@@ -1293,7 +1870,7 @@
                 {#if pendingPayloads.length === 0}
                   <p class="payload-status payload-empty">
                     No session candidates are pending for this template — submit one with the hydration tool, or
-                    attach a local payload file.
+                    attach a saved or local payload.
                   </p>
                 {:else}
                   {#each pendingPayloads as candidate (candidate.templateId)}
@@ -1323,6 +1900,43 @@
                 {/if}
               {/if}
 
+              {#if payloadSourceKind === 'saved'}
+                {#if savedPayloads.length === 0}
+                  <p class="payload-status payload-empty">
+                    No saved payloads exist for this template yet — assemble inputs and save one below, or attach a
+                    local payload file.
+                  </p>
+                {:else}
+                  {#each savedPayloads as entry (entry.id)}
+                    <div class="payload-candidate">
+                      <div class="payload-candidate-info">
+                        <span class="payload-candidate-title">
+                          {entry.name}
+                          <span class="template-version font-mono">{entry.digest}</span>
+                        </span>
+                        <span class="field-hint">{entry.inputSummary} · saved {formatRealmLaunchTimestamp(entry.savedAt)}</span>
+                      </div>
+                      <div class="template-picker-actions">
+                        <button
+                          type="button"
+                          class="btn-secondary btn-xs"
+                          class:active-candidate={payloadSavedId === entry.id && Boolean(attachedPayload)}
+                          onclick={() => attachSavedPayload(entry)}
+                        >
+                          {payloadSavedId === entry.id && attachedPayload ? 'Attached' : 'Attach'}
+                        </button>
+                        <button type="button" class="btn-secondary btn-xs" onclick={() => downloadSavedPayload(entry)}>
+                          Download
+                        </button>
+                        <button type="button" class="btn-danger-outline btn-xs" onclick={() => deleteSavedPayload(entry)}>
+                          Delete…
+                        </button>
+                      </div>
+                    </div>
+                  {/each}
+                {/if}
+              {/if}
+
               {#if payloadFileError}
                 <p class="payload-error" role="alert">{payloadFileError}</p>
               {/if}
@@ -1340,6 +1954,48 @@
               {:else if payloadSourceKind === 'file'}
                 <p class="payload-status">No payload file read yet — choose a package JSON file.</p>
               {/if}
+              {#if editedFileSlotCount > 0}
+                <p class="payload-status">
+                  {editedFileSlotCount} reviewed file slot{editedFileSlotCount === 1 ? '' : 's'} assembled into the
+                  launch package.
+                </p>
+              {/if}
+
+              <div class="save-payload-row">
+                <input
+                  type="text"
+                  class="input-field grow"
+                  placeholder="Name this payload (e.g. Act 1 briefs)"
+                  aria-label="Saved payload name"
+                  bind:value={savedPayloadName}
+                  oninput={() => savedPayloadError = ''}
+                />
+                <button type="button" class="btn-secondary btn-xs" onclick={saveCurrentPayload}>
+                  Save payload…
+                </button>
+              </div>
+              {#if savedPayloadError}
+                <p class="payload-error" role="alert">{savedPayloadError}</p>
+              {/if}
+
+              <div class="pin-card">
+                <div class="pin-row">
+                  <span class="pin-label">Template pin</span>
+                  <span class="pin-value font-mono">{hydrationPinView.pin || 'unresolved'}</span>
+                </div>
+                <div class="pin-row">
+                  <span class="pin-label">Payload digest</span>
+                  <span class="pin-value font-mono" class:pin-value-missing={!hydrationPinView.digestOk}>
+                    {hydrationPinView.digestOk ? hydrationPinView.digest : (hydrationPinView.digestError || 'no payload')}
+                  </span>
+                </div>
+                <div class="pin-row">
+                  <span class="pin-label">Content</span>
+                  <span class="pin-value">
+                    {hydrationPinView.sourceLabel} · {hydrationPinView.inputCount} input{hydrationPinView.inputCount === 1 ? '' : 's'}{#if hydrationPinView.fileCount > 0} · {hydrationPinView.fileCount} file{hydrationPinView.fileCount === 1 ? '' : 's'}{/if}
+                  </span>
+                </div>
+              </div>
             </div>
           {/if}
 
@@ -1352,10 +2008,34 @@
                 </div>
               </div>
               <p class="seed-summary-line">
-                {seedSummary.fileCount} file{seedSummary.fileCount === 1 ? '' : 's'} seeded at launch into
-                {seedSummary.targetLabels.length > 0 ? seedSummary.targetLabels.join(', ') : 'no target'}.
+                {seedSummary.placementCount ?? seedSummary.fileCount}
+                placement{(seedSummary.placementCount ?? seedSummary.fileCount) === 1 ? '' : 's'} write at launch into
+                {seedSummary.targetLabels.length > 0 ? seedSummary.targetLabels.join(', ') : 'no target'}{#if seedSummary.directiveCount} · {seedSummary.directiveCount} directive{seedSummary.directiveCount === 1 ? '' : 's'}{/if}.
               </p>
-              {#if seedSummary.directive}
+              {#if directiveReview.entries.length > 0}
+                <div class="directive-review">
+                  <span class="slot-list-title">Directives ({directiveReview.entries.length})</span>
+                  {#each directiveReview.entries as entry, index (index)}
+                    <div class="directive-row">
+                      <span class="directive-target">
+                        → {entry.targetLabel}
+                        {#if entry.source === 'input'}
+                          <span class="field-hint">bound to "{entry.inputLabel}"</span>
+                        {:else}
+                          <span class="field-hint">literal directive</span>
+                        {/if}
+                      </span>
+                      {#if entry.error}
+                        <span class="input-error" role="alert">{entry.error}</span>
+                      {:else if entry.text}
+                        <span class="seed-directive-preview">“{entry.text}”</span>
+                      {:else}
+                        <span class="field-hint">resolves empty — this directive delivers nothing.</span>
+                      {/if}
+                    </div>
+                  {/each}
+                </div>
+              {:else if seedSummary.directive}
                 <p class="seed-summary-line">
                   First directive → {seedSummary.directive.targetLabel}:
                   <span class="seed-directive-preview">“{seedSummary.directive.preview}”</span>
@@ -1364,7 +2044,7 @@
               {#if fileSlots.length > 0}
                 <div class="slot-list">
                   <span class="slot-list-title">
-                    File slots ({fileSlots.length}){#if editedFileSlotCount > 0} · {editedFileSlotCount} edited{/if}{#if attachedPayload} · payload attached{/if}
+                    Destinations ({fileSlots.length}){#if editedFileSlotCount > 0} · {editedFileSlotCount} edited{/if}{#if conflictedFileSlotCount > 0} · {conflictedFileSlotCount} conflict{conflictedFileSlotCount === 1 ? '' : 's'}{/if}{#if attachedPayload} · payload attached{/if}
                   </span>
                   <div class="template-picker-actions">
                     <button type="button" class="btn-secondary btn-xs" onclick={openFilesDialog}>
@@ -1372,8 +2052,9 @@
                     </button>
                   </div>
                   <span class="field-hint">
-                    View and edit the resolved content of every slot. <code>fixed</code> slots ship in the bundle and
-                    stay read-only; <code>user</code>/<code>generated</code> slots travel in the attached payload.
+                    Every declared placement with its resolved content. Bundle-file destinations ship in the bundle;
+                    input destinations resolve from the launch inputs (then the attached payload) and are edited at
+                    the input field above.
                   </span>
                 </div>
               {/if}
@@ -1403,9 +2084,9 @@
             {#each preview.rows as row (row.key)}
               {@const spec = agentSpecFor(row.key)}
               {@const binding = describeRealmPresetBinding(spec?.modelPresetId, catalogPresets, defaultPresetId)}
-              {@const promptPreview = buildRealmPromptPreview(spec?.prompt ?? [], selectedTemplate?.inputs, { inputValues: reviewInputValues, bundleFiles })}
-              {@const promptPartViews = buildRealmPartProvenanceViews(spec?.prompt ?? [], selectedTemplate?.inputs, { inputValues: reviewInputValues, bundleFiles })}
-              {@const historyEditor = buildRealmHistoryEditorViews(spec, selectedTemplate?.inputs, { inputValues: reviewInputValues, bundleFiles })}
+              {@const promptPreview = buildRealmPromptPreview(spec?.prompt ?? [], selectedTemplate?.inputs, { inputs: reviewInputValues, bundleFiles })}
+              {@const promptPartViews = buildRealmPartProvenanceViews(spec?.prompt ?? [], selectedTemplate?.inputs, { inputs: reviewInputValues, bundleFiles })}
+              {@const historyEditor = buildRealmHistoryEditorViews(spec, selectedTemplate?.inputs, { inputs: reviewInputValues, bundleFiles })}
               {@const disclosureRows = buildRealmAgentDisclosureRows(spec, binding.label)}
               <div class="agent-preview-card">
                 <div class="agent-preview-head">
@@ -1546,15 +2227,17 @@
                                     {part.origin}
                                   </span>
                                   <span class="part-label">{part.label}</span>
-                                  {#if part.editable && draftFor(part.inputId)}
+                                  {#if part.editable && draftFor(part.inputId)?.shape === 'text'}
                                     <textarea
                                       class="part-input-edit"
                                       rows="2"
-                                      value={resolveRealmReviewInputDisplay(draftFor(part.inputId), attachedPayload)}
+                                      value={inputDisplayFor(part.inputId)}
                                       aria-label={`Edit ${part.inputLabel} for this history entry`}
                                       oninput={(event) => setInputValue(draftFor(part.inputId), event.currentTarget.value)}
                                     ></textarea>
                                     <span class="part-note">edits the launch input (source)</span>
+                                  {:else if part.editable && draftFor(part.inputId)?.shape === 'files'}
+                                    <span class="part-note">files input — edit the attached fileset above</span>
                                   {:else if part.editable}
                                     <span class="part-note">input not declared in the review form</span>
                                   {:else}
@@ -1677,8 +2360,8 @@
             <label class="review-ack">
               <input type="checkbox" checked={reviewAcknowledged} onchange={handleReviewAcknowledge} />
               <span>
-                I reviewed the composed prompts, the resolved file contents, and the declared publishing authorities for
-                this launch.
+                I reviewed the composed prompts, the resolved input values and file contents, and the declared
+                publishing authorities for this launch.
               </span>
             </label>
             {#if launchGate.disabled}
@@ -1842,15 +2525,15 @@
             </button>
           </div>
           <p class="field-hint">
-            Every declared seed slot with its resolved content. <code>fixed</code> slots ship in the bundle and cannot
-            be overridden by a payload; <code>user</code>/<code>generated</code> slots carry the attached payload's
-            content and can be edited here — edits travel in the launch payload.
+            Every declared placement with its resolved content. Bundle-file destinations ship in the bundle;
+            input destinations resolve from the launch inputs (then the attached payload) and are edited at the input
+            field — this dialog is read-only.
           </p>
           {#if fileSlots.length === 0}
-            <p class="rows-empty">This template declares no seed file slots.</p>
+            <p class="rows-empty">This template declares no placements.</p>
           {/if}
           {#each fileSlots as slot (slot.key)}
-            <div class="file-slot" class:file-slot-fixed={!slot.editable}>
+            <div class="file-slot" class:file-slot-fixed={slot.source === 'bundle'} class:file-slot-conflict={slot.conflict}>
               <div class="file-slot-head">
                 <span class="slot-path font-mono">{slot.path}</span>
                 <span
@@ -1863,10 +2546,13 @@
                 {#if slot.required}
                   <span class="required-badge">required</span>
                 {/if}
+                {#if slot.conflict}
+                  <span class="unknown-badge">conflict</span>
+                {/if}
                 <span class="file-slot-source">{slot.sourceLabel}</span>
               </div>
               <span class="field-hint">
-                {slot.targetLabel}{#if slot.brief} · {slot.brief}{/if}
+                {slot.targetLabel}{#if slot.inputLabel} · input "{slot.inputLabel}"{/if}{#if slot.brief} · {slot.brief}{/if}
               </span>
               {#if slot.editable}
                 <textarea
@@ -1886,7 +2572,11 @@
                 </div>
               {:else}
                 <pre class="file-slot-readonly">{slot.content}</pre>
-                <span class="field-hint">Shipped in the bundle — the format forbids payload overrides for fixed slots.</span>
+                <span class="field-hint">
+                  {slot.source === 'bundle'
+                    ? 'Shipped in the bundle — the format forbids payload overrides for bundle-file destinations.'
+                    : 'Resolved from the input — edit it at the input field above.'}
+                </span>
               {/if}
             </div>
           {/each}
@@ -3182,6 +3872,239 @@
     word-break: break-word;
     max-height: 160px;
     overflow-y: auto;
+  }
+
+  /* Format-v2 input requirements and usage map (ticket a71198f) */
+
+  .shape-badge {
+    margin-left: 0.4rem;
+    font-size: 0.6rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    padding: 0.08rem 0.35rem;
+    border-radius: 4px;
+    border: 1px solid var(--border-subtle);
+    background: var(--bg-base);
+    color: var(--text-muted);
+    vertical-align: middle;
+  }
+
+  .fileset-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    padding: 0.55rem 0.65rem;
+    background: var(--bg-secondary);
+  }
+
+  .attachment-row {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    padding: 0.45rem 0.55rem;
+    background: var(--bg-base);
+  }
+
+  .attachment-head {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+
+  .attachment-head .input-field {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .attachment-content summary {
+    cursor: pointer;
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--text-muted);
+  }
+
+  .usage-map {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    border: 1px dashed var(--border-subtle);
+    border-radius: 6px;
+    padding: 0.45rem 0.55rem;
+    background: rgba(0, 0, 0, 0.12);
+  }
+
+  .usage-summary {
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--text-muted);
+  }
+
+  .usage-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+  }
+
+  .usage-row {
+    display: flex;
+    align-items: baseline;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+  }
+
+  .usage-kind {
+    flex-shrink: 0;
+    font-size: 0.6rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    padding: 0.06rem 0.3rem;
+    border-radius: 4px;
+    border: 1px solid var(--border-subtle);
+    background: var(--bg-surface);
+    color: var(--text-muted);
+  }
+
+  .usage-label {
+    font-weight: 600;
+  }
+
+  .usage-path {
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+    word-break: break-all;
+  }
+
+  .usage-detail {
+    color: var(--text-muted);
+  }
+
+  /* Hydration workspace additions (ticket 874182b): placement mapping,
+     per-file destinations, saved payloads, pin/digest card, directives. */
+
+  .placement-map {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+  }
+
+  .placement-row {
+    display: flex;
+    align-items: baseline;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+  }
+
+  .placement-mode {
+    flex-shrink: 0;
+    font-size: 0.6rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    padding: 0.06rem 0.3rem;
+    border-radius: 4px;
+    border: 1px solid var(--border-subtle);
+    background: var(--bg-surface);
+    color: var(--text-muted);
+  }
+
+  .placement-target {
+    font-weight: 600;
+  }
+
+  .placement-destination {
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+    word-break: break-all;
+  }
+
+  .attachment-destinations {
+    color: var(--text-secondary);
+  }
+
+  .save-payload-row {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    margin-top: 0.45rem;
+  }
+
+  .save-payload-row .input-field {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .pin-card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    margin-top: 0.55rem;
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    padding: 0.45rem 0.55rem;
+    background: var(--bg-base);
+  }
+
+  .pin-row {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    font-size: 0.72rem;
+  }
+
+  .pin-label {
+    flex-shrink: 0;
+    min-width: 6.5rem;
+    font-weight: 600;
+    color: var(--text-muted);
+  }
+
+  .pin-value {
+    color: var(--text-secondary);
+    word-break: break-all;
+  }
+
+  .pin-value-missing {
+    color: var(--accent-danger);
+  }
+
+  .directive-review {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    margin-top: 0.35rem;
+  }
+
+  .directive-row {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+  }
+
+  .directive-target {
+    font-weight: 600;
+  }
+
+  .file-slot-conflict {
+    border-color: var(--accent-danger-border);
+    background: var(--accent-danger-subtle);
   }
 
   @keyframes fade-in {

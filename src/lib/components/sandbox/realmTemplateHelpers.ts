@@ -102,7 +102,7 @@ export function describeRealmTemplateSource(source: unknown, replacesShipped: un
  * ```
  */
 export function buildRealmTemplateCatalogEntries(
-  templates: readonly RealmTemplate[] | null | undefined,
+  templates: readonly (RealmTemplate)[] | null | undefined,
   sources: readonly RealmTemplateSourceLabel[] | null | undefined
 ): RealmTemplateCatalogEntry[] {
   const templateList = Array.isArray(templates) ? templates : [];

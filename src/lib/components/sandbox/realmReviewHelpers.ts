@@ -9,7 +9,7 @@
  *
  * The composition and validation projections call the real `realmCatalog`
  * helpers (`composeSystemPrompt`, `composeAgentHistory`,
- * `validateHydrationPackage`) so a review can never disagree with what the
+ * `validatePayload`) so a review can never disagree with what the
  * launch materializes; the store stays out of this module except for the one
  * injected grant-host seam the settings toggles call through
  * ({@link applyMetaAuthorityToggle}), which keeps the toggle wiring testable
@@ -21,22 +21,32 @@
  * package), and baked history entries through those sources. Per-instance
  * prompt overrides stay out, so `fixed` prompt parts and `fixed` seed slots
  * render read-only with explicit provenance.
+ *
+ * Format v2 (ticket a71198f): the files dialog renders the normalized
+ * placements (`file` sources from the bundle; input sources resolved from the
+ * launch inputs, then the attached payload, then the declared default), with
+ * `root` placements expanded across the attached fileset and read-only slots
+ * because editing happens at the input field. The prompt/history projections
+ * accept shape-tagged `inputs` and resolve a `files` input part's exact
+ * `path` selection through the real catalog composition (`composeSystemPrompt`
+ * / `composeAgentHistory`), so a review can never disagree with the launch.
  */
 
 import {
   AGENT_AUTHORITIES,
-  KNOWN_AGENT_AUTHORITIES,
   composeAgentHistory,
-  validateHydrationPackage
+  normalizeTemplate,
+  validatePayload
 } from '../../sandbox/realmCatalog/index.ts';
 import type {
   PromptPart,
   RealmAgentSpec,
   RealmComposeOptions,
+  RealmInputValue,
   RealmInputValues,
+  RealmPlacement,
   RealmTemplate,
-  RealmTemplateInput,
-  RealmTemplateSeedFile
+  RealmTemplateInput
 } from '../../sandbox/realmCatalog/index.ts';
 
 /** Declared content origin of one reviewed artifact. */
@@ -160,54 +170,28 @@ export interface RealmPartProvenanceProjection {
 }
 
 /**
- * Builds declared-input lookup and resolves one input's review value with the
- * catalog's launch → default → defaultFile → empty precedence.
- *
- * @param declaration - Declared input.
- * @param inputValues - Effective review values.
- * @param bundleFiles - Bundle file bodies.
- * @returns The resolved value (empty when unresolved) and whether it resolved.
- */
-function resolveInputReviewValue(
-  declaration: RealmTemplateInput,
-  inputValues: Readonly<Record<string, unknown>>,
-  bundleFiles: Readonly<Record<string, string>>
-): { value: string; resolved: boolean } {
-  if (Object.prototype.hasOwnProperty.call(inputValues, declaration.id)) {
-    const explicit = inputValues[declaration.id];
-    return { value: typeof explicit === 'string' ? explicit : '', resolved: true };
-  }
-  if (typeof declaration.default === 'string') return { value: declaration.default, resolved: true };
-  if (typeof declaration.defaultFile === 'string') {
-    if (Object.prototype.hasOwnProperty.call(bundleFiles, declaration.defaultFile)) {
-      return { value: bundleFiles[declaration.defaultFile], resolved: true };
-    }
-    return { value: '', resolved: false };
-  }
-  return { value: '', resolved: true };
-}
-
-/**
  * Builds per-part provenance views for one ordered part list (a prompt or a
  * history entry's content).
  *
  * `file` parts resolve verbatim from the bundle files and `text` parts carry
- * their literal text (both `fixed`); `input` parts carry the declared origin
- * and the value resolved with the same precedence the catalog composition
- * uses. Missing bundle entries are reported as `bundleUnavailable` — the
- * caller renders the explicit bundle state instead of guessing.
+ * their literal text (both `fixed`); `input` parts carry the declared display
+ * origin and the value resolved with the same precedence the catalog
+ * composition uses, and a `files` input part resolves the exact file its
+ * `path` selects (a missing selection is reported inline). Missing bundle
+ * entries are reported as `bundleUnavailable` — the caller renders the
+ * explicit bundle state instead of guessing.
  *
  * @param parts - Declared parts in order.
  * @param inputs - Declared template inputs referenced by input parts.
- * @param options - Effective review input values and bundle file bodies.
+ * @param options - Supplied shape-tagged input values and bundle file bodies.
  * @returns The projection; failures are inline, never thrown.
  *
  * @example
  * ```typescript
  * const view = buildRealmPartProvenanceViews(
  *   [{ kind: 'input', inputId: 'tone' }],
- *   [{ id: 'tone', label: 'Tone', origin: 'generated' }],
- *   { inputValues: { tone: 'Noir.' } }
+ *   [{ id: 'tone', label: 'Tone', shape: 'text', required: true }],
+ *   { inputs: { tone: { shape: 'text', text: 'Noir.' } } }
  * );
  * view.parts[0].origin; // 'generated'
  * ```
@@ -220,7 +204,7 @@ export function buildRealmPartProvenanceViews(
   const partList = Array.isArray(parts) ? parts : [];
   const declarations = Array.isArray(inputs) ? inputs : [];
   const opts = isRecord(options) ? options : {};
-  const inputValues: Readonly<Record<string, unknown>> = isRecord(opts.inputValues) ? opts.inputValues : {};
+  const shapeTagged: RealmInputValues = isRecord(opts.inputs) ? opts.inputs as RealmInputValues : {};
   const bundleFiles: Readonly<Record<string, string>> = isRecord(opts.bundleFiles)
     ? (opts.bundleFiles as Readonly<Record<string, string>>)
     : {};
@@ -231,6 +215,7 @@ export function buildRealmPartProvenanceViews(
   );
 
   const missing: string[] = [];
+  const compositionErrors: string[] = [];
   const views: RealmPartProvenanceView[] = [];
   partList.forEach((part, index) => {
     if (!part || typeof part !== 'object') return;
@@ -272,14 +257,16 @@ export function buildRealmPartProvenanceViews(
         });
         return;
       }
-      const resolved = resolveInputReviewValue(declaration, inputValues, bundleFiles);
-      if (!resolved.resolved && typeof declaration.defaultFile === 'string') missing.push(declaration.defaultFile);
+      const resolved = resolveRealmV2PartContribution(declaration, part, shapeTagged, bundleFiles);
+      if (resolved.missingBundle.length > 0) missing.push(...resolved.missingBundle);
+      if (resolved.error) compositionErrors.push(resolved.error);
+      const selected = typeof part.path === 'string' && part.path.length > 0 ? ` — "${part.path}"` : '';
       views.push({
         index,
         kind: 'input',
-        origin: declaration.origin === 'generated' ? 'generated' : 'user',
-        label: `input "${declaration.label}"`,
-        path: '',
+        origin: reviewInputDisplayOrigin(declaration),
+        label: `input "${declaration.label}"${selected}`,
+        path: typeof part.path === 'string' ? part.path : '',
         inputId: declaration.id,
         inputLabel: declaration.label,
         editable: isRealmInputPartEditable(),
@@ -314,7 +301,64 @@ export function buildRealmPartProvenanceViews(
       error: `Prompt bundle files are not available: ${unique.join(', ')}. The review needs the bundle to resolve these parts.`
     };
   }
+  if (compositionErrors.length > 0) {
+    return { ok: false, parts: [], bundleUnavailable: false, error: compositionErrors[0] };
+  }
   return { ok: true, parts: views, bundleUnavailable: false, error: '' };
+}
+
+/**
+ * Resolves one v2 input part's contribution and missing-bundle state with the
+ * catalog's own precedence (supplied value → default → defaultFile → empty).
+ *
+ * @param declaration - Declared v2 input.
+ * @param part - Input part (validated structurally).
+ * @param inputs - Shape-tagged effective values.
+ * @param bundleFiles - Bundle file bodies.
+ * @returns The contribution, missing bundle entries, and any selection error.
+ */
+function resolveRealmV2PartContribution(
+  declaration: RealmTemplateInput,
+  part: Extract<PromptPart, { kind: 'input' }>,
+  inputs: RealmInputValues,
+  bundleFiles: Readonly<Record<string, string>>
+): { readonly value: string; readonly missingBundle: readonly string[]; readonly error: string } {
+  const supplied = Object.prototype.hasOwnProperty.call(inputs, declaration.id)
+    ? inputs[declaration.id]
+    : null;
+  if (declaration.shape === 'files') {
+    if (typeof part.path !== 'string' || part.path.length === 0) {
+      return {
+        value: '',
+        missingBundle: [],
+        error: `The prompt references files input "${declaration.id}" without a file selection — name exactly one file with "path".`
+      };
+    }
+    const files = supplied && supplied.shape === 'files' ? supplied.files : [];
+    if (files.length === 0) return { value: '', missingBundle: [], error: '' };
+    const selected = files.find((file) => file.path === part.path);
+    if (!selected) {
+      return {
+        value: '',
+        missingBundle: [],
+        error: `The files input "${declaration.id}" has no attached file "${part.path}".`
+      };
+    }
+    return { value: selected.content, missingBundle: [], error: '' };
+  }
+  if (supplied && supplied.shape === 'text') {
+    return { value: supplied.text, missingBundle: [], error: '' };
+  }
+  if (typeof declaration.default === 'string') {
+    return { value: declaration.default, missingBundle: [], error: '' };
+  }
+  if (typeof declaration.defaultFile === 'string') {
+    if (Object.prototype.hasOwnProperty.call(bundleFiles, declaration.defaultFile)) {
+      return { value: bundleFiles[declaration.defaultFile], missingBundle: [], error: '' };
+    }
+    return { value: '', missingBundle: [declaration.defaultFile], error: '' };
+  }
+  return { value: '', missingBundle: [], error: '' };
 }
 
 // ============================================================================
@@ -363,8 +407,9 @@ export interface RealmHistoryEditorProjection {
 
 /**
  * Builds the editable baked-history projection for one template agent: the
- * composed entries (through the real `composeAgentHistory`) zipped with each
- * entry's per-part provenance.
+ * composed entries (through the real `composeAgentHistory`, or
+ * `composeAgentHistory` when shape-tagged format-v2 values are supplied)
+ * zipped with each entry's per-part provenance.
  *
  * Composition failures (missing bundle entries, undeclared input references,
  * an entry that composes empty) are reported inline; a spec without history is
@@ -372,7 +417,7 @@ export interface RealmHistoryEditorProjection {
  *
  * @param spec - Agent spec whose history is reviewed.
  * @param inputs - Declared template inputs referenced by history parts.
- * @param options - Effective review input values and bundle file bodies.
+ * @param options - Supplied shape-tagged input values and bundle file bodies.
  * @returns The projection; failures are inline, never thrown.
  */
 export function buildRealmHistoryEditorViews(
@@ -387,20 +432,19 @@ export function buildRealmHistoryEditorViews(
   if (history.length === 0) return { ok: true, entries: [], bundleUnavailable: false, error: '' };
   const declarations = Array.isArray(inputs) ? inputs : [];
   const opts = isRecord(options) ? options : {};
-  const inputValues: Readonly<Record<string, unknown>> = isRecord(opts.inputValues) ? opts.inputValues : {};
+  const shapeTagged: RealmInputValues = isRecord(opts.inputs) ? opts.inputs as RealmInputValues : {};
   const inputsById: ReadonlyMap<string, RealmTemplateInput> = new Map(
     declarations
       .filter((input): input is RealmTemplateInput => Boolean(input) && typeof input.id === 'string')
       .map((input) => [input.id, input] as const)
   );
 
-  // Resolve each entry's referenced inputs with the catalog's own precedence
-  // (launch value → default → defaultFile → empty) and collect per-part
-  // provenance; the composed content itself comes from the real
-  // `composeAgentHistory`, so the review can never disagree with the launch.
-  const resolvedValues: Record<string, string> = Object.create(null);
+  // Collect per-part provenance; the composed content itself comes from the
+  // real `composeAgentHistory`, so the review can never disagree with the
+  // launch.
   const missing: string[] = [];
   const undeclaredInputs: string[] = [];
+  const partErrors: string[] = [];
   const partViewsByEntry: RealmPartProvenanceView[][] = [];
   const bundleFiles = isRecord(opts.bundleFiles) ? (opts.bundleFiles as Readonly<Record<string, string>>) : {};
 
@@ -452,26 +496,21 @@ export function buildRealmHistoryEditorViews(
           });
           return;
         }
-        let resolved: string;
-        if (Object.prototype.hasOwnProperty.call(resolvedValues, inputId)) {
-          resolved = resolvedValues[inputId];
-        } else {
-          const resolution = resolveInputReviewValue(declaration, inputValues, bundleFiles);
-          if (!resolution.resolved && typeof declaration.defaultFile === 'string') missing.push(declaration.defaultFile);
-          resolved = resolution.value;
-          resolvedValues[inputId] = resolved;
-        }
+        const resolvedV2 = resolveRealmV2PartContribution(declaration, part, shapeTagged, bundleFiles);
+        if (resolvedV2.missingBundle.length > 0) missing.push(...resolvedV2.missingBundle);
+        if (resolvedV2.error) partErrors.push(resolvedV2.error);
+        const selected = typeof part.path === 'string' && part.path.length > 0 ? ` — "${part.path}"` : '';
         partViews.push({
           index: partIndex,
           kind: 'input',
-          origin: declaration.origin === 'generated' ? 'generated' : 'user',
-          label: `input "${declaration.label}"`,
-          path: '',
+          origin: reviewInputDisplayOrigin(declaration),
+          label: `input "${declaration.label}"${selected}`,
+          path: typeof part.path === 'string' ? part.path : '',
           inputId,
           inputLabel: declaration.label,
           editable: isRealmInputPartEditable(),
-          content: resolved,
-          empty: resolved.trim().length === 0,
+          content: resolvedV2.value,
+          empty: resolvedV2.value.trim().length === 0,
           required: declaration.required === true
         });
         return;
@@ -504,6 +543,10 @@ export function buildRealmHistoryEditorViews(
     };
   }
 
+  if (partErrors.length > 0) {
+    return { ok: false, entries: [], bundleUnavailable: false, error: partErrors[0] };
+  }
+
   if (missing.length > 0) {
     const unique = [...new Set(missing)];
     return {
@@ -516,7 +559,7 @@ export function buildRealmHistoryEditorViews(
 
   let messages: readonly { readonly role: 'user' | 'assistant'; readonly content: string }[];
   try {
-    messages = composeAgentHistory(spec, resolvedValues, bundleFiles);
+    messages = composeAgentHistory(spec, declarations, { inputs: shapeTagged, bundleFiles });
   } catch (error) {
     return {
       ok: false,
@@ -561,9 +604,17 @@ export function buildRealmHistoryEditorViews(
  * One declared seed slot rendered in the review files dialog.
  *
  * `content` is the resolved review content (bundle for `fixed`, the attached
- * payload or the review edit for `user`/`generated`); `contentSource` names
- * where it came from, and `editable` is false for `fixed` slots (shipped in
- * the bundle — a hydration package must never carry them).
+ * payload, the launch input value, or the review edit for `user`/`generated`);
+ * `contentSource` names where it came from, and `editable` is false for `fixed`
+ * slots (shipped in the bundle — a hydration package must never carry them).
+ *
+ * Format-v2 slots (ticket a71198f) render from the normalized placements:
+ * `source` names whether the destination is backed by a bundle file or a
+ * declared input, `inputId`/`inputLabel` carry the input identity for the
+ * usage view, and `conflict` marks a declared placement the attached fileset
+ * cannot resolve (a `path` destination with several files). Format-v2 slots
+ * stay read-only in the dialog — editing happens at the input field, the
+ * declared source.
  */
 export interface RealmReviewFileSlot {
   /** Stable slot key (`<target>|<path>`) shared with payload matching. */
@@ -582,16 +633,24 @@ export interface RealmReviewFileSlot {
   readonly brief: string;
   /** Whether an attached package must carry this slot (`generated` slots). */
   readonly required: boolean;
-  /** Whether the review may edit the content (everything but `fixed`). */
+  /** Whether the review may edit the content (v1 non-`fixed` slots only). */
   readonly editable: boolean;
   /** Resolved review content (empty when absent/unresolved). */
   readonly content: string;
   /** Where the resolved content came from. */
-  readonly contentSource: 'bundle-inline' | 'bundle-file' | 'payload' | 'review' | 'absent' | 'bundle-missing';
+  readonly contentSource: 'bundle-inline' | 'bundle-file' | 'payload' | 'review' | 'input' | 'absent' | 'bundle-missing';
   /** Human label of `contentSource`. */
   readonly sourceLabel: string;
   /** Whether the operator edited the slot in review. */
   readonly edited: boolean;
+  /** What backs the destination: a bundle file or a declared input. */
+  readonly source: 'bundle' | 'input';
+  /** Declared input id backing the slot (`''` for bundle-file destinations). */
+  readonly inputId: string;
+  /** Declared input label (`''` for bundle-file destinations). */
+  readonly inputLabel: string;
+  /** Whether the declared placement cannot resolve from the attached fileset. */
+  readonly conflict: boolean;
 }
 
 /**
@@ -611,51 +670,21 @@ export function realmReviewSlotKey(target: unknown, path: unknown): string {
 }
 
 /**
- * Resolves the payload files map (from an attached candidate or local file)
- * keyed by slot key.
+ * Builds the review file-dialog slots for one template: every declared
+ * placement with its resolved content and provenance.
  *
- * @param payload - Candidate hydration package (structural; malformed entries skipped).
- * @returns Slot key → content for every well-formed entry.
- */
-function payloadFilesByKey(payload: unknown): Map<string, string> {
-  const byKey = new Map<string, string>();
-  if (!isRecord(payload) || !Array.isArray(payload.files)) return byKey;
-  for (const entry of payload.files) {
-    if (!isRecord(entry) || typeof entry.path !== 'string' || typeof entry.content !== 'string') continue;
-    const key = realmReviewSlotKey(entry.target, entry.path);
-    if (key.startsWith('unknown|')) continue;
-    byKey.set(key, entry.content);
-  }
-  return byKey;
-}
-
-/**
- * Reads the attached payload's input values (string-valued entries only).
- *
- * @param payload - Candidate hydration package (structural).
- * @returns Input id → value for every well-formed entry.
- */
-export function payloadInputValues(payload: unknown): Record<string, string> {
-  const values: Record<string, string> = {};
-  if (!isRecord(payload) || !isRecord(payload.inputs)) return values;
-  for (const [inputId, value] of Object.entries(payload.inputs)) {
-    if (typeof value === 'string') values[inputId] = value;
-  }
-  return values;
-}
-
-/**
- * Builds the review file-dialog slots for one template: every declared seed
- * slot with its resolved content and provenance.
- *
- * Resolution order per slot — review edit, attached payload entry, bundle
- * source (`fixed` only), absent. `fixed` slots are never editable and never
- * payload-overridable; a missing fixed `source.file` bundle entry is reported
- * as `bundle-missing` instead of guessing.
+ * A `file` placement resolves from the bundle, an input placement resolves
+ * from the effective launch inputs (explicit review values → attached payload →
+ * declared default), a `root` placement expands one slot per attached file,
+ * and a `path` placement expects exactly one file (a larger fileset renders as
+ * a flagged conflict). Legacy format-v1 documents convert through the read
+ * shim first, so their converted placements render natively. Slots are
+ * read-only in this dialog — editing happens at the input field, the declared
+ * source.
  *
  * @param template - Selected template (structural; malformed slots skipped).
  * @param bundleFiles - Bundle file bodies.
- * @param options - Attached payload and review edits keyed by slot key.
+ * @param options - Attached payload and the explicit launch input values.
  * @returns Slot views in declared order.
  */
 export function buildRealmReviewFileSlots(
@@ -664,86 +693,290 @@ export function buildRealmReviewFileSlots(
   options: {
     readonly payload?: unknown;
     readonly edits?: Readonly<Record<string, string>> | null;
+    /** Explicit launch input values (shape-tagged; win over the payload). */
+    readonly inputs?: RealmInputValues | null;
   } | null | undefined = {}
 ): RealmReviewFileSlot[] {
-  if (!template || typeof template !== 'object' || !template.seed || typeof template.seed !== 'object') return [];
-  const files: readonly RealmTemplateSeedFile[] = Array.isArray(template.seed.files) ? template.seed.files : [];
+  if (!template || typeof template !== 'object') return [];
+  let model: RealmTemplate;
+  try {
+    model = normalizeTemplate(template);
+  } catch {
+    return [];
+  }
+  return buildRealmReviewFileSlotsFromModel(model, bundleFiles, options);
+}
+
+/**
+ * Placement views: one slot per declared destination, with a `root` placement
+ * expanded across the attached fileset.
+ *
+ * @param template - Canonical template.
+ * @param bundleFiles - Bundle file bodies.
+ * @param options - Attached payload and explicit shape-tagged launch inputs.
+ * @returns Slot views in declared order.
+ */
+function buildRealmReviewFileSlotsFromModel(
+  template: RealmTemplate,
+  bundleFiles: Readonly<Record<string, string>> | null | undefined,
+  options: {
+    readonly payload?: unknown;
+    readonly inputs?: RealmInputValues | null;
+  } | null | undefined
+): RealmReviewFileSlot[] {
+  const placements = Array.isArray(template.placements) ? template.placements : [];
+  if (placements.length === 0) return [];
   const agents = Array.isArray(template.agents) ? template.agents : [];
   const bodies = isRecord(bundleFiles) ? bundleFiles as Readonly<Record<string, string>> : {};
   const opts = isRecord(options) ? options : {};
-  const edits: Readonly<Record<string, unknown>> = isRecord(opts.edits) ? opts.edits : {};
-  const payloadByKey = payloadFilesByKey(opts.payload);
+  const payloadValues = reviewPayloadShapeTaggedInputs(template, opts.payload);
+  const explicitValues: RealmInputValues = isRecord(opts.inputs) ? opts.inputs as RealmInputValues : {};
+  const declarationsById: ReadonlyMap<string, RealmTemplateInput> = new Map(
+    (Array.isArray(template.inputs) ? template.inputs : [])
+      .filter((input): input is RealmTemplateInput => Boolean(input) && typeof input.id === 'string')
+      .map((input) => [input.id, input] as const)
+  );
 
   const views: RealmReviewFileSlot[] = [];
-  for (const file of files) {
-    if (!file || typeof file !== 'object' || typeof file.path !== 'string' || file.path.length === 0) continue;
-    const origin: RealmContentOrigin = file.origin === 'user' || file.origin === 'generated'
-      ? file.origin
-      : 'fixed';
-    let targetKind: 'realm' | 'agent' = 'realm';
-    let targetKey = '';
-    let targetLabel = 'Realm-global workspace';
-    if (isRecord(file.target) && typeof file.target.agent === 'string') {
-      targetKind = 'agent';
-      targetKey = file.target.agent;
-      const agent = agents.find((entry) => entry && entry.key === targetKey) ?? null;
-      targetLabel = agent && typeof agent.name === 'string' && agent.name.length > 0
-        ? `${agent.name} (${targetKey})`
-        : targetKey;
-    }
-    const key = realmReviewSlotKey(file.target, file.path);
-    const edited = Object.prototype.hasOwnProperty.call(edits, key) && typeof own(edits, key) === 'string';
+  for (const placement of placements) {
+    if (!placement || typeof placement !== 'object') continue;
+    const targetKind: 'realm' | 'agent' = placement.target === 'realm' ? 'realm' : 'agent';
+    const targetKey = targetKind === 'agent' && isRecord(placement.target) && typeof placement.target.agent === 'string'
+      ? placement.target.agent
+      : '';
+    const targetLabel = targetKind === 'agent' ? reviewAgentLabel(agents, targetKey) : 'Realm-global workspace';
 
-    let content = '';
-    let contentSource: RealmReviewFileSlot['contentSource'] = 'absent';
-    let sourceLabel = 'not attached';
-    if (origin === 'fixed') {
-      const source = file.source as { readonly inline?: unknown; readonly file?: unknown } | undefined;
-      const inlineValue = source?.inline;
-      const fileRef = source?.file;
-      if (typeof inlineValue === 'string') {
-        content = inlineValue;
-        contentSource = 'bundle-inline';
-        sourceLabel = 'inline bundle content';
-      } else if (typeof fileRef === 'string') {
-        if (Object.prototype.hasOwnProperty.call(bodies, fileRef)) {
-          content = bodies[fileRef];
-          contentSource = 'bundle-file';
-          sourceLabel = `bundle file ${fileRef}`;
-        } else {
-          contentSource = 'bundle-missing';
-          sourceLabel = `bundle file ${fileRef} (missing)`;
-        }
-      } else {
-        sourceLabel = 'bundle content';
-      }
-    } else if (edited) {
-      content = String(own(edits, key));
-      contentSource = 'review';
-      sourceLabel = 'edited in review';
-    } else if (payloadByKey.has(key)) {
-      content = payloadByKey.get(key) ?? '';
-      contentSource = 'payload';
-      sourceLabel = 'attached payload';
+    if (typeof placement.file === 'string' && placement.file.length > 0) {
+      const path = typeof placement.path === 'string' ? placement.path : '';
+      if (path.length === 0) continue;
+      const present = Object.prototype.hasOwnProperty.call(bodies, placement.file);
+      views.push({
+        key: realmReviewSlotKey(placement.target, path),
+        path,
+        targetKind,
+        targetKey,
+        targetLabel,
+        origin: 'fixed',
+        brief: '',
+        required: false,
+        editable: false,
+        content: present ? bodies[placement.file] : '',
+        contentSource: present ? 'bundle-file' : 'bundle-missing',
+        sourceLabel: present ? `bundle file ${placement.file}` : `bundle file ${placement.file} (missing)`,
+        edited: false,
+        source: 'bundle',
+        inputId: '',
+        inputLabel: '',
+        conflict: false
+      });
+      continue;
     }
 
-    views.push({
-      key,
-      path: file.path,
+    if (typeof placement.inputId !== 'string' || placement.inputId.length === 0) continue;
+    const declaration = declarationsById.get(placement.inputId) ?? null;
+    if (!declaration) continue;
+    const inputLabel = declaration.label.length > 0 ? declaration.label : declaration.id;
+    const explicitProvided = Object.prototype.hasOwnProperty.call(explicitValues, declaration.id);
+    const payloadProvided = Object.prototype.hasOwnProperty.call(payloadValues, declaration.id);
+    let supplied: RealmInputValue | null = explicitProvided
+      ? explicitValues[declaration.id]
+      : payloadProvided
+        ? payloadValues[declaration.id]
+        : null;
+    if (supplied && supplied.shape !== declaration.shape) supplied = null;
+    let value: RealmInputValue;
+    let source: 'launch' | 'payload' | 'default' | 'defaultFile' | 'empty';
+    if (supplied && explicitProvided) {
+      value = supplied;
+      source = 'launch';
+    } else if (supplied && payloadProvided) {
+      value = supplied;
+      source = 'payload';
+    } else if (declaration.shape === 'text' && typeof declaration.default === 'string') {
+      value = { shape: 'text', text: declaration.default };
+      source = 'default';
+    } else if (declaration.shape === 'text' && typeof declaration.defaultFile === 'string'
+      && Object.prototype.hasOwnProperty.call(bodies, declaration.defaultFile)) {
+      value = { shape: 'text', text: bodies[declaration.defaultFile] };
+      source = 'defaultFile';
+    } else {
+      value = declaration.shape === 'files' ? { shape: 'files', files: [] } : { shape: 'text', text: '' };
+      source = 'empty';
+    }
+
+    const base = {
       targetKind,
       targetKey,
       targetLabel,
-      origin,
-      brief: typeof file.brief === 'string' ? file.brief : '',
-      required: origin === 'generated',
-      editable: origin !== 'fixed',
-      content,
-      contentSource,
-      sourceLabel,
-      edited
+      origin: reviewInputDisplayOrigin(declaration),
+      brief: typeof declaration.brief === 'string' ? declaration.brief : '',
+      required: declaration.required === true,
+      editable: false,
+      edited: false,
+      source: 'input' as const,
+      inputId: declaration.id,
+      inputLabel
+    };
+
+    if (declaration.shape === 'files') {
+      const files = value.shape === 'files' ? value.files : [];
+      const root = typeof placement.root === 'string' ? placement.root : '';
+      if (root.length > 0) {
+        const prefix = root.endsWith('/') ? root : `${root}/`;
+        if (files.length === 0) {
+          views.push({
+            ...base,
+            key: realmReviewSlotKey(placement.target, root),
+            path: root,
+            content: '',
+            contentSource: 'absent',
+            sourceLabel: `input "${inputLabel}" — no files attached`,
+            conflict: false
+          });
+          continue;
+        }
+        for (const file of files) {
+          const path = `${prefix}${file.path}`;
+          views.push({
+            ...base,
+            key: realmReviewSlotKey(placement.target, path),
+            path,
+            content: file.content,
+            contentSource: reviewInputContentSource(source),
+            sourceLabel: reviewInputSourceLabel(inputLabel, source),
+            conflict: false
+          });
+        }
+        continue;
+      }
+      const path = typeof placement.path === 'string' ? placement.path : '';
+      if (path.length === 0) continue;
+      const conflict = files.length > 1;
+      views.push({
+        ...base,
+        key: realmReviewSlotKey(placement.target, path),
+        path,
+        content: files.length === 1 ? files[0].content : '',
+        contentSource: files.length === 1 ? reviewInputContentSource(source) : 'absent',
+        sourceLabel: conflict
+          ? `input "${inputLabel}" — ${files.length} files attached, but a path destination needs exactly one`
+          : reviewInputSourceLabel(inputLabel, source),
+        conflict
+      });
+      continue;
+    }
+
+    const path = typeof placement.path === 'string' ? placement.path : '';
+    if (path.length === 0) continue;
+    const text = value.shape === 'text' ? value.text : '';
+    views.push({
+      ...base,
+      key: realmReviewSlotKey(placement.target, path),
+      path,
+      content: text,
+      contentSource: reviewInputContentSource(source),
+      sourceLabel: reviewInputSourceLabel(inputLabel, source),
+      conflict: false
     });
   }
   return views;
+}
+
+/**
+ * Reads the attached payload's shape-tagged input values against one v2
+ * template (a v1 package converts through the catalog); a malformed payload
+ * resolves nothing here — its typed error is surfaced by the package preview.
+ *
+ * @param template - Normalized format-v2 template.
+ * @param payload - Attached payload.
+ * @returns Validated shape-tagged values (empty when unresolvable).
+ */
+function reviewPayloadShapeTaggedInputs(template: RealmTemplate, payload: unknown): RealmInputValues {
+  if (payload === null || payload === undefined) return {};
+  try {
+    return validatePayload(template, payload, { allowVersionMismatch: true }).inputs;
+  } catch {
+    if (!isRecord(payload) || payload.formatVersion !== 2 || !isRecord(payload.inputs)) return {};
+    const values: Record<string, RealmInputValue> = {};
+    for (const [inputId, candidate] of Object.entries(payload.inputs)) {
+      if (!isRecord(candidate)) continue;
+      if (typeof candidate.text === 'string') {
+        values[inputId] = { shape: 'text', text: candidate.text };
+        continue;
+      }
+      if (Array.isArray(candidate.files)) {
+        const files: Array<{ path: string; content: string }> = [];
+        for (const file of candidate.files) {
+          if (isRecord(file) && typeof file.path === 'string' && typeof file.content === 'string') {
+            files.push({ path: file.path, content: file.content });
+          }
+        }
+        if (files.length > 0) values[inputId] = { shape: 'files', files };
+      }
+    }
+    return values;
+  }
+}
+
+/**
+ * Coarse review origin of one v2 input declaration (v1-comparable labels).
+ *
+ * @param declaration - Declared format-v2 input.
+ * @returns `generated` for a required input, `fixed` for a prefilled text input, else `user`.
+ */
+function reviewInputDisplayOrigin(declaration: RealmTemplateInput): RealmContentOrigin {
+  if (declaration.required === true) return 'generated';
+  if (declaration.shape === 'text' && (typeof declaration.default === 'string' || typeof declaration.defaultFile === 'string')) {
+    return 'fixed';
+  }
+  return 'user';
+}
+
+/**
+ * Maps one v2 input value source onto the review content-source vocabulary.
+ *
+ * @param source - Effective value source.
+ * @returns The matching review content source.
+ */
+function reviewInputContentSource(
+  source: 'launch' | 'payload' | 'default' | 'defaultFile' | 'empty'
+): RealmReviewFileSlot['contentSource'] {
+  if (source === 'launch') return 'input';
+  if (source === 'payload') return 'payload';
+  if (source === 'default') return 'bundle-inline';
+  if (source === 'defaultFile') return 'bundle-file';
+  return 'absent';
+}
+
+/**
+ * Human label of one v2 input value source.
+ *
+ * @param label - Declared input label.
+ * @param source - Effective value source.
+ * @returns The source label.
+ */
+function reviewInputSourceLabel(
+  label: string,
+  source: 'launch' | 'payload' | 'default' | 'defaultFile' | 'empty'
+): string {
+  if (source === 'launch') return `input "${label}" — launch value`;
+  if (source === 'payload') return `input "${label}" — attached payload`;
+  if (source === 'default') return `input "${label}" — template default`;
+  if (source === 'defaultFile') return `input "${label}" — default file`;
+  return `input "${label}" — not provided`;
+}
+
+/**
+ * Display label of one template agent key (realm-opaque).
+ *
+ * @param agents - Declared agent specs.
+ * @param key - Template agent key.
+ * @returns `Name (key)` or the raw key.
+ */
+function reviewAgentLabel(agents: readonly RealmAgentSpec[], key: string): string {
+  const spec = agents.find((entry) => entry && entry.key === key) ?? null;
+  const name = spec && typeof spec.name === 'string' && spec.name.length > 0 ? spec.name : '';
+  return name.length > 0 ? `${name} (${key})` : key;
 }
 
 // ============================================================================
@@ -975,16 +1208,17 @@ export interface RealmReviewPackagePreview {
 }
 
 /**
- * Validates one attached package against the effective template for review.
+ * Validates one attached payload against the effective template for review.
  *
- * The package is validated through the real `validateHydrationPackage` with
- * `allowVersionMismatch: true`, so a version mismatch surfaces as a review
- * warning plus the `mismatch` flag (the launcher then requires explicit
- * confirmation before launch passes the flag); every other contract failure is
- * reported inline with its typed code.
+ * Validation runs through the catalog's `validatePayload`, which accepts both
+ * canonical payloads and legacy format-v1 hydration packages (converted
+ * against the normalized template) with `allowVersionMismatch: true`, so a
+ * version mismatch surfaces as a review warning plus the `mismatch` flag (the
+ * launcher then requires explicit confirmation before launch passes the flag);
+ * every other contract failure is reported inline with its typed code.
  *
- * @param template - Effective template.
- * @param value - Attached package (`null`/`undefined` → valid empty preview).
+ * @param template - Effective template (legacy format-v1 documents accepted).
+ * @param value - Attached payload (`null`/`undefined` → valid empty preview).
  * @param options - Effective bundle `currentVersion`.
  * @returns The preview; failures are inline, never thrown.
  */
@@ -1003,7 +1237,7 @@ export function previewRealmReviewPackage(
     ? options.currentVersion
     : undefined;
   try {
-    const resolved = validateHydrationPackage(template, value, {
+    const resolved = validatePayload(template, value, {
       allowVersionMismatch: true,
       ...(currentVersion !== undefined ? { currentVersion } : {})
     });
@@ -1024,6 +1258,94 @@ export function previewRealmReviewPackage(
       code: codeOf(error)
     };
   }
+}
+
+// ============================================================================
+// Launch payload resolution
+// ============================================================================
+
+/**
+ * The payload the review will actually launch plus its blocking state.
+ *
+ * `edited` reports whether any non-fixed slot carries a review edit;
+ * `payload` is the exact value the launcher passes as `payload` (the source
+ * verbatim while unedited, else the package rebuilt from the current slots);
+ * `blocked` means the review cannot launch as-is (a placement conflict, or an
+ * edit set that cannot be assembled into a package) and `error` is the
+ * user-facing reason the gate must show instead of silently dropping edits.
+ */
+export interface RealmReviewLaunchPayload {
+  /** Whether any non-fixed slot carries a review edit. */
+  readonly edited: boolean;
+  /** The exact payload to pass to the launch (`null` when nothing attaches). */
+  readonly payload: Readonly<Record<string, unknown>> | null;
+  /** Whether the gate must block the launch. */
+  readonly blocked: boolean;
+  /** User-facing blocking reason (empty when not blocked). */
+  readonly error: string;
+}
+
+/**
+ * Resolves the review's launch payload and blocking state, so "preview ok"
+ * and the launched payload can never drift apart.
+ *
+ * An unedited review attaches the source verbatim (a candidate's digest stays
+ * the submitter's). As soon as a non-fixed slot is edited, the package is
+ * rebuilt from the current slots through {@link assembleRealmReviewPackage};
+ * an edit set that cannot be assembled, or any declared placement the attached
+ * fileset cannot resolve (`conflict`), blocks the launch with a clear reason
+ * instead of dropping the edits. A review with no source and no edits attaches
+ * nothing.
+ *
+ * @param options - Template identity/version, source package, and current slots.
+ * @returns The launch payload resolution; never throws.
+ *
+ * @example
+ * ```typescript
+ * const resolved = resolveRealmReviewLaunchPayload({ templateId, templateVersion, source, slots });
+ * resolved.blocked; // true while a placement conflict remains
+ * ```
+ */
+export function resolveRealmReviewLaunchPayload(options: {
+  readonly templateId: unknown;
+  readonly templateVersion: unknown;
+  readonly source?: unknown;
+  readonly slots?: readonly RealmReviewFileSlot[] | null;
+}): RealmReviewLaunchPayload {
+  const slots = Array.isArray(options?.slots) ? options.slots : [];
+  const edited = slots.some((slot) => slot && slot.edited === true && slot.origin !== 'fixed');
+  const conflict = slots.find((slot) => slot && slot.conflict === true) ?? null;
+  if (conflict) {
+    return {
+      edited,
+      payload: null,
+      blocked: true,
+      error: `A declared placement cannot resolve from the attached fileset: ${conflict.sourceLabel}`
+    };
+  }
+  if (!edited) {
+    return {
+      edited: false,
+      payload: isRecord(options?.source) ? options.source : null,
+      blocked: false,
+      error: ''
+    };
+  }
+  const assembly = assembleRealmReviewPackage({
+    templateId: options?.templateId,
+    templateVersion: options?.templateVersion,
+    source: options?.source,
+    slots
+  });
+  if (!assembly.attached || !assembly.package) {
+    return {
+      edited: true,
+      payload: null,
+      blocked: true,
+      error: 'The reviewed file edits could not be assembled into a launch package — attach a source payload or reset the edits.'
+    };
+  }
+  return { edited: true, payload: assembly.package, blocked: false, error: '' };
 }
 
 // ============================================================================
@@ -1546,79 +1868,4 @@ export function buildRealmAgentDisclosureRows(
       present: true
     }
   ];
-}
-
-/**
- * The effective review input values for previews: explicit review edits win,
- * then the attached payload's values, then nothing (the catalog resolves the
- * declared default).
- *
- * @param drafts - Review input drafts.
- * @param payload - Attached payload (its `inputs` record; string values only).
- * @returns Preview values keyed by input id.
- */
-export function buildRealmReviewInputValues(
-  drafts: readonly { readonly id: string; readonly value?: unknown; readonly dirty?: unknown }[] | null | undefined,
-  payload: unknown
-): Record<string, string> {
-  const values: Record<string, string> = {};
-  const payloadValues = payloadInputValues(payload);
-  if (Array.isArray(drafts)) {
-    for (const draft of drafts) {
-      if (!draft || typeof draft.id !== 'string' || draft.id.length === 0) continue;
-      if (draft.dirty === true) {
-        values[draft.id] = typeof draft.value === 'string' ? draft.value : '';
-      }
-    }
-  }
-  for (const [inputId, value] of Object.entries(payloadValues)) {
-    if (!Object.prototype.hasOwnProperty.call(values, inputId)) values[inputId] = value;
-  }
-  return values;
-}
-
-/**
- * Resolves the value one input field displays: an explicit edit, else the
- * attached payload's value, else the draft's prefill.
- *
- * @param draft - Review input draft.
- * @param payload - Attached payload.
- * @returns The display value.
- */
-export function resolveRealmReviewInputDisplay(
-  draft: { readonly id?: unknown; readonly value?: unknown; readonly dirty?: unknown } | null | undefined,
-  payload: unknown
-): string {
-  if (!draft || typeof draft.id !== 'string' || draft.id.length === 0) return '';
-  if (draft.dirty === true) return typeof draft.value === 'string' ? draft.value : '';
-  const payloadValues = payloadInputValues(payload);
-  if (Object.prototype.hasOwnProperty.call(payloadValues, draft.id)) return payloadValues[draft.id];
-  return typeof draft.value === 'string' ? draft.value : '';
-}
-
-/**
- * Known-authority vocabulary for callers that only need the v1 ids.
- */
-export function knownRealmAuthorities(): readonly string[] {
-  return KNOWN_AGENT_AUTHORITIES;
-}
-
-/**
- * The reconciliation-safe input values payload for the launch call: explicit
- * review edits only (untouched fields stay out so the attached payload's
- * values, then the declared defaults, apply).
- *
- * @param drafts - Review input drafts.
- * @returns `inputValues` payload.
- */
-export function assembleRealmReviewLaunchInputValues(
-  drafts: readonly { readonly id: string; readonly value?: unknown; readonly dirty?: unknown }[] | null | undefined
-): RealmInputValues {
-  const values: Record<string, string> = {};
-  if (!Array.isArray(drafts)) return values;
-  for (const draft of drafts) {
-    if (!draft || typeof draft.id !== 'string' || draft.id.length === 0) continue;
-    if (draft.dirty === true) values[draft.id] = typeof draft.value === 'string' ? draft.value : '';
-  }
-  return values;
 }

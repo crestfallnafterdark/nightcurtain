@@ -11,6 +11,7 @@
   import RecycleBinModal from './RecycleBinModal.svelte';
   import RealmSettingsModal from './RealmSettingsModal.svelte';
   import RealmLauncherModal from './RealmLauncherModal.svelte';
+  import RealmRehydrateModal from './RealmRehydrateModal.svelte';
   import {
     DIRECTOR_GROUP_KEY,
     DIRECTOR_GROUP_LABEL,
@@ -25,6 +26,8 @@
   let showRecycleBinModal = $state(false);
   let showRealmModal = $state(false);
   let showRealmLauncherModal = $state(false);
+  // Realm targeted by the rehydrate/replace modal opened from the Realm manager.
+  let rehydrateRealmId = $state('');
   // Optional Realm preselected when the Realm manager opens ('' = none).
   let realmSettingsTargetId = $state('');
   let collapsedRealmKeys = $state({});
@@ -546,12 +549,18 @@
       realmId={realmSettingsTargetId || null}
       onclose={closeRealmSettings}
       onlaunchtemplate={() => { closeRealmSettings(); showRealmLauncherModal = true; }}
+      onrehydrate={(realm) => { closeRealmSettings(); rehydrateRealmId = realm.id; }}
     />
   {/if}
 
   <!-- Realm Launcher Modal (Wave B template launch + seed wizard) -->
   {#if showRealmLauncherModal}
     <RealmLauncherModal onclose={() => showRealmLauncherModal = false} />
+  {/if}
+
+  <!-- Realm Rehydrate Modal (ticket 874182b reopen/replace flow) -->
+  {#if rehydrateRealmId}
+    <RealmRehydrateModal realmId={rehydrateRealmId} onclose={() => rehydrateRealmId = ''} />
   {/if}
 </div>
 
