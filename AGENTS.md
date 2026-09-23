@@ -137,6 +137,7 @@ Grammar is version-sensitive; trust the installed binary (`git bug version`, `gi
 
 ## 10. Work & issue tracking (three tiers)
 - **Ephemeral work** → the session todo list only. Never durable, never committed.
+- **Session context / checkpoints** → the gitignored `./scratch/` directory (`scratch/checkpoints/` for session catalogues; topic subfolders for scratch scripts and probes). Never write session context to `/tmp`, and never commit `scratch/`. Anything that must outlive the session belongs in a living doc, `AGENTS.md`, or a ticket — not in `scratch/`.
 - **Durable issues/backlog** → **git-bug** (single source; §9). Drive it via `node scripts/gitbug.mjs` (`list`/`show`/`resolve`/`new`/`comment`/`close`); never keep a TODO file. Board: `list --status open`; filter with `-l area:*`, `-l sev:*`, `-l type:*`, `-l prio:*`.
 - **Durable decisions/rules** → `AGENTS.md` and living docs. Tickets link to them; docs never mirror ticket status.
 - **Every ticket update is a comment** carrying references: commit SHA, `file:line`, durable doc paths, command + result. Close only after a closing comment citing the fix.
