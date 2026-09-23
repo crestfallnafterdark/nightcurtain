@@ -43,6 +43,6 @@ export const DEMO_TEMPLATE: RealmTemplate = deepFreeze({
   id: 'demo',
   name: 'Demo Realm',
   description: 'Trivial two-agent fixture: a privileged coordinator and a read-only worker.',
-  formatVersion: 1,
+  formatVersion: 2,
   agents: [coordinatorSpec, workerSpec]
 });

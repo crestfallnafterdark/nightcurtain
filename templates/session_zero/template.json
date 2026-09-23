@@ -1,21 +1,30 @@
 {
-  "formatVersion": 1,
+  "formatVersion": 2,
   "id": "session_zero",
   "name": "Session Zero",
-  "description": "Generator realm: Architect authors Realm template bundles; Genesis produces hydration packages for imported templates.",
+  "description": "Generator realm: Architect authors Realm template bundles; Genesis produces hydration payloads for imported templates.",
   "notes": "Both members are privileged so either can read the other's private workspace in-realm (/agents/<id>/...). The publishing authorities are declared per agent and stay inert until the operator approves them per agent in the mandatory launch review; privilege alone never grants them.",
   "inputs": [
     {
       "id": "assignment",
       "label": "Assignment",
+      "shape": "text",
       "help": "What to author (Architect) or hydrate (Genesis): the experience, its audience, and any must-haves.",
       "required": true
     },
     {
       "id": "target_template",
       "label": "Target template id",
+      "shape": "text",
       "help": "The template id Genesis must hydrate. Leave empty when Architect is authoring a new bundle; Genesis then reads the newest note under /global/handoff/.",
       "multiline": false
+    },
+    {
+      "id": "handoff_notes",
+      "label": "Handoff notes",
+      "shape": "files",
+      "help": "Optional operator notes written to /global/handoff/notes.md at launch; absent notes write nothing.",
+      "brief": "Optional operator notes for this generation session (attached at launch; absent notes are skipped)."
     }
   ],
   "agents": [
@@ -54,7 +63,7 @@
       "key": "genesis",
       "idPattern": "genesis",
       "name": "Genesis",
-      "role": "Hydration package generator",
+      "role": "Payload generator",
       "prompt": [
         { "kind": "file", "path": "prompts/operational_rules.md" },
         { "kind": "file", "path": "prompts/genesis_protocol.md" },
@@ -82,20 +91,8 @@
       "authorities": ["@hydration:authority"]
     }
   ],
-  "seed": {
-    "files": [
-      {
-        "path": "handoff/README.md",
-        "target": "realm",
-        "origin": "fixed",
-        "source": { "file": "files/handoff_readme.md" }
-      },
-      {
-        "path": "handoff/notes.md",
-        "target": "realm",
-        "origin": "user",
-        "brief": "Optional operator notes for this generation session (attached at launch; absent notes are skipped)."
-      }
-    ]
-  }
+  "placements": [
+    { "file": "files/handoff_readme.md", "target": "realm", "path": "handoff/README.md" },
+    { "inputId": "handoff_notes", "target": "realm", "path": "handoff/notes.md" }
+  ]
 }

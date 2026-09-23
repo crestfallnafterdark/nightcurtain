@@ -6,8 +6,8 @@
  * This file is the module's single composition point for baked bundle content:
  * it deep-freezes the generated payload and exposes id lookup for the launcher
  * preview and the sandbox store's default launch catalog. Bundle files are the
- * only source for `file` prompt parts, input `defaultFile` prefills, and seed
- * `source.file` resolution — the catalog performs no runtime file reads and
+ * only source for prompt/history `file` parts, input `defaultFile` prefills,
+ * and placement `file` sources — the catalog performs no runtime file reads and
  * uses no `?raw` imports.
  */
 

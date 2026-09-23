@@ -20,7 +20,7 @@
  * @invariant Credential-vault composition root: the store constructs the MOD-16 `CredentialVault` over an injected `CredentialStoragePort`, hands the runtime only the frozen least-privilege `CredentialResolverPort` from `createResolverPort()`, and exposes the full vault only through `getCredentialVault()`.
  * @invariant MOD-20 preset composition root: the store owns the single `presetCatalog` instance over a snapshot-backed `{ load, save }` adapter, mirrors the active pointer and custom preset entries as snapshot state, persists catalog mutations through the existing debounced save, and hands the owned runtime only the frozen `ModelPresetSourcePort`.
  * @invariant Realm composition root: the store owns the single `realmRegistry` instance over a snapshot-backed `{ load, save }` adapter, mirrors the realm records into the reactive `realms` projection and the snapshot `realms` field, and persists registry mutations through the existing debounced save. Every store seeds the protected Generic default (`realm_generic`, display "Generic", renamable, non-deletable) at init and hands the registry its protected-id set, so removal is refused on every public surface; reconciliation keeps the seeded default in place — first — and a reset restores its pristine metadata, so the registry is never empty and every non-director launch has a Realm.
- * @invariant Realm launch atomicity: `launchRealmFromTemplate` creates the Realm record first and, when materialization, any member launch, or the template seed fails, rolls the whole operation back (launched members purged, record removed, seed files already written best-effort evicted) before throwing a coded failure — a failed call never leaves a half-realm, and template lookup, preset binding, input values, and seed validation are all fail-closed.
+ * @invariant Realm launch atomicity: `launchRealmFromTemplate` creates the Realm record first and, when materialization, any member launch, a placement write, or a directive delivery fails, rolls the whole operation back (launched members purged, record removed, placement files already written best-effort evicted) before throwing a coded failure — a failed call never leaves a half-realm, and template lookup, preset binding, payload/input validation, and placement validation are all fail-closed.
  * @invariant H1 reload capability heal: on hydration completion the store runs an operator-context heal pass that restores only the persisted tool grants (`allowedTools`/`tools`/`toolPreset`) onto the restored agents; `privileged`, parentage (`spawnedBy`/`creatorId`), and realm membership are never restored from a snapshot — privilege and parentage stay default-deny/unbound (template-backed privilege is re-derived from trusted template specs) while membership hydrates through the runtime's scope-constraint path. The pass is idempotent (a second run reports `unchanged` and mutates nothing) and observable through the reactive `capabilityHealReport`.
  * @invariant Hydration is storage-read-only: the whole `hydrateFromStorage` flow (catalog reconciliation, fingerprint heal, capability heal, runtime restore, resyncs, legacy-workspace remap) runs under an internal suppression guard so no catalog-adapter or pointer write can schedule the debounced autosave — a failed restore leaves the raw persisted bytes byte-identical and a successful one never rewrites them.
  * @invariant Realm-local store identity: agent-facing projections (`agents`, `recycleBin`, receipts, listings) always carry bare realm-local ids — canonical `(realmId, agentId)` keys and Realm vocabulary never surface; internal mailbox and clock-partition lookups resolve the canonical key through the runtime identity port realm-exactly, and an id registered in more than one Realm fails closed (zero unread, no wrong-Realm pick) instead of silently using the first registration. The store's late-bound identity bridge forwards the full `(agentId, scope)` resolution and enumeration so store-constructed substrates can resolve multi-Realm identities and fire the ambiguity guard.
@@ -39,8 +39,9 @@
  * @decision The H1 heal reads only the persisted capability selectors as data and applies them through the runtime's gated config-update path with the store's operator principal (the runtime's host principal), while the snapshot privilege/parentage claims are ignored entirely — capability is restored, authority is never re-derived from the snapshot
  * @decision Template launch resolves baked templates by id and fails closed for unknown ids; member launch forwards the materialized resolved grant list as `allowedTools` (the aggregate `subagent_management` sentinel preserved), the declared preset name as inert `toolPreset` metadata, and the per-key preset binding (winning over the spec `modelPresetId`) as `presetId` resolved through the owned preset catalog — no model literals
  * @decision A failed template launch rolls back by purging every active member of the freshly created Realm under the operator principal and then removing the record through the recursive `deleteRealm` override (so a leftover member from a failed purge is retried by the same route); the thrown `ERR_STORE_REALM_LAUNCH_FAILED` error carries the original failure as `cause` plus the rollback report (`realmId`, `templateId`, `failedAgentId`, `rolledBack`, `terminatedMembers`, `evictedSeedFiles`, `rollbackFailures`), so a half-realm is never left un-described
- * @decision `launchRealmFromTemplate` applies a template-declared seed after every member launches, inside the same atomic try: resolved files are grouped by target in first-appearance order (one `seedRealm` call per target, the directive riding its target's group), `seed: false` skips the seed entirely, and a seed failure rolls back exactly like a member failure — including best-effort eviction of the files already written, reported as `evictedSeedFiles` (member private workspaces are evicted by the member purge; a realm-global partition is a VFS-reserved key, so its seeded files are deleted individually and an empty container key can remain)
- * @decision The launch catalog is a bundle seam (`RealmTemplateBundle` = frozen template plus bundle file bodies): the store materializes with the bundle's `files` as `bundleFiles` and exposes the same bundle to the launcher preview through `getRealmTemplateBundle`, per-instance bundles (host/pipeline injection) extend the baked demo bundle, and launch input values forward to materialization after fail-closed key/value validation — so the content pipeline can supply real bundle files without restructuring the launch flow
+ * @decision `launchRealmFromTemplate` applies a template's resolved launch plan inside the same atomic try: placement writes group by target in first-appearance order (one `seedRealm` call per target, reusing its fail-closed path/target validation and per-target write record), then every directive is delivered independently as an operator-attributed `source: 'realm_seed'` mailbox message addressed realm-exactly, `seed: false` skips placements and directives entirely, and a failure in either phase rolls back exactly like a member failure — including best-effort eviction of the files already written, reported as `evictedSeedFiles` (member private workspaces are evicted by the member purge; a realm-global partition is a VFS-reserved key, so its seeded files are deleted individually and an empty container key can remain)
+ * @decision The launch catalog exposes the normalized format-v2 template (`normalizeTemplate` of the authored bundle template) through `listRealmTemplates`/`getRealmTemplateBundle`, so the launcher/review surfaces see declared inputs, placements, and directives; the authored form stays the identity source — imports persist and export re-emit their authored transport payload verbatim, shipped bundles re-serialize their authored template + files, and the effective template version is the authored-form pin (the import's parsed version, else `templateBundleVersion`), never a hash of the normalized model
+ * @decision `RealmTemplateBundle` is the authored bundle seam (a format-v1 or format-v2 template plus bundle file bodies): host/pipeline injection may supply either format, the store normalizes once for exposure/launch, and the content pipeline can supply real bundle files without restructuring the launch flow
  * @decision The default launch catalog is sourced from `realmCatalog`'s baked bundles — the demo fixture first, then the embedded `templates/**` bundles generated by `scripts/embed_realm_content.mjs` — so `listRealmTemplates()` and `getRealmTemplateBundle()` share one embedded source; per-instance `realmTemplateBundles` still extend and override it in place (an injected id matching a baked id replaces it), and the store adds no new module-level exports
  * @decision Agent ids are realm-opaque: template ids materialize as literal plain ids (the `{realm}` placeholder is retired at validation), the realm id never prefixes an agent id, and a resolved member id already registered — in the target realm or, while the registry stays globally keyed, in any other realm — is denied at launch time with an `AGENT_ALREADY_EXISTS` cause and is never auto-suffixed; realm-local id namespacing is a follow-up
  * @decision The store's operator principal is the runtime's host operator principal (`runtime.getOperatorPrincipal()`, exact-reference validated): every operator-scoped store action — runtime lifecycle/scheduler calls, substrate calls, and manual-send attribution — carries that principal, never an agent id or a director descriptor, so operator actions work with zero agents and never depend on the director's lifecycle
@@ -52,8 +53,8 @@
  * @invariant Template registry resolution: the effective launch catalog resolves shipped (baked demo/embedded bundles plus the `realmTemplateBundles` host injection) → runtime imports, replacing in place by template id, with re-import replacing the previous import so every id has exactly one effective entry; `listRealmTemplates`/`getRealmTemplateBundle`/`launchRealmFromTemplate`/`exportRealmTemplate` all read that one catalog and `listRealmTemplateSources` labels each entry's origin (`shipped`/`imported`/`replacesShipped`).
  * @invariant Template registry honesty: `importRealmTemplate`/`deleteRealmTemplate` mutate the effective catalog and persist the snapshot synchronously; a failed write (quota/unavailable storage) rolls the mutation back and surfaces the typed `ERR_STORE_TEMPLATE_PERSIST_FAILED`, so the registry is never silently in-memory-only. Imports are capped at 2 MiB per bundle and 3 MiB total (`ERR_STORE_TEMPLATE_TOO_LARGE`), persisted as canonical transport payloads, and re-parsed/re-capped fail-closed on hydration without ever rewriting persisted bytes. `previewRealmTemplateImport` runs the identical parse → cap → label pipeline with zero side effects (`dry_run`), so preview and import can never disagree.
  * @invariant Publishing surface: the store is the host-side realm publishing composition root — it exposes the frozen `RealmPublishingPort` (real import path, effective-catalog resolution, session candidate store) to the store-owned runtime; pending instance payloads are session-only and cleared by a reset; approved template authorities are applied under the operator principal as ordinary registry grants (`metaAuthorityGrants`, canonical identity keys, hydration re-applied) and a `templateAuthorityTrust` record auto-approves only exact declared matches at a later launch. A template declaring an authority id unknown to this host fails the launch closed (`ERR_TEMPLATE_AUTHORITY_UNSUPPORTED`), approvals beyond declarations and malformed approvals are rejected (`ERR_STORE_INVALID_PARAMS`), and grant-free/trust-free snapshots keep every existing field and byte.
- * @invariant Realm launch fail-closed gates: a template whose `toolContract`/`providers` are non-empty is refused before any side effect with `ERR_TEMPLATE_PROVIDERS_UNSUPPORTED`, and a hydration package is validated (including the pinned version against the effective bundle version) before the Realm record exists — launch packages mismatch only with the explicit `allowVersionMismatch` confirmation, which rides the receipt as a warning.
- * @decision Instance provenance is hashes and paths only: a successful template launch records `RealmRecord.instance` with the effective `templateVersion`, optional canonical package digest, per-input hashes, the seed paths the launch actually wrote, and `launchedAt`; raw input values, package content, and credentials never reach the record, and `resolvedTools` stays reserved, persisting/hydrating when present
+ * @invariant Realm launch fail-closed gates: a template whose `toolContract`/`providers` are non-empty is refused before any side effect with `ERR_TEMPLATE_PROVIDERS_UNSUPPORTED`, and an attached payload/package (or the operator-assembled explicit inputs) is validated against the effective template contract — including the pinned version — before the Realm record exists, so launch mismatches only with the explicit `allowVersionMismatch` confirmation, which rides the receipt as a warning.
+ * @decision Instance provenance is hashes and paths only: a successful template launch records `RealmRecord.instance` with the authored `templateVersion`, the canonical payload digest (`payloadDigest` over the attached payload, when one was attached), per-input hashes over each supplied value's canonical tagged JSON, the placement paths the launch actually wrote, and `launchedAt`; raw input values, package content, and credentials never reach the record, and `resolvedTools` stays reserved, persisting/hydrating when present
  * 
  * @example
  * ```typescript
@@ -95,20 +96,24 @@ import {
   BAKED_TEMPLATE_BUNDLES,
   hashText,
   materializeTemplate,
+  normalizeTemplate,
   parseTemplateBundle,
+  payloadDigest,
   serializeTemplateBundle,
   templateBundleVersion,
   templateRequiresProviders,
   templateUnsupportedAuthorities,
-  validateHydrationPackage
+  validatePayload
 } from '../realmCatalog/index.ts';
 import type {
-  ParsedTemplateBundle,
   PendingInstancePayload,
+  RealmInputValues,
+  RealmInputValue,
   RealmLaunchAgentPlan,
-  RealmResolvedSeed,
+  RealmResolvedDirective,
+  RealmResolvedPlacement,
   RealmTemplate,
-  ResolvedHydration
+  RealmTemplateInput
 } from '../realmCatalog/index.ts';
 import { resolveToolPreset } from '../toolDefinitions/index.ts';
 import type { RealmPublishingPort } from '../toolDefinitions/index.ts';
@@ -1189,22 +1194,41 @@ export interface EventQueryOptions {
 // ============================================================================
 
 /**
- * One launchable Realm template bundle: the template plus the bundle file
- * bodies its `file` prompt parts and seed sources resolve against.
+ * One launchable Realm template bundle (the authored seam): the template —
+ * format v1 or format v2 — plus the bundle file bodies its `file` prompt
+ * parts, placement `file` sources, and input `defaultFile` prefills resolve
+ * against.
  *
- * The bundle is the store's launch seam: `launchRealmFromTemplate` materializes
- * the template with `files` as `bundleFiles`, and the launcher preview reads
- * the same bundle through `getRealmTemplateBundle`. The baked catalog ships the
- * demo bundle with no files; the content pipeline registers real bundles
- * through {@link SandboxStoreOptions.realmTemplateBundles} without touching
- * the launch flow. The store freezes the bundle container and a copy of the
- * file map; the template itself is used as supplied (the baked demo template
- * is deep-frozen, injected templates are validated by materialization).
+ * The bundle is the store's launch seam: host/pipeline injection registers
+ * authored bundles through {@link SandboxStoreOptions.realmTemplateBundles},
+ * and the store normalizes each template once for exposure and launch
+ * ({@link RealmTemplateBundleView}). The baked catalog ships the demo bundle
+ * with no files; the store freezes the bundle container and a copy of the
+ * file map, while the template itself is used as supplied (baked/injected
+ * templates are validated at catalog resolution).
  */
 export interface RealmTemplateBundle {
-  /** Template the bundle launches. */
+  /** Authored template the bundle launches (format v1 or format v2). */
   readonly template: RealmTemplate;
   /** Bundle file bodies keyed by bundle-relative path (empty for file-less bundles). */
+  readonly files: Readonly<Record<string, string>>;
+}
+
+/**
+ * One effective launch bundle as the launcher and review surfaces see it: the
+ * normalized format-v2 template ({@link normalizeTemplate} of the authored
+ * bundle template) plus the bundle file bodies.
+ *
+ * Exposure is normalized so the launcher can read declared inputs, placements,
+ * and directives without a format branch; the authored form stays the identity
+ * and round-trip source (imports persist/export their authored payload,
+ * shipped bundles re-serialize their authored template, and the effective
+ * template version is the authored-form pin).
+ */
+export interface RealmTemplateBundleView {
+  /** Normalized format-v2 template (frozen). */
+  readonly template: RealmTemplate;
+  /** Bundle file bodies keyed by bundle-relative path (the authored file map). */
   readonly files: Readonly<Record<string, string>>;
 }
 
@@ -1415,32 +1439,50 @@ export interface RealmLaunchFromTemplateOptions {
   /** Per-agent id override keyed by template agent key; wins over `idPattern`. */
   idOverrides?: Readonly<Record<string, string>>;
   /**
-   * Launch-level template input values keyed by declared input id (one value
-   * per input, shared by every referencing agent). Keys must name declared
-   * inputs and values must be strings; an explicit empty string stays
-   * launch-sourced (it blocks a `required` input instead of falling back to
-   * the declared default).
+   * Legacy launch-level text input values keyed by declared input id (one
+   * value per input, shared by every referencing agent). Keys must name
+   * declared `text`-shape inputs and values must be strings; an explicit empty
+   * string stays launch-sourced (it blocks a `required` input instead of
+   * falling back to the declared default). A key naming a `files`-shape input
+   * fails closed with a message directing the caller to `inputs`/`payload`.
    */
   inputValues?: Readonly<Record<string, string>>;
   /**
-   * Whether to apply the template-declared seed after every member launches.
-   * Defaults to `true`; `false` skips the seed entirely (launcher toggle) so
-   * the operator can seed manually afterwards.
+   * Operator-assembled supplied input values keyed by declared input id, in
+   * the shape-tagged format-v2 form (`{ shape: 'text', text }` or
+   * `{ shape: 'files', files }`). The explicit launch/review value wins per
+   * key over an attached payload's value; supplying the same input id in both
+   * `inputs` and the legacy `inputValues` fails closed (one value per input).
+   */
+  inputs?: RealmInputValues;
+  /**
+   * Optional instance payload: a format-v2 payload object (an envelope
+   * carrying `formatVersion: 2`, `templateId`, `templateVersion`, and
+   * `inputs`) or a legacy format-v1 hydration package, validated against the
+   * effective template contract before any Realm record exists. Payload inputs
+   * are the base and `inputs`/`inputValues` win per key; the payload's pinned
+   * template version is compared against the effective authored template
+   * version (a mismatch fails closed unless `allowVersionMismatch` explicitly
+   * confirms it).
+   */
+  payload?: unknown;
+  /**
+   * Whether to apply the template's resolved placements and directives after
+   * every member launches. Defaults to `true`; `false` skips both entirely
+   * (launcher toggle) so the operator can seed manually afterwards.
    */
   seed?: boolean;
   /**
-   * Optional hydration package (Wave T, ticket 0df20ae): the instance content
-   * a hydrator produced, validated against the effective template contract
-   * before any Realm record exists. Package inputs merge with `inputValues`
-   * (launch/review values win per key) and package files fill the declared
-   * `user`/`generated` seed slots.
+   * Legacy alias of {@link RealmLaunchFromTemplateOptions.payload}: the
+   * instance content a hydrator produced. Supplying both `payload` and
+   * `package` fails closed.
    */
   package?: unknown;
   /**
-   * Explicit confirmation that a hydration package pinning a different
-   * template version may attach: without it a version mismatch fails closed
-   * with `ERR_HYDRATION_VERSION_MISMATCH`; with it the mismatch is reported as
-   * a receipt warning and the launch proceeds.
+   * Explicit confirmation that a payload pinning a different template version
+   * may attach: without it a version mismatch fails closed with
+   * `ERR_HYDRATION_VERSION_MISMATCH`; with it the mismatch is reported as a
+   * receipt warning and the launch proceeds.
    */
   allowVersionMismatch?: boolean;
   /**
@@ -1923,30 +1965,28 @@ function generateRealmId(): string {
 const BAKED_REALM_TEMPLATE_BUNDLES: readonly RealmTemplateBundle[] = BAKED_TEMPLATE_BUNDLES;
 
 /**
- * Frozen template projection of the baked launch bundles (demo fixture first,
- * then embedded bundles in generated order), in picker order.
- */
-const BAKED_REALM_TEMPLATES: readonly RealmTemplate[] = Object.freeze(
-  BAKED_REALM_TEMPLATE_BUNDLES.map((bundle) => bundle.template)
-);
-
-/**
  * Validates and freezes the effective launch-bundle catalog: the baked catalog
  * first, then any per-instance injection (an injected entry whose template id
  * matches an existing bundle replaces it in place).
  *
- * The bundle container is validated here (template id, file map shape) so a
- * malformed host injection fails at construction; the template itself is
- * validated by `materializeTemplate` at launch time.
+ * The bundle container is validated here (template id, file map shape) and
+ * every template is normalized once (format v1 through the read shim, format
+ * v2 directly) so a malformed host injection fails at construction instead of
+ * surfacing on a later picker/launch read; the authored template itself stays
+ * on the internal bundle (export, versioning, and the publishing port use it),
+ * while the normalized view feeds exposure and launch.
  *
  * @param extra - Per-instance bundles from the store options.
  * @returns Frozen effective bundle catalog.
- * @throws `TypeError` - When an injected entry is malformed.
+ * @throws `TypeError` - When an injected entry is malformed or its template cannot be normalized.
  */
 function resolveRealmTemplateBundles(
   extra: readonly RealmTemplateBundle[] | null | undefined
 ): readonly RealmTemplateBundle[] {
-  if (extra === undefined || extra === null) return BAKED_REALM_TEMPLATE_BUNDLES;
+  if (extra === undefined || extra === null) {
+    for (const bundle of BAKED_REALM_TEMPLATE_BUNDLES) resolveTemplateBundleView(bundle);
+    return BAKED_REALM_TEMPLATE_BUNDLES;
+  }
   if (!Array.isArray(extra)) {
     throw new TypeError('realmTemplateBundles must be an array of template bundles');
   }
@@ -1968,7 +2008,16 @@ function resolveRealmTemplateBundles(
         throw new TypeError(`realmTemplateBundles['${template.id}'].files['${key}'] must be a string`);
       }
     }
-    byId.set(template.id, Object.freeze({ template, files: Object.freeze({ ...files }) }));
+    const frozen = Object.freeze({ template, files: Object.freeze({ ...files }) });
+    try {
+      resolveTemplateBundleView(frozen);
+    } catch (error) {
+      throw new TypeError(
+        `realmTemplateBundles['${template.id}'].template is not a valid format-v1/v2 template: `
+        + `${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+    byId.set(template.id, frozen);
   }
   return Object.freeze([...byId.values()]);
 }
@@ -2053,18 +2102,55 @@ function canonicalJsonForDigest(value: unknown): string {
 const realmTemplateVersionCache: WeakMap<object, string> = new WeakMap();
 
 /**
- * Resolves a bundle's content version, caching the result per bundle object.
- * A malformed host-injected bundle cannot be versioned yet (validation happens
- * at launch); the label reports `null` instead of throwing.
+ * Module-level cache of normalized bundle views keyed by the internal authored
+ * bundle object. Normalization validates the whole template (the v1 read shim
+ * included) and is deterministic, so the view is stable for the bundle's
+ * lifetime; caching keeps picker/launch reads from re-validating large
+ * templates.
+ */
+const realmTemplateViewCache: WeakMap<object, RealmTemplateBundleView> = new WeakMap();
+
+/**
+ * Resolves the normalized exposure view of an authored bundle: the format-v2
+ * template (`normalizeTemplate` — a format-v1 bundle goes through the read
+ * shim) plus the authored file map.
  *
- * @param bundle - Bundle to version.
+ * @param bundle - Authored bundle to normalize.
+ * @returns The frozen normalized view.
+ * @throws `Error` - When the bundle template is not a valid format-v1/v2 template.
+ */
+function resolveTemplateBundleView(bundle: RealmTemplateBundle): RealmTemplateBundleView {
+  const cached = realmTemplateViewCache.get(bundle);
+  if (cached !== undefined) return cached;
+  const view: RealmTemplateBundleView = Object.freeze({
+    // Top-level freeze so callers can never replace the exposed declaration
+    // sets; nested author data is the authored bundle's (deep-frozen for baked
+    // and parsed/imported bundles).
+    template: Object.freeze(normalizeTemplate(bundle.template)),
+    files: bundle.files
+  });
+  realmTemplateViewCache.set(bundle, view);
+  return view;
+}
+
+/**
+ * Resolves a shipped bundle's authored-form content version
+ * (`templateBundleVersion` over the authored template + files), caching the
+ * result per bundle object. Imported bundles carry their parsed authored pin
+ * (passed as `pinnedVersion`) and are never re-hashed. A malformed
+ * host-injected bundle cannot be versioned yet; the label reports `null`
+ * instead of throwing.
+ *
+ * @param bundle - Authored bundle to version.
+ * @param pinnedVersion - The import's parsed authored version, when known.
  * @returns The canonical `sha256:<hex>` version, or `null` when uncomputable.
  */
-function resolveTemplateBundleVersion(bundle: RealmTemplateBundle): string | null {
+function resolveTemplateBundleVersion(bundle: RealmTemplateBundle, pinnedVersion?: string): string | null {
+  if (pinnedVersion !== undefined) return pinnedVersion;
   const cached = realmTemplateVersionCache.get(bundle);
   if (cached !== undefined) return cached;
   try {
-    const version = templateBundleVersion(bundle);
+    const version = templateBundleVersion({ template: bundle.template, files: bundle.files });
     realmTemplateVersionCache.set(bundle, version);
     return version;
   } catch {
@@ -2099,51 +2185,152 @@ function resolveEffectiveRealmTemplateBundles(
 
 /**
  * Hashes launch input values for instance provenance: one `sha256:<hex>`
- * content hash per supplied input id (declared inputs only, as validated by
- * the launch/package paths), keyed in sorted order. Raw values never reach the
- * provenance record.
+ * content hash per supplied input id over the canonical JSON of the tagged
+ * value (sorted keys, no insignificant whitespace; declared inputs only, as
+ * validated by the launch/payload paths), keyed in sorted order. Raw values
+ * never reach the provenance record.
  *
  * @param values - Effective supplied input values, or `undefined` when none.
  * @returns Frozen id → hash record (empty when no values were supplied).
  */
 function hashRealmInputValues(
-  values: Readonly<Record<string, string>> | undefined
+  values: RealmInputValues | undefined
 ): Readonly<Record<string, string>> {
   const hashes: Record<string, string> = {};
   if (!values) return Object.freeze(hashes);
   for (const key of Object.keys(values).sort()) {
-    hashes[key] = hashText(values[key]);
+    hashes[key] = hashText(canonicalJsonForDigest(values[key]));
   }
   return Object.freeze(hashes);
 }
 
 /**
- * Merges hydration-package input values with explicit launch/review values:
- * both are keyed by declared input id and the explicit launch value wins per
- * key (Wave T decision 3.5). Returns `undefined` when neither side supplies
- * values, so materialization resolves declared defaults.
+ * Structural validation of the operator-supplied explicit input values — the
+ * shape-tagged `inputs` option and the legacy `inputValues` string record —
+ * against the normalized template declarations. Store-level argument errors
+ * fail with `ERR_STORE_INVALID_PARAMS`; the shape-tagged values are then
+ * re-validated by `validatePayload` through the launch's single payload
+ * validation path.
  *
- * @param hydration - Validated package resolution, or `null` when no package was attached.
- * @param launchValues - Validated launch/review values, or `undefined` when absent.
- * @returns Merged values, or `undefined` when both sides are empty.
+ * Rules: every key must name a declared input; the legacy record may only fill
+ * `text`-shape inputs (a `files` declaration fails closed with a message
+ * directing the caller to `inputs`/`payload`); shape-tagged values must match
+ * the declaration's shape (exactly one of `{ shape: 'text', text }` /
+ * `{ shape: 'files', files }`); and one input id may not be supplied through
+ * both records.
+ *
+ * @param template - Normalized effective template.
+ * @param inputs - Shape-tagged supplied values, or `undefined`.
+ * @param inputValues - Legacy string-valued supplied values, or `undefined`.
+ * @returns A fresh shape-tagged record, or `undefined` when neither was supplied.
+ * @throws Error with code `'ERR_STORE_INVALID_PARAMS'` when a key, value, shape, or duplicate is invalid.
  */
-function mergeRealmInputValues(
-  hydration: ResolvedHydration | null,
-  launchValues: Readonly<Record<string, string>> | undefined
-): Record<string, string> | undefined {
-  if (hydration === null && launchValues === undefined) return undefined;
-  const merged: Record<string, string> = {};
-  if (hydration !== null) {
-    for (const key of Object.keys(hydration.inputValues)) {
-      merged[key] = hydration.inputValues[key];
+function resolveExplicitInputValues(
+  template: RealmTemplate,
+  inputs: unknown,
+  inputValues: unknown
+): RealmInputValues | undefined {
+  if (inputs === undefined && inputValues === undefined) return undefined;
+  const declarations: ReadonlyMap<string, RealmTemplateInput> = new Map(
+    (template.inputs ?? []).map((declaration) => [declaration.id, declaration] as const)
+  );
+  const resolved: Record<string, RealmInputValue> = {};
+
+  if (inputValues !== undefined) {
+    if (!inputValues || typeof inputValues !== 'object' || Array.isArray(inputValues)) {
+      throw invalidRealmParams('launchRealmFromTemplate inputValues must be a record of input id to string');
+    }
+    const record = inputValues as Record<string, unknown>;
+    for (const key of Object.keys(record)) {
+      const declaration = declarations.get(key);
+      if (!declaration) {
+        throw invalidRealmParams(`launchRealmFromTemplate inputValues names unknown input '${key}'`);
+      }
+      if (declaration.shape !== 'text') {
+        throw invalidRealmParams(
+          `launchRealmFromTemplate inputValues['${key}'] targets files input '${key}' — `
+          + "string inputValues fill text inputs only; pass the fileset through inputs (or a payload) as { shape: 'files', files: [...] }"
+        );
+      }
+      const value = record[key];
+      if (typeof value !== 'string') {
+        throw invalidRealmParams(`launchRealmFromTemplate inputValues['${key}'] must be a string`);
+      }
+      resolved[key] = { shape: 'text', text: value };
     }
   }
-  if (launchValues !== undefined) {
-    for (const key of Object.keys(launchValues)) {
-      merged[key] = launchValues[key];
+
+  if (inputs !== undefined) {
+    if (!inputs || typeof inputs !== 'object' || Array.isArray(inputs)) {
+      throw invalidRealmParams('launchRealmFromTemplate inputs must be a record of input id to shape-tagged values');
+    }
+    const record = inputs as Record<string, unknown>;
+    for (const key of Object.keys(record)) {
+      const declaration = declarations.get(key);
+      if (!declaration) {
+        throw invalidRealmParams(`launchRealmFromTemplate inputs names unknown input '${key}'`);
+      }
+      if (Object.prototype.hasOwnProperty.call(resolved, key)) {
+        throw invalidRealmParams(
+          `launchRealmFromTemplate input '${key}' was supplied through both inputs and inputValues — supply one value per input`
+        );
+      }
+      const value = record[key];
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        throw invalidRealmParams(
+          `launchRealmFromTemplate inputs['${key}'] must be a shape-tagged value ({ shape, ... })`
+        );
+      }
+      const tagged = value as Record<string, unknown>;
+      if (declaration.shape === 'text') {
+        if (tagged.shape !== 'text' || typeof tagged.text !== 'string') {
+          throw invalidRealmParams(
+            `launchRealmFromTemplate inputs['${key}'] must be { shape: 'text', text } for the declared text input`
+          );
+        }
+        resolved[key] = { shape: 'text', text: tagged.text };
+        continue;
+      }
+      if (tagged.shape !== 'files' || !Array.isArray(tagged.files)) {
+        throw invalidRealmParams(
+          `launchRealmFromTemplate inputs['${key}'] must be { shape: 'files', files: [...] } for the declared files input`
+        );
+      }
+      const files: { path: string; content: string }[] = [];
+      for (let index = 0; index < tagged.files.length; index += 1) {
+        const entry = tagged.files[index] as Record<string, unknown> | null;
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+          throw invalidRealmParams(`launchRealmFromTemplate inputs['${key}'].files[${index}] must be a { path, content } object`);
+        }
+        if (typeof entry.path !== 'string' || typeof entry.content !== 'string') {
+          throw invalidRealmParams(`launchRealmFromTemplate inputs['${key}'].files[${index}] requires string path and content`);
+        }
+        files.push({ path: entry.path, content: entry.content });
+      }
+      resolved[key] = { shape: 'files', files };
     }
   }
-  return merged;
+
+  return Object.freeze(resolved);
+}
+
+/**
+ * Converts validated shape-tagged input values into the authored payload value
+ * form (`{ text }` / `{ files }`) so they can re-enter `validatePayload`'s
+ * single validation path.
+ *
+ * @param values - Validated shape-tagged values.
+ * @returns Fresh authored-form input record.
+ */
+function toAuthoredInputValues(
+  values: RealmInputValues
+): Record<string, { text: string } | { files: readonly { path: string; content: string }[] }> {
+  const authored: Record<string, { text: string } | { files: readonly { path: string; content: string }[] }> = {};
+  for (const key of Object.keys(values)) {
+    const value = values[key];
+    authored[key] = value.shape === 'text' ? { text: value.text } : { files: value.files };
+  }
+  return authored;
 }
 
 /**
@@ -2333,17 +2520,20 @@ function templatePersistFailedError(message: string, cause?: unknown): CodedErro
 }
 
 /**
- * One in-memory runtime template import: the frozen bundle, its canonical
- * transport JSON payload (persisted verbatim), and the payload byte size used
- * for the total budget.
+ * One in-memory runtime template import: the frozen effective bundle with its
+ * normalized format-v2 template, the canonical authored transport JSON payload
+ * (persisted and exported verbatim), the authored-form content version, and
+ * the payload byte size used for the total budget.
  *
  * @internal
  */
 interface RealmTemplateImportRecord {
-  /** Frozen effective bundle of the import. */
+  /** Frozen effective bundle of the import (normalized v2 template + files). */
   readonly bundle: RealmTemplateBundle;
-  /** Canonical transport JSON text persisted for the import. */
+  /** Canonical authored transport JSON text persisted for the import. */
   readonly payload: string;
+  /** Authored-form content version returned by `parseTemplateBundle` (`sha256:<hex>`). */
+  readonly version: string;
   /** Payload UTF-8 byte length. */
   readonly bytes: number;
 }
@@ -2812,8 +3002,11 @@ export class SandboxStore {
    * here.
    */
   #realmTemplateBundles: readonly RealmTemplateBundle[] = BAKED_REALM_TEMPLATE_BUNDLES;
-  /** Frozen template projection of `#realmTemplateBundles` (picker order). */
-  #realmTemplates: readonly RealmTemplate[] = BAKED_REALM_TEMPLATES;
+  /**
+   * Frozen normalized template projection of `#realmTemplateBundles` (picker
+   * order); rebuilt by `#resolveRealmTemplateCatalog` before any read.
+   */
+  #realmTemplates: readonly RealmTemplate[] = [];
   /**
    * Capability grants captured from the persisted snapshot at hydration start
    * (`allowedTools`/`tools`/`toolPreset` resolved through the sandbox preset
@@ -5828,16 +6021,19 @@ export class SandboxStore {
    *
    * The store owns the launch catalog (the templates `launchRealmFromTemplate`
    * resolves against), so the launcher UI reads its picker options here instead
-   * of importing fixtures directly. The catalog is the effective catalog: the
-   * baked catalog (the `realmCatalog` demo fixture plus the embedded template
-   * bundles generated by the content pipeline), any per-instance injection
-   * ({@link SandboxStoreOptions.realmTemplateBundles}), and runtime imports
-   * layered on top — an imported bundle whose id matches a shipped id replaces
-   * it in place, so every id resolves exactly once
+   * of importing fixtures directly. Every entry is the normalized format-v2
+   * template (`normalizeTemplate` of the authored bundle template), so the
+   * picker and review surfaces can read declared inputs, placements, and
+   * directives without a format branch. The catalog is the effective catalog:
+   * the baked catalog (the `realmCatalog` demo fixture plus the embedded
+   * template bundles generated by the content pipeline), any per-instance
+   * injection ({@link SandboxStoreOptions.realmTemplateBundles}), and runtime
+   * imports layered on top — an imported bundle whose id matches a shipped id
+   * replaces it in place, so every id resolves exactly once
    * ({@link SandboxStore.listRealmTemplateSources} labels the origin); the
    * returned array and every template are frozen.
    *
-   * @returns Frozen launch templates, in effective bundle order.
+   * @returns Frozen normalized launch templates, in effective bundle order.
    *
    * @example
    * ```typescript
@@ -5850,25 +6046,28 @@ export class SandboxStore {
   }
 
   /**
-   * Resolves the launch bundle behind one template id: the frozen template plus
-   * the bundle file bodies its prompt parts and seed sources resolve against.
+   * Resolves the launch bundle behind one template id: the normalized
+   * format-v2 template plus the bundle file bodies its prompt parts, placement
+   * `file` sources, and input `defaultFile` prefills resolve against.
    *
-   * The launcher preview reads the same bundle files the launch materializes
-   * with, so a previewed prompt can never disagree with the launched system
-   * prompt. Unknown ids return `null`; the returned bundle is frozen.
+   * The launcher preview reads the same normalized template and bundle files
+   * the launch materializes with, so a previewed prompt can never disagree
+   * with the launched system prompt. Unknown ids return `null`; the returned
+   * bundle and template are frozen.
    *
    * @param templateId - Template id from `listRealmTemplates()`.
-   * @returns The frozen bundle, or `null` for an unknown id.
+   * @returns The frozen normalized bundle view, or `null` for an unknown id.
    *
    * @example
    * ```typescript
    * const bundle = sandboxStore.getRealmTemplateBundle('demo');
-   * console.log(Object.keys(bundle?.files ?? {}).length);
+   * console.log(bundle?.template.formatVersion, Object.keys(bundle?.files ?? {}).length);
    * ```
    */
-  getRealmTemplateBundle(templateId: string): RealmTemplateBundle | null {
+  getRealmTemplateBundle(templateId: string): RealmTemplateBundleView | null {
     if (typeof templateId !== 'string' || templateId.trim().length === 0) return null;
-    return this.#realmTemplateBundles.find((bundle) => bundle.template.id === templateId) ?? null;
+    const bundle = this.#realmTemplateBundles.find((entry) => entry.template.id === templateId);
+    return bundle ? resolveTemplateBundleView(bundle) : null;
   }
 
   /**
@@ -5899,7 +6098,7 @@ export class SandboxStore {
         templateId: bundle.template.id,
         source: imported ? 'imported' as const : 'shipped' as const,
         replacesShipped: imported && shippedIds.has(bundle.template.id),
-        templateVersion: resolveTemplateBundleVersion(bundle)
+        templateVersion: this.#effectiveTemplateVersion(bundle.template.id)
       });
     }));
   }
@@ -5978,8 +6177,8 @@ export class SandboxStore {
    * @internal
    */
   #importRealmTemplateInternal(payload: string | object, dryRun: boolean): RealmTemplateImportReceipt {
-    const parsed: ParsedTemplateBundle = parseTemplateBundle(payload);
-    const canonicalPayload = serializeTemplateBundle({ template: parsed.template, files: parsed.files });
+    const parsed = parseTemplateBundle(payload);
+    const canonicalPayload = parsed.serialized;
     const bytes = utf8ByteLength(canonicalPayload);
     const templateId = parsed.template.id;
 
@@ -6020,6 +6219,7 @@ export class SandboxStore {
     this.#realmTemplateImports.set(templateId, Object.freeze({
       bundle: Object.freeze({ template: parsed.template, files: parsed.files }),
       payload: canonicalPayload,
+      version: parsed.version,
       bytes
     }));
     this.#resolveRealmTemplateCatalog();
@@ -6036,11 +6236,12 @@ export class SandboxStore {
 
   /**
    * Exports one effective launch template as canonical transport JSON (Wave T,
-   * ticket 0df20ae): the exact bundle future launches resolve — an import when
-   * one shadows the id, otherwise the shipped revision — rendered by
+   * ticket 0df20ae): the exact authored bundle future launches resolve — an
+   * import when one shadows the id (its persisted canonical transport payload
+   * is re-emitted verbatim), otherwise the shipped revision rendered by
    * `realmCatalog.serializeTemplateBundle` (recursively sorted keys, no
    * insignificant whitespace), so re-importing the output reproduces the same
-   * content version.
+   * authored content version.
    *
    * @param templateId - Template id from `listRealmTemplates()`.
    * @returns Canonical transport JSON text.
@@ -6052,7 +6253,12 @@ export class SandboxStore {
    * ```
    */
   exportRealmTemplate(templateId: string): string {
-    const bundle = this.getRealmTemplateBundle(templateId);
+    if (typeof templateId !== 'string' || templateId.trim().length === 0) {
+      throw invalidRealmParams(`exportRealmTemplate: unknown realm template '${String(templateId)}'`);
+    }
+    const imported = this.#realmTemplateImports.get(templateId);
+    if (imported) return imported.payload;
+    const bundle = this.#realmTemplateBundles.find((entry) => entry.template.id === templateId);
     if (!bundle) {
       throw invalidRealmParams(`exportRealmTemplate: unknown realm template '${String(templateId)}'`);
     }
@@ -6164,16 +6370,21 @@ export class SandboxStore {
    * Resolution rules:
    * - the template resolves by id against the effective launch catalog
    *   (shipped baked/injected bundles with runtime imports layered on top) and
-   *   an unknown id fails closed before any record or member exists; a template
-   *   whose `toolContract` requirements or `providers` are non-empty is refused
-   *   before any side effect with the typed
-   *   `ERR_TEMPLATE_PROVIDERS_UNSUPPORTED` (Wave T decision 3.3);
-   * - an optional `package` is validated against the effective template
-   *   contract (pinned version compared against the effective bundle version):
-   *   a mismatch fails closed unless `allowVersionMismatch` explicitly confirms
-   *   it, in which case the warning rides the receipt; package inputs merge
-   *   with `inputValues` (the explicit launch/review value wins per key) and
-   *   package files fill the declared `user`/`generated` seed slots;
+   *   an unknown id fails closed before any record or member exists; the stored
+   *   template is the normalized format-v2 model and the launch materializes it
+   *   through `materializeTemplate`. A template whose `toolContract`
+   *   requirements or `providers` are non-empty is refused before any side
+   *   effect with the typed `ERR_TEMPLATE_PROVIDERS_UNSUPPORTED` (Wave T
+   *   decision 3.3);
+   * - supplied values arrive either as an attached `payload` (or its legacy
+   *   alias `package`) or as operator-assembled explicit values (`inputs`
+   *   shape-tagged, plus the legacy `inputValues` string record). Every supplied
+   *   value validates through `validatePayload` against the effective template
+   *   contract: payload inputs are the base and explicit values win per key,
+   *   a legacy record may only fill `text`-shape inputs, and the payload's
+   *   pinned template version is compared against the effective authored
+   *   version — a mismatch fails closed unless `allowVersionMismatch` explicitly
+   *   confirms it, in which case the warning rides the receipt;
    * - agent ids resolve as literal realm-opaque plain ids from `idPattern` with
    *   per-key `idOverrides` winning over the pattern; the realm id is
    *   membership metadata and never prefixes an agent id (Wave R ticket
@@ -6193,9 +6404,7 @@ export class SandboxStore {
    * - `privileged`, `role`, `name`, and the composed `systemPrompt` are
    *   forwarded from the plan, and the plan's `initialPrompt` triggers the
    *   member's first turn when declared;
-   * - `inputValues` forward to materialization after fail-closed validation
-   *   (every key must name a declared template input, every value must be a
-   *   string), and `seed: false` skips the template-declared seed entirely.
+   * - `seed: false` skips the resolved placements and directives entirely.
    * - Wave U publishing authorities (ticket 2518510): a template declaring an
    *   authority id unknown to this host fails the launch closed with
    *   `ERR_TEMPLATE_AUTHORITY_UNSUPPORTED` before any side effect; every other
@@ -6209,26 +6418,31 @@ export class SandboxStore {
    *   persisted after a fully successful launch (an empty set clears the
    *   record).
    *
-   * Template seed: when materialization resolves a seed and `seed` is not
-   * `false`, the resolved files are grouped by target in first-appearance order
-   * and written through `seedRealm` — one operator-context call per target, the
-   * directive riding its target's group (a directive-only manifest is rejected
-   * at catalog validation, so no second delivery path exists). Member targets
-   * resolve through the template agent key to the launched member id. Declared
-   * history is seeded through the runtime's trusted `history` launch option
-   * without a model call (`[system, ...declared]`, launch-generated ids).
+   * Launch plan application: when `seed` is not `false`, the resolved placement
+   * writes are grouped by target in first-appearance order and written through
+   * `seedRealm` — one operator-context call per target, so every resolved path
+   * passes the same reserved-root/traversal/duplicate validation as an operator
+   * seed (`'realm'` writes to `realm:<realmId>:global`, `{ agent: key }` to the
+   * launched member's realm-exact private workspace). Directives are then
+   * delivered independently, in declared order, as operator-attributed
+   * `source: 'realm_seed'` mailbox messages addressed realm-exactly (the same
+   * addressing path `seedRealm` uses); member targets resolve through the
+   * template agent key to the launched member id. Declared history is seeded
+   * through the runtime's trusted `history` launch option without a model call
+   * (`[system, ...declared]`, launch-generated ids).
    *
    * Provenance: a successful launch records the frozen
-   * {@link RealmInstanceProvenance} on the Realm record (`templateId`,
-   * effective `templateVersion`, optional `packageDigest`, per-input hashes,
-   * seeded destination paths, `launchedAt`) — hashes and paths only, never raw
+   * {@link RealmInstanceProvenance} on the Realm record (`templateId`, authored
+   * `templateVersion`, canonical `packageDigest` when a payload was attached,
+   * per-input hashes over the canonical tagged values, placement destination
+   * paths actually written, `launchedAt`) — hashes and paths only, never raw
    * input values — and the receipt carries the updated record; `resolvedTools`
    * stays reserved for the providers wave.
    *
-   * Partial-failure policy: when materialization, any member launch, or the
-   * template seed fails, every active member of the freshly created Realm is
-   * permanently purged, the files the seed already wrote are best-effort
-   * evicted, and the record is removed, then a coded
+   * Partial-failure policy: when materialization, any member launch, a
+   * placement write, or a directive delivery fails, every active member of the
+   * freshly created Realm is permanently purged, the placement files already
+   * written are best-effort evicted, and the record is removed, then a coded
    * `ERR_STORE_REALM_LAUNCH_FAILED` error is thrown carrying `realmId`,
    * `templateId`, `failedAgentId`, `rolledBack`, `terminatedMembers`,
    * `evictedSeedFiles`, `rollbackFailures`, and the original failure as
@@ -6239,14 +6453,14 @@ export class SandboxStore {
    * deleted individually and an empty container key can remain.
    *
    * @param templateId - Launch template id (`'demo'` for the baked fixture).
-   * @param options - Optional name/color/description overrides, per-key preset bindings, per-key id overrides, launch input values, the seed toggle, an optional hydration `package`, and the `allowVersionMismatch` confirmation.
-   * @returns The created Realm record (with `instance` provenance) plus the launched member snapshots in template order and any hydration warnings.
-   * @throws Error with code `'ERR_STORE_INVALID_PARAMS'` when the template id, options, preset bindings, input values, seed toggle, or `allowVersionMismatch` flag are invalid (nothing is created).
+   * @param options - Optional name/color/description overrides, per-key preset bindings, per-key id overrides, operator-assembled `inputs`/legacy `inputValues`, an attached `payload` (or legacy alias `package`), the `allowVersionMismatch` confirmation, the seed toggle, and publishing-authority approvals/trust.
+   * @returns The created Realm record (with `instance` provenance) plus the launched member snapshots in template order and any payload warnings.
+   * @throws Error with code `'ERR_STORE_INVALID_PARAMS'` when the template id, options, preset bindings, supplied inputs, seed toggle, payload/package alias pair, or `allowVersionMismatch` flag are invalid (nothing is created).
    * @throws Error with code `'ERR_TEMPLATE_PROVIDERS_UNSUPPORTED'` when the template declares capability requirements/providers (nothing is created; fail-closed until the providers wave).
    * @throws Error with code `'ERR_TEMPLATE_AUTHORITY_UNSUPPORTED'` when the template declares a publishing authority unknown to this host (nothing is created).
    * @throws Error with code `'ERR_STORE_INVALID_PARAMS'` when an authority approval is malformed or references an undeclared `(agentKey, authority)` pair (nothing is created).
-   * @throws `RealmCatalogError` (`ERR_HYDRATION_PACKAGE`/`ERR_HYDRATION_VERSION_MISMATCH`) when the hydration package is malformed or pins a version that was not explicitly allowed (nothing is created).
-   * @throws Error with code `'ERR_STORE_REALM_LAUNCH_FAILED'` when materialization, a member launch, or the template seed fails — a member id already registered in the target realm is denied at launch time with an `AGENT_ALREADY_EXISTS` `cause` and no auto-suffix (the same literal id in another realm is a distinct realm-local registration); the realm record, any launched members, and the seed files already written were rolled back first.
+   * @throws `RealmCatalogError` (`ERR_HYDRATION_PACKAGE`/`ERR_HYDRATION_VERSION_MISMATCH`) when the payload/package or the operator-assembled inputs are malformed or pin a version that was not explicitly allowed (nothing is created).
+   * @throws Error with code `'ERR_STORE_REALM_LAUNCH_FAILED'` when materialization, a member launch, a placement write, or a directive delivery fails — a member id already registered in the target realm is denied at launch time with an `AGENT_ALREADY_EXISTS` `cause` and no auto-suffix (the same literal id in another realm is a distinct realm-local registration); the realm record, any launched members, and the placement files already written were rolled back first.
    *
    * @example
    * ```typescript
@@ -6283,10 +6497,16 @@ export class SandboxStore {
     if (unsupportedAuthorities.length > 0) {
       throw templateAuthorityUnsupportedError(template.id, unsupportedAuthorities);
     }
-    // The effective bundle version is the canonical content hash launch
-    // provenance and package version checks use; computing it also validates
-    // the bundle parts (file references resolve) before any side effect.
-    const effectiveTemplateVersion = templateBundleVersion(bundle);
+    // The effective version is the authored-form pin (an import's parsed
+    // version, else `templateBundleVersion` over the authored template +
+    // files): launch provenance and payload version checks use it, and it is
+    // never a hash of the normalized model.
+    const effectiveTemplateVersion = this.#effectiveTemplateVersion(template.id);
+    if (effectiveTemplateVersion === null) {
+      throw invalidRealmParams(
+        `launchRealmFromTemplate: template '${template.id}' cannot be versioned — the bundle is malformed`
+      );
+    }
     for (const field of ['name', 'color', 'description'] as const) {
       const value = options[field];
       if (value !== undefined && typeof value !== 'string') {
@@ -6335,24 +6555,69 @@ export class SandboxStore {
     // Resolve every effective preset id up front (a presetBindings entry wins
     // over the spec's modelPresetId, both resolved through the owned catalog):
     // an unknown key or unresolvable preset id rejects the call before any
-    // Realm record or member exists. Launch input values validate the same way:
-    // an unknown input key or non-string value never creates a record.
+    // Realm record or member exists.
     const presetIdByKey = this.#resolveRealmPresetBindings(template, options.presetBindings);
-    const launchInputValues = this.#validateRealmInputValues(template, options.inputValues);
 
-    // Hydration package (when attached) validates against the effective
-    // template contract before any record exists: the pinned template version
-    // is compared against the effective bundle version, and a mismatch fails
-    // closed unless the caller explicitly confirmed it. Package inputs merge
-    // with the launch/review values (the explicit value wins per key).
-    const packageValue = options.package === null ? undefined : options.package;
-    const hydration = packageValue !== undefined
-      ? validateHydrationPackage(template, packageValue, {
+    // Operator-assembled supplied values (`inputs` shape-tagged plus the legacy
+    // `inputValues` string record) validate structurally first; an attached
+    // payload (or its legacy alias `package`) is then validated through the
+    // catalog's single `validatePayload` path. One value per input: the same
+    // key through both records fails closed, and supplying both `payload` and
+    // `package` fails closed.
+    const explicitInputs = resolveExplicitInputValues(template, options.inputs, options.inputValues);
+    const payloadSupplied = options.payload !== undefined && options.payload !== null;
+    const packageSupplied = options.package !== undefined && options.package !== null;
+    if (payloadSupplied && packageSupplied) {
+      throw invalidRealmParams(
+        'launchRealmFromTemplate accepts either payload or its legacy alias package, not both'
+      );
+    }
+    const payloadValue = payloadSupplied ? options.payload : packageSupplied ? options.package : undefined;
+    const allowVersionMismatch = options.allowVersionMismatch === true;
+    const warnings: string[] = [];
+    let effectiveInputs: RealmInputValues | undefined;
+    if (payloadValue !== undefined) {
+      // The attached payload validates against the effective contract: required
+      // inputs present, unknown keys/shape mismatches rejected, and the pinned
+      // version compared against the authored effective version.
+      const payloadResolution = validatePayload(template, payloadValue, {
+        currentVersion: effectiveTemplateVersion,
+        ...(allowVersionMismatch ? { allowVersionMismatch: true } : {})
+      });
+      warnings.push(...payloadResolution.warnings);
+      if (explicitInputs !== undefined) {
+        // Explicit launch/review values win per key over the payload base; the
+        // merged record re-enters `validatePayload` so the merged result is
+        // checked against the same contract (required inputs included).
+        const merged = validatePayload(template, {
+          formatVersion: 2,
+          templateId: template.id,
+          templateVersion: payloadResolution.templateVersion,
+          inputs: {
+            ...toAuthoredInputValues(payloadResolution.inputs),
+            ...toAuthoredInputValues(explicitInputs)
+          }
+        }, {
           currentVersion: effectiveTemplateVersion,
-          ...(options.allowVersionMismatch === true ? { allowVersionMismatch: true } : {})
-        })
-      : null;
-    const inputValues = mergeRealmInputValues(hydration, launchInputValues);
+          ...(allowVersionMismatch ? { allowVersionMismatch: true } : {})
+        });
+        warnings.push(...merged.warnings);
+        effectiveInputs = merged.inputs;
+      } else {
+        effectiveInputs = payloadResolution.inputs;
+      }
+    } else if (explicitInputs !== undefined) {
+      // No payload attached: synthesize the canonical payload shape from the
+      // operator-assembled values and run the same validation path, so a
+      // missing required input or a bad fileset fails closed before any record
+      // exists.
+      effectiveInputs = validatePayload(template, {
+        formatVersion: 2,
+        templateId: template.id,
+        templateVersion: effectiveTemplateVersion,
+        inputs: toAuthoredInputValues(explicitInputs)
+      }, { currentVersion: effectiveTemplateVersion }).inputs;
+    }
 
     const realm = this.createRealm({
       name: options.name !== undefined ? options.name : template.name,
@@ -6368,8 +6633,7 @@ export class SandboxStore {
       const plan = materializeTemplate(template, {
         realmId: realm.id,
         ...(options.idOverrides !== undefined ? { idOverrides: options.idOverrides } : {}),
-        ...(inputValues !== undefined ? { inputValues } : {}),
-        ...(hydration !== null ? { hydrationFiles: hydration.files } : {}),
+        ...(effectiveInputs !== undefined ? { inputs: effectiveInputs } : {}),
         bundleFiles: bundle.files
       });
 
@@ -6436,31 +6700,39 @@ export class SandboxStore {
         }
       }
 
-      // The member phase completed; a failure from here on is a seed failure,
-      // not an agent-launch failure, so the rollback report names no agent.
+      // The member phase completed; a failure from here on is a placement or
+      // directive failure, not an agent-launch failure, so the rollback report
+      // names no agent. Placements write first (grouped per target, through the
+      // operator seed path), then directives deliver independently.
       failedAgentId = null;
-      if (plan.seed !== undefined && options.seed !== false) {
-        this.#applyTemplateSeed(realm.id, plan.seed, plan.agents, seedWrites);
+      if (options.seed !== false) {
+        if (plan.placements.length > 0) {
+          this.#applyTemplatePlacements(realm.id, plan.placements, plan.agents, seedWrites);
+        }
+        if (plan.directives.length > 0) {
+          this.#deliverTemplateDirectives(realm.id, plan.directives, plan.agents);
+        }
       }
 
       // Instance provenance (Wave T decision 4): recorded on the Realm record
       // after a fully successful launch — hashes and paths only, never raw
-      // values. Seed paths are the files this launch actually wrote; a skipped
-      // seed records none. `resolvedTools` stays reserved for Wave P.
+      // values. `seedPaths` records the placement destination paths this launch
+      // actually wrote; a skipped seed records none. The payload digest covers
+      // the attached payload (operator-assembled inputs carry no digest), and
+      // `inputHashes` hash each supplied value's canonical tagged JSON.
+      // `resolvedTools` stays reserved.
       const seedPaths: string[] = [];
       for (const group of seedWrites) {
         for (const path of group.writtenPaths) {
           if (!seedPaths.includes(path)) seedPaths.push(path);
         }
       }
-      const packageDigest = packageValue !== undefined
-        ? hashText(canonicalJsonForDigest(packageValue))
-        : undefined;
+      const packageDigest = payloadValue !== undefined ? payloadDigest(payloadValue) : undefined;
       const instance: RealmInstanceProvenance = Object.freeze({
         templateId: template.id,
         templateVersion: effectiveTemplateVersion,
         ...(packageDigest !== undefined ? { packageDigest } : {}),
-        inputHashes: hashRealmInputValues(inputValues),
+        inputHashes: hashRealmInputValues(effectiveInputs),
         seedPaths: Object.freeze(seedPaths),
         launchedAt: new Date().toISOString()
       });
@@ -6480,12 +6752,11 @@ export class SandboxStore {
         this.#scheduleAutoSave();
       }
 
+      const uniqueWarnings = [...new Set(warnings)];
       return {
         realm: launchedRealm,
         agents: launched,
-        ...(hydration !== null && hydration.warnings.length > 0
-          ? { warnings: Object.freeze([...hydration.warnings]) }
-          : {})
+        ...(uniqueWarnings.length > 0 ? { warnings: Object.freeze(uniqueWarnings) } : {})
       };
     } catch (failure) {
       const rollback = this.#rollbackRealmLaunch(realm.id, seedWrites);
@@ -6744,41 +7015,6 @@ export class SandboxStore {
   }
 
   /**
-   * Validates the launch-level input values against the template's declared
-   * inputs: the record must be a plain object, every key must name a declared
-   * input id, and every value must be a string (an explicit empty string is a
-   * valid launch value). Returns a fresh record so the store never aliases
-   * caller state; `undefined` means "no launch values supplied".
-   *
-   * @param template - Template whose declared inputs the values must name.
-   * @param values - Optional input-value record from the launch options.
-   * @returns A fresh validated record, or `undefined` when absent.
-   * @throws `Error` - With code `'ERR_STORE_INVALID_PARAMS'` when malformed.
-   */
-  #validateRealmInputValues(
-    template: RealmTemplate,
-    values: Readonly<Record<string, string>> | undefined
-  ): Record<string, string> | undefined {
-    if (values === undefined) return undefined;
-    if (!values || typeof values !== 'object' || Array.isArray(values)) {
-      throw invalidRealmParams('launchRealmFromTemplate inputValues must be a record of input id to string');
-    }
-    const declared: ReadonlySet<string> = new Set((template.inputs ?? []).map((input) => input.id));
-    const resolved: Record<string, string> = {};
-    for (const key of Object.keys(values)) {
-      if (!declared.has(key)) {
-        throw invalidRealmParams(`launchRealmFromTemplate inputValues names unknown input '${key}'`);
-      }
-      const value = values[key];
-      if (typeof value !== 'string') {
-        throw invalidRealmParams(`launchRealmFromTemplate inputValues['${key}'] must be a string`);
-      }
-      resolved[key] = value;
-    }
-    return resolved;
-  }
-
-  /**
    * Finds the ACTIVE member registration of a bare agent id inside one Realm
    * (defect adcc133): identity is the composite `(realmId, agentId)`, so the
    * same literal id registered in another Realm is never matched.
@@ -6910,40 +7146,41 @@ export class SandboxStore {
   }
 
   /**
-   * Applies a materialized template seed through the operator `seedRealm`
-   * path: resolved files group by target in first-appearance order (one
-   * `seedRealm` call per target, the directive riding its target's group), and
-   * member targets resolve through the template agent key to the launched
-   * member id.
+   * Applies a materialized launch plan's placements through the operator
+   * `seedRealm` path: resolved writes group by target in first-appearance order
+   * (one `seedRealm` call per target), member targets resolve through the
+   * template agent key to the launched member id, and `'realm'` targets write
+   * to the Realm-global workspace. Every resolved path therefore passes the
+   * same reserved-root/traversal/duplicate validation an operator seed enforces
+   * before the first write of its group.
    *
    * Every completed write group is recorded on `writes` so a later failure can
    * best-effort evict the files already written; when a `seedRealm` call fails
    * partway, its partial `writtenPaths` are recorded too before the original
-   * error is rethrown. A directive target with no files is rejected at catalog
-   * validation, so this method never invents a second delivery path.
+   * error is rethrown.
    *
    * @param realmId - Registry id of the freshly created Realm.
-   * @param seed - Resolved seed from the launch plan.
+   * @param placements - Resolved placements from the launch plan, in declared order.
    * @param agentPlans - Materialized agent plans (template keys to member ids).
    * @param writes - Rollback record appended in write order.
    * @throws `Error` - Propagates the failing `seedRealm` error unchanged.
    */
-  #applyTemplateSeed(
+  #applyTemplatePlacements(
     realmId: string,
-    seed: RealmResolvedSeed,
+    placements: readonly RealmResolvedPlacement[],
     agentPlans: readonly RealmLaunchAgentPlan[],
     writes: RealmSeedWriteGroup[]
   ): void {
-    interface SeedGroup {
+    interface PlacementGroup {
       agentKey: string | null;
       agentId: string | null;
       workspace: string;
       files: RealmSeedFile[];
     }
-    const groups: SeedGroup[] = [];
+    const groups: PlacementGroup[] = [];
     const groupIndex: Map<string, number> = new Map();
-    for (const file of seed.files) {
-      const agentKey = file.target === 'realm' ? null : file.target.agent;
+    for (const placement of placements) {
+      const agentKey = placement.target === 'realm' ? null : placement.target.agent;
       const groupKey = agentKey ?? '';
       let index = groupIndex.get(groupKey);
       if (index === undefined) {
@@ -6951,9 +7188,9 @@ export class SandboxStore {
           ? null
           : agentPlans.find((entry) => entry.key === agentKey) ?? null;
         if (agentKey !== null && !agentPlan) {
-          // Unreachable through materialization (seed targets are validated
+          // Unreachable through materialization (placement targets are validated
           // against template agent keys); kept fail-closed for hand-built plans.
-          throw invalidRealmParams(`launchRealmFromTemplate: template seed targets unknown agent key '${agentKey}'`);
+          throw invalidRealmParams(`launchRealmFromTemplate: placement targets unknown agent key '${agentKey}'`);
         }
         index = groups.length;
         groupIndex.set(groupKey, index);
@@ -6964,19 +7201,15 @@ export class SandboxStore {
           files: []
         });
       }
-      groups[index].files.push({ path: file.path, content: file.content });
+      groups[index].files.push({ path: placement.path, content: placement.content });
     }
 
     for (const group of groups) {
-      const directive = seed.directive !== undefined && seed.directive.targetAgentKey === group.agentKey
-        ? seed.directive.text
-        : undefined;
       try {
         const receipt = this.seedRealm({
           realmId,
           files: group.files,
-          ...(group.agentId !== null ? { targetAgentId: group.agentId } : {}),
-          ...(directive !== undefined ? { directive } : {})
+          ...(group.agentId !== null ? { targetAgentId: group.agentId } : {})
         });
         writes.push({ workspace: receipt.workspace, writtenPaths: [...receipt.writtenPaths] });
       } catch (err) {
@@ -6989,6 +7222,43 @@ export class SandboxStore {
         }
         throw err;
       }
+    }
+  }
+
+  /**
+   * Delivers a materialized launch plan's directives, independently and in
+   * declared order: each resolved directive becomes one operator-attributed
+   * mailbox message (`source: 'realm_seed'`) addressed realm-exactly through
+   * the same canonical-key resolution `seedRealm`'s directive uses (bare-id
+   * fallback when the identity port cannot resolve the registration). Member
+   * targets resolve through the template agent key to the launched member id.
+   *
+   * Delivery runs after every placement write, so a write failure never leaves
+   * a directive behind; like `seedRealm`, a bus rejection (`success !== true`)
+   * is not rethrown — the launch receipt has no per-directive outcome surface
+   * and the envelope archive records the outcome.
+   *
+   * @param realmId - Registry id of the freshly created Realm.
+   * @param directives - Resolved directives from the launch plan, in declared order.
+   * @param agentPlans - Materialized agent plans (template keys to member ids).
+   * @throws `Error` - With code `'ERR_STORE_INVALID_PARAMS'` when a directive targets an unknown agent key.
+   */
+  #deliverTemplateDirectives(
+    realmId: string,
+    directives: readonly RealmResolvedDirective[],
+    agentPlans: readonly RealmLaunchAgentPlan[]
+  ): void {
+    for (const directive of directives) {
+      const agentPlan = agentPlans.find((entry) => entry.key === directive.targetAgentKey) ?? null;
+      if (!agentPlan) {
+        // Unreachable through materialization (directive targets are validated
+        // against template agent keys); kept fail-closed for hand-built plans.
+        throw invalidRealmParams(
+          `launchRealmFromTemplate: directive targets unknown agent key '${directive.targetAgentKey}'`
+        );
+      }
+      const recipient = this.#canonicalAgentKeyInRealm(agentPlan.agentId, realmId) ?? agentPlan.agentId;
+      this.sendMessage('human', recipient, directive.text, { source: 'realm_seed', realmId });
     }
   }
 
@@ -7011,7 +7281,7 @@ export class SandboxStore {
    * missing file (`false`) is not a failure — the purge already removed it.
    *
    * @param realmId - Registry id of the Realm being rolled back.
-   * @param seedWrites - Seed write groups recorded by `#applyTemplateSeed`.
+   * @param seedWrites - Seed write groups recorded by `#applyTemplatePlacements`.
    * @returns Purged member ids, evicted seed paths, and human-readable rollback failures.
    */
   #rollbackRealmLaunch(
@@ -8220,7 +8490,7 @@ export class SandboxStore {
         const id = typeof candidate.id === 'string' && candidate.id.trim().length > 0 ? candidate.id : '';
         const payload = typeof candidate.payload === 'string' ? candidate.payload : '';
         if (!id || !payload) continue;
-        let parsed: ParsedTemplateBundle;
+        let parsed: ReturnType<typeof parseTemplateBundle>;
         try {
           parsed = parseTemplateBundle(payload);
         } catch {
@@ -8234,6 +8504,7 @@ export class SandboxStore {
         imports.set(id, Object.freeze({
           bundle: Object.freeze({ template: parsed.template, files: parsed.files }),
           payload,
+          version: parsed.version,
           bytes
         }));
       }
@@ -8256,11 +8527,20 @@ export class SandboxStore {
       previewTemplateImport: (canonicalPayload: string) => this.previewRealmTemplateImport(canonicalPayload),
       getEffectiveTemplateBundle: (templateId: string) => {
         if (typeof templateId !== 'string' || templateId.trim().length === 0) return null;
-        const bundle = this.getRealmTemplateBundle(templateId);
+        const bundle = this.#authoredTemplateBundle(templateId);
         if (!bundle) return null;
-        const version = resolveTemplateBundleVersion(bundle);
+        const version = this.#effectiveTemplateVersion(templateId);
         if (version === null) return null;
-        return Object.freeze({ template: bundle.template, files: bundle.files, version });
+        // The port view predates the format-v2 migration (the publishing tools
+        // lane migrates separately): shipped entries are authored format-v1
+        // templates and keep working unchanged, while a format-v2 import is
+        // passed through as its authored document and fails the tools'
+        // format-v1 validation closed until they migrate.
+        return Object.freeze({
+          template: bundle.template as RealmTemplate,
+          files: bundle.files,
+          version
+        });
       },
       storePendingInstancePayload: (candidate: PendingInstancePayload) => {
         this.#storePendingInstancePayload(candidate);
@@ -8432,14 +8712,56 @@ export class SandboxStore {
 
   /**
    * Re-resolves the effective launch catalog: shipped bundles first, then the
-   * import registry (in-place replacement by id). Both the bundle list and the
-   * template projection are rebuilt and frozen; callers must invoke this after
-   * any host/import mutation before reading the catalog.
+   * import registry (in-place replacement by id). The bundle list and the
+   * normalized template projection are rebuilt and frozen; callers must invoke
+   * this after any host/import mutation before reading the catalog.
    */
   #resolveRealmTemplateCatalog(): void {
     const imported = [...this.#realmTemplateImports.values()].map((record) => record.bundle);
     this.#realmTemplateBundles = resolveEffectiveRealmTemplateBundles(this.#hostRealmTemplateBundles, imported);
-    this.#realmTemplates = Object.freeze(this.#realmTemplateBundles.map((bundle) => bundle.template));
+    this.#realmTemplates = Object.freeze(
+      this.#realmTemplateBundles.map((bundle) => resolveTemplateBundleView(bundle).template)
+    );
+  }
+
+  /**
+   * Resolves the effective authored-form content version of one catalog entry:
+   * an import's parsed authored pin (never re-hashed) or a shipped bundle's
+   * `templateBundleVersion` over the authored template + files. `null` means
+   * the entry cannot be versioned (malformed host injection).
+   *
+   * @param templateId - Effective catalog template id.
+   * @returns The canonical `sha256:<hex>` version, or `null`.
+   */
+  #effectiveTemplateVersion(templateId: string): string | null {
+    const imported = this.#realmTemplateImports.get(templateId);
+    if (imported) return imported.version;
+    const bundle = this.#realmTemplateBundles.find((entry) => entry.template.id === templateId);
+    if (!bundle) return null;
+    return resolveTemplateBundleVersion(bundle);
+  }
+
+  /**
+   * Resolves one catalog entry's internal authored bundle (the authored
+   * template + file map). Imports keep their normalized template in the
+   * registry, so the authored form is recovered by re-parsing the persisted
+   * canonical payload; shipped entries return their authored bundle directly.
+   *
+   * @param templateId - Effective catalog template id.
+   * @returns The authored bundle, or `null` for an unknown/unparseable id.
+   */
+  #authoredTemplateBundle(templateId: string): RealmTemplateBundle | null {
+    const imported = this.#realmTemplateImports.get(templateId);
+    if (imported) {
+      try {
+        const envelope = JSON.parse(imported.payload) as { template?: RealmTemplate } | null;
+        if (!envelope || typeof envelope !== 'object' || !envelope.template) return null;
+        return { template: envelope.template, files: imported.bundle.files };
+      } catch {
+        return null;
+      }
+    }
+    return this.#realmTemplateBundles.find((entry) => entry.template.id === templateId) ?? null;
   }
 
   /**

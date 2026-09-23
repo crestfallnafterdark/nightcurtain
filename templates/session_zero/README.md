@@ -2,7 +2,7 @@
 
 **Status:** Shipped bundle content · **Last verified:** 2026-09-22.
 
-One generator realm hosting both generator agents on the format-v1 template
+One generator realm hosting both generator agents on the format-v2 template
 primitives. *Session Zero* is an ordinary template: it is launched through the
 standard review path, replaceable/shadowable like any other bundle, and the host
 has no generator-specific orchestration. Publishing happens only through the
@@ -13,7 +13,10 @@ validated tool paths.
 - `template.json` — manifest: two privileged agents (`architect`, `genesis`),
   each with ordered prompt parts (shared operational rules → agent protocol →
   the `assignment` and `target_template` launch inputs), an explicit plumbing
-  `toolProfile`, and a declared publishing authority.
+  `toolProfile`, and a declared publishing authority. Two placements seed the
+  realm workspace at launch: the bundled `files/handoff_readme.md` body lands at
+  `/global/handoff/README.md`, and the optional `handoff_notes` files input
+  lands at `/global/handoff/notes.md`.
 - `prompts/operational_rules.md` — the shared operational contract: workspace
   view, `/global/...` handoff conventions, caps, typed-error recovery loop, and
   the operator-content prohibition.
@@ -21,11 +24,11 @@ validated tool paths.
   as files by reference, assemble the transport manifest, `dry_run`, import,
   hand off) with a worked example.
 - `prompts/genesis_protocol.md` — payload-generation procedure (read the
-  handoff, assemble content by reference, pin the version, `dry_run`, submit,
-  report) with a worked example.
-- `files/handoff_readme.md` — fixed seed content written to
-  `/global/handoff/README.md` at launch; `seed.files` also declares an optional
-  `user` slot at `/global/handoff/notes.md`.
+  handoff, assemble input bodies by reference, pin the version, `dry_run`,
+  submit, report) with a worked example.
+- `files/handoff_readme.md` — bundle file placed at `/global/handoff/README.md`
+  at launch; the `handoff_notes` files input is placed at
+  `/global/handoff/notes.md` when the operator attaches notes.
 - `README.md` — this human doc (not embedded in any prompt).
 
 ## Authorities and approval
@@ -55,11 +58,11 @@ validated tool paths.
    `import.manifest.json`, iterates with
    `import_realm_template { manifest_file, dry_run: true }`, then imports for
    real and writes `/global/handoff/<id>.md` (template id + canonical version).
-3. Genesis reads the handoff, assembles payload files by reference, writes
-   `hydrate.manifest.json` (pinned `templateVersion`), iterates with
-   `submit_hydration_package { manifest_file, dry_run: true }`, then submits for
-   real; the candidate is session-only until the operator reviews and attaches
-   it at launch.
+3. Genesis reads the handoff, assembles the payload input bodies by reference,
+   writes the format-v2 payload manifest (pinned `templateVersion`), iterates
+   with `submit_hydration_package { manifest_file, dry_run: true }`, then
+   submits for real; the candidate is session-only until the operator reviews
+   and attaches it at launch.
 
 ## Owner decisions (2026-09-21/22)
 

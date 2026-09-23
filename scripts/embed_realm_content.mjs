@@ -18,14 +18,15 @@
  * Validation split
  * ----------------
  * This script owns bundle *mechanics* only: the manifest must parse as a JSON
- * object whose id matches its directory and whose formatVersion is 1, every
- * referenced bundle file must exist under the inline directories, bundle paths
- * must be safe forward-slash relative paths, and every embedded file must be
- * UTF-8 text within the per-file byte cap. The complete format-v1 template
- * schema (unknown fields, id patterns, input cross-references, origins,
- * history, presets, composition caps) is enforced against the generated
- * bundles by the pipeline test through the real `materializeTemplate`, so the
- * schema is never re-implemented here.
+ * object whose id matches its directory, the inline directories are walked
+ * under the safe-path, UTF-8, binary, and per-file byte-cap rules, and every
+ * referenced bundle file must be embedded. The complete template schema
+ * (closed shapes, totality, input/placement/directive cross-references, tool
+ * profiles, history) is enforced by the real catalog validator through
+ * `normalizeTemplate`, which accepts the format-v2 schema and legacy
+ * format-v1 documents through the read shim — the schema is never
+ * re-implemented here. References follow the format-v2 model: prompt/history
+ * `file` parts, input `defaultFile` prefills, and placement `file` sources.
  *
  * Exit codes: 0 success, 1 validation/drift/write failure, 2 usage error.
  */
@@ -33,6 +34,7 @@
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { normalizeTemplate } from '../src/lib/sandbox/realmCatalog/index.ts';
 
 /** Repository root (this script lives in `scripts/`). */
 const PROJECT_ROOT = path.resolve(import.meta.dirname, '..');
@@ -217,116 +219,56 @@ function collectInlineFiles(bundleDir, bundleId, dirName, files) {
 }
 
 /**
- * Collects bundle file references from one ordered part list (prompt or
- * history content), validating the structures it traverses.
+ * Collects every bundle file path a normalized format-v2 template references:
+ * `file` prompt/history parts, input `defaultFile` prefills, and placement
+ * `file` sources.
  *
- * @param {unknown} parts Candidate part list.
- * @param {string} label Label used in error messages.
- * @param {(value: unknown, refLabel: string) => void} reference Reference accumulator.
- */
-function collectPartReferences(parts, label, reference) {
-  if (!Array.isArray(parts) || parts.length === 0) {
-    fail(`${label} must be a non-empty array`);
-  }
-  parts.forEach((part, partIndex) => {
-    const partLabel = `${label}[${partIndex}]`;
-    if (!isRecord(part)) {
-      fail(`${partLabel} must be an object`);
-    }
-    if (part.kind === 'file') {
-      reference(part.path, `${partLabel}.path`);
-    } else if (part.kind === 'input') {
-      requireNonEmptyString(part.inputId, `${partLabel}.inputId`);
-    } else if (part.kind === 'text') {
-      if (typeof part.text !== 'string') {
-        fail(`${partLabel}.text must be a string`);
-      }
-    } else {
-      fail(`${partLabel} carries unknown prompt part kind '${String(part.kind)}'`);
-    }
-  });
-}
-
-/**
- * Collects every bundle file path the manifest references: agent `file` prompt
- * parts, `file` history content parts, input `defaultFile` prefills, and seed
- * `source.file` entries.
+ * The template has already passed `normalizeTemplate`, so its structures are
+ * schema-valid; this walk extracts the reference paths and applies the
+ * bundle-relative path mechanics the catalog leaves to the pipeline.
  *
- * The walk is fail-closed on the structures it must traverse (it cannot verify
- * references inside a malformed shape), but cross-reference and closed-shape
- * schema rules stay with `materializeTemplate` in the pipeline test.
- *
- * @param {Record<string, unknown>} manifest Parsed manifest.
+ * @param {Record<string, unknown>} template Normalized format-v2 template.
  * @param {string} label Bundle label used in error messages.
  * @returns {Set<string>} Referenced bundle-relative paths.
  */
-function collectReferencedBundlePaths(manifest, label) {
+function collectReferencedBundlePaths(template, label) {
   const references = new Set();
   const reference = (value, refLabel) => {
     references.add(assertBundlePath(value, refLabel));
   };
-
-  if (!Array.isArray(manifest.agents) || manifest.agents.length === 0) {
-    fail(`${label}: 'agents' must be a non-empty array`);
-  }
-  manifest.agents.forEach((agent, agentIndex) => {
-    if (!isRecord(agent)) {
-      fail(`${label}: agents[${agentIndex}] must be an object`);
-    }
-    collectPartReferences(agent.prompt, `${label}: agents[${agentIndex}].prompt`, reference);
-    if (agent.history !== undefined) {
-      if (!Array.isArray(agent.history)) {
-        fail(`${label}: agents[${agentIndex}].history must be an array`);
-      }
-      agent.history.forEach((entry, entryIndex) => {
-        const entryLabel = `${label}: agents[${agentIndex}].history[${entryIndex}]`;
-        if (!isRecord(entry)) {
-          fail(`${entryLabel} must be an object`);
-        }
-        collectPartReferences(entry.content, `${entryLabel}.content`, reference);
-      });
-    }
-  });
-
-  if (manifest.inputs !== undefined) {
-    if (!Array.isArray(manifest.inputs)) {
-      fail(`${label}: 'inputs' must be an array`);
-    }
-    manifest.inputs.forEach((input, inputIndex) => {
-      if (!isRecord(input)) {
-        fail(`${label}: inputs[${inputIndex}] must be an object`);
-      }
-      if (input.defaultFile !== undefined) {
-        reference(input.defaultFile, `${label}: inputs[${inputIndex}].defaultFile`);
+  const addParts = (parts, partsLabel) => {
+    parts.forEach((part, partIndex) => {
+      if (part.kind === 'file') {
+        reference(part.path, `${partsLabel}[${partIndex}].path`);
       }
     });
-  }
+  };
 
-  if (manifest.seed !== undefined) {
-    if (!isRecord(manifest.seed)) {
-      fail(`${label}: 'seed' must be an object`);
+  template.agents.forEach((agent, agentIndex) => {
+    addParts(agent.prompt, `${label}: agents[${agentIndex}].prompt`);
+    (agent.history ?? []).forEach((entry, entryIndex) => {
+      addParts(entry.content, `${label}: agents[${agentIndex}].history[${entryIndex}].content`);
+    });
+  });
+  (template.inputs ?? []).forEach((input, inputIndex) => {
+    if (input.defaultFile !== undefined) {
+      reference(input.defaultFile, `${label}: inputs[${inputIndex}].defaultFile`);
     }
-    if (manifest.seed.files !== undefined) {
-      if (!Array.isArray(manifest.seed.files)) {
-        fail(`${label}: seed.files must be an array`);
-      }
-      manifest.seed.files.forEach((file, fileIndex) => {
-        if (!isRecord(file)) {
-          fail(`${label}: seed.files[${fileIndex}] must be an object`);
-        }
-        if (isRecord(file.source) && file.source.file !== undefined) {
-          reference(file.source.file, `${label}: seed.files[${fileIndex}].source.file`);
-        }
-      });
+  });
+  (template.placements ?? []).forEach((placement, placementIndex) => {
+    if (placement.file !== undefined) {
+      reference(placement.file, `${label}: placements[${placementIndex}].file`);
     }
-  }
+  });
 
   return references;
 }
 
 /**
- * Collects one bundle: parses and mechanics-validates its manifest, walks the
- * inline directories, and fails closed on dangling references.
+ * Collects one bundle: parses and mechanics-validates its manifest, validates
+ * the complete template schema through the real catalog (`normalizeTemplate`,
+ * v2 or the v1 read shim), walks the inline directories, and fails closed on
+ * dangling references.
  *
  * @param {string} root Templates root.
  * @param {string} entryName Bundle directory name.
@@ -353,14 +295,15 @@ function collectBundle(root, entryName) {
   if (id !== entryName) {
     fail(`bundle '${entryName}': template.json id '${id}' must match the bundle directory name`);
   }
-  if (manifest.formatVersion !== 1) {
-    fail(
-      `bundle '${entryName}': template.json formatVersion must be 1 (got '${String(manifest.formatVersion)}')`
-    );
-  }
 
   const label = `bundle '${id}'`;
-  const references = collectReferencedBundlePaths(manifest, label);
+  let normalized;
+  try {
+    normalized = normalizeTemplate(manifest);
+  } catch (error) {
+    fail(`${label}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const references = collectReferencedBundlePaths(normalized, label);
 
   const collected = new Map();
   for (const dirName of INLINE_DIRECTORIES) {
@@ -441,11 +384,11 @@ function renderModule(bundles) {
     ' * The payload embeds every `templates/<id>/` bundle (the `template.json`',
     ' * manifest plus its `prompts/**`, `inputs/**`, and `files/**` text bodies,',
     ` * capped at ${MAX_FILE_BYTES} bytes per file) so the sandbox resolves prompt parts`,
-    ' * and seed sources without runtime file reads or `?raw` imports. The',
+    ' * and bundle references without runtime file reads or `?raw` imports. The',
     ' * generator fails closed on malformed manifests, missing referenced files,',
-    ' * oversized or binary files, and unsafe bundle paths; the complete format-v1',
-    ' * schema is enforced against this generated data by the pipeline test through',
-    ' * the real `materializeTemplate`.',
+    ' * oversized or binary files, and unsafe bundle paths; the complete format-v2',
+    ' * schema is enforced against every manifest through the real',
+    ' * `normalizeTemplate` (format-v1 documents through the read shim).',
     ' *',
     ` * Regenerate: node ${REGEN_SCRIPT}`,
     ` * Freshness:  node ${REGEN_SCRIPT} --check`,

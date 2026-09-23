@@ -1,26 +1,31 @@
 #!/usr/bin/env node
 /**
  * @file scripts/validate_realm_artifacts.mjs
- * @description Standalone validator for Realm format-v1 authoring artifacts:
- * template bundles (the canonical transport document
- * `{ formatVersion: 1, template, files }`) and hydration packages (the
- * instance-content document validated against a template).
+ * @description Standalone validator for Realm authoring artifacts (format v2,
+ * with the format-v1 read shim): template bundles (the canonical transport
+ * document `{ formatVersion: 1|2, template, files }`) and payloads (the
+ * format-v2 instance-content document, or a legacy format-v1 hydration
+ * package) validated against a template.
  *
  * This script intentionally re-implements nothing: it imports the real
  * `realmCatalog` entry points and reports their typed results. The engine is
  * the single source of validation truth, so an artifact that passes here is an
  * artifact the host's import/submit pipeline accepts.
  *
- *   parseTemplateBundle()       bundle envelope + template + files + version
- *   templateBundleVersion()     recomputed canonical version (consistency check)
- *   validateHydrationPackage()  package shape, slot matching, version pin (fail-closed)
- *   hashText()                  informational sha256 of the artifact file bytes
+ *   parseTemplateBundle()  bundle envelope + template + files + version (v1 or v2)
+ *   validatePayload()        payload/package shape, coverage, version pin (fail-closed)
+ *   hashText()               informational sha256 of the artifact file bytes
+ *
+ * A format-v1 bundle or package is accepted through the same entry points (the
+ * v2 parser shims the authored v1 template and preserves its authored pin;
+ * `validatePayload` converts a legacy package against the normalized model),
+ * so pre-migration artifacts stay checkable.
  *
  * Usage: node scripts/validate_realm_artifacts.mjs <artifact.json> [options]
  *
- *   <artifact.json>            Bundle or hydration package (kind auto-detected)
+ *   <artifact.json>            Bundle or payload/package (kind auto-detected)
  *   --kind bundle|package      Force the artifact kind
- *   --template <file>          Package validation input: a transport bundle
+ *   --template <file>          Payload validation input: a transport bundle
  *                              (recommended — also checks the pinned version)
  *                              or a bare template.json spec (pin check skipped)
  *   --json                     Machine-readable result on stdout
@@ -37,22 +42,22 @@ import {
   RealmCatalogError,
   hashText,
   parseTemplateBundle,
-  templateBundleVersion,
-  validateHydrationPackage
+  validatePayload
 } from '../src/lib/sandbox/realmCatalog/index.ts';
 
 const USAGE = `Usage: node scripts/validate_realm_artifacts.mjs <artifact.json> [options]
 
-Validates a Realm format-v1 template bundle or hydration package with the real
-realmCatalog validator (no reimplementation).
+Validates a Realm template bundle or a format-v2 payload (legacy format-v1
+hydration packages included) with the real realmCatalog validator (no
+reimplementation).
 
 Arguments:
-  <artifact.json>            Bundle (transport JSON) or hydration package;
+  <artifact.json>            Bundle (transport JSON) or payload/package;
                              the kind is auto-detected unless --kind is given.
 
 Options:
   --kind bundle|package      Force the artifact kind.
-  --template <file>          Template for package validation: a transport
+  --template <file>          Template for payload validation: a transport
                              bundle (recommended; also checks the pinned
                              templateVersion) or a bare template.json spec
                              (the pin check is then skipped).
@@ -157,13 +162,14 @@ function detectKind(value) {
 }
 
 /**
- * Loads the `--template` input for package validation.
+ * Loads the `--template` input for payload validation.
  *
  * A transport bundle is parsed with the real `parseTemplateBundle()` (which
- * resolves bundle file references and pins the canonical version); a bare
- * template spec is passed through with no version, so the pin check is
- * skipped. Either way the template itself is validated by the real
- * `validateHydrationPackage()` before any package check runs.
+ * accepts either authored format, resolves bundle file references, and pins
+ * the canonical version — the authored v1 pin included); a bare template spec
+ * is passed through with no version, so the pin check is skipped. Either way
+ * the template itself is validated by the real `validatePayload()` before any
+ * payload check runs.
  *
  * @param {string} file Path as given on the command line.
  * @returns {{template: unknown, currentVersion: string | null, form: 'bundle' | 'spec'}} Template input
@@ -192,7 +198,8 @@ function loadTemplateInput(file) {
 }
 
 /**
- * Validates a template bundle with the real catalog parser.
+ * Validates a template bundle (either authored format) with the real catalog
+ * parser, then round-trips its canonical transport text as a consistency check.
  *
  * @param {{file: string, text: string, value: unknown}} artifact Artifact input.
  * @returns {Record<string, unknown>} Validation summary.
@@ -200,26 +207,24 @@ function loadTemplateInput(file) {
  */
 function validateBundle(artifact) {
   const parsed = parseTemplateBundle(artifact.value);
-  const recomputed = templateBundleVersion({ template: parsed.template, files: parsed.files });
-  if (recomputed !== parsed.version) {
+  const reparsed = parseTemplateBundle(parsed.serialized);
+  if (reparsed.version !== parsed.version) {
     throw new Error(
-      `internal: parseTemplateBundle version '${parsed.version}' does not match templateBundleVersion '${recomputed}'`
+      `internal: canonical transport re-parses to version '${reparsed.version}' instead of '${parsed.version}'`
     );
   }
-  const inputs = parsed.template.inputs ?? [];
-  const seedSlots = (parsed.template.seed?.files ?? []).map((slot) => ({
-    path: slot.path,
-    target: slot.target,
-    origin: slot.origin ?? 'fixed'
-  }));
+  const template = parsed.template;
+  const inputs = template.inputs ?? [];
+  const placements = template.placements ?? [];
   return {
     kind: 'bundle',
     file: artifact.file,
-    templateId: parsed.template.id,
-    templateName: parsed.template.name,
+    templateId: template.id,
+    templateName: template.name,
+    sourceFormatVersion: parsed.sourceFormatVersion,
     version: parsed.version,
     fileCount: Object.keys(parsed.files).length,
-    agents: parsed.template.agents.map((agent) => ({
+    agents: template.agents.map((agent) => ({
       key: agent.key,
       idPattern: agent.idPattern,
       privileged: agent.privileged === true,
@@ -227,15 +232,14 @@ function validateBundle(artifact) {
     })),
     inputs: {
       total: inputs.length,
-      user: inputs.filter((input) => (input.origin ?? 'user') === 'user').length,
-      generated: inputs.filter((input) => input.origin === 'generated').length
+      text: inputs.filter((input) => input.shape === 'text').length,
+      files: inputs.filter((input) => input.shape === 'files').length,
+      required: inputs.filter((input) => input.required === true).length
     },
-    seedSlots: {
-      total: seedSlots.length,
-      fixed: seedSlots.filter((slot) => slot.origin === 'fixed').length,
-      user: seedSlots.filter((slot) => slot.origin === 'user').length,
-      generated: seedSlots.filter((slot) => slot.origin === 'generated').length,
-      slots: seedSlots
+    placements: {
+      total: placements.length,
+      realm: placements.filter((placement) => placement.target === 'realm').length,
+      agent: placements.filter((placement) => placement.target !== 'realm').length
     },
     warnings: [...parsed.warnings],
     fileHash: hashText(artifact.text)
@@ -243,47 +247,75 @@ function validateBundle(artifact) {
 }
 
 /**
- * Validates a hydration package against the `--template` input.
+ * Validates a format-v2 payload (or a legacy format-v1 hydration package)
+ * against the `--template` input.
  *
  * @param {{file: string, text: string, value: unknown}} artifact Artifact input.
  * @param {string | null} templateFile `--template` path (required).
  * @returns {Record<string, unknown>} Validation summary.
  * @throws {UsageError} When `--template` is missing.
- * @throws {RealmCatalogError} On an invalid template or package.
+ * @throws {RealmCatalogError} On an invalid template or payload.
  */
 function validatePackage(artifact, templateFile) {
   if (templateFile === null) {
-    throw new UsageError('hydration package validation requires --template <template.json|bundle.json>');
+    throw new UsageError('payload validation requires --template <template.json|bundle.json>');
   }
   const { template, currentVersion, form } = loadTemplateInput(templateFile);
-  const resolved = validateHydrationPackage(
+  const resolved = validatePayload(
     template,
     artifact.value,
     currentVersion === null ? undefined : { currentVersion }
   );
+  const payloadFormatVersion =
+    isRecord(artifact.value) && artifact.value.formatVersion === 1 ? 1 : 2;
+  // Legacy package entries carry their target; v2 payload entries do not
+  // (destinations live only in the template), so the target is reported when
+  // the authored document names one.
+  const targetByPath = new Map();
+  if (payloadFormatVersion === 1 && isRecord(artifact.value) && Array.isArray(artifact.value.files)) {
+    for (const entry of artifact.value.files) {
+      if (isRecord(entry) && typeof entry.path === 'string') {
+        targetByPath.set(entry.path, entry.target);
+      }
+    }
+  }
+  const fileEntries = [];
+  for (const inputId of Object.keys(resolved.inputs)) {
+    const value = resolved.inputs[inputId];
+    if (value.shape !== 'files') continue;
+    for (const entry of value.files) {
+      fileEntries.push({
+        inputId,
+        path: entry.path,
+        target: targetByPath.has(entry.path) ? targetByPath.get(entry.path) : null
+      });
+    }
+  }
   return {
     kind: 'package',
     file: artifact.file,
     templateFile,
     templateForm: form,
+    payloadFormatVersion,
     templateId: resolved.templateId,
     pinnedVersion: resolved.templateVersion,
     currentVersion,
     versionCheck: currentVersion === null ? 'skipped' : 'match',
-    inputValues: Object.keys(resolved.inputValues),
-    fileEntries: resolved.files.map((entry) => ({ path: entry.path, target: entry.target })),
+    inputValues: Object.keys(resolved.inputs),
+    fileEntries,
     warnings: [...resolved.warnings],
     fileHash: hashText(artifact.text)
   };
 }
 
 /**
- * Renders a seed-file target for display.
+ * Renders a placement/file target for display.
  *
- * @param {{agent: string} | string} target Seed target.
+ * @param {{agent: string} | string | null} target Seed or file target.
  * @returns {string} Display form.
  */
 function formatTarget(target) {
+  if (target === null || target === undefined) return 'template destination';
   return target === 'realm' ? 'realm' : `agent:${target.agent}`;
 }
 
@@ -297,16 +329,20 @@ function formatSuccess(summary) {
   const lines = [];
   if (summary.kind === 'bundle') {
     lines.push(`realm-artifacts: OK bundle '${summary.templateId}' (${summary.templateName})`);
-    lines.push(`  file:      ${summary.file}`);
-    lines.push(`  version:   ${summary.version}`);
-    lines.push(`  files:     ${summary.fileCount}`);
-    lines.push(`  agents:    ${summary.agents.length} (${summary.agents.map((agent) => agent.key).join(', ')})`);
+    lines.push(`  file:       ${summary.file}`);
     lines.push(
-      `  inputs:    ${summary.inputs.total} (${summary.inputs.user} user, ${summary.inputs.generated} generated)`
+      `  format:     authored v${summary.sourceFormatVersion}` +
+        (summary.sourceFormatVersion === 1 ? ' (shimmed to the v2 model)' : '')
+    );
+    lines.push(`  version:    ${summary.version}`);
+    lines.push(`  files:      ${summary.fileCount}`);
+    lines.push(`  agents:     ${summary.agents.length} (${summary.agents.map((agent) => agent.key).join(', ')})`);
+    lines.push(
+      `  inputs:     ${summary.inputs.total} (${summary.inputs.text} text, ${summary.inputs.files} files; ` +
+        `${summary.inputs.required} required)`
     );
     lines.push(
-      `  seed:      ${summary.seedSlots.total} slot(s) (${summary.seedSlots.fixed} fixed, ` +
-        `${summary.seedSlots.user} user, ${summary.seedSlots.generated} generated)`
+      `  placements: ${summary.placements.total} (${summary.placements.realm} realm, ${summary.placements.agent} agent)`
     );
     const declared = summary.agents.filter((agent) => agent.authorities.length > 0);
     if (declared.length > 0) {
@@ -316,9 +352,12 @@ function formatSuccess(summary) {
       }
     }
   } else {
-    lines.push(`realm-artifacts: OK hydration package for '${summary.templateId}'`);
+    lines.push(`realm-artifacts: OK payload for '${summary.templateId}'`);
     lines.push(`  file:       ${summary.file}`);
     lines.push(`  template:   ${summary.templateFile} (${summary.templateForm})`);
+    lines.push(
+      `  payload:    ${summary.payloadFormatVersion === 1 ? 'legacy format v1 (hydration package)' : 'format v2'}`
+    );
     lines.push(
       `  pinned:     ${summary.pinnedVersion}` +
         (summary.versionCheck === 'match'
@@ -327,9 +366,11 @@ function formatSuccess(summary) {
     );
     lines.push(`  inputs:     ${summary.inputValues.length} value(s) (${summary.inputValues.join(', ') || 'none'})`);
     lines.push(
-      `  files:      ${summary.fileEntries.length} entry(ies)` +
+      `  files:      ${summary.fileEntries.length} fileset entry(ies)` +
         (summary.fileEntries.length > 0
-          ? ` (${summary.fileEntries.map((entry) => `${entry.path} → ${formatTarget(entry.target)}`).join(', ')})`
+          ? ` (${summary.fileEntries
+              .map((entry) => `${entry.inputId}:${entry.path} → ${formatTarget(entry.target)}`)
+              .join(', ')})`
           : '')
     );
   }
@@ -386,12 +427,12 @@ export function run(argv, io = {}) {
     if (kind === null) kind = detectKind(artifact.value);
     if (kind === null) {
       throw new UsageError(
-        `'${options.file}' is neither a template bundle { formatVersion, template, files } nor a hydration package; ` +
+        `'${options.file}' is neither a template bundle { formatVersion, template, files } nor a payload/package; ` +
           'use --kind to force one'
       );
     }
     if (kind === 'bundle' && options.template !== null) {
-      throw new UsageError("--template only applies to hydration packages (this artifact is a bundle)");
+      throw new UsageError("--template only applies to payloads/packages (this artifact is a bundle)");
     }
     const summary =
       kind === 'bundle'

@@ -1,8 +1,8 @@
 # SESSION ZERO — OPERATIONAL RULES (shared)
 
 You are a generator agent in the **Session Zero** realm: an ordinary realm whose
-members produce Realm format-v1 artifacts for the operator. Architect authors
-template bundles; Genesis produces hydration packages for imported templates.
+members produce Realm format-v2 artifacts for the operator. Architect authors
+template bundles; Genesis produces payloads for imported templates.
 Both members are privileged, so each of you may read the other's private
 workspace in-realm — but the canonical handoff surface is the realm-global
 workspace, and the publishing authorities are separate, explicitly approved
@@ -25,9 +25,10 @@ grants (never implied by privilege).
 - `/global/work/<template_id>/` — working directory for one artifact: bundle
   files, manifests, and assembled content.
 - `/global/work/<template_id>/import.manifest.json` — Architect's transport
-  manifest (`{ "formatVersion": 1, "template": …, "files": { … } }`).
+  manifest (`{ "formatVersion": 2, "template": …, "files": { … } }`).
 - `/global/work/<template_id>/hydrate.manifest.json` — Genesis's submission
-  manifest.
+  manifest (the format-v2 payload: `{ formatVersion: 2, templateId,
+  templateVersion, inputs }`).
 - Bytes move by reference: manifests name `sourceFile` paths and the host
   resolves them at submit time, so large content never transits your context.
   Use `source_file` / `data_source_file` / `value_file` /
@@ -37,8 +38,8 @@ grants (never implied by privilege).
 ## Caps (fail closed)
 
 - 2 MiB per referenced file; 3 MiB per template bundle; 8 MiB per hydration
-  package. Keep every artifact far below the caps; split large sources into
-  parts and assemble them with `concat_files`.
+  payload submission. Keep every artifact far below the caps; split large
+  sources into parts and assemble them with `concat_files`.
 
 ## Typed errors — recover in-loop, never retry blindly
 

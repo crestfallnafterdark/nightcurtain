@@ -28,11 +28,15 @@ export interface RealmAgentToolProfile {
  *
  * A part is one of three primitives: a bundle prompt file (`file`), a
  * template-declared input (`input`), or inline text (`text`). Composition
- * inserts parts in declared order; an empty input contributes nothing.
+ * inserts parts in declared order; an empty input contributes nothing. The
+ * optional `path` file selector is the format-v2 extension: a reference to a
+ * `files`-shape input must name exactly one file of the fileset (`path`
+ * required), and a reference to a `text`-shape input must not carry one
+ * (format-v1 validation rejects the field entirely).
  */
 export type PromptPart =
   | { kind: 'file'; path: string }
-  | { kind: 'input'; inputId: string }
+  | { kind: 'input'; inputId: string; path?: string }
   | { kind: 'text'; text: string };
 
 /**
@@ -44,7 +48,7 @@ export type PromptPart =
  * resolves empty. The kernel attaches no meaning to the text — an input may
  * carry directives, lore, policy notes, or nothing at all.
  */
-export interface RealmTemplateInput {
+export interface RealmTemplateInputV1 {
   /** Stable per-template input id (unique within the template; referenced by `input` parts). */
   id: string;
   /** Human-readable field label. */
@@ -162,7 +166,7 @@ export interface RealmAgentSpec {
  * seed payload type is `RealmSeedFile` (`{ path, content }`), the resolved
  * write shape this declaration materializes into.
  */
-export interface RealmTemplateSeedFile {
+export interface RealmTemplateSeedFileV1 {
   /** Destination path (workspace-relative; traversal rejected). */
   path: string;
   /** Destination workspace: the Realm-global partition or one member's private workspace. */
@@ -184,9 +188,9 @@ export interface RealmTemplateSeedFile {
  * the directive's target agent; a directive-only manifest is rejected at
  * validation rather than inventing a second delivery path.
  */
-export interface RealmSeedManifest {
+export interface RealmSeedManifestV1 {
   /** Files to seed, in declared order. */
-  files?: readonly RealmTemplateSeedFile[];
+  files?: readonly RealmTemplateSeedFileV1[];
   /** Optional first directive delivered to the named template agent key. */
   directive?: { targetAgentKey: string; text: string };
 }
@@ -195,7 +199,7 @@ export interface RealmSeedManifest {
  * Hydration declaration: the overall instruction a hydrator reads when
  * producing a package for this template.
  */
-export interface RealmHydrationDeclaration {
+export interface RealmHydrationDeclarationV1 {
   /** Non-empty hydration brief. */
   brief: string;
 }
@@ -312,16 +316,15 @@ export interface RealmProviderMcp {
 export type RealmProvider = RealmProviderPack | RealmProviderMcp;
 
 /**
- * A code-owned Realm template.
+ * The frozen format-v1 document schema (legacy read-shim input).
  *
- * Templates are frozen data: they declare the schema format version, optional
- * hydration brief, optional template inputs, agent roles with ordered prompt
- * parts and baked history, an optional seed manifest, and the optional
- * capability contract. Domain content lives in bundle files referenced by
- * prompt parts and seed sources; the kernel ships no policy content and no
- * provider implementations.
+ * Not part of the public surface: `normalizeTemplate()` validates format-v1
+ * documents against this schema and converts them to the canonical
+ * {@link RealmTemplate} model. The catalog's transport, version, payload, and
+ * materialization helpers accept such documents at their authored boundary, so
+ * pre-migration bundles keep importing, launching, and validating.
  */
-export interface RealmTemplate {
+export interface RealmTemplateV1 {
   /** Stable template id. */
   id: string;
   /** Human-readable display name. */
@@ -333,13 +336,13 @@ export interface RealmTemplate {
   /** Schema format version; only `1` is accepted. */
   formatVersion: 1;
   /** Overall hydrator instruction. */
-  hydration?: RealmHydrationDeclaration;
+  hydration?: RealmHydrationDeclarationV1;
   /** Declared template inputs referenced by `input` parts. */
-  inputs?: readonly RealmTemplateInput[];
+  inputs?: readonly RealmTemplateInputV1[];
   /** Declared agent specs, in launch order; never empty. */
   agents: RealmAgentSpec[];
   /** Optional seed manifest resolved by materialization. */
-  seed?: RealmSeedManifest;
+  seed?: RealmSeedManifestV1;
   /** Optional capability requirements (shape-validated; never resolved in this wave). */
   toolContract?: RealmToolContract;
   /** Optional provider requests (shape-validated; never resolved in this wave). */
@@ -348,8 +351,8 @@ export interface RealmTemplate {
 
 /**
  * One baked Realm template bundle: a frozen template plus the bundle file
- * bodies its `file` prompt parts, input `defaultFile` prefills, and seed
- * `source.file` entries resolve against.
+ * bodies its `file` prompt/history parts, input `defaultFile` prefills, and
+ * placement `file` sources resolve against.
  *
  * Bundle files are the only source for those references — the catalog performs
  * no runtime file reads, and the generated module is embedded at build time by
@@ -410,112 +413,10 @@ export interface RealmComposedPrompt {
 }
 
 /**
- * Resolved input values keyed by declared input id.
- *
- * Used by `composeAgentHistory()` (history parts resolve from this map) and by
- * launch callers that pass one value per declared input to
- * `materializeTemplate()`.
- */
-export type RealmInputValues = Readonly<Record<string, string>>;
-
-/**
  * Bundle file bodies keyed by bundle-relative path (or hydration file content
  * keyed by slot path when a caller composes history against hydrated content).
  */
 export type BundleFiles = Readonly<Record<string, string>>;
-
-/**
- * One hydration file entry resolved from a package: the declared slot path and
- * target plus the content the hydrator produced.
- */
-export interface ResolvedHydrationFile {
-  /** Slot destination path (workspace-relative; matches a declared seed slot). */
-  path: string;
-  /** Destination workspace: the Realm-global partition or one template agent key. */
-  target: 'realm' | { agent: string };
-  /** Slot content (may be empty). */
-  content: string;
-}
-
-/**
- * Fully validated hydration package resolution produced by
- * `validateHydrationPackage()`.
- *
- * `templateVersion` is the version the package pinned; `inputValues` are the
- * package's declared input values; `files` are the package's file entries in
- * package order; `warnings` carries review-surface notes (for example an
- * explicitly allowed version mismatch).
- */
-export interface ResolvedHydration {
-  /** Template id the package targets (equal to the validated template's id). */
-  templateId: string;
-  /** Template version the package pinned (`sha256:<hex>`). */
-  templateVersion: string;
-  /** Package input values keyed by declared input id. */
-  inputValues: RealmInputValues;
-  /** Package file entries in package order. */
-  files: readonly ResolvedHydrationFile[];
-  /** Review warnings (empty when none). */
-  warnings: readonly string[];
-}
-
-/**
- * Parsed and validated canonical transport bundle produced by
- * `parseTemplateBundle()`.
- *
- * `version` is the per-bundle content version
- * ({@link templateBundleVersion} semantics: the canonical template JSON plus
- * each referenced bundle file, framed and hashed). `warnings` carries review
- * notes; the transport envelope itself never silently drops fields.
- */
-export interface ParsedTemplateBundle {
-  /** The validated template (deeply frozen). */
-  template: RealmTemplate;
-  /** Bundle file bodies keyed by bundle-relative path (deeply frozen). */
-  files: BundleFiles;
-  /** Per-bundle content version (`sha256:<hex>`). */
-  version: string;
-  /** Parse warnings (empty when none). */
-  warnings: readonly string[];
-}
-
-/**
- * Options accepted by the composition helpers.
- */
-export interface RealmComposeOptions {
-  /** Launch-level input values keyed by declared input id. */
-  inputValues?: Readonly<Record<string, string>>;
-  /** Bundle file bodies keyed by bundle-relative path. */
-  bundleFiles?: Readonly<Record<string, string>>;
-  /** Resolved hydration file entries matching declared `user`/`generated` seed slots. */
-  hydrationFiles?: readonly ResolvedHydrationFile[];
-}
-
-/**
- * One resolved seed file: destination, target, and the resolved content.
- *
- * Targets stay template agent keys — resolving keys to launched agent ids
- * belongs to the seeding orchestration, not to the catalog.
- */
-export interface RealmResolvedSeedFile {
-  /** Destination path copied from the manifest. */
-  path: string;
-  /** Destination workspace: the Realm-global partition or one template agent key. */
-  target: 'realm' | { agent: string };
-  /** Resolved content (inline verbatim, or the referenced bundle file body). */
-  content: string;
-}
-
-/**
- * Resolved seed manifest carried by a launch plan: inline and bundle-file
- * sources are resolved to content and the directive is copied verbatim.
- */
-export interface RealmResolvedSeed {
-  /** Resolved files, in declared order (empty when the manifest declares none). */
-  files: readonly RealmResolvedSeedFile[];
-  /** Directive copied from the manifest when declared. */
-  directive?: { targetAgentKey: string; text: string };
-}
 
 /**
  * One fully resolved agent plan produced by `materializeTemplate()`.
@@ -557,33 +458,6 @@ export interface RealmLaunchAgentPlan {
   modelPresetId?: string;
   /** Initial prompt copied from the spec when declared. */
   initialPrompt?: string;
-}
-
-/**
- * Deeply frozen launch plan produced by `materializeTemplate()`.
- *
- * The plan is deterministic: agent order is template order and every field is
- * a pure function of the template plus the launch options.
- */
-export interface RealmLaunchPlan {
-  /** Id of the template the plan was materialized from. */
-  templateId: string;
-  /** Target realm id, stored verbatim from the materialization options. */
-  realmId: string;
-  /** Resolved seed manifest; absent when the template declares no seed. */
-  seed?: RealmResolvedSeed;
-  /** Resolved agent plans, in template order. */
-  agents: readonly RealmLaunchAgentPlan[];
-}
-
-/**
- * Launch options accepted by `materializeTemplate()`.
- */
-export interface RealmMaterializeOptions extends RealmComposeOptions {
-  /** Target realm id (membership metadata only; agent ids never embed it). */
-  realmId: string;
-  /** Per-agent-key id overrides; keys must name template agent keys. */
-  idOverrides?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -652,7 +526,7 @@ export const CAPABILITY_WILDCARD_SOURCES = Object.freeze({
 
 /**
  * Origin of the effective wildcard capability reported by
- * `summarizeAgentCapabilities()`: the declared profile, the privilege flag, or
+ * `summarizeAgentCapabilitiesV1()`: the declared profile, the privilege flag, or
  * neither.
  */
 export type CapabilityWildcardSource = 'profile' | 'privileged' | 'none';
@@ -677,7 +551,7 @@ type _CapabilityWildcardSourcesSyncCheck = _AssertTrue<_CapabilityWildcardSource
 
 /**
  * Honest per-agent capability preview produced by
- * `summarizeAgentCapabilities()`.
+ * `summarizeAgentCapabilitiesV1()`.
  *
  * `grants` is the effective canonical grant list after alias canonicalization
  * and aggregate expansion (wildcard reported as `['*']`); `mutating` and
@@ -714,4 +588,309 @@ export interface AgentCapabilitySummary {
   readOnly: readonly string[];
   /** Declared grants that map to no canonical tool; empty under wildcard. */
   unrecognized: readonly string[];
+}
+
+/* ------------------------------------------------------------------------- *
+ * Format v2 (decision ticket 2ba3008)
+ *
+ * The format-v2 model makes inputs the only variable content and every
+ * consumption explicit at its use site: `agents[].prompt[]` and
+ * `agents[].history[]` inject inputs at an exact position, `placements[]`
+ * write inputs or bundle files into workspaces, and `directives[]` deliver an
+ * operator-attributed mailbox message. `origin` is removed; requiredness is
+ * the per-input `required` flag, and the hash scope follows the
+ * template/payload split. The agent-spec, tool-profile, tool-contract,
+ * provider, history-message, launch-agent-plan, and capability-summary types
+ * are shared with format v1 because their shape is unchanged.
+ * ------------------------------------------------------------------------- */
+
+/**
+ * One template-declared editable input in format v2.
+ *
+ * Inputs are the only variable content: one value per input is used wherever
+ * any agent, placement, or directive references it. `shape` selects the value
+ * domain — `text` is one UTF-8 string, `files` is an ordered fileset
+ * (`{ path, content }` entries; filesets only, no archives or base64). A
+ * `files` input is never injected wholesale: a prompt/history reference names
+ * one file (`path`), and a placement writes the fileset to a workspace
+ * (`root`) or, when the fileset holds exactly one file, to an exact `path`.
+ * `default`/`defaultFile` are text-only prefills and mutually exclusive; a
+ * `required` input fails closed while it resolves empty. `label`, `help`, and
+ * `multiline` are review/UI metadata.
+ */
+export interface RealmTemplateInput {
+  /** Stable per-template input id (unique within the template; referenced by parts, placements, and directives). */
+  id: string;
+  /** Human-readable field label. */
+  label: string;
+  /** Value domain: one text string or an ordered fileset. */
+  shape: 'text' | 'files';
+  /** Author commentary (provider notes, provenance, usage) shown with the field. */
+  help?: string;
+  /** Production instruction for whoever fills the input (hydrator or operator). */
+  brief?: string;
+  /** Whether composition and placement fail closed while the input resolves empty (default `false`). */
+  required?: boolean;
+  /** Prefilled text (`text` shape only); absent or empty starts empty. */
+  default?: string;
+  /** Alternative prefill resolved from a bundle file (`text` shape only); mutually exclusive with `default`. */
+  defaultFile?: string;
+  /** UI hint: render as a multiline field (`text` shape only; default true). */
+  multiline?: boolean;
+}
+
+/**
+ * One format-v2 placement: a declared destination for an input's value or a
+ * bundle file.
+ *
+ * A placement names exactly one source (`inputId` or `file`), one target (the
+ * Realm-global workspace or one template agent key), and exactly one
+ * destination: `path` writes a single value verbatim (a `text` input's value,
+ * a bundle file's body, or the single file of a one-file fileset), while
+ * `root` writes every file of a `files` input under the root prefix
+ * (`root + file.path`). Destinations live only in the template; a payload
+ * repeats no paths and no targets.
+ */
+export interface RealmPlacement {
+  /** Source: a declared template input. */
+  inputId?: string;
+  /** Source: a bundle file body. */
+  file?: string;
+  /** Destination workspace: the Realm-global partition or one member's private workspace. */
+  target: 'realm' | { agent: string };
+  /** Exact destination path (single-value sources and one-file filesets). */
+  path?: string;
+  /** Directory prefix for every file of a `files` input. */
+  root?: string;
+}
+
+/**
+ * One format-v2 directive: an operator-attributed mailbox message delivered at
+ * launch.
+ *
+ * A directive names exactly one message source (`inputId` naming a `text`
+ * input, or literal `text`) and exactly one target agent key. An optional
+ * input that resolves empty delivers nothing.
+ */
+export interface RealmDirective {
+  /** Message source: a declared `text` input. */
+  inputId?: string;
+  /** Message source: literal text. */
+  text?: string;
+  /** Destination: one template agent key. */
+  target: { agent: string };
+}
+
+/**
+ * A code-owned Realm template in format v2.
+ *
+ * Templates are frozen data: they declare the schema format version, input
+ * requirements, agent roles with ordered prompt parts and baked history,
+ * placements, directives, and the optional capability contract. Domain content
+ * lives in bundle files referenced by prompt parts, placement `file` sources,
+ * and input `defaultFile` prefills; the kernel ships no policy content and no
+ * provider implementations. Validation is closed-shape and total: every
+ * declared input must be referenced at least once and every reference must
+ * resolve.
+ */
+export interface RealmTemplate {
+  /** Stable template id. */
+  id: string;
+  /** Human-readable display name. */
+  name: string;
+  /** Operator-facing description (may be empty). */
+  description: string;
+  /** Free-text author comments shown in the launcher. */
+  notes?: string;
+  /** Schema format version; only `2` is accepted by the v2 surface. */
+  formatVersion: 2;
+  /** Declared input requirements referenced by parts, placements, and directives. */
+  inputs?: readonly RealmTemplateInput[];
+  /** Declared agent specs, in launch order; never empty. */
+  agents: RealmAgentSpec[];
+  /** Declared workspace placements, in write order. */
+  placements?: readonly RealmPlacement[];
+  /** Declared launch directives, in delivery order. */
+  directives?: readonly RealmDirective[];
+  /** Optional capability requirements (shape-validated; never resolved in this wave). */
+  toolContract?: RealmToolContract;
+  /** Optional provider requests (shape-validated; never resolved in this wave). */
+  providers?: readonly RealmProvider[];
+}
+
+/**
+ * One file of a format-v2 payload fileset.
+ */
+export interface RealmPayloadFile {
+  /** Fileset-relative path (safe; unique within the fileset). */
+  path: string;
+  /** File content (UTF-8 text; may be empty). */
+  content: string;
+}
+
+/**
+ * One authored format-v2 payload input value: `{ text }` for a `text` input,
+ * `{ files }` for a `files` input (closed shape; exactly one member).
+ */
+export type RealmPayloadInputValue =
+  | { text: string }
+  | { files: readonly RealmPayloadFile[] };
+
+/**
+ * Optional payload provenance block (all fields optional non-empty strings;
+ * never secrets).
+ */
+export interface RealmPayloadProvenance {
+  /** Who produced the payload (hydrator, operator, or tool name). */
+  producer?: string;
+  /** ISO-8601 production timestamp. */
+  generatedAt?: string;
+  /** Producing model identifier, when one was used. */
+  model?: string;
+  /** Who reviewed the payload, when reviewed. */
+  reviewedBy?: string;
+}
+
+/**
+ * A format-v2 payload: the structured input values for one template.
+ *
+ * The payload is self-contained and inline-only: it repeats no paths and no
+ * targets (destinations live only in the template), contains no external file
+ * references, and pins the template version it was produced against. Every
+ * `required` input must be present; unknown keys, shape mismatches, and
+ * duplicate fileset paths are rejected.
+ */
+export interface RealmPayload {
+  /** Schema format version; only `2` is accepted by the v2 surface. */
+  formatVersion: 2;
+  /** Template id the payload targets. */
+  templateId: string;
+  /** Template version the payload was produced against (`sha256:<hex>`). */
+  templateVersion: string;
+  /** Input values keyed by declared input id. */
+  inputs: Readonly<Record<string, RealmPayloadInputValue>>;
+  /** Optional provenance block. */
+  provenance?: RealmPayloadProvenance;
+}
+
+/**
+ * One validated format-v2 input value: the declaration's shape tag plus the
+ * resolved content.
+ */
+export type RealmInputValue =
+  | { shape: 'text'; text: string }
+  | { shape: 'files'; files: readonly RealmPayloadFile[] };
+
+/**
+ * Validated input values keyed by declared input id (supplied values only;
+ * defaults resolve at composition time).
+ */
+export type RealmInputValues = Readonly<Record<string, RealmInputValue>>;
+
+/**
+ * Fully validated payload resolution produced by `validatePayload()`.
+ *
+ * `inputs` carries the supplied values keyed by declared input id (shape
+ * tagged); `warnings` carries review-surface notes (for example an explicitly
+ * allowed version mismatch).
+ */
+export interface ResolvedPayload {
+  /** Template id the payload targets (equal to the validated template's id). */
+  templateId: string;
+  /** Template version the payload pinned (`sha256:<hex>`). */
+  templateVersion: string;
+  /** Supplied input values keyed by declared input id. */
+  inputs: RealmInputValues;
+  /** Review warnings (empty when none). */
+  warnings: readonly string[];
+}
+
+/**
+ * Options accepted by the format-v2 composition helpers.
+ */
+export interface RealmComposeOptions {
+  /** Supplied input values keyed by declared input id (shape tagged). */
+  inputs?: RealmInputValues;
+  /** Bundle file bodies keyed by bundle-relative path. */
+  bundleFiles?: Readonly<Record<string, string>>;
+}
+
+/**
+ * Launch options accepted by `materializeTemplate()`.
+ */
+export interface RealmMaterializeOptions extends RealmComposeOptions {
+  /** Target realm id (membership metadata only; agent ids never embed it). */
+  realmId: string;
+  /** Per-agent-key id overrides; keys must name template agent keys. */
+  idOverrides?: Readonly<Record<string, string>>;
+}
+
+/**
+ * One resolved placement: destination path, target, and the resolved content.
+ *
+ * Targets stay template agent keys — resolving keys to launched agent ids
+ * belongs to the launch orchestration, not to the catalog.
+ */
+export interface RealmResolvedPlacement {
+  /** Destination path copied from the placement (or root-joined for filesets). */
+  path: string;
+  /** Destination workspace: the Realm-global partition or one template agent key. */
+  target: 'realm' | { agent: string };
+  /** Resolved content (input value or bundle file body). */
+  content: string;
+}
+
+/**
+ * One resolved directive: the target agent key and the resolved message text.
+ */
+export interface RealmResolvedDirective {
+  /** Target template agent key. */
+  targetAgentKey: string;
+  /** Resolved message text (never empty; empty optional inputs deliver nothing). */
+  text: string;
+}
+
+/**
+ * Deeply frozen format-v2 launch plan produced by `materializeTemplate()`.
+ *
+ * The plan is deterministic: agent order is template order, placement and
+ * directive order is declared order, and every field is a pure function of the
+ * template plus the launch options.
+ */
+export interface RealmLaunchPlan {
+  /** Id of the template the plan was materialized from. */
+  templateId: string;
+  /** Target realm id, stored verbatim from the materialization options. */
+  realmId: string;
+  /** Resolved workspace placements, in declared order (empty when none declared). */
+  placements: readonly RealmResolvedPlacement[];
+  /** Resolved directives, in declared order (empty when none declared). */
+  directives: readonly RealmResolvedDirective[];
+  /** Resolved agent plans, in template order. */
+  agents: readonly RealmLaunchAgentPlan[];
+}
+
+/**
+ * Parsed and validated format-v2 transport bundle produced by
+ * `parseTemplateBundle()`.
+ *
+ * `template` is the normalized format-v2 model (a format-v1 bundle is shimmed);
+ * `serialized` is the canonical authored transport JSON (round-trips to a
+ * deep-equal parsed bundle with the same `version`), and `version` pins the
+ * authored content. `sourceFormatVersion` records which format the transport
+ * document declared.
+ */
+export interface ParsedTemplateBundle {
+  /** The validated, normalized format-v2 template. */
+  template: RealmTemplate;
+  /** Bundle file bodies keyed by bundle-relative path. */
+  files: BundleFiles;
+  /** Per-bundle content version over the authored transport form (`sha256:<hex>`). */
+  version: string;
+  /** Format the authored transport document declared. */
+  sourceFormatVersion: 1 | 2;
+  /** Canonical authored transport JSON text (stable round-trip input). */
+  serialized: string;
+  /** Parse warnings (empty when none). */
+  warnings: readonly string[];
 }

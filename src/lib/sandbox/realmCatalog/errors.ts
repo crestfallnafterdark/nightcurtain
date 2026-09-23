@@ -1,13 +1,14 @@
 /**
  * Typed error surface for the `realmCatalog` module.
  *
- * The catalog's format-v1 entry points (`parseTemplateBundle`,
- * `validateHydrationPackage`, `templateBundleVersion`) fail closed with a
- * `RealmCatalogError` carrying a stable `code`, so callers can branch on the
- * failure class (malformed transport, invalid template, invalid hydration
- * package, pinned-version mismatch) instead of matching message text. Internal
- * structural validators keep throwing plain `Error`s with the same descriptive
- * messages; the typed entry points wrap them.
+ * The catalog's typed entry points (`parseTemplateBundle`,
+ * `serializeTemplateBundle`, `templateBundleVersion`, `materializeTemplate`,
+ * `validatePayload`) fail closed with a `RealmCatalogError` carrying a stable
+ * `code`, so callers can branch on the failure class (malformed transport,
+ * invalid template, invalid payload, pinned-version mismatch) instead of
+ * matching message text. Internal structural validators keep throwing plain
+ * `Error`s with the same descriptive messages; the typed entry points wrap
+ * them.
  */
 
 /**
@@ -49,7 +50,7 @@ export type RealmCatalogErrorCode =
  * import { RealmCatalogError, REALM_CATALOG_ERROR_CODES } from './realmCatalog/index.ts';
  *
  * try {
- *   parseTemplateBundle({ formatVersion: 2 });
+ *   parseTemplateBundleV1({ formatVersion: 2 });
  * } catch (error) {
  *   if (error instanceof RealmCatalogError) console.error(error.code);
  * }

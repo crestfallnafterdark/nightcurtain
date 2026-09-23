@@ -3,6 +3,7 @@
   "templateId": "authoring_demo",
   "templateVersion": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
   "inputs": {
+    "topic": "A topic hydrated against an older template revision.",
     "briefing": "A briefing hydrated against an older template revision."
   },
   "files": [

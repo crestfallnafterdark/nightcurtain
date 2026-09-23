@@ -11,9 +11,9 @@ workspaces.
 - `/global/work/<template_id>/` — working directory for one artifact: bundle
   files, manifests, and assembled content.
 - `/global/work/<template_id>/import.manifest.json` — Architect's transport
-  manifest (`{ formatVersion: 1, template, files }`).
-- `/global/work/<template_id>/hydrate.manifest.json` — Genesis's submission
-  manifest.
+  manifest (`{ formatVersion: 2, template, files }`).
+- `/global/work/<template_id>/hydrate.manifest.json` — Genesis's format-v2
+  payload submission manifest.
 - `/global/handoff/notes.md` — operator notes attached at launch (when provided).
 
 Bytes move by reference: manifests name `sourceFile` paths and the host resolves

@@ -111,7 +111,7 @@ export function utf8ByteLength(text: string): number {
  * Computes the `sha256:<hex>` content hash of a UTF-8 string.
  *
  * Shares the module's self-contained synchronous SHA-256 with
- * {@link templateBundleVersion}, so callers that need to record content
+ * {@link templateBundleVersionV1}, so callers that need to record content
  * hashes (for example instance-provenance input hashes) do not need platform
  * crypto, asynchronous `crypto.subtle`, or a deep import into this module.
  *

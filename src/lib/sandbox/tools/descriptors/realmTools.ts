@@ -8,6 +8,30 @@
  * only ever exposed to callers whose frozen `AuthorityDescriptor` carries the
  * matching authority id (`@template:authority` / `@hydration:authority`).
  *
+ * Both tools speak the format-v2 publishing contract (decision `2ba3008`) while
+ * keeping the format-v1 transport/package conveniences working for one
+ * migration cycle:
+ *
+ * - `import_realm_template` accepts the authored transport document of either
+ *   format (`{ formatVersion: 1|2, template, files }`), resolves every
+ *   tool-layer `{ sourceFile }` convenience into inline file bodies, and
+ *   validates through the catalog's own `parseTemplateBundle` — the same
+ *   parser the host registry uses — before handing the canonical authored
+ *   `serialized` transport to the publishing port.
+ * - `submit_hydration_package` accepts a format-v2 payload
+ *   (`{ formatVersion: 2, templateId, templateVersion, inputs, provenance? }`
+ *   with shape-matched `{ text }` / `{ files }` values) or a legacy format-v1
+ *   package (the pre-migration manifest shape, or the same shape with an
+ *   explicit `formatVersion: 1`), resolves `{ sourceFile }` conveniences
+ *   inline, and validates through the catalog's `validatePayload`. The receipt
+ *   carries the canonical `payloadDigest` over the stored authored payload,
+ *   which equals the launch provenance `packageDigest` when the candidate is
+ *   attached at launch.
+ *
+ * Tool-layer references are conveniences only: `{ sourceFile }` never reaches
+ * a spec, a payload, or the port — every reference resolves to conforming
+ * inline content before validation.
+ *
  * Both tools accept a `dry_run` validator mode: the identical resolve → validate
  * pipeline runs with zero side effects (no import, no candidate, no registry or
  * trust mutation) and returns the same typed receipt/errors, so generator
@@ -18,11 +42,18 @@ import { PUBLISHING_TOOLS, TOOL_SYSTEM_ERROR_CODES } from '../constants/index.ts
 import { createParamSanitizer } from '../normalizers/index.ts';
 import {
   AGENT_AUTHORITIES,
+  normalizeTemplate,
   parseTemplateBundle,
-  serializeTemplateBundle,
-  validateHydrationPackage
+  payloadDigest,
+  resolvePlacements,
+  validatePayload
 } from '../../realmCatalog/index.ts';
-import type { PendingInstancePayload, RealmTemplate } from '../../realmCatalog/index.ts';
+import type {
+  PendingInstancePayload,
+  RealmInputValue,
+  RealmTemplateInput,
+  RealmTemplate
+} from '../../realmCatalog/index.ts';
 import { FILE_PLUMBING_MAX_FILE_BYTES } from '../../virtualFs/index.ts';
 import type { ExecutionContext, JsonSchemaDraft07, RealmPublishingPort } from '../../toolDefinitions/index.ts';
 
@@ -288,22 +319,33 @@ function resolveManifestArgument(
 }
 
 /**
- * Resolves a template-bundle manifest into the canonical transport document.
+ * Canonical authored transport envelope field names (closed shape).
+ *
+ * `formatVersion` accepts 1 or 2; the catalog's own parser owns the
+ * template-format match rule.
+ */
+const IMPORT_MANIFEST_FIELDS: ReadonlySet<string> = new Set(['formatVersion', 'template', 'files']);
+
+/**
+ * Resolves a template-bundle manifest into the canonical authored transport
+ * document.
  *
  * Exactly one of the two manifest forms is accepted (inline object or
  * `manifest_file` path). The envelope is closed-shape
- * (`{ formatVersion: 1, template, files }`); the caller's `formatVersion` must
- * be exactly the number 1 and is enforced before any reference resolution,
- * mirroring the catalog parser's own transport gate. Every `files` value is
- * either an inline string or `{ sourceFile }`, resolved server-side through the
- * caller's workspace view under the per-file 2 MiB and 3 MiB bundle-total caps.
- * The resolved document is then validated by the real catalog parser, so the
- * tool and the import registry share one validation truth.
+ * (`{ formatVersion: 1|2, template, files }`); the caller's `formatVersion`
+ * must be exactly the number 1 or 2 and is enforced before any reference
+ * resolution, mirroring the catalog parser's own transport gate. Every `files`
+ * value is either an inline string or `{ sourceFile }`, resolved server-side
+ * through the caller's workspace view under the per-file 2 MiB and 3 MiB
+ * bundle-total caps. The resolved authored document is then validated by the
+ * real catalog parser (`parseTemplateBundle`), so the tool and the import
+ * registry share one validation truth for either format; the parser's
+ * canonical authored `serialized` text is what travels to the port.
  *
  * @param params - Sanitized handler parameters.
  * @param vfs - Caller-scoped VirtualFS read view.
  * @param context - Trusted execution context.
- * @returns The parsed bundle plus its canonical transport JSON.
+ * @returns The parsed bundle, its canonical authored transport JSON, and the manifest source label.
  */
 function resolveImportBundle(
   params: ToolParams,
@@ -320,21 +362,20 @@ function resolveImportBundle(
     throw invalidArguments('import_realm_template manifest must be the transport object { formatVersion, template, files }');
   }
   for (const key of Object.keys(manifest)) {
-    if (key !== 'formatVersion' && key !== 'template' && key !== 'files') {
+    if (!IMPORT_MANIFEST_FIELDS.has(key)) {
       throw invalidArguments(`import_realm_template manifest carries unknown field '${key}'`);
     }
   }
-  // Transport envelope gate (defect dfba631): the catalog's own parser owns
-  // this rule — `realmCatalog/transport.ts` requires `formatVersion` to be
-  // exactly the number 1, checked after the closed-field scan and before any
-  // template/files work. The tool resolves `{ sourceFile }` references before
-  // the canonical document reaches the parser, so the caller's value is
-  // re-checked here (canonical re-serialization stamps 1 unconditionally and
-  // must only ever receive an already-validated v1 envelope) and fails with
-  // the same typed upstream code before any reference resolution or mutation.
-  if (manifest.formatVersion !== 1) {
+  // Transport envelope gate: the catalog's own parser accepts exactly
+  // `formatVersion` 1 or 2 (checked after the closed-field scan and before any
+  // template/files work, and matched against the template's declared format).
+  // The tool resolves `{ sourceFile }` references before the canonical document
+  // reaches the parser, so the caller's value is re-checked here — before any
+  // reference resolution or mutation — and fails with the same typed upstream
+  // code.
+  if (manifest.formatVersion !== 1 && manifest.formatVersion !== 2) {
     throw invalidArguments(
-      `import_realm_template manifest formatVersion must be 1 (got '${String(manifest.formatVersion)}')`,
+      `import_realm_template manifest formatVersion must be 1 or 2 (got '${String(manifest.formatVersion)}')`,
       { upstreamCode: 'ERR_BUNDLE_FORMAT' }
     );
   }
@@ -391,17 +432,20 @@ function resolveImportBundle(
     });
   }
 
-  let canonical: string;
+  let parsed: ReturnType<typeof parseTemplateBundle>;
   try {
-    canonical = serializeTemplateBundle({
-      // Only the canonical envelope travels; a malformed manifest is rejected
-      // by the catalog's own validation below.
-      template: manifest.template as RealmTemplate,
+    parsed = parseTemplateBundle({
+      // The authored envelope travels as declared; the parser owns the
+      // closed-shape, format-version match, template, and reference validation
+      // for either format. `serialized` is the canonical authored round-trip.
+      formatVersion: manifest.formatVersion,
+      template: manifest.template,
       files: resolvedFiles
     });
   } catch (error) {
     throw failureFromError(error);
   }
+  const canonical = parsed.serialized;
   const canonicalBytes = utf8ByteLength(canonical);
   if (canonicalBytes > REALM_PUBLISHING_MAX_BUNDLE_BYTES) {
     throw invalidArguments(
@@ -410,32 +454,263 @@ function resolveImportBundle(
       { actualBytes: canonicalBytes, maxBytes: REALM_PUBLISHING_MAX_BUNDLE_BYTES }
     );
   }
-  let parsed: ReturnType<typeof parseTemplateBundle>;
-  try {
-    parsed = parseTemplateBundle(canonical);
-  } catch (error) {
-    throw failureFromError(error);
-  }
   return { parsed, canonical, manifestSource };
 }
 
 /**
- * Resolves a hydration manifest into the canonical inline package and
+ * Canonical hydration manifest field names (closed shape).
+ *
+ * `formatVersion` is optional for one migration cycle: absent selects the
+ * legacy format-v1 package manifest, an explicit 1 or 2 selects that payload
+ * contract.
+ */
+const HYDRATION_MANIFEST_FIELDS: ReadonlySet<string> = new Set([
+  'formatVersion',
+  'templateId',
+  'templateVersion',
+  'inputs',
+  'files',
+  'provenance'
+]);
+
+/**
+ * One resolved destination entry reported by the submission receipt: the
+ * destination path and its workspace target (`realm` or a template agent key).
+ */
+interface ResolvedFileEntry {
+  readonly path: string;
+  readonly target: 'realm' | { agent: string };
+}
+
+/** Mutable running total for the per-file/package-total publishing caps. */
+interface PublishingByteState {
+  totalBytes: number;
+}
+
+/**
+ * Enforces the per-file (2 MiB) and package-total (8 MiB) publishing caps over
+ * one resolved content body, accumulating the running total.
+ *
+ * @param state - Running byte total for the submission.
+ * @param bytes - UTF-8 byte length of the resolved body.
+ * @param prefix - Message prefix naming the resolved body.
+ * @param details - Machine-readable diagnostics merged into a cap failure.
+ * @throws `PublishingFailure`-shaped error carrying the structured receipt fields
+ */
+function accountPublishingBytes(
+  state: PublishingByteState,
+  bytes: number,
+  prefix: string,
+  details: Record<string, unknown>
+): void {
+  if (bytes > REALM_PUBLISHING_MAX_FILE_BYTES) {
+    throw invalidArguments(
+      `${prefix} is ${bytes} bytes and exceeds the ${REALM_PUBLISHING_MAX_FILE_BYTES}-byte per-file publishing cap`,
+      { ...details, actualBytes: bytes, maxBytes: REALM_PUBLISHING_MAX_FILE_BYTES }
+    );
+  }
+  state.totalBytes += bytes;
+  if (state.totalBytes > REALM_PUBLISHING_MAX_PACKAGE_BYTES) {
+    throw invalidArguments(
+      `submit_hydration_package resolved content is ${state.totalBytes} bytes and exceeds the `
+      + `${REALM_PUBLISHING_MAX_PACKAGE_BYTES}-byte package-total cap`,
+      { actualBytes: state.totalBytes, maxBytes: REALM_PUBLISHING_MAX_PACKAGE_BYTES }
+    );
+  }
+}
+
+/**
+ * Resolves one format-v1 package input value: an inline string or a
+ * `{ sourceFile }` reference resolved through the caller's workspace view.
+ *
+ * @param entry - Authored input value.
+ * @param inputId - Declared input id (diagnostics only).
+ * @param label - Parameter label used in failure messages.
+ * @param vfs - Caller-scoped VirtualFS read view.
+ * @param context - Trusted execution context.
+ * @param state - Running byte total.
+ * @returns The resolved inline string value.
+ * @throws `PublishingFailure`-shaped error carrying the structured receipt fields
+ */
+function resolveLegacyInputValue(
+  entry: unknown,
+  inputId: string,
+  label: string,
+  vfs: VirtualFsReadView,
+  context: ExecutionContext,
+  state: PublishingByteState
+): string {
+  let value: string;
+  if (typeof entry === 'string') {
+    value = entry;
+  } else if (isPlainRecord(entry)) {
+    const keys = Object.keys(entry);
+    if (keys.length !== 1 || keys[0] !== 'sourceFile' || typeof entry.sourceFile !== 'string') {
+      throw invalidArguments(`${label} must be an inline string or { sourceFile }`);
+    }
+    value = readSourceFile(vfs, context, entry.sourceFile, `${label}.sourceFile`);
+  } else {
+    throw invalidArguments(`${label} must be an inline string or { sourceFile }`);
+  }
+  accountPublishingBytes(state, utf8ByteLength(value), label, { inputId });
+  return value;
+}
+
+/**
+ * Resolves one format-v2 payload input value against its declaration.
+ *
+ * A `text` declaration accepts `{ text }` or a whole-value `{ sourceFile }`
+ * reference; a `files` declaration accepts a non-empty `{ files }` fileset
+ * whose entries carry inline `content` or a `{ sourceFile }` reference. Every
+ * resolved body counts against the per-file and package-total caps. Values for
+ * undeclared inputs pass through unchanged so the catalog's own validation
+ * reports them with the canonical "names undeclared input" failure.
+ *
+ * @param entry - Authored input value.
+ * @param inputId - Input id the value is keyed by.
+ * @param declaration - Declared input, when the id is declared.
+ * @param label - Parameter label used in failure messages.
+ * @param vfs - Caller-scoped VirtualFS read view.
+ * @param context - Trusted execution context.
+ * @param state - Running byte total.
+ * @returns The resolved authored value (shape-tagged, or the raw value for the catalog to reject).
+ * @throws `PublishingFailure`-shaped error carrying the structured receipt fields
+ */
+function resolvePayloadInputValue(
+  entry: unknown,
+  inputId: string,
+  declaration: RealmTemplateInput | undefined,
+  label: string,
+  vfs: VirtualFsReadView,
+  context: ExecutionContext,
+  state: PublishingByteState
+): unknown {
+  if (!isPlainRecord(entry)) return entry;
+  const keys = Object.keys(entry);
+  const hasSourceReference = keys.includes('sourceFile');
+
+  if (declaration?.shape === 'text') {
+    if (hasSourceReference) {
+      if (keys.length !== 1) {
+        throw invalidArguments(`${label} must declare either { text } or { sourceFile }`);
+      }
+      const text = readSourceFile(vfs, context, entry.sourceFile, `${label}.sourceFile`);
+      accountPublishingBytes(state, utf8ByteLength(text), label, { inputId });
+      return { text };
+    }
+    if (typeof entry.text === 'string') {
+      accountPublishingBytes(state, utf8ByteLength(entry.text), label, { inputId });
+      return { text: entry.text };
+    }
+    return entry;
+  }
+
+  if (declaration?.shape === 'files') {
+    if (hasSourceReference && entry.files === undefined) {
+      throw invalidArguments(
+        `${label} targets files input '${inputId}' and must declare a { files } fileset — `
+        + 'a whole-value sourceFile reference is only valid for text inputs'
+      );
+    }
+    if (entry.files === undefined) return entry;
+    if (!Array.isArray(entry.files)) {
+      throw invalidArguments(`${label}.files must be an array of file entries`);
+    }
+    const files = entry.files.map((file, index) => {
+      const fileLabel = `${label}.files[${index}]`;
+      if (!isPlainRecord(file)) {
+        throw invalidArguments(`${fileLabel} must be an object`);
+      }
+      for (const key of Object.keys(file)) {
+        if (key !== 'path' && key !== 'content' && key !== 'sourceFile') {
+          throw invalidArguments(`${fileLabel} carries unknown field '${key}'`);
+        }
+      }
+      const hasContent = file.content !== undefined;
+      const hasSource = file.sourceFile !== undefined;
+      if (hasContent === hasSource) {
+        throw invalidArguments(`${fileLabel} must declare exactly one of content or sourceFile`);
+      }
+      let content: string;
+      if (hasSource) {
+        content = readSourceFile(vfs, context, file.sourceFile, `${fileLabel}.sourceFile`);
+      } else if (typeof file.content === 'string') {
+        content = file.content;
+      } else {
+        throw invalidArguments(`${fileLabel} content must be a string`);
+      }
+      accountPublishingBytes(state, utf8ByteLength(content), `${fileLabel} '${String(file.path)}'`, { path: file.path });
+      return { path: file.path, content };
+    });
+    return { files };
+  }
+
+  // Undeclared input (or a value the declaration cannot shape): pass the
+  // authored value through so `validatePayload` owns the canonical rejection.
+  return entry;
+}
+
+/**
+ * Resolves the destination entries the submission receipt reports for the
+ * payload's files-shaped inputs.
+ *
+ * Destinations live only in the template: the declared placements that consume
+ * the supplied files inputs resolve through the catalog's own
+ * `resolvePlacements` (canonical root-joining and single-file semantics).
+ * Fileset entries consumed only by prompt/history parts have no destination and
+ * are not reported.
+ *
+ * @param template - Normalized format-v2 template.
+ * @param inputs - Validated supplied input values.
+ * @param bundleFiles - Bundle file bodies the template references.
+ * @returns Frozen `{ path, target }` destination entries, in placement order.
+ */
+function resolvePayloadFileEntries(
+  template: RealmTemplate,
+  inputs: Readonly<Record<string, RealmInputValue>>,
+  bundleFiles: Readonly<Record<string, string>>
+): readonly ResolvedFileEntry[] {
+  const suppliedFilesInputIds: ReadonlySet<string> = new Set(
+    Object.keys(inputs).filter((inputId) => inputs[inputId].shape === 'files')
+  );
+  if (suppliedFilesInputIds.size === 0) return Object.freeze([]);
+  const consumingPlacements = (template.placements ?? []).filter(
+    (placement) => placement.inputId !== undefined && suppliedFilesInputIds.has(placement.inputId)
+  );
+  if (consumingPlacements.length === 0) return Object.freeze([]);
+  const resolvedPlacements = resolvePlacements(consumingPlacements, template.inputs, {
+    inputs,
+    bundleFiles
+  });
+  return Object.freeze(resolvedPlacements.map((placement) => Object.freeze({
+    path: placement.path,
+    target: placement.target
+  })));
+}
+
+/**
+ * Resolves a hydration manifest into the conforming inline payload and
  * validates it against the effective catalog template.
  *
- *
  * Exactly one of the two manifest forms is accepted (inline object or
- * `manifest_file` path). `inputs` values are either inline strings or
- * `{ sourceFile }`; `files` entries are `{ path, target, content? | sourceFile }`
- * with exactly one content form. Every reference resolves through the caller's
- * workspace view under the per-file 2 MiB and 8 MiB package-total caps. The
- * canonical package pins the effective template version (the manifest may pin
- * its own; a mismatch fails closed through the catalog's version gate).
+ * `manifest_file` path). The manifest is a format-v2 payload
+ * (`formatVersion: 2`; shape-matched `{ text }` / `{ files }` values) or a
+ * legacy format-v1 package (absent `formatVersion`, or an explicit `1`;
+ * `inputs` strings and `{ path, target, content? | sourceFile }` file entries).
+ * Every `{ sourceFile }` convenience — whole-value for a `text` input, per-file
+ * body for a fileset entry, and every v1 input/file body — resolves through the
+ * caller's workspace view into inline content under the per-file 2 MiB and
+ * 8 MiB package-total caps, so the validated payload is always self-contained
+ * and no reference ever reaches the catalog or the port. The canonical payload
+ * pins the effective template version (the manifest may pin its own; a mismatch
+ * fails closed through the catalog's version gate) and is validated by the
+ * catalog's single `validatePayload` path, which accepts v2 payloads and
+ * converts v1 packages against the normalized template.
  *
  * @param params - Sanitized handler parameters.
  * @param vfs - Caller-scoped VirtualFS read view.
  * @param context - Trusted execution context.
- * @returns The canonical package, effective template version, and warnings.
+ * @returns The conforming payload, its canonical digest, and review metadata.
  */
 function resolveHydrationSubmission(
   params: ToolParams,
@@ -445,8 +720,10 @@ function resolveHydrationSubmission(
   package: Record<string, unknown>;
   templateId: string;
   templateVersion: string;
+  sourceFormatVersion: 1 | 2;
+  digest: string;
   inputIds: readonly string[];
-  fileEntries: readonly { path: string; target: 'realm' | { agent: string } }[];
+  fileEntries: readonly ResolvedFileEntry[];
   warnings: readonly string[];
   manifestSource: string;
 } {
@@ -462,15 +739,27 @@ function resolveHydrationSubmission(
     );
   }
   for (const key of Object.keys(manifest)) {
-    if (
-      key !== 'templateId'
-      && key !== 'templateVersion'
-      && key !== 'inputs'
-      && key !== 'files'
-      && key !== 'provenance'
-    ) {
+    if (!HYDRATION_MANIFEST_FIELDS.has(key)) {
       throw invalidArguments(`submit_hydration_package manifest carries unknown field '${key}'`);
     }
+  }
+  // Authored-format gate: absent means the legacy v1 package manifest (the
+  // pre-migration wire shape); an explicit 1 or 2 selects that payload
+  // contract. Anything else fails closed before any reference resolution.
+  const declaredFormatVersion = manifest.formatVersion === undefined ? 1 : manifest.formatVersion;
+  if (declaredFormatVersion !== 1 && declaredFormatVersion !== 2) {
+    throw invalidArguments(
+      `submit_hydration_package manifest formatVersion must be 1 or 2 (got '${String(manifest.formatVersion)}')`,
+      { upstreamCode: 'ERR_HYDRATION_PACKAGE' }
+    );
+  }
+  const sourceFormatVersion: 1 | 2 = declaredFormatVersion;
+  if (sourceFormatVersion === 2 && manifest.files !== undefined) {
+    throw invalidArguments(
+      'submit_hydration_package manifest with formatVersion 2 carries no top-level files — '
+      + 'destinations live in the template placements',
+      { upstreamCode: 'ERR_HYDRATION_PACKAGE' }
+    );
   }
   const templateId = typeof manifest.templateId === 'string' ? manifest.templateId.trim() : '';
   if (!templateId) {
@@ -488,52 +777,32 @@ function resolveHydrationSubmission(
       { templateId, reason: 'unknown_template' }
     );
   }
+  // The port serves the authored template (v1 or v2); normalize it once for the
+  // shape-aware convenience resolution. The catalog's own normalization is the
+  // single shape source, so a v2 payload targeting a v1-authored template
+  // resolves against the same shimmed declarations `validatePayload` uses.
+  let normalized: RealmTemplate;
+  try {
+    normalized = normalizeTemplate(effective.template);
+  } catch (error) {
+    throw failureFromError(error);
+  }
+  const declarationsById: ReadonlyMap<string, RealmTemplateInput> = new Map(
+    (normalized.inputs ?? []).map((declaration) => [declaration.id, declaration] as const)
+  );
 
-  let totalBytes = 0;
-  const inputs: Record<string, string> = Object.create(null);
+  const state: PublishingByteState = { totalBytes: 0 };
+  const inputs: Record<string, unknown> = Object.create(null);
   if (manifest.inputs !== undefined) {
     if (!isPlainRecord(manifest.inputs)) {
       throw invalidArguments('submit_hydration_package manifest inputs must be a record of values');
     }
     for (const inputId of Object.keys(manifest.inputs)) {
+      const label = `submit_hydration_package manifest inputs['${inputId}']`;
       const entry = manifest.inputs[inputId];
-      let value: string;
-      if (typeof entry === 'string') {
-        value = entry;
-      } else if (isPlainRecord(entry)) {
-        const keys = Object.keys(entry);
-        if (keys.length !== 1 || keys[0] !== 'sourceFile' || typeof entry.sourceFile !== 'string') {
-          throw invalidArguments(
-            `submit_hydration_package manifest inputs['${inputId}'] must be an inline string or { sourceFile }`
-          );
-        }
-        value = readSourceFile(
-          vfs,
-          context,
-          entry.sourceFile,
-          `submit_hydration_package manifest inputs['${inputId}'].sourceFile`
-        );
-      } else {
-        throw invalidArguments(
-          `submit_hydration_package manifest inputs['${inputId}'] must be an inline string or { sourceFile }`
-        );
-      }
-      const inputBytes = utf8ByteLength(value);
-      if (inputBytes > REALM_PUBLISHING_MAX_FILE_BYTES) {
-        throw invalidArguments(
-          `submit_hydration_package manifest inputs['${inputId}'] is ${inputBytes} bytes and exceeds the `
-          + `${REALM_PUBLISHING_MAX_FILE_BYTES}-byte per-file publishing cap`,
-          { inputId, actualBytes: inputBytes, maxBytes: REALM_PUBLISHING_MAX_FILE_BYTES }
-        );
-      }
-      totalBytes += inputBytes;
-      if (totalBytes > REALM_PUBLISHING_MAX_PACKAGE_BYTES) {
-        throw invalidArguments(
-          `submit_hydration_package resolved content is ${totalBytes} bytes and exceeds the `
-          + `${REALM_PUBLISHING_MAX_PACKAGE_BYTES}-byte package-total cap`,
-          { actualBytes: totalBytes, maxBytes: REALM_PUBLISHING_MAX_PACKAGE_BYTES }
-        );
-      }
+      const value = sourceFormatVersion === 1
+        ? resolveLegacyInputValue(entry, inputId, label, vfs, context, state)
+        : resolvePayloadInputValue(entry, inputId, declarationsById.get(inputId), label, vfs, context, state);
       Object.defineProperty(inputs, inputId, {
         value,
         writable: false,
@@ -571,47 +840,44 @@ function resolveHydrationSubmission(
       } else {
         throw invalidArguments(`${label} content must be a string`);
       }
-      const fileBytes = utf8ByteLength(content);
-      if (fileBytes > REALM_PUBLISHING_MAX_FILE_BYTES) {
-        throw invalidArguments(
-          `${label} '${String(entry.path)}' is ${fileBytes} bytes and exceeds the `
-          + `${REALM_PUBLISHING_MAX_FILE_BYTES}-byte per-file publishing cap`,
-          { path: entry.path, actualBytes: fileBytes, maxBytes: REALM_PUBLISHING_MAX_FILE_BYTES }
-        );
-      }
-      totalBytes += fileBytes;
-      if (totalBytes > REALM_PUBLISHING_MAX_PACKAGE_BYTES) {
-        throw invalidArguments(
-          `submit_hydration_package resolved content is ${totalBytes} bytes and exceeds the `
-          + `${REALM_PUBLISHING_MAX_PACKAGE_BYTES}-byte package-total cap`,
-          { actualBytes: totalBytes, maxBytes: REALM_PUBLISHING_MAX_PACKAGE_BYTES }
-        );
-      }
+      accountPublishingBytes(state, utf8ByteLength(content), `${label} '${String(entry.path)}'`, { path: entry.path });
       files.push({ path: entry.path, target: entry.target, content });
     });
   }
 
   const packageRecord: Record<string, unknown> = {
-    formatVersion: 1,
+    formatVersion: sourceFormatVersion,
     templateId,
     // A manifest may omit the pin; the effective version is injected so the
-    // canonical package always pins what validation checked. A supplied pin
+    // canonical payload always pins what validation checked. A supplied pin
     // that differs from the effective version fails closed in the catalog.
     templateVersion: typeof manifest.templateVersion === 'string' && manifest.templateVersion.trim()
       ? manifest.templateVersion
       : (effective.version || ''),
     inputs: { ...inputs },
-    files
+    ...(sourceFormatVersion === 1 ? { files } : {})
   };
   if (manifest.provenance !== undefined) {
     packageRecord.provenance = manifest.provenance;
   }
 
-  let resolved: ReturnType<typeof validateHydrationPackage>;
+  let resolved: ReturnType<typeof validatePayload>;
   try {
-    resolved = validateHydrationPackage(effective.template, packageRecord, {
+    resolved = validatePayload(effective.template, packageRecord, {
       currentVersion: effective.version
     });
+  } catch (error) {
+    throw failureFromError(error);
+  }
+
+  let digest: string;
+  let fileEntries: readonly ResolvedFileEntry[];
+  try {
+    // Digest the authored payload exactly as it is stored (canonical sorted-key
+    // bytes), so the receipt value equals the store's launch provenance
+    // `packageDigest` when this candidate is attached.
+    digest = payloadDigest(packageRecord);
+    fileEntries = resolvePayloadFileEntries(normalized, resolved.inputs, effective.files);
   } catch (error) {
     throw failureFromError(error);
   }
@@ -620,8 +886,13 @@ function resolveHydrationSubmission(
     package: packageRecord,
     templateId: resolved.templateId,
     templateVersion: resolved.templateVersion,
-    inputIds: Object.freeze(Object.keys(resolved.inputValues)),
-    fileEntries: Object.freeze(resolved.files.map((file) => Object.freeze({ path: file.path, target: file.target }))),
+    sourceFormatVersion,
+    digest,
+    // The authored payload's filled input ids (v1 packages report their input
+    // values; a v1 package's file entries resolve to shimmed fileset inputs and
+    // are reported through `fileEntries` instead).
+    inputIds: Object.freeze(Object.keys(packageRecord.inputs as Record<string, unknown>)),
+    fileEntries,
     warnings: resolved.warnings,
     manifestSource
   };
@@ -706,21 +977,31 @@ const importRealmTemplateParamAliasMap = Object.freeze({
  * through the host's Wave T template registry.
  *
  * Args: exactly one of `manifest` (the transport object) or `manifest_file`
- * (a caller-visible JSON file), plus optional `dry_run`. Bundle file values may
- * be inline strings or `{ sourceFile }` references resolved server-side under
- * the caller's workspace view. `dry_run: true` runs the identical
- * resolve → validate → preview pipeline with zero side effects.
+ * (a caller-visible JSON file), plus optional `dry_run`. The transport envelope
+ * declares `formatVersion` 1 or 2; bundle file values may be inline strings or
+ * `{ sourceFile }` references resolved server-side under the caller's workspace
+ * view. The resolved authored document validates through the catalog's own
+ * `parseTemplateBundle` (the same parser the registry uses) and the parser's
+ * canonical `serialized` transport travels to the port, so a format-v1 bundle
+ * is normalized through the read shim while a format-v2 bundle imports as
+ * authored. `dry_run: true` runs the identical resolve → validate → preview
+ * pipeline with zero side effects.
+ *
+ * Receipt: the store import receipt (`templateId`, authored `templateVersion`,
+ * shadow labels, effective byte budget, parser warnings) plus
+ * `sourceFormatVersion` (which authored format the transport declared),
+ * `fileCount`, `manifestSource`, `dryRun`, and `imported`.
  */
 export const importRealmTemplateDescriptor = Object.freeze({
   name: PUBLISHING_TOOLS.IMPORT_REALM_TEMPLATE,
   authority: AGENT_AUTHORITIES.TEMPLATE,
-  description: `Import a realm template transport bundle ({ formatVersion: 1, template, files }) into the host's template registry. Provide exactly one of manifest (the transport object) or manifest_file (a caller-visible JSON file path); each files value is an inline string or { sourceFile: '<caller-visible path>' } resolved server-side under your workspace view (referenced bytes never enter context). dry_run: true runs the identical resolve/validate pipeline and returns the same typed receipt with zero side effects.`,
+  description: `Import a realm template transport bundle ({ formatVersion: 1|2, template, files }) into the host's template registry. Provide exactly one of manifest (the transport object) or manifest_file (a caller-visible JSON file path); each files value is an inline string or { sourceFile: '<caller-visible path>' } resolved server-side under your workspace view (referenced bytes never enter context). A format-v1 bundle validates against the frozen v1 schema and normalizes to the format-v2 model; a format-v2 bundle validates directly. dry_run: true runs the identical resolve/validate pipeline and returns the same typed receipt with zero side effects.`,
   schema: Object.freeze({
     type: 'object',
     properties: {
       manifest: {
         type: 'object',
-        description: 'Transport bundle object { formatVersion: 1, template, files }; files values are inline strings or { sourceFile } references. Mutually exclusive with manifest_file.'
+        description: 'Transport bundle object { formatVersion: 1|2, template, files }; files values are inline strings or { sourceFile } references. Mutually exclusive with manifest_file.'
       },
       manifest_file: {
         type: 'string',
@@ -751,6 +1032,7 @@ export const importRealmTemplateDescriptor = Object.freeze({
         tool: PUBLISHING_TOOLS.IMPORT_REALM_TEMPLATE,
         templateId: receipt.templateId,
         templateVersion: receipt.templateVersion,
+        sourceFormatVersion: parsed.sourceFormatVersion,
         source: receipt.source,
         replacesShipped: receipt.replacesShipped,
         replacedImport: receipt.replacedImport,
@@ -759,7 +1041,7 @@ export const importRealmTemplateDescriptor = Object.freeze({
         manifestSource,
         dryRun,
         imported: !dryRun,
-        warnings: [...receipt.warnings]
+        warnings: [...new Set([...parsed.warnings, ...receipt.warnings])]
       };
     } catch (error) {
       const structured = (error ?? {}) as Partial<PublishingFailure>;
@@ -792,36 +1074,49 @@ const submitHydrationPackageParamAliasMap = Object.freeze({
 });
 
 /**
- * `submit_hydration_package` descriptor — submit an instance content package
+ * `submit_hydration_package` descriptor — submit an instance content payload
  * for an effective catalog template.
  *
  * Args: exactly one of `manifest` or `manifest_file`, plus optional `dry_run`.
- * Input values and file entries may be inline or `{ sourceFile }` references
- * resolved server-side under the caller's workspace view. The resolved package
- * is validated against the effective catalog template with the effective
- * version as `currentVersion` (a mismatch fails closed), then stored as a
- * session-only pending candidate. `dry_run: true` validates (slot coverage,
- * version check, caps) and reports the would-be package without storing a
- * candidate.
+ * The manifest is a format-v2 payload (`formatVersion: 2`; shape-matched
+ * `{ text }` / `{ files }` values keyed by declared input id) or a legacy
+ * format-v1 package (absent `formatVersion`, or an explicit `1`; string input
+ * values and `{ path, target, content }` file entries). Input bodies and file
+ * entries may be inline or `{ sourceFile }` references resolved server-side
+ * under the caller's workspace view before validation, so the validated payload
+ * is always self-contained. The resolved payload is validated against the
+ * effective catalog template through the catalog's `validatePayload` (required
+ * coverage, shape match, effective version as `currentVersion`; a mismatch
+ * fails closed), then stored as a session-only pending candidate.
+ * `dry_run: true` runs the identical resolve → validate pipeline and reports
+ * the would-be payload without storing a candidate.
+ *
+ * Receipt: `templateId`, the pinned `templateVersion`, `sourceFormatVersion`,
+ * the canonical `payloadDigest` (`sha256:<hex>` over the stored authored
+ * payload — equal to the launch provenance `packageDigest` when the candidate
+ * is attached), the filled `inputIds`, the resolved destination `fileEntries`
+ * (declared placements consuming the supplied files inputs; fileset entries
+ * consumed only by prompt/history parts have no destination), `manifestSource`,
+ * `resolvedAt`, `stored`, `dryRun`, and any catalog review `warnings`.
  */
 export const submitHydrationPackageDescriptor = Object.freeze({
   name: PUBLISHING_TOOLS.SUBMIT_HYDRATION_PACKAGE,
   authority: AGENT_AUTHORITIES.HYDRATION,
-  description: `Submit a hydration package for a realm template: { templateId, templateVersion?, inputs, files, provenance? } where inputs values and files entries may be inline or { sourceFile: '<caller-visible path>' } resolved server-side under your workspace view (referenced bytes never enter context). The host validates the resolved package against the effective template (slot coverage and template-version pin; mismatch fails closed) and stores a session-only pending candidate for the launch review. dry_run: true validates and reports the would-be package without storing a candidate.`,
+  description: `Submit a hydration payload for a realm template: a format-v2 payload { formatVersion: 2, templateId, templateVersion?, inputs, provenance? } with shape-matched values ({ text } for a text input, { files: [{ path, content }] } for a files input) or a legacy format-v1 package { formatVersion: 1, templateId, templateVersion?, inputs, files, provenance? }. Provide exactly one of manifest (the payload object) or manifest_file (a caller-visible JSON file path); input bodies and file entries may be inline or { sourceFile: '<caller-visible path>' } resolved server-side under your workspace view (referenced bytes never enter context). The host validates the resolved payload against the effective template (required coverage, shape match, template-version pin; mismatch fails closed) and stores a session-only pending candidate for the launch review; the receipt carries the canonical payloadDigest (sha256:<hex> over the stored authored payload) that launch provenance reuses. dry_run: true validates and reports the would-be payload without storing a candidate.`,
   schema: Object.freeze({
     type: 'object',
     properties: {
       manifest: {
         type: 'object',
-        description: 'Hydration manifest { templateId, templateVersion?, inputs, files, provenance? }; values may be inline or { sourceFile } references. Mutually exclusive with manifest_file.'
+        description: 'Hydration payload: format-v2 { formatVersion: 2, templateId, templateVersion?, inputs, provenance? } with { text } / { files } values, or legacy format-v1 { formatVersion: 1, templateId, templateVersion?, inputs, files, provenance? }; bodies may be inline or { sourceFile } references. Mutually exclusive with manifest_file.'
       },
       manifest_file: {
         type: 'string',
-        description: 'Caller-visible path of a JSON file carrying the hydration manifest; mutually exclusive with manifest.'
+        description: 'Caller-visible path of a JSON file carrying the hydration payload; mutually exclusive with manifest.'
       },
       dry_run: {
         type: 'boolean',
-        description: 'Validate and report the would-be package without storing a candidate (defaults to false).'
+        description: 'Validate and report the would-be payload without storing a candidate (defaults to false).'
       }
     },
     oneOf: [
@@ -853,6 +1148,8 @@ export const submitHydrationPackageDescriptor = Object.freeze({
         tool: PUBLISHING_TOOLS.SUBMIT_HYDRATION_PACKAGE,
         templateId: resolved.templateId,
         templateVersion: resolved.templateVersion,
+        sourceFormatVersion: resolved.sourceFormatVersion,
+        payloadDigest: resolved.digest,
         inputIds: [...resolved.inputIds],
         fileEntries: resolved.fileEntries.map((entry) => ({ path: entry.path, target: entry.target })),
         manifestSource: resolved.manifestSource,

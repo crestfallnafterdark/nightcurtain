@@ -2,6 +2,14 @@
 
 **Status:** snapshot of the accepted format-v1 contract (extracted 2026-09-21) · **Last verified:** 2026-09-21.
 
+> **Historical snapshot (post-cutover).** The engine's canonical format is now v2
+> (`skills/realm-authoring/SKILL.md`). This file documents the frozen format-v1 contract that
+> legacy documents are still validated against: `normalizeTemplate()` converts them to the
+> canonical model, and the transport, version, payload, and materialization entry points accept
+> them at their authored boundary. The v1-only API names mentioned below (for example
+> `validateHydrationPackage`) were deleted in the cutover — v1 *documents* flow through the read
+> shim, not through a public v1 API.
+
 > **format v1 (snapshot — may evolve pre-release).** This is a convenience copy for offline
 > authoring: the field tables, the declared-authority semantics, the hydration-package contract,
 > the canonical version definition, the validation rules, and the draft 2020-12 JSON schema.

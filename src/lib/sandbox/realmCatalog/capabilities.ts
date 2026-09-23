@@ -67,15 +67,41 @@ export function summarizeAgentCapabilities(
   spec: RealmAgentSpec,
   requirements?: readonly RealmToolRequirement[]
 ): AgentCapabilitySummary {
-  let requirementIds: ReadonlySet<string> | undefined;
-  if (requirements !== undefined) {
-    const ids: Set<string> = new Set();
-    requirements.forEach((requirement, index) => {
-      ids.add(requireNonEmptyString(requirement?.id, `summarizeAgentCapabilities requirements[${index}] id`));
-    });
-    requirementIds = ids;
-  }
+  const requirementIds = collectRequirementIds(requirements, 'summarizeAgentCapabilities');
   const validated = validateAgentSpec(spec, 'agent spec', requirementIds);
+  return summarizeValidatedAgent(validated, requirementIds);
+}
+
+/**
+ * Validates and collects an optional requirement list into an id set.
+ *
+ * @param requirements - Declared tool requirements, when supplied
+ * @param label - Human-readable label used in error messages
+ * @returns The declared requirement ids, or `undefined` when no list was supplied
+ */
+function collectRequirementIds(
+  requirements: readonly RealmToolRequirement[] | undefined,
+  label: string
+): ReadonlySet<string> | undefined {
+  if (requirements === undefined) return undefined;
+  const ids: Set<string> = new Set();
+  requirements.forEach((requirement, index) => {
+    ids.add(requireNonEmptyString(requirement?.id, `${label} requirements[${index}] id`));
+  });
+  return ids;
+}
+
+/**
+ * Projects one validated agent spec into the capability summary display model.
+ *
+ * @param validated - Validated agent spec
+ * @param requirementIds - Declared requirement ids, when known
+ * @returns A deeply frozen capability summary
+ */
+function summarizeValidatedAgent(
+  validated: RealmAgentSpec,
+  requirementIds: ReadonlySet<string> | undefined
+): AgentCapabilitySummary {
   const profile = resolveToolProfile(validated.toolProfile, `agent '${validated.key}' toolProfile`, requirementIds);
 
   const grants: string[] = [];

@@ -16,14 +16,20 @@ import { KNOWN_AGENT_AUTHORITIES } from './types.ts';
 import type {
   PromptPart,
   RealmAgentSpec,
+  RealmDirective,
   RealmHistoryEntry,
+  RealmInputValue,
   RealmLaunchToolProfile,
+  RealmPayloadFile,
+  RealmPlacement,
   RealmProviderMcp,
   RealmProviderPack,
-  RealmSeedManifest,
-  RealmTemplate,
+  RealmSeedManifestV1,
+  RealmTemplateV1,
+  RealmTemplateInputV1,
   RealmTemplateInput,
-  RealmTemplateSeedFile,
+  RealmTemplateSeedFileV1,
+  RealmTemplate,
   RealmToolRequirement
 } from './types.ts';
 
@@ -155,6 +161,59 @@ const SEED_AGENT_TARGET_FIELDS: ReadonlySet<string> = new Set(['agent']);
 
 /** Canonical seed-directive field names (closed shape). */
 const SEED_DIRECTIVE_FIELDS: ReadonlySet<string> = new Set(['targetAgentKey', 'text']);
+
+/** Canonical format-v2 template field names (closed shape). */
+const TEMPLATE_V2_FIELDS: ReadonlySet<string> = new Set([
+  'id',
+  'name',
+  'description',
+  'notes',
+  'formatVersion',
+  'inputs',
+  'agents',
+  'placements',
+  'directives',
+  'toolContract',
+  'providers'
+]);
+
+/** Canonical format-v2 template-input field names (closed shape). */
+const TEMPLATE_INPUT_V2_FIELDS: ReadonlySet<string> = new Set([
+  'id',
+  'label',
+  'shape',
+  'help',
+  'brief',
+  'required',
+  'default',
+  'defaultFile',
+  'multiline'
+]);
+
+/** Canonical format-v2 placement field names (closed shape). */
+const PLACEMENT_FIELDS: ReadonlySet<string> = new Set(['inputId', 'file', 'target', 'path', 'root']);
+
+/** Canonical format-v2 directive field names (closed shape). */
+const DIRECTIVE_FIELDS: ReadonlySet<string> = new Set(['inputId', 'text', 'target']);
+
+/** Canonical format-v2 directive-target field names (closed shape). */
+const DIRECTIVE_TARGET_FIELDS: ReadonlySet<string> = new Set(['agent']);
+
+/** Canonical format-v2 prompt-part field names per declared kind (closed shape). */
+const PROMPT_PART_V2_FIELDS: Readonly<Record<string, ReadonlySet<string>>> = Object.freeze({
+  file: new Set(['kind', 'path']),
+  input: new Set(['kind', 'inputId', 'path']),
+  text: new Set(['kind', 'text'])
+});
+
+/** Canonical format-v2 input-value field names per declared shape (closed shape). */
+const INPUT_VALUE_V2_FIELDS: Readonly<Record<string, ReadonlySet<string>>> = Object.freeze({
+  text: new Set(['shape', 'text']),
+  files: new Set(['shape', 'files'])
+});
+
+/** Canonical format-v2 payload-file field names (closed shape). */
+const PAYLOAD_FILE_FIELDS: ReadonlySet<string> = new Set(['path', 'content']);
 
 /** Optional agent-spec string fields validated as non-empty when present. */
 const OPTIONAL_SPEC_STRING_FIELDS: readonly string[] = Object.freeze([
@@ -353,7 +412,7 @@ export function resolveToolProfile(
  * @param label - Human-readable label used in error messages
  * @returns The validated part reference
  */
-export function validatePromptPart(candidate: unknown, label: string): PromptPart {
+export function validatePromptPartV1(candidate: unknown, label: string): PromptPart {
   if (!isPlainRecord(candidate)) {
     throw new Error(`${label} must be an object`);
   }
@@ -379,7 +438,7 @@ export function validatePromptPart(candidate: unknown, label: string): PromptPar
  * @param label - Human-readable label used in error messages
  * @returns The validated part list reference
  */
-export function validatePromptParts(candidate: unknown, label: string): readonly PromptPart[] {
+export function validatePromptPartsV1(candidate: unknown, label: string): readonly PromptPart[] {
   if (!Array.isArray(candidate) || candidate.length === 0) {
     throw new Error(`${label} must be a non-empty array of prompt parts`);
   }
@@ -387,7 +446,7 @@ export function validatePromptParts(candidate: unknown, label: string): readonly
     throw new Error(`${label} declares ${candidate.length} prompt parts; the cap is ${MAX_PROMPT_PARTS}`);
   }
   candidate.forEach((part, index) => {
-    validatePromptPart(part, `${label}[${index}]`);
+    validatePromptPartV1(part, `${label}[${index}]`);
   });
   return candidate as readonly PromptPart[];
 }
@@ -405,7 +464,7 @@ export function validatePromptParts(candidate: unknown, label: string): readonly
  * @param label - Human-readable label used in error messages
  * @returns The validated input reference
  */
-export function validateTemplateInput(candidate: unknown, label: string): RealmTemplateInput {
+export function validateTemplateInputV1(candidate: unknown, label: string): RealmTemplateInputV1 {
   if (!isPlainRecord(candidate)) {
     throw new Error(`${label} must be an object`);
   }
@@ -442,7 +501,7 @@ export function validateTemplateInput(candidate: unknown, label: string): RealmT
       throw new Error(`${label} ${field} must be a boolean`);
     }
   }
-  return candidate as unknown as RealmTemplateInput;
+  return candidate as unknown as RealmTemplateInputV1;
 }
 
 /**
@@ -452,23 +511,23 @@ export function validateTemplateInput(candidate: unknown, label: string): RealmT
  * @param label - Human-readable label used in error messages
  * @returns The validated list reference, or `undefined` when absent
  */
-export function validateTemplateInputs(
+export function validateTemplateInputsV1(
   candidate: unknown,
   label: string
-): readonly RealmTemplateInput[] | undefined {
+): readonly RealmTemplateInputV1[] | undefined {
   if (candidate === undefined) return undefined;
   if (!Array.isArray(candidate)) {
     throw new Error(`${label} must be an array of template inputs`);
   }
   const ids: Set<string> = new Set();
   candidate.forEach((input, index) => {
-    const validated = validateTemplateInput(input, `${label}[${index}]`);
+    const validated = validateTemplateInputV1(input, `${label}[${index}]`);
     if (ids.has(validated.id)) {
       throw new Error(`${label} carries duplicate input id '${validated.id}'`);
     }
     ids.add(validated.id);
   });
-  return candidate as readonly RealmTemplateInput[];
+  return candidate as readonly RealmTemplateInputV1[];
 }
 
 /**
@@ -543,7 +602,7 @@ export function validateSeedFile(
   candidate: unknown,
   label: string,
   agentKeys?: ReadonlySet<string>
-): RealmTemplateSeedFile {
+): RealmTemplateSeedFileV1 {
   if (!isPlainRecord(candidate)) {
     throw new Error(`${label} must be an object`);
   }
@@ -569,7 +628,7 @@ export function validateSeedFile(
   } else if (candidate.source !== undefined) {
     throw new Error(`${label} must not declare a source for a ${origin} seed slot`);
   }
-  return candidate as unknown as RealmTemplateSeedFile;
+  return candidate as unknown as RealmTemplateSeedFileV1;
 }
 
 /**
@@ -617,7 +676,7 @@ export function validateSeedManifest(
   candidate: unknown,
   label: string,
   agentKeys?: ReadonlySet<string>
-): RealmSeedManifest {
+): RealmSeedManifestV1 {
   if (!isPlainRecord(candidate)) {
     throw new Error(`${label} must be an object`);
   }
@@ -654,7 +713,7 @@ export function validateSeedManifest(
       );
     }
   }
-  return candidate as unknown as RealmSeedManifest;
+  return candidate as unknown as RealmSeedManifestV1;
 }
 
 /**
@@ -676,7 +735,7 @@ export function validateHistoryEntry(candidate: unknown, label: string): RealmHi
   if (candidate.role !== 'user' && candidate.role !== 'assistant') {
     throw new Error(`${label} role must be 'user' or 'assistant'`);
   }
-  validatePromptParts(candidate.content, `${label} content`);
+  validatePromptPartsV1(candidate.content, `${label} content`);
   return candidate as unknown as RealmHistoryEntry;
 }
 
@@ -687,7 +746,7 @@ export function validateHistoryEntry(candidate: unknown, label: string): RealmHi
  * @param label - Human-readable label used in error messages
  * @returns The validated list reference, or `undefined` when absent
  */
-export function validateAgentHistory(
+export function validateAgentHistoryV1(
   candidate: unknown,
   label: string
 ): readonly RealmHistoryEntry[] | undefined {
@@ -938,9 +997,9 @@ export function validateProviders(candidate: unknown, label: string): void {
  * `ERR_TEMPLATE_PROVIDERS_UNSUPPORTED` until the providers wave lands, while
  * import, parse, validation, and review all succeed. The helper is a pure
  * shape query — the shape itself is validated by
- * `validateTemplate()`/`parseTemplateBundle()`.
+ * `validateTemplateV1()`/`parseTemplateBundleV1()`.
  *
- * @param template - Template (or `null`/`undefined`) to inspect
+ * @param template - Template of either format (or `null`/`undefined`) to inspect
  * @returns `true` when the template requests providers or capability requirements
  *
  * @example
@@ -951,7 +1010,9 @@ export function validateProviders(candidate: unknown, label: string): void {
  * // false
  * ```
  */
-export function templateRequiresProviders(template: RealmTemplate | null | undefined): boolean {
+export function templateRequiresProviders(
+  template: RealmTemplate | null | undefined
+): boolean {
   if (!template || typeof template !== 'object') return false;
   const requirements = template.toolContract?.requirements;
   const providers = template.providers;
@@ -971,7 +1032,7 @@ export function templateRequiresProviders(template: RealmTemplate | null | undef
  * `ERR_TEMPLATE_AUTHORITY_UNSUPPORTED` (providers precedent). The helper never
  * validates the template — malformed declarations are simply not reported.
  *
- * @param template - Template (or `null`/`undefined`) to inspect
+ * @param template - Template of either format (or `null`/`undefined`) to inspect
  * @returns Declared-but-unknown authority ids (empty when all are known)
  *
  * @example
@@ -982,7 +1043,9 @@ export function templateRequiresProviders(template: RealmTemplate | null | undef
  * // []
  * ```
  */
-export function templateUnsupportedAuthorities(template: RealmTemplate | null | undefined): readonly string[] {
+export function templateUnsupportedAuthorities(
+  template: RealmTemplate | null | undefined
+): readonly string[] {
   if (!template || typeof template !== 'object') return Object.freeze([]);
   const known: ReadonlySet<string> = new Set(KNOWN_AGENT_AUTHORITIES);
   const unsupported: string[] = [];
@@ -1016,7 +1079,7 @@ export function templateUnsupportedAuthorities(template: RealmTemplate | null | 
  * @param requirementIds - Declared `toolContract` requirement ids, when known
  * @returns The validated spec reference
  */
-export function validateAgentSpec(
+export function validateAgentSpecV1(
   candidate: unknown,
   label: string,
   requirementIds?: ReadonlySet<string>
@@ -1035,13 +1098,13 @@ export function validateAgentSpec(
   }
   requireNonEmptyString(candidate.name, `${label} name`);
   requireNonEmptyString(candidate.role, `${label} role`);
-  validatePromptParts(candidate.prompt, `${label} prompt`);
+  validatePromptPartsV1(candidate.prompt, `${label} prompt`);
   resolveToolProfile(candidate.toolProfile, `${label} toolProfile`, requirementIds);
   if (typeof candidate.privileged !== 'boolean') {
     throw new Error(`${label} privileged must be a boolean`);
   }
   validateAgentAuthorities(candidate.authorities, `${label} authorities`);
-  validateAgentHistory(candidate[AGENT_HISTORY_FIELD], `${label} history`);
+  validateAgentHistoryV1(candidate[AGENT_HISTORY_FIELD], `${label} history`);
   for (const field of OPTIONAL_SPEC_STRING_FIELDS) {
     const value = candidate[field];
     if (value !== undefined) {
@@ -1065,7 +1128,7 @@ export function validateAgentSpec(
  * @param candidate - Candidate template
  * @returns The validated template reference
  */
-export function validateTemplate(candidate: unknown): RealmTemplate {
+export function validateTemplateV1(candidate: unknown): RealmTemplateV1 {
   if (!isPlainRecord(candidate)) {
     throw new Error('template must be an object');
   }
@@ -1085,7 +1148,7 @@ export function validateTemplate(candidate: unknown): RealmTemplate {
   const requirementIds = validateToolContract(candidate.toolContract, 'template toolContract');
   validateProviders(candidate.providers, 'template providers');
 
-  const inputs = validateTemplateInputs(candidate.inputs, 'template inputs');
+  const inputs = validateTemplateInputsV1(candidate.inputs, 'template inputs');
   const declaredInputIds: ReadonlySet<string> = new Set((inputs ?? []).map((input) => input.id));
 
   const agents = candidate.agents;
@@ -1095,7 +1158,7 @@ export function validateTemplate(candidate: unknown): RealmTemplate {
 
   const keys: Set<string> = new Set();
   agents.forEach((agent, index) => {
-    const spec = validateAgentSpec(agent, `template agent[${index}]`, requirementIds);
+    const spec = validateAgentSpecV1(agent, `template agent[${index}]`, requirementIds);
     if (keys.has(spec.key)) {
       throw new Error(`template carries duplicate agent key '${spec.key}'`);
     }
@@ -1120,7 +1183,7 @@ export function validateTemplate(candidate: unknown): RealmTemplate {
     validateSeedManifest(candidate.seed, 'template seed', keys);
   }
 
-  return candidate as unknown as RealmTemplate;
+  return candidate as unknown as RealmTemplateV1;
 }
 
 /**
@@ -1164,4 +1227,644 @@ function assertUsableAgentId(id: string, key: string): string {
     throw new Error(`agent '${key}' resolves to '${id}' with an unresolved placeholder`);
   }
   return id;
+}
+
+/* ------------------------------------------------------------------------- *
+ * Format v2 (decision ticket 2ba3008)
+ *
+ * The v2 validators are closed-shape and total: every declared input must be
+ * referenced at least once across prompts, history, placements, and
+ * directives, and every reference must resolve to a declared input. The
+ * shared primitives (tool profiles, tool contracts, providers, authorities,
+ * targets, safe paths, reserved names) are the format-v1 ones because their
+ * shape is unchanged.
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Validates one format-v2 prompt part against the closed schema shape.
+ *
+ * `kind` selects the closed field set: `file` requires a safe bundle path,
+ * `input` requires a non-empty input id and accepts the optional `path` file
+ * selector, and `text` requires non-empty text. Unknown kinds and unknown
+ * fields on any kind are rejected. Shape-dependent selector rules (a `files`
+ * input reference requires `path`; a `text` input reference forbids it) are
+ * enforced against the declared inputs by {@link validateTemplate}.
+ *
+ * @param candidate - Candidate prompt part
+ * @param label - Human-readable label used in error messages
+ * @returns The validated part reference
+ */
+export function validatePromptPart(candidate: unknown, label: string): PromptPart {
+  if (!isPlainRecord(candidate)) {
+    throw new Error(`${label} must be an object`);
+  }
+  const kind = candidate.kind;
+  if (kind !== 'file' && kind !== 'input' && kind !== 'text') {
+    throw new Error(`${label} carries unknown prompt part kind '${String(kind)}'`);
+  }
+  rejectUnknownFields(candidate, PROMPT_PART_V2_FIELDS[kind], label);
+  if (kind === 'file') {
+    requireSafePath(candidate.path, `${label} path`);
+  } else if (kind === 'input') {
+    requireNonEmptyString(candidate.inputId, `${label} inputId`);
+    if (candidate.path !== undefined) {
+      requireSafePath(candidate.path, `${label} path`);
+    }
+  } else {
+    requireNonEmptyString(candidate.text, `${label} text`);
+  }
+  return candidate as unknown as PromptPart;
+}
+
+/**
+ * Validates a format-v2 prompt: a non-empty part list.
+ *
+ * The format-v2 schema imposes no part-count cap (decision `2ba3008`): limits,
+ * if any, are author- or user-decided, never engine-arbitrary.
+ *
+ * @param candidate - Candidate prompt-part list
+ * @param label - Human-readable label used in error messages
+ * @returns The validated part list reference
+ */
+export function validatePromptParts(candidate: unknown, label: string): readonly PromptPart[] {
+  if (!Array.isArray(candidate) || candidate.length === 0) {
+    throw new Error(`${label} must be a non-empty array of prompt parts`);
+  }
+  candidate.forEach((part, index) => {
+    validatePromptPart(part, `${label}[${index}]`);
+  });
+  return candidate as readonly PromptPart[];
+}
+
+/**
+ * Validates one format-v2 template input against the closed schema shape.
+ *
+ * `shape` is required and selects the value domain. `default`/`defaultFile`
+ * prefills and the `multiline` UI hint are `text`-only and are rejected on a
+ * `files` input; `default` and `defaultFile` are alternative prefills and are
+ * rejected together.
+ *
+ * @param candidate - Candidate template input
+ * @param label - Human-readable label used in error messages
+ * @returns The validated input reference
+ */
+export function validateTemplateInput(candidate: unknown, label: string): RealmTemplateInput {
+  if (!isPlainRecord(candidate)) {
+    throw new Error(`${label} must be an object`);
+  }
+  rejectUnknownFields(candidate, TEMPLATE_INPUT_V2_FIELDS, label);
+  requireNonReservedName(requireNonEmptyString(candidate.id, `${label} id`), `${label} id`);
+  requireNonEmptyString(candidate.label, `${label} label`);
+  if (candidate.shape !== 'text' && candidate.shape !== 'files') {
+    throw new Error(`${label} shape must be 'text' or 'files'`);
+  }
+  const shape = candidate.shape;
+  if (candidate.help !== undefined) {
+    requireNonEmptyString(candidate.help, `${label} help`);
+  }
+  if (candidate.brief !== undefined) {
+    requireNonEmptyString(candidate.brief, `${label} brief`);
+  }
+  if (candidate.default !== undefined) {
+    if (shape !== 'text') {
+      throw new Error(`${label} must not declare default for a files input`);
+    }
+    if (typeof candidate.default !== 'string') {
+      throw new Error(`${label} default must be a string`);
+    }
+  }
+  if (candidate.defaultFile !== undefined) {
+    if (shape !== 'text') {
+      throw new Error(`${label} must not declare defaultFile for a files input`);
+    }
+    requireSafePath(candidate.defaultFile, `${label} defaultFile`);
+  }
+  if (candidate.default !== undefined && candidate.defaultFile !== undefined) {
+    throw new Error(`${label} must declare at most one of default or defaultFile`);
+  }
+  for (const field of ['required', 'multiline'] as const) {
+    if (candidate[field] !== undefined && typeof candidate[field] !== 'boolean') {
+      throw new Error(`${label} ${field} must be a boolean`);
+    }
+  }
+  if (candidate.multiline !== undefined && shape !== 'text') {
+    throw new Error(`${label} must not declare multiline for a files input`);
+  }
+  return candidate as unknown as RealmTemplateInput;
+}
+
+/**
+ * Validates an optional format-v2 template-input declaration list.
+ *
+ * @param candidate - Candidate input list
+ * @param label - Human-readable label used in error messages
+ * @returns The validated list reference, or `undefined` when absent
+ */
+export function validateTemplateInputs(
+  candidate: unknown,
+  label: string
+): readonly RealmTemplateInput[] | undefined {
+  if (candidate === undefined) return undefined;
+  if (!Array.isArray(candidate)) {
+    throw new Error(`${label} must be an array of template inputs`);
+  }
+  const ids: Set<string> = new Set();
+  candidate.forEach((input, index) => {
+    const validated = validateTemplateInput(input, `${label}[${index}]`);
+    if (ids.has(validated.id)) {
+      throw new Error(`${label} carries duplicate input id '${validated.id}'`);
+    }
+    ids.add(validated.id);
+  });
+  return candidate as readonly RealmTemplateInput[];
+}
+
+/**
+ * Validates one format-v2 payload file entry against the closed schema shape.
+ *
+ * @param candidate - Candidate file entry
+ * @param label - Human-readable label used in error messages
+ * @returns The validated file reference
+ */
+export function validatePayloadFile(candidate: unknown, label: string): RealmPayloadFile {
+  if (!isPlainRecord(candidate)) {
+    throw new Error(`${label} must be an object`);
+  }
+  rejectUnknownFields(candidate, PAYLOAD_FILE_FIELDS, label);
+  const path = requireSafePath(candidate.path, `${label} path`);
+  if (typeof candidate.content !== 'string') {
+    throw new Error(`${label} content must be a string`);
+  }
+  return { path, content: candidate.content };
+}
+
+/**
+ * Validates an optional record of shape-tagged format-v2 input values
+ * (composition/launch plumbing, not authored template data).
+ *
+ * Each value must be `{ shape: 'text', text }` or `{ shape: 'files', files }`
+ * with closed shapes; fileset paths must be safe and unique within the
+ * fileset. An empty fileset is structurally valid (it resolves like an absent
+ * value); requiredness is enforced by the payload validator and composition.
+ *
+ * @param candidate - Candidate input-value record
+ * @param label - Human-readable label used in error messages
+ * @returns The validated record (empty when absent)
+ */
+export function validateInputValues(candidate: unknown, label: string): Record<string, RealmInputValue> {
+  if (candidate === undefined) return {};
+  if (!isPlainRecord(candidate)) {
+    throw new Error(`${label} must be a record of input values`);
+  }
+  // Null prototype: a caller key can never reach an Object.prototype setter
+  // through this accumulator (T-V finding F1, ticket e4c8f91).
+  const values: Record<string, RealmInputValue> = Object.create(null);
+  for (const inputId of Object.keys(candidate)) {
+    const valueLabel = `${label}['${inputId}']`;
+    const value = candidate[inputId];
+    if (!isPlainRecord(value)) {
+      throw new Error(`${valueLabel} must be an object`);
+    }
+    const shape = value.shape;
+    if (shape !== 'text' && shape !== 'files') {
+      throw new Error(`${valueLabel} shape must be 'text' or 'files'`);
+    }
+    rejectUnknownFields(value, INPUT_VALUE_V2_FIELDS[shape], valueLabel);
+    if (shape === 'text') {
+      if (typeof value.text !== 'string') {
+        throw new Error(`${valueLabel} text must be a string`);
+      }
+      values[inputId] = { shape: 'text', text: value.text };
+      continue;
+    }
+    if (!Array.isArray(value.files)) {
+      throw new Error(`${valueLabel} files must be an array of file entries`);
+    }
+    const files: RealmPayloadFile[] = [];
+    const seen: Set<string> = new Set();
+    value.files.forEach((file, index) => {
+      const validated = validatePayloadFile(file, `${valueLabel} files[${index}]`);
+      if (seen.has(validated.path)) {
+        throw new Error(`${valueLabel} files duplicate the path '${validated.path}'`);
+      }
+      seen.add(validated.path);
+      files.push(validated);
+    });
+    values[inputId] = { shape: 'files', files };
+  }
+  return values;
+}
+
+/**
+ * Validates one format-v2 placement against the closed schema shape.
+ *
+ * A placement declares exactly one source (`inputId` or `file`), one target
+ * (the Realm-global workspace or one template agent key), and exactly one
+ * destination (`path` or `root`). Shape-dependent rules (a `file` source and
+ * a `text`-input source require `path`; only a `files`-input source may use
+ * `root`) are enforced by {@link validateTemplate}, where the declared input
+ * shapes are known.
+ *
+ * @param candidate - Candidate placement
+ * @param label - Human-readable label used in error messages
+ * @param agentKeys - Declared template agent keys, when known
+ * @returns The validated placement reference
+ */
+export function validatePlacement(
+  candidate: unknown,
+  label: string,
+  agentKeys?: ReadonlySet<string>
+): RealmPlacement {
+  if (!isPlainRecord(candidate)) {
+    throw new Error(`${label} must be an object`);
+  }
+  rejectUnknownFields(candidate, PLACEMENT_FIELDS, label);
+  const hasInput = candidate.inputId !== undefined;
+  const hasFile = candidate.file !== undefined;
+  if (hasInput === hasFile) {
+    throw new Error(`${label} must declare exactly one of inputId or file`);
+  }
+  if (hasInput) {
+    requireNonEmptyString(candidate.inputId, `${label} inputId`);
+  } else {
+    requireSafePath(candidate.file, `${label} file`);
+  }
+  validateSeedTarget(candidate.target, `${label} target`, agentKeys);
+  const hasPath = candidate.path !== undefined;
+  const hasRoot = candidate.root !== undefined;
+  if (hasPath === hasRoot) {
+    throw new Error(`${label} must declare exactly one of path or root`);
+  }
+  if (hasPath) {
+    requireSafePath(candidate.path, `${label} path`);
+  } else {
+    requireSafePath(candidate.root, `${label} root`);
+  }
+  return candidate as unknown as RealmPlacement;
+}
+
+/**
+ * Validates an optional format-v2 placement list.
+ *
+ * @param candidate - Candidate placement list
+ * @param label - Human-readable label used in error messages
+ * @param agentKeys - Declared template agent keys, when known
+ * @returns The validated list reference, or `undefined` when absent
+ */
+export function validatePlacements(
+  candidate: unknown,
+  label: string,
+  agentKeys?: ReadonlySet<string>
+): readonly RealmPlacement[] | undefined {
+  if (candidate === undefined) return undefined;
+  if (!Array.isArray(candidate)) {
+    throw new Error(`${label} must be an array of placements`);
+  }
+  candidate.forEach((placement, index) => {
+    validatePlacement(placement, `${label}[${index}]`, agentKeys);
+  });
+  return candidate as readonly RealmPlacement[];
+}
+
+/**
+ * Validates one format-v2 directive against the closed schema shape.
+ *
+ * A directive declares exactly one message source (`inputId` naming a `text`
+ * input, or literal `text`) and one target agent key. The input-shape rule is
+ * enforced by {@link validateTemplate}, where the declared inputs are known.
+ *
+ * @param candidate - Candidate directive
+ * @param label - Human-readable label used in error messages
+ * @param agentKeys - Declared template agent keys, when known
+ * @returns The validated directive reference
+ */
+export function validateDirective(
+  candidate: unknown,
+  label: string,
+  agentKeys?: ReadonlySet<string>
+): RealmDirective {
+  if (!isPlainRecord(candidate)) {
+    throw new Error(`${label} must be an object`);
+  }
+  rejectUnknownFields(candidate, DIRECTIVE_FIELDS, label);
+  const hasInput = candidate.inputId !== undefined;
+  const hasText = candidate.text !== undefined;
+  if (hasInput === hasText) {
+    throw new Error(`${label} must declare exactly one of inputId or text`);
+  }
+  if (hasInput) {
+    requireNonEmptyString(candidate.inputId, `${label} inputId`);
+  } else {
+    requireNonEmptyString(candidate.text, `${label} text`);
+  }
+  const target = candidate.target;
+  if (!isPlainRecord(target)) {
+    throw new Error(`${label} target must be an object naming a template agent`);
+  }
+  rejectUnknownFields(target, DIRECTIVE_TARGET_FIELDS, `${label} target`);
+  const agent = requireNonEmptyString(target.agent, `${label} target agent`);
+  if (agentKeys !== undefined && !agentKeys.has(agent)) {
+    throw new Error(`${label} target names unknown template agent key '${agent}'`);
+  }
+  return candidate as unknown as RealmDirective;
+}
+
+/**
+ * Validates an optional format-v2 directive list.
+ *
+ * @param candidate - Candidate directive list
+ * @param label - Human-readable label used in error messages
+ * @param agentKeys - Declared template agent keys, when known
+ * @returns The validated list reference, or `undefined` when absent
+ */
+export function validateDirectives(
+  candidate: unknown,
+  label: string,
+  agentKeys?: ReadonlySet<string>
+): readonly RealmDirective[] | undefined {
+  if (candidate === undefined) return undefined;
+  if (!Array.isArray(candidate)) {
+    throw new Error(`${label} must be an array of directives`);
+  }
+  candidate.forEach((directive, index) => {
+    validateDirective(directive, `${label}[${index}]`, agentKeys);
+  });
+  return candidate as readonly RealmDirective[];
+}
+
+/**
+ * Validates an optional format-v2 agent history declaration.
+ *
+ * @param candidate - Candidate history list
+ * @param label - Human-readable label used in error messages
+ * @returns The validated list reference, or `undefined` when absent
+ */
+export function validateAgentHistory(
+  candidate: unknown,
+  label: string
+): readonly RealmHistoryEntry[] | undefined {
+  if (candidate === undefined) return undefined;
+  if (!Array.isArray(candidate)) {
+    throw new Error(`${label} must be an array of history entries`);
+  }
+  candidate.forEach((entry, index) => {
+    const entryLabel = `${label}[${index}]`;
+    if (!isPlainRecord(entry)) {
+      throw new Error(`${entryLabel} must be an object`);
+    }
+    rejectUnknownFields(entry, HISTORY_ENTRY_FIELDS, entryLabel);
+    if (entry.role !== 'user' && entry.role !== 'assistant') {
+      throw new Error(`${entryLabel} role must be 'user' or 'assistant'`);
+    }
+    validatePromptParts(entry.content, `${entryLabel} content`);
+  });
+  return candidate as readonly RealmHistoryEntry[];
+}
+
+/**
+ * Validates one format-v2 agent spec against the closed schema shape.
+ *
+ * Structurally identical to the format-v1 spec validator except that prompt
+ * and history parts accept the optional `path` file selector and the schema
+ * imposes no part-count cap. Input references and reserved-identity checks
+ * happen later (template validation and materialization, where the declared
+ * input ids and the final id are known).
+ *
+ * @param candidate - Candidate agent spec
+ * @param label - Human-readable label used in error messages
+ * @param requirementIds - Declared `toolContract` requirement ids, when known
+ * @returns The validated spec reference
+ */
+export function validateAgentSpec(
+  candidate: unknown,
+  label: string,
+  requirementIds?: ReadonlySet<string>
+): RealmAgentSpec {
+  if (!isPlainRecord(candidate)) {
+    throw new Error(`${label} must be an object`);
+  }
+  rejectUnknownFields(candidate, AGENT_SPEC_FIELDS, label);
+  requireNonReservedName(requireNonEmptyString(candidate.key, `${label} key`), `${label} key`);
+  const idPattern = requireNonEmptyString(candidate.idPattern, `${label} idPattern`);
+  if (idPattern.includes('{') || idPattern.includes('}')) {
+    throw new Error(
+      `${label} idPattern '${idPattern}' must be a literal agent id without placeholders — `
+      + `the '${RETIRED_REALM_PLACEHOLDER}' placeholder is retired (agent ids are realm-opaque)`
+    );
+  }
+  requireNonEmptyString(candidate.name, `${label} name`);
+  requireNonEmptyString(candidate.role, `${label} role`);
+  validatePromptParts(candidate.prompt, `${label} prompt`);
+  resolveToolProfile(candidate.toolProfile, `${label} toolProfile`, requirementIds);
+  if (typeof candidate.privileged !== 'boolean') {
+    throw new Error(`${label} privileged must be a boolean`);
+  }
+  validateAgentAuthorities(candidate.authorities, `${label} authorities`);
+  validateAgentHistory(candidate[AGENT_HISTORY_FIELD], `${label} history`);
+  for (const field of OPTIONAL_SPEC_STRING_FIELDS) {
+    const value = candidate[field];
+    if (value !== undefined) {
+      requireNonEmptyString(value, `${label} ${field}`);
+    }
+  }
+  return candidate as unknown as RealmAgentSpec;
+}
+
+/**
+ * Asserts the format-v2 selector rule for one prompt/history input reference:
+ * the input must be declared, a `files` input reference must name exactly one
+ * file (`path`), and a `text` input reference must not carry a `path`.
+ *
+ * @param part - Validated prompt part
+ * @param declarationsById - Declared inputs keyed by id
+ * @param label - Human-readable label used in error messages
+ */
+function assertInputPartRulesV2(
+  part: PromptPart,
+  declarationsById: ReadonlyMap<string, RealmTemplateInput>,
+  label: string
+): void {
+  if (part.kind !== 'input') return;
+  const declaration = declarationsById.get(part.inputId);
+  if (declaration === undefined) {
+    throw new Error(`${label} references undeclared input '${part.inputId}'`);
+  }
+  if (declaration.shape === 'files') {
+    if (part.path === undefined) {
+      throw new Error(
+        `${label} references files input '${declaration.id}' without a file selection path — `
+        + 'a files input is never injected wholesale; name exactly one file with "path"'
+      );
+    }
+  } else if (part.path !== undefined) {
+    throw new Error(
+      `${label} references text input '${declaration.id}' with a file selection path — `
+      + '"path" is only meaningful for files inputs'
+    );
+  }
+}
+
+/**
+ * Asserts the format-v2 destination rule for one placement: a bundle `file`
+ * source and a `text`-input source require a `path` destination, and only a
+ * `files`-input source may declare a `root` destination.
+ *
+ * @param placement - Validated placement
+ * @param declarationsById - Declared inputs keyed by id
+ * @param label - Human-readable label used in error messages
+ */
+function assertPlacementSourceShape(
+  placement: RealmPlacement,
+  declarationsById: ReadonlyMap<string, RealmTemplateInput>,
+  label: string
+): void {
+  if (placement.file !== undefined) {
+    if (placement.path === undefined) {
+      throw new Error(`${label} with a file source must declare a path destination`);
+    }
+    return;
+  }
+  const declaration = declarationsById.get(placement.inputId as string);
+  if (declaration === undefined) {
+    throw new Error(`${label} references undeclared input '${String(placement.inputId)}'`);
+  }
+  if (declaration.shape === 'files') return;
+  if (placement.path === undefined) {
+    throw new Error(
+      `${label} references text input '${declaration.id}' and must declare a path destination`
+    );
+  }
+}
+
+/**
+ * Rejects duplicate static placement destinations: two placements writing the
+ * same exact `path` (or the same `root`) into the same target are a template
+ * error. Root/file overlaps that only collide at resolution time are rejected
+ * there with the resolved destination.
+ *
+ * @param placements - Validated placements
+ * @param label - Human-readable label used in error messages
+ */
+function assertUniquePlacementDestinations(placements: readonly RealmPlacement[], label: string): void {
+  const pathKeys: Set<string> = new Set();
+  const rootKeys: Set<string> = new Set();
+  placements.forEach((placement, index) => {
+    const targetKey = placement.target === 'realm' ? 'realm' : `agent:${placement.target.agent}`;
+    if (placement.path !== undefined) {
+      const key = `${placement.path}\u0000${targetKey}`;
+      if (pathKeys.has(key)) {
+        throw new Error(`${label}[${index}] duplicates the destination '${placement.path}' for the same target`);
+      }
+      pathKeys.add(key);
+    } else if (placement.root !== undefined) {
+      const key = `${placement.root}\u0000${targetKey}`;
+      if (rootKeys.has(key)) {
+        throw new Error(`${label}[${index}] duplicates the root destination '${placement.root}' for the same target`);
+      }
+      rootKeys.add(key);
+    }
+  });
+}
+
+/**
+ * Validates a whole format-v2 template against the closed schema shape.
+ *
+ * Beyond the structural checks, the cross-references fail closed here: the
+ * tool contract and provider requests validate (with requirement ids collected
+ * first so `toolProfile.tools` can reference them), every prompt/history
+ * `input` part, placement, and directive must resolve to a declared input with
+ * the right shape, input ids and requirement ids must be unique, every
+ * placement target and directive target must name a declared template agent
+ * key, and the format-v2 **totality** rule holds: every declared input is
+ * referenced at least once. Inputs that no surface consumes are template
+ * errors — an input can never have an implicit role.
+ *
+ * @param candidate - Candidate template
+ * @returns The validated template reference
+ */
+export function validateTemplate(candidate: unknown): RealmTemplate {
+  if (!isPlainRecord(candidate)) {
+    throw new Error('template must be an object');
+  }
+  rejectUnknownFields(candidate, TEMPLATE_V2_FIELDS, 'template');
+  requireNonEmptyString(candidate.id, 'template id');
+  requireNonEmptyString(candidate.name, 'template name');
+  if (typeof candidate.description !== 'string') {
+    throw new Error('template description must be a string');
+  }
+  if (candidate.notes !== undefined) {
+    requireNonEmptyString(candidate.notes, 'template notes');
+  }
+  if (candidate.formatVersion !== 2) {
+    throw new Error(`template formatVersion must be 2 (got '${String(candidate.formatVersion)}')`);
+  }
+  const requirementIds = validateToolContract(candidate.toolContract, 'template toolContract');
+  validateProviders(candidate.providers, 'template providers');
+
+  const inputs = validateTemplateInputs(candidate.inputs, 'template inputs');
+  const declarationsById: ReadonlyMap<string, RealmTemplateInput> = new Map(
+    (inputs ?? []).map((input) => [input.id, input] as const)
+  );
+
+  const agents = candidate.agents;
+  if (!Array.isArray(agents) || agents.length === 0) {
+    throw new Error('template agents must be a non-empty array');
+  }
+
+  const referenced: Set<string> = new Set();
+  const keys: Set<string> = new Set();
+  agents.forEach((agent, index) => {
+    const spec = validateAgentSpec(agent, `template agent[${index}]`, requirementIds);
+    if (keys.has(spec.key)) {
+      throw new Error(`template carries duplicate agent key '${spec.key}'`);
+    }
+    keys.add(spec.key);
+    spec.prompt.forEach((part, partIndex) => {
+      assertInputPartRulesV2(part, declarationsById, `template agent '${spec.key}' prompt[${partIndex}]`);
+      if (part.kind === 'input') referenced.add(part.inputId);
+    });
+    (spec.history ?? []).forEach((entry, entryIndex) => {
+      entry.content.forEach((part, partIndex) => {
+        assertInputPartRulesV2(
+          part,
+          declarationsById,
+          `template agent '${spec.key}' history[${entryIndex}].content[${partIndex}]`
+        );
+        if (part.kind === 'input') referenced.add(part.inputId);
+      });
+    });
+  });
+
+  const placements = validatePlacements(candidate.placements, 'template placements', keys) ?? [];
+  placements.forEach((placement, index) => {
+    assertPlacementSourceShape(placement, declarationsById, `template placements[${index}]`);
+    if (placement.inputId !== undefined) referenced.add(placement.inputId);
+  });
+  assertUniquePlacementDestinations(placements, 'template placements');
+
+  const directives = validateDirectives(candidate.directives, 'template directives', keys) ?? [];
+  directives.forEach((directive, index) => {
+    if (directive.inputId === undefined) return;
+    const declaration = declarationsById.get(directive.inputId);
+    if (declaration === undefined) {
+      throw new Error(`template directives[${index}] references undeclared input '${directive.inputId}'`);
+    }
+    if (declaration.shape !== 'text') {
+      throw new Error(
+        `template directives[${index}] references files input '${declaration.id}' — a directive needs a text message`
+      );
+    }
+    referenced.add(directive.inputId);
+  });
+
+  for (const input of inputs ?? []) {
+    if (!referenced.has(input.id)) {
+      throw new Error(
+        `template input '${input.id}' is never referenced — format v2 requires every declared input `
+        + 'to be consumed by a prompt, history entry, placement, or directive'
+      );
+    }
+  }
+
+  return candidate as unknown as RealmTemplate;
 }

@@ -10,7 +10,7 @@ node skills/realm-authoring/fixtures/run_fixtures.mjs   # all expectations, exit
 | path | expectation | demonstrates |
 |---|---|---|
 | `valid/authoring_demo.bundle.json` | exit 0 | packet-valid template: prompt parts, input origins, fixed + generated seed slots, baked history, requirement id in `tools`, one MCP provider request |
-| `valid/authoring_demo.package.json` | exit 0 (with `--template valid/authoring_demo.bundle.json`) | package pinning the bundle's canonical version, filling the generated input + slot |
+| `valid/authoring_demo.package.json` | exit 0 (with `--template valid/authoring_demo.bundle.json`) | package pinning the bundle's canonical version, filling the required inputs + generated slot |
 | `invalid/unknown_field.bundle.json` | exit 1 `ERR_TEMPLATE_INVALID` | misspelled agent field fails closed |
 | `invalid/dangling_prompt.bundle.json` | exit 1 `ERR_TEMPLATE_INVALID` | prompt `file` part not carried by the bundle |
 | `invalid/missing_generated_slot.package.json` | exit 1 `ERR_HYDRATION_PACKAGE` | required `generated` slot absent |

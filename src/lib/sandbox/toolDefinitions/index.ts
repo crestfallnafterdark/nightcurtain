@@ -180,15 +180,21 @@ export interface RealmTemplateImportView {
 }
 
 /**
- * Structural view of one effective catalog template: the frozen template, its
- * bundle file bodies, and the canonical content version.
+ * Structural view of one effective catalog template: the authored template
+ * (format v1 or v2), its bundle file bodies, and the canonical authored-form
+ * content version.
+ *
+ * The port serves the **authored** template, never a normalized projection:
+ * the publishing tools validate a format-v2 payload against a v2 template
+ * directly and a legacy v1 package against the catalog's v1 read shim, so a
+ * format-v2 import no longer fails the tools' format-v1 validation closed.
  */
 export interface RealmEffectiveTemplateView {
-  /** The effective (shipped or imported) template. */
+  /** The effective (shipped or imported) authored template. */
   readonly template: RealmTemplate;
   /** Bundle file bodies the template references. */
   readonly files: BundleFiles;
-  /** Canonical content version (`sha256:<hex>`). */
+  /** Canonical authored-form content version (`sha256:<hex>`). */
   readonly version: string;
 }
 
@@ -205,8 +211,8 @@ export interface RealmEffectiveTemplateView {
  */
 export interface RealmPublishingPort {
   /**
-   * Imports one canonical transport bundle through the host registry.
-   * @param canonicalPayload - Canonical transport JSON (`{ formatVersion: 1, template, files }`).
+   * Imports one canonical authored transport bundle through the host registry.
+   * @param canonicalPayload - Canonical authored transport JSON (`{ formatVersion: 1|2, template, files }`).
    * @returns The committed import receipt.
    */
   importTemplate(canonicalPayload: string): RealmTemplateImportView;
@@ -214,7 +220,7 @@ export interface RealmPublishingPort {
   /**
    * Computes the would-be import receipt (caps, shadow labels, effective
    * budget) without mutating the registry, the persisted snapshot, or trust.
-   * @param canonicalPayload - Canonical transport JSON.
+   * @param canonicalPayload - Canonical authored transport JSON (`{ formatVersion: 1|2, template, files }`).
    * @returns The would-be import receipt.
    */
   previewTemplateImport(canonicalPayload: string): RealmTemplateImportView;
