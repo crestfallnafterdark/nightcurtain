@@ -1609,11 +1609,34 @@
     gap: 0.75rem;
   }
 
+  /* Workspace selector must stay bounded as realms/agents accumulate (ticket 5263034):
+     share the bar row with the actions (flex-basis 0 + grow), then scroll internally
+     past max-height instead of stretching the bar and pushing the file panes away. */
   .workspace-pills {
     display: flex;
     gap: 0.85rem;
     flex-wrap: wrap;
     align-items: flex-start;
+    flex: 1 1 0%;
+    min-width: 0;
+    max-height: 6.5rem;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-color) transparent;
+  }
+
+  .workspace-pills::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  .workspace-pills::-webkit-scrollbar-thumb {
+    background: var(--border-color);
+    border-radius: 3px;
+  }
+
+  .workspace-pills::-webkit-scrollbar-track {
+    background: transparent;
   }
 
   /* Realm-grouped operator partitions (ticket 7571ce5) */
