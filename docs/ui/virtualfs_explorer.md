@@ -1,7 +1,7 @@
 # Virtual Filesystem Explorer Architecture
 
 **Status:** CANONICAL
-**Last verified: 2026-09-22**
+**Last verified: 2026-09-24**
 
 > [!NOTE]
 > This document specifies the technical architecture, interactive file tree navigation, AST JSON keypath querying, regex line grep, USTAR archive packaging, and drag-and-drop ingestion within `VirtualFsExplorer.svelte`.
@@ -66,6 +66,10 @@ The filesystem architecture enforces strict multi-tenant workspace isolation:
 - the same bare agent id live in two Realms yields two distinct partitions (distinct realm-qualified labels, distinct keys, distinct counts);
 - `groupFsPartitionsByRealm()` (`realmGroups.ts`) groups the listing into **Shared** → registered Realm groups (registry order) → unregistered/synthetic Realm groups → trailing **Workspaces** group; realm-global partitions sort before their agents, then by label;
 - `sandboxStore.activeFsWorkspace` holds the selected **partition key**; `sandboxStore.activeFsPartition` exposes its descriptor. The agent-facing `allWorkspaces` projection stays realm-opaque and is not consumed by the explorer.
+
+### 2.2 Bounded workspace selector (ticket 5263034)
+
+The selector toolbar stays bounded as realms and agents accumulate: `.workspace-pills` shares the bar row (`flex: 1 1 0%`, `min-width: 0`) and caps at `max-height: 6.5rem` with internal vertical scroll (`overflow-y: auto`, `overscroll-behavior: contain`, thin themed scrollbar), so the bar height is independent of group/pill count and the file panes keep their space. Live measurement at 1440×900 with 8 realm groups / 16 pills: bar **130 px** (was 540), pills **104 px** (was 464), explorer container **768 / 768** (was 768 / 1131 — no selector-driven overflow). All groups and pills remain reachable by scrolling.
 
 ```mermaid
 graph LR
