@@ -23,6 +23,7 @@ import {
   buildCommentArgs,
   main,
   resolveLockPath,
+  lockCommandFor,
   acquireLock,
   releaseLock,
   withLock,
@@ -65,8 +66,9 @@ function spawnWrapper(args, env) {
 
 /**
  * Install a fake `git` first on `PATH`. Every invocation appends
- * `lock=<bool> args=<...>` to `GITBUG_TEST_MARKER`; `bug bug` exits 0, all
- * other subcommands delegate to the real git.
+ * `lock=<bool> args=<...>` to `GITBUG_TEST_MARKER`; `bug bug` exits 0 (and,
+ * when `GITBUG_CAPTURE` is set, copies the lock file there first), all other
+ * subcommands delegate to the real git.
  * @param {string} binDir Directory to place the shim in.
  * @returns {void}
  */
@@ -78,7 +80,10 @@ const { spawnSync } = require('node:child_process');
 const args = process.argv.slice(2);
 const held = fs.existsSync(process.env.GITBUG_LOCK_PATH);
 fs.appendFileSync(process.env.GITBUG_TEST_MARKER, 'lock=' + held + ' args=' + args.join(' ') + '\\n');
-if (args[0] === 'bug' && args[1] === 'bug') process.exit(0);
+if (args[0] === 'bug' && args[1] === 'bug') {
+  if (process.env.GITBUG_CAPTURE) fs.writeFileSync(process.env.GITBUG_CAPTURE, fs.readFileSync(process.env.GITBUG_LOCK_PATH, 'utf8'));
+  process.exit(0);
+}
 const result = spawnSync(process.env.GITBUG_TEST_REAL_GIT, args, { stdio: 'inherit' });
 process.exit(result.status === null ? 1 : result.status);
 `;
@@ -245,6 +250,24 @@ test('resolveLockPath is absolute and shared between linked worktrees', () => {
   }
 });
 
+test('lockCommandFor records only the verb, never argument values', () => {
+  assert.strictEqual(lockCommandFor(['new', '--title', 'SECRET-TITLE', '--body', 'SECRET-BODY']), 'new');
+  assert.strictEqual(lockCommandFor(['comment', 'deadbeef', '--body', 'SECRET-BODY']), 'comment');
+  assert.strictEqual(lockCommandFor(['list', '--json']), 'list');
+  assert.strictEqual(lockCommandFor([]), 'unknown');
+
+  const lockPath = path.join(makeTempDir('lock-command'), 'wrapper.lock');
+  const handle = acquireLock(lockPath, {
+    command: lockCommandFor(['new', '--title', 'SECRET-TITLE', '--body', 'SECRET-BODY']),
+    timeoutMs: 0,
+  });
+  const raw = fs.readFileSync(lockPath, 'utf8');
+  assert.strictEqual(JSON.parse(raw).command, 'new');
+  assert.ok(!raw.includes('SECRET-TITLE'), 'the lock file must not contain the title');
+  assert.ok(!raw.includes('SECRET-BODY'), 'the lock file must not contain the body');
+  assert.strictEqual(releaseLock(handle), true);
+});
+
 test('acquireLock writes holder metadata and releaseLock removes our own lock', () => {
   const lockPath = path.join(makeTempDir('acquire'), 'wrapper.lock');
   const handle = acquireLock(lockPath, { command: 'gitbug list --json', timeoutMs: 0 });
@@ -339,6 +362,21 @@ test('acquireLock reclaims locks past the hard cap (old startedAt, or unparseabl
   assert.strictEqual(releaseLock(second), true);
 });
 
+test('acquireLock hits the deadline instead of spinning when reclaim fails persistently', () => {
+  const lockPath = path.join(makeTempDir('reclaim-fail'), 'wrapper.lock');
+  fs.mkdirSync(lockPath);
+  fs.writeFileSync(path.join(lockPath, 'blocker'), 'x');
+  const past = new Date(Date.now() - 16 * 60 * 1000);
+  fs.utimesSync(lockPath, past, past);
+
+  const started = Date.now();
+  assert.throws(
+    () => acquireLock(lockPath, { timeoutMs: 0, command: 'gitbug list' }),
+    /timed out after 0ms/
+  );
+  assert.ok(Date.now() - started < 2000, 'a failing unlink must still reach the deadline, not hot-loop');
+});
+
 test('withLock releases the lock when the callback throws', () => {
   const lockPath = path.join(makeTempDir('withlock'), 'wrapper.lock');
   assert.throws(
@@ -369,6 +407,31 @@ test('wrapper holds GITBUG_LOCK_PATH across the underlying git call and releases
   const lines = fs.readFileSync(marker, 'utf8').trim().split('\n');
   assert.deepStrictEqual(lines, [`lock=true args=bug bug -f json`]);
   assert.strictEqual(fs.existsSync(lockPath), false, 'the lock must be released after the command');
+});
+
+test('wrapper lock file never carries ticket titles or comment bodies (end-to-end)', async () => {
+  const tmp = makeTempDir('nonsecret-e2e');
+  const lockPath = path.join(tmp, 'wrapper.lock');
+  const marker = path.join(tmp, 'marker.log');
+  const capture = path.join(tmp, 'captured-lock.json');
+  const binDir = path.join(tmp, 'bin');
+  writeGitShim(binDir);
+  const env = {
+    ...process.env,
+    PATH: `${binDir}${path.delimiter}${process.env.PATH}`,
+    GITBUG_TEST_REAL_GIT: REAL_GIT,
+    GITBUG_TEST_MARKER: marker,
+    GITBUG_CAPTURE: capture,
+    GITBUG_LOCK_PATH: lockPath,
+  };
+
+  const result = await spawnWrapper(['new', '--title', 'SECRET-TITLE', '--body', 'SECRET-BODY'], env);
+  assert.strictEqual(result.code, 0, `new against the intercepting shim must succeed: ${result.stderr}`);
+  const captured = fs.readFileSync(capture, 'utf8');
+  assert.strictEqual(JSON.parse(captured).command, 'new');
+  assert.ok(!captured.includes('SECRET-TITLE'), 'the lock file must not contain the title');
+  assert.ok(!captured.includes('SECRET-BODY'), 'the lock file must not contain the body');
+  assert.strictEqual(fs.existsSync(lockPath), false, 'the lock must be released');
 });
 
 test('wrapper queues behind a held lock instead of failing', async () => {

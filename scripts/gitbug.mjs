@@ -316,6 +316,20 @@ export function resolveLockPath(env = process.env) {
 }
 
 /**
+ * Derive the lock file's command label from the wrapper argv. Only the
+ * top-level verb is recorded: argument values (ticket titles, comment bodies)
+ * must never be written to the lock file or timeout errors.
+ * @param {string[]} rest Wrapper argv with global flags stripped.
+ * @returns {string} The invoked verb (or `unknown` when absent).
+ */
+export function lockCommandFor(rest) {
+  if (!Array.isArray(rest) || rest.length === 0 || typeof rest[0] !== 'string' || rest[0] === '') {
+    return 'unknown';
+  }
+  return rest[0];
+}
+
+/**
  * Parse a lock timeout value.
  * @param {unknown} raw Candidate value.
  * @param {string} source Flag/env name used in the error message.
@@ -485,12 +499,16 @@ export function acquireLock(lockPath, options = {}) {
     }
     const inspected = inspectLock(lockPath);
     if (isLockReclaimable(inspected, hostname, now())) {
+      let reclaimed = false;
       try {
         unlinkSync(lockPath);
+        reclaimed = true;
       } catch {
-        // Another waiter reclaimed it first; loop and retry the create.
+        // Either another waiter reclaimed it first (ENOENT) or unlink is
+        // failing persistently; fall through to the deadline + backoff sleep
+        // so this branch can never spin.
       }
-      continue;
+      if (reclaimed) continue;
     }
     if (now() >= deadline) throw lockTimeoutError(lockPath, inspected, timeoutMs, now());
     sleep(lockBackoffDelay(attempt));
@@ -761,7 +779,7 @@ export function main(argv = []) {
     if (global.dryRun) return dispatch(command, tokens, global);
     const timeoutMs = global.lockTimeout !== undefined ? global.lockTimeout : readLockTimeoutEnv();
     const lockPath = resolveLockPath();
-    const lockCommand = ['gitbug', ...rest].join(' ');
+    const lockCommand = lockCommandFor(rest);
     return withLock({ lockPath, command: lockCommand, timeoutMs }, () => dispatch(command, tokens, global));
   } catch (err) {
     const code = err && err.exitCode ? err.exitCode : EXIT_FAIL;
