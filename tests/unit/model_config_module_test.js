@@ -3,7 +3,7 @@
  * @description Comprehensive isolated unit suite for the `modelConfig` module.
  *
  * Contract coverage:
- *  1. Strict export whitelist (no runtime import surface beyond the four symbols).
+ *  1. Strict export whitelist (no runtime import surface beyond the five symbols).
  *  2. Preset catalog: 5 entries with exact ids/names and verbatim literal values.
  *  3. Immutability: frozen array/entries/nested configs + copy isolation.
  *  4. `getDefaultModelConfig`: master default verbatim + fresh copy per call.
@@ -12,6 +12,7 @@
  *  7. `'inherit'` stripping for every field.
  *  8. `keyId` derivation (`canonical_<providerId>`) and explicit-key precedence.
  *  9. Completeness guarantee + no secrets + fresh output + input immutability.
+ * 10. `getProviderCapabilities`: routing only for nanogpt, url only for custom.
  */
 
 import test from 'node:test';
@@ -24,6 +25,7 @@ import {
   PRESET_MODELS,
   getDefaultModelConfig,
   getDefaultModelId,
+  getProviderCapabilities,
   resolveModelConfig
 } from '../../src/lib/sandbox/modelConfig/index.ts';
 
@@ -125,6 +127,7 @@ test('1. Strict Export Whitelist & Function Types', () => {
     'PRESET_MODELS',
     'getDefaultModelConfig',
     'getDefaultModelId',
+    'getProviderCapabilities',
     'resolveModelConfig'
   ].sort();
 
@@ -138,6 +141,7 @@ test('1. Strict Export Whitelist & Function Types', () => {
   assert.ok(Array.isArray(PRESET_MODELS), 'PRESET_MODELS must be an array');
   assert.strictEqual(typeof getDefaultModelConfig, 'function');
   assert.strictEqual(typeof getDefaultModelId, 'function');
+  assert.strictEqual(typeof getProviderCapabilities, 'function');
   assert.strictEqual(typeof resolveModelConfig, 'function');
 });
 
@@ -449,4 +453,41 @@ test('11. resolveModelConfig: completeness guarantee, no secrets, fresh output',
   const resolved = resolveModelConfig(frozenSettings);
   assert.strictEqual(resolved.keyId, 'canonical_prem');
   assert.deepStrictEqual(frozenSettings.modelConfig, { providerId: 'prem' });
+});
+
+// ============================================================================
+// 9. getProviderCapabilities — Single Capability Source (ticket 1448f5a)
+// ============================================================================
+
+test('12. getProviderCapabilities: routing only for nanogpt, url only for custom', () => {
+  assert.deepStrictEqual(getProviderCapabilities('nanogpt'), {
+    supportsRouting: true,
+    supportsUrl: false
+  });
+  assert.deepStrictEqual(getProviderCapabilities('custom'), {
+    supportsRouting: false,
+    supportsUrl: true
+  });
+
+  for (const providerId of ['runware', 'deepseek', 'prem']) {
+    assert.deepStrictEqual(
+      getProviderCapabilities(providerId),
+      { supportsRouting: false, supportsUrl: false },
+      `Provider '${providerId}' supports neither routing nor a custom endpoint`
+    );
+  }
+
+  for (const unknown of ['unknown-provider', 'deepseek_native', '', undefined]) {
+    assert.deepStrictEqual(
+      getProviderCapabilities(unknown),
+      { supportsRouting: false, supportsUrl: false },
+      `Unknown provider ${JSON.stringify(unknown)} must degrade to both false`
+    );
+  }
+
+  const first = getProviderCapabilities('nanogpt');
+  const second = getProviderCapabilities('nanogpt');
+  assert.notStrictEqual(first, second, 'Each call must return a fresh capability object');
+  first.supportsRouting = false;
+  assert.strictEqual(second.supportsRouting, true, 'Copy mutation must not leak');
 });
