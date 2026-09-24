@@ -27,6 +27,7 @@ dist-ssr
 api-key
 .env*
 .aider*
+.sensitive-content.local.json
 
 # Agent runtime state
 .opencode/

@@ -33,7 +33,7 @@ after(() => {
 const FAKE_OPENAI_KEY = 'sk-' + 'F'.repeat(24);
 const FAKE_AWS_KEY = 'AKIA' + 'Q'.repeat(16);
 const FAKE_GITHUB_TOKEN = 'ghp_' + 'g'.repeat(24);
-const FAKE_JWT = ['eyJ', 'h'.repeat(12), 'p'.repeat(12), 's'.repeat(12)].join('.');
+const FAKE_JWT = ['eyJ' + 'h'.repeat(12), 'p'.repeat(12), 's'.repeat(12)].join('.');
 const FAKE_PRIVATE_KEY_MARKER = ['-----BEGIN', 'OPENSSH', 'PRIVATE', 'KEY-----'].join(' ');
 const FAKE_ASSIGNMENT = 'api_key = "' + 'z'.repeat(20) + '"';
 
@@ -166,11 +166,19 @@ test('machine-specific absolute paths in staged content fail', () => {
   const repo = makeRepo();
   const fakeHome = path.join(repo, 'fakehome');
   fs.mkdirSync(fakeHome, { recursive: true });
+  const windowsPath = ['C:', 'Users', 'exampleuser', 'work'].join('\\');
   writeFile(repo, 'src/home-path.js', `const dir = "${fakeHome}/notes";\n`);
-  writeFile(repo, 'src/posix-path.js', `const dir = ${JSON.stringify(['/Users', 'exampleuser', 'work'].join('/'))};\n`);
-  writeFile(repo, 'src/windows-path.js', `const dir = ${JSON.stringify(['C:', 'Users', 'exampleuser', 'work'].join('\\\\'))};\n`);
+  writeFile(repo, 'src/posix-path.js', `const dir = "${['/Users', 'exampleuser', 'work'].join('/')}";\n`);
+  writeFile(repo, 'src/windows-path.js', `const dir = "${windowsPath}";\n`);
+  writeFile(repo, 'src/windows-escaped-path.js', `const dir = "${windowsPath.replaceAll('\\', '\\\\')}";\n`);
   writeFile(repo, 'src/relative.js', 'const dir = "src/local";\n');
-  stagePaths(repo, ['src/home-path.js', 'src/posix-path.js', 'src/windows-path.js', 'src/relative.js']);
+  stagePaths(repo, [
+    'src/home-path.js',
+    'src/posix-path.js',
+    'src/windows-path.js',
+    'src/windows-escaped-path.js',
+    'src/relative.js'
+  ]);
 
   const result = runChecker(repo, ['--staged', '--json'], { home: fakeHome });
   assert.equal(result.status, 1, result.stderr);
@@ -179,6 +187,7 @@ test('machine-specific absolute paths in staged content fail', () => {
   assert.ok(flagged.has('src/home-path.js'), `home dir not flagged: ${result.stdout}`);
   assert.ok(flagged.has('src/posix-path.js'), `/Users path not flagged: ${result.stdout}`);
   assert.ok(flagged.has('src/windows-path.js'), `C:\\Users path not flagged: ${result.stdout}`);
+  assert.ok(flagged.has('src/windows-escaped-path.js'), `escaped C:\\Users path not flagged: ${result.stdout}`);
   assert.ok(!flagged.has('src/relative.js'), 'relative path must not be flagged');
   assert.ok(!result.stdout.includes(fakeHome), 'stdout must not echo the home path');
 });
@@ -357,6 +366,10 @@ test('usage and config errors exit 2', () => {
   writeFile(repo, 'bad.json', '{ not json');
   result = runChecker(repo, ['--config', 'bad.json']);
   assert.equal(result.status, 2, 'malformed config must exit 2');
+
+  writeFile(repo, 'unknown-key.json', JSON.stringify({ denyPaths: [], surprise: true }));
+  result = runChecker(repo, ['--config', 'unknown-key.json']);
+  assert.equal(result.status, 2, 'unknown config key must exit 2');
 });
 
 test('--paths scans working-tree files without staging them', () => {

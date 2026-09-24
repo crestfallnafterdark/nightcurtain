@@ -1,0 +1,40 @@
+{
+  "denyPaths": [
+    "data/**",
+    "scratch/**",
+    "sandbox_world/**",
+    "logs/**",
+    "test-results/**",
+    "playwright-report/**",
+    ".playwright/**",
+    "coverage/**",
+    "**/.opencode/**",
+    "**/.env*",
+    "**/*.pem",
+    "**/*.key",
+    "**/id_rsa*",
+    "**/id_ed25519*",
+    "**/*.log",
+    "**/api-key",
+    "**/.aider*"
+  ],
+  "binaryAllowGlobs": [
+    "**/*.png",
+    "**/*.jpg",
+    "**/*.jpeg",
+    "**/*.gif",
+    "**/*.webp",
+    "**/*.ico",
+    "**/*.woff",
+    "**/*.woff2",
+    "**/*.ttf",
+    "**/*.otf",
+    "**/*.eot",
+    "**/*.mp3",
+    "**/*.wav",
+    "**/*.mp4",
+    "**/*.webm"
+  ],
+  "maxBytes": 1048576,
+  "allowlist": []
+}

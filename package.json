@@ -29,7 +29,9 @@
     "verify:api-reports": "node scripts/api_reports.mjs --check",
     "api:extract": "api-extractor run --local --config api-extractor.json",
     "gate:arch": "depcruise src --config .dependency-cruiser.cjs",
-    "gate:arch:json": "depcruise src --config .dependency-cruiser.cjs --output-type json"
+    "gate:arch:json": "depcruise src --config .dependency-cruiser.cjs --output-type json",
+    "guard:check": "node scripts/check_sensitive_content.mjs --staged",
+    "guard:install": "node scripts/install_git_hooks.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
