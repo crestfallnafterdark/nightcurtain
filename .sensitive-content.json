@@ -36,5 +36,17 @@
     "**/*.webm"
   ],
   "maxBytes": 1048576,
-  "allowlist": []
+  "allowlist": [
+    { "pattern": "tests/audit/repros/**", "rule": "credential-pattern", "reason": "synthetic credential fixtures in audit repros" },
+    { "pattern": "tests/integration/modern_settings_workflow_test.js", "rule": "credential-pattern", "reason": "synthetic credential fixtures in tests" },
+    { "pattern": "tests/integration/settings_modal_modern_test.js", "rule": "credential-pattern", "reason": "synthetic credential fixtures in tests" },
+    { "pattern": "tests/unit/deepseek_provider_test.js", "rule": "credential-pattern", "reason": "synthetic invalid-key fixture" },
+    { "pattern": "tests/unit/nanogpt_provider_test.js", "rule": "credential-pattern", "reason": "synthetic credential fixtures in tests" },
+    { "pattern": "tests/unit/preset_catalog_module_test.js", "rule": "credential-pattern", "reason": "synthetic credential fixtures in tests" },
+    { "pattern": "tests/unit/realm_registry_module_test.js", "rule": "credential-pattern", "reason": "synthetic credential fixtures in tests" },
+    { "pattern": "tests/unit/runware_provider_test.js", "rule": "credential-pattern", "reason": "synthetic credential fixtures in tests" },
+    { "pattern": "tests/unit/sandbox_persistence_module_test.js", "rule": "credential-pattern", "reason": "synthetic credential fixtures in tests" },
+    { "pattern": "tests/unit/sandbox_store_module_test.js", "rule": "credential-pattern", "reason": "synthetic credential fixtures in tests" },
+    { "pattern": "tests/unit/settings_modal_presets_test.js", "rule": "credential-pattern", "reason": "synthetic credential fixtures in tests" }
+  ]
 }
