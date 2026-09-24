@@ -183,6 +183,7 @@ export function resetSaveLockQueue(): void;
 export interface RestoredMetadata {
     readonly activeAgentCount: number;
     readonly activeAgentId: string | null;
+    readonly activeAgentKey: string | null;
     readonly activeFsWorkspace: string;
     readonly activeTab: string;
     readonly agentDraftInputs: Record<string, string>;
@@ -213,6 +214,7 @@ export const SANDBOX_STATE_STORAGE_KEY: string;
 // @public
 export interface SandboxPersistedState {
     readonly activeAgentId: string | null;
+    readonly activeAgentKey?: string | null;
     readonly activeFsWorkspace: string;
     readonly activePresetId?: string;
     readonly activeTab: string;
@@ -357,6 +359,7 @@ export function serializeRuntimeEnvironment(env: PersistenceEnvironment, meta?: 
 // @public
 export interface SessionMetadata {
     readonly activeAgentId?: string | null;
+    readonly activeAgentKey?: string | null;
     readonly activeFsWorkspace?: string;
     readonly activePresetId?: string;
     readonly activeTab?: string;
@@ -759,6 +762,7 @@ Restored session metadata extracted from the persisted snapshot. Provided to Lay
 
 - **`activeAgentCount`** — Total count of active agents restored in state IDLE.
 - **`activeAgentId`** — ID of the active agent selected prior to serialization.
+- **`activeAgentKey`** — Canonical `(realmId, agentId)` identity key of the selected agent (defect 7d2c314), or `null` on legacy snapshots without the additive field.
 - **`activeFsWorkspace`** — Active virtual filesystem workspace partition identifier.
 - **`activeTab`** — Active UI tab identifier.
 - **`agentDraftInputs`** — Preserved uncommitted draft input map keyed by agent ID.
@@ -878,6 +882,7 @@ if (validateSandboxState(state).valid) {
 #### Members
 
 - **`activeAgentId`** — ID of active agent in UI; null if none selected.
+- **`activeAgentKey`** — Canonical `(realmId, agentId)` identity key of the selected agent (additive optional field, defect 7d2c314). Absent on legacy snapshots; an invalid (non-string) value is dropped during validation so an otherwise valid snapshot still loads.
 - **`activeFsWorkspace`** — Active virtual filesystem workspace identifier.
 - **`activePresetId`** — Active MOD-20 model-preset pointer (additive optional field). Absent on legacy snapshots; invalid values are dropped during validation so an otherwise valid snapshot still loads.
 - **`activeTab`** — Active UI navigation tab identifier.
@@ -1146,6 +1151,7 @@ Transient UI and session metadata preserved across persistence boundaries.
 #### Members
 
 - **`activeAgentId`** — Identifier of the currently selected active agent in the user interface.
+- **`activeAgentKey`** — Canonical `(realmId, agentId)` identity key of the currently selected active agent (defect 7d2c314). Additive optional field: absent on legacy snapshots, where hydration falls back to `activeAgentId`'s unique-match resolution; a realm-local agent whose literal id equals another scope's id is restored realm-exactly through this field.
 - **`activeFsWorkspace`** — Identifier of the currently selected virtual filesystem workspace partition.
 - **`activePresetId`** — Active MOD-20 model-preset pointer captured from the composition root. Additive optional field: absent on legacy snapshots, dropped when structurally invalid, and never rewritten by hydration.
 - **`activeTab`** — Identifier of the currently active navigation tab (e.g., 'chat', 'fs', 'clock').
@@ -1239,8 +1245,8 @@ Serialized file record within a virtual filesystem workspace partition. Mirrors 
 ## Doc coverage
 
 - Top-level exports: 43
-- Declarations (exports + members): 222
-- Documented declarations: 222 / 222 (100%)
+- Declarations (exports + members): 225
+- Documented declarations: 225 / 225 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): `AgentRuntime`, `AgentState`, `InterruptedTurn`, `MessageEnvelope`, `MessagingBus`, `PartitionClockSnapshot`, `SchedulerStatus`, `TimerCondition`, `VirtualFS`, `WorldClock`, `WorldEvent`

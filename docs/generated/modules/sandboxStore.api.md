@@ -101,6 +101,7 @@ export interface AgentStateSnapshot {
     readonly currentStream: string;
     readonly history: ReadonlyArray<HistoryMessage>;
     readonly id: string;
+    readonly identityKey: string;
     readonly lastError: string | null;
     readonly lastSummary: string | null;
     readonly name: string;
@@ -406,6 +407,7 @@ export interface RecycledAgentStateSnapshot {
     readonly createdAt: number;
     readonly history: ReadonlyArray<HistoryMessage>;
     readonly id: string;
+    readonly identityKey: string;
     readonly lastError: string | null;
     readonly lastSummary: string | null;
     readonly name: string;
@@ -590,11 +592,12 @@ export class SandboxStore {
     scheduledTimers: ScheduledTimerSnapshot[];
     scheduleTimer(input?: ScheduleTimerParams): Promise<ScheduleTimerReceipt>;
     seedRealm(input: RealmSeedInput): RealmSeedReceipt;
-    selectAgent(agentId: string | null): void;
+    selectAgent(agentId: string | null, realmId?: string | null): void;
     get selectedAgent(): AgentStateSnapshot | null;
     get selectedAgentClock(): AgentClockState | null;
     get selectedAgentEvents(): AgentEventsQueryState;
-    selectedAgentId: string | null;
+    get selectedAgentId(): string | null;
+    selectedAgentKey: string | null;
     // Warning: (ae-forgotten-export) The symbol "SendMessageReceipt" needs to be exported by the entry point index.svelte.d.ts
     sendMessage(from: string, to: string, content: string | object, metadata?: Record<string, unknown>): SendMessageReceipt;
     // Warning: (ae-forgotten-export) The symbol "SandboxPersistedState" needs to be exported by the entry point index.svelte.d.ts
@@ -825,6 +828,7 @@ Normalized reactive state snapshot of an active agent in runtime.
 ```typescript
 const agentSnapshot: AgentStateSnapshot = {
   id: 'agent-writer',
+  identityKey: 'realm:realm_generic:agent-writer',
   name: 'Lead Writer',
   config: { id: 'agent-writer', name: 'Lead Writer', role: 'Author' },
   state: 'idle',
@@ -853,6 +857,7 @@ const agentSnapshot: AgentStateSnapshot = {
 - **`currentStream`** — In-flight prose token stream currently being generated.
 - **`history`** — Chronological array of conversational messages in this agent's history.
 - **`id`** — Unique agent identifier string (e.g. `'director'`, `'agent-scout'`).
+- **`identityKey`** — Canonical `(realmId, agentId)` identity key of this registration (`createAgentIdentityKey`; defect 7d2c314). Internal-only addressing reference: selection, lifecycle actions, and clock/event partitions resolve it realm-exactly, so the same literal id registered in another Realm is never shadowed.
 - **`lastError`** — Last error message recorded during turn execution, or `null` if healthy.
 - **`lastSummary`** — Most recent context summary text, or `null` if no summarization has occurred.
 - **`name`** — Human-readable display name of the agent.
@@ -1394,6 +1399,7 @@ Intentionally omits the live-turn projection fields (`currentStream`, `currentRe
 ```typescript
 const recycled: RecycledAgentStateSnapshot = {
   id: 'agent-scout',
+  identityKey: 'realm:realm_generic:agent-scout',
   name: 'Scout Unit',
   config: { id: 'agent-scout', name: 'Scout Unit', role: 'Recon' },
   state: 'recycled',
@@ -1418,6 +1424,7 @@ const recycled: RecycledAgentStateSnapshot = {
 - **`createdAt`** — Millisecond epoch timestamp when the agent was provisioned.
 - **`history`** — Chronological array of conversational messages preserved from before the kill.
 - **`id`** — Unique agent identifier string (e.g. `'agent-scout'`).
+- **`identityKey`** — Canonical `(realmId, agentId)` identity key of this recycled registration (`createAgentIdentityKey`; defect 7d2c314), so restore and purge address the exact record even when the literal id is live in another Realm.
 - **`lastError`** — Last error message recorded before the kill, or `null` if healthy.
 - **`lastSummary`** — Most recent context summary text, or `null` if no summarization occurred.
 - **`name`** — Human-readable display name of the agent.
@@ -1623,11 +1630,12 @@ console.log('Agent response:', turn.output);
 - **`scheduledTimers`** — Reactive list of deferred timer executions with live 1s countdown tracking (`remainingSeconds`).
 - **`scheduleTimer`** — Enqueues a deferred turn execution with live countdown tracking. Starts internal 1-second countdown interval ticker if not already running.
 - **`seedRealm`** — Seeds a Realm: validates the request, writes operator-supplied files into the chosen workspace through the operator-context VirtualFS surface, then optionally delivers an operator-attributed directive to a member. Workspace selection: with a `targetAgentId` the files land in that active member's private workspace; without a target they land in the Realm-global workspace `realm:<realmId>:global`, the same alias a realm-bound member resolves `global` onto. Realm-scoped resolution (defect adcc133): the named target is resolved WITHIN the requested Realm — an active member whose literal id matches and whose membership names that Realm. Agent identity is the composite `(realmId, agentId)`, so a same-literal-id member in another Realm is never selected, and the write targets that exact registration's storage key (explicit pin, canonical identity key, or legacy bare id) instead of resolving a bare workspace id across Realms. Membership compares under the store's trim semantics (`resolveMemberRealmId`, defect 3595f6a), so a padded hydrated membership resolves to the same Realm the grouping and deletion paths resolve, and its write key is re-normalized to that resolved Realm's canonical identity. The receipt keeps the realm-opaque member label (its configured `workspaceId`, else its agent id), and the directive is addressed to the exact registration's mailbox (envelope labels stay bare). Fail-closed validation runs before the first write: the Realm must be registered, a named target must be an ACTIVE member of that Realm and must not resolve to a reserved workspace key, the file list must be non-empty with string contents and unique normalized paths, every path must be free of null bytes and `..` traversal segments, and no path may address the reserved `global`/`public` workspace roots. Those roots are rejected, never re-rooted: the legacy VirtualFS prefix routing would otherwise divert the write to the ungrouped shared workspace while the receipt still named the selected one. A directive requires an explicit member target (there is no realm-wide fan-out), and a directive that is an empty/whitespace string counts as absent. The directive is delivered as a mailbox message from a non-agent sender label, so the store attributes the host operator principal by exact reference (Wave I, ticket c02d0b9) exactly like the manual send surface (ticket 99faaf1); the target's mail wake then dispatches the turn. `directiveDelivered` mirrors the bus receipt (`success === true`): a delivery the bus rejects — for example its fail-closed cross-Realm `PERMISSION_DENIED` — comes back as `false` rather than silently succeeding.
-- **`selectAgent`** — Changes the focused agent ID for chat conversation, action input, and telemetry inspection. Persists selection preference to storage.
-- **`selectedAgent`** — Pure derived getter returning the full normalized agent snapshot for `selectedAgentId`, or `null` if no agent is selected.
+- **`selectAgent`** — Changes the focused agent for chat conversation, action input, and telemetry inspection. Persists selection preference to storage. Resolution (defect 7d2c314): an exact canonical `identityKey` match wins; otherwise the reference is filtered by bare id (plus Realm when `realmId` is supplied) and a unique match selects its canonical key. An unresolvable or ambiguous reference is stored raw — `selectedAgent` then resolves it only while it is unique and otherwise fails closed.
+- **`selectedAgent`** — Pure derived getter returning the full normalized agent snapshot for `selectedAgentKey`, or `null` if no agent is selected. Resolution (defect 7d2c314): an exact canonical `identityKey` match wins; otherwise a unique bare-id match keeps the legacy behavior for a raw reference (a pre-fix persisted selection or an explicit bare-id select); an ambiguous bare id resolves `null` (fail closed — never a wrong-Realm pick).
 - **`selectedAgentClock`** — Narrative clock state (`totalSeconds`, `formattedTime`, `day`) for the selected agent partition or global.
 - **`selectedAgentEvents`** — Narrative events list and counts for the selected agent partition or global.
-- **`selectedAgentId`** — Currently selected / focused agent ID across Chat Studio and Agent Inspector. `null` if no agent is currently active or selected.
+- **`selectedAgentId`** — Derived bare realm-local id of the selected agent, or `null` when no agent is selected. Legacy read surface: selection is keyed by `selectedAgentKey`, so two same-literal-id registrations resolve independently through the key while this getter stays the realm-opaque display/label form.
+- **`selectedAgentKey`** — Canonical `(realmId, agentId)` identity key of the currently selected / focused agent across Chat Studio and Agent Inspector, or `null` when no agent is selected. The single source of truth for selection (defect 7d2c314): a realm-local agent whose literal id equals another scope's id is addressed realm-exactly and never shadowed by a bare-id match.
 - **`sendMessage`** — Injects a manual point-to-point or broadcast message into the `MessagingBus`. An unregistered recipient that is not marked terminated is auto-registered before delivery. The store does not verify that the recipient exists as an active runtime agent, so a phantom recipient id is accepted and delivered to instead of following the bus `RECIPIENT_NOT_FOUND` dead-letter path. Operator attribution (ticket 99faaf1; Wave I, ticket c02d0b9): the store is the human-operator surface, so a `from` label that does not resolve to a registered agent identity (e.g. the `MessagingBusViewer` default `'human'`) is sent through a store-built execution context carrying the runtime's host operator principal by exact reference — the bypass is the principal, never an id, and the label stays presentation only. Agent- labelled sends keep the agent's own identity and Realm scope.
 - **`serialize`** — Serializes complete store, runtime, VirtualFS, MessagingBus, clock, and UI metadata snapshot. Wave I (ticket c02d0b9; fix lane G2): the active operator `realmBypass` grants (`runtime.listRealmBypassGrants()`, canonical identity keys) ride the additive top-level `realmBypassGrants` field; it is omitted when empty, so grant-free and legacy snapshots keep every existing field and byte. Wave U (ticket 2518510): the explicit publishing-authority grants ride the additive `metaAuthorityGrants` field (canonical identity keys per authority) and the per-template trust record rides `templateAuthorityTrust`; both are omitted when empty, so grant-free and legacy snapshots stay byte-identical.
 - **`setActiveFsWorkspace`** — Changes the active workspace filter in the VirtualFS Explorer tab. Operator surfaces pass a partition key from `fsWorkspacePartitions` (an internal snapshot key) so a realm-global partition or a same-id agent in two Realms is addressed exactly (ticket 7571ce5). Legacy callers keep the historical verbatim behavior: a public label is stored as-is and the read paths (`activeFsFiles`, `activeFsPartition`) resolve it through the unique registration when one exists.
@@ -1989,8 +1997,8 @@ console.log(`Uploaded ${receipt.count} files:`, receipt.files);
 ## Doc coverage
 
 - Top-level exports: 62
-- Declarations (exports + members): 434
-- Documented declarations: 434 / 434 (100%)
+- Declarations (exports + members): 437
+- Documented declarations: 437 / 437 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): `Agent`, `AgentConfig`, `AgentConfigUpdate`, `AgentIdentityScope`, `AgentRuntime`, `AgentState`, `ArchiveDownloadReceipt`, `AuthorityDescriptor`, `BatchDownloadFailure`, `BusMessageEnvelope`, `CopyReceipt`, `CredentialResolverPort`, `CredentialStoragePort`, `CredentialVault`, `DownloadReceipt`, `FileRecord`, `GrepMatch`, `GrepOptions`, `InboxHeader`, `InboxListOptions`, `LaunchHistoryEntry`, `MessageEnvelope`, `MessagingBus`, `NarrativeEvent`, `PendingInstancePayload`, `PresetCatalog`, `PresetModelConfig`, `ReadMessageResult`, `RealmInputValues`, `RealmPublishingPort`, `RealmRecord`, `RealmRegistry`, `RealmTemplate`, `RealmUpdatePatch`, `SandboxPersistedState`, `ScheduleReceipt`, `SendMessageReceipt`, `TurnBundle`, `TurnExecutionResult`, `TurnInput`, `VfsCopyOptions`, `VfsWriteOptions`, `VirtualFS`, `WriteReceipt`
