@@ -16,6 +16,13 @@
  *   `git rev-parse`.
  * - Labels are validated individually (one argv element each); malformed or unknown
  *   labels are rejected with exit code 2 instead of creating a space-containing label.
+ * - Concurrent invocations are serialized through an advisory O_EXCL lock file
+ *   (`<git-common-dir>/gitbug-wrapper.lock`, shared across worktrees; override with
+ *   `GITBUG_LOCK_PATH`), so parallel git-bug calls queue instead of failing on
+ *   git-bug's own repository lock. The wrapper waits with jittered backoff up to
+ *   `--lock-timeout`/`GITBUG_LOCK_TIMEOUT` (default 120000 ms), reclaims stale locks,
+ *   and fails closed with holder details on timeout. `.git/git-bug/lock` is never
+ *   touched. `--help` and `--dry-run` never take the lock.
  *
  * @remarks
  * `--dry-run` prints the exact `git` argv instead of executing a mutation. Ticket
@@ -27,7 +34,18 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import {
+  closeSync,
+  fsyncSync,
+  openSync,
+  readFileSync,
+  statSync,
+  unlinkSync,
+  writeSync,
+} from 'node:fs';
+import { hostname as osHostname } from 'node:os';
+import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const EXIT_OK = 0;
@@ -37,6 +55,13 @@ const EXIT_USAGE = 2;
 const VALID_STATUS = new Set(['open', 'closed']);
 const LABEL_PREFIXES = ['area', 'sev', 'type', 'prog', 'prio'];
 const LEGACY_LABELS = new Set(['qa', 'mod-21', 'security', 'audit-fail']);
+
+const LOCK_BASENAME = 'gitbug-wrapper.lock';
+const DEFAULT_LOCK_TIMEOUT_MS = 120_000;
+const LOCK_HARD_CAP_MS = 15 * 60 * 1000;
+const LOCK_POLL_MIN_MS = 50;
+const LOCK_POLL_MAX_MS = 500;
+const LOCKABLE_COMMANDS = new Set(['list', 'show', 'resolve', 'new', 'comment', 'close', 'open', 'labels']);
 
 const USAGE = `Usage: gitbug <command> [options]
 
@@ -51,8 +76,11 @@ Commands:
   labels
 
 Global:
-  --dry-run    Print the git argv that would run; perform no mutation.
-  -h, --help   Show this help.
+  --dry-run            Print the git argv that would run; perform no mutation.
+  --lock-timeout <ms>  Max wait for the wrapper invocation lock (default 120000;
+                       env GITBUG_LOCK_TIMEOUT). Serializes concurrent gitbug
+                       invocations so they queue on git-bug's repository lock.
+  -h, --help           Show this help.
 
 Allowed labels: area:* sev:* type:* prog:* prio:* qa mod-21 security audit-fail
 Exit codes: 0 ok, 1 command failure, 2 usage/validation.`;
@@ -210,12 +238,17 @@ function single(values, flag) {
 }
 
 function parse(argv) {
-  const global = { dryRun: false, help: false };
+  const global = { dryRun: false, help: false, lockTimeout: undefined };
   const rest = [];
-  for (const token of argv) {
+  for (let i = 0; i < argv.length; i += 1) {
+    const token = argv[i];
     if (token === '--dry-run') global.dryRun = true;
     else if (token === '--help' || token === '-h') global.help = true;
-    else rest.push(token);
+    else if (token === '--lock-timeout') {
+      if (i + 1 >= argv.length) throw usage('missing value for --lock-timeout');
+      global.lockTimeout = parseLockTimeoutValue(argv[i + 1], '--lock-timeout');
+      i += 1;
+    } else rest.push(token);
   }
   return { global, rest };
 }
@@ -237,6 +270,294 @@ function execGit(args, input) {
     return { status: EXIT_FAIL, stdout: '', stderr: `git invocation failed: ${result.error.code || 'error'}` };
   }
   return { status: result.status ?? EXIT_FAIL, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
+}
+
+// ---------------------------------------------------------------------------
+// Advisory invocation lock
+//
+// git-bug guards its repository with file locks; concurrent wrapper calls must
+// queue on our own lock instead of racing into git-bug's. The O_EXCL create is
+// the mutex; the JSON content is holder metadata used for stale reclamation.
+// ---------------------------------------------------------------------------
+
+const SLEEP_CELL = new Int32Array(new SharedArrayBuffer(4));
+
+/**
+ * Sleep synchronously, blocking the current thread only.
+ * @param {number} ms Milliseconds to wait.
+ * @returns {void}
+ */
+function sleepSync(ms) {
+  if (ms > 0) Atomics.wait(SLEEP_CELL, 0, 0, ms);
+}
+
+/**
+ * Jittered exponential backoff: ~50 ms at first, ~500 ms cap.
+ * @param {number} attempt Zero-based attempt counter.
+ * @returns {number} Milliseconds to sleep.
+ */
+function lockBackoffDelay(attempt) {
+  const base = Math.min(LOCK_POLL_MAX_MS, LOCK_POLL_MIN_MS * 2 ** Math.min(attempt, 10));
+  return Math.max(1, Math.round(base * (0.5 + Math.random() * 0.5)));
+}
+
+/**
+ * Resolve the wrapper lock path. `GITBUG_LOCK_PATH` overrides the default
+ * `<git-common-dir>/gitbug-wrapper.lock`, which is shared across worktrees.
+ * git-bug's own `.git/git-bug/lock` is never touched.
+ * @param {Record<string, string|undefined>} [env] Environment holding the override.
+ * @returns {string} Absolute lock file path.
+ */
+export function resolveLockPath(env = process.env) {
+  if (env.GITBUG_LOCK_PATH) return path.resolve(env.GITBUG_LOCK_PATH);
+  const result = execGit(['rev-parse', '--git-common-dir']);
+  const commonDir = result.status === EXIT_OK && result.stdout.trim() !== '' ? result.stdout.trim() : '.git';
+  return path.resolve(commonDir, LOCK_BASENAME);
+}
+
+/**
+ * Parse a lock timeout value.
+ * @param {unknown} raw Candidate value.
+ * @param {string} source Flag/env name used in the error message.
+ * @returns {number} Validated non-negative integer (milliseconds).
+ */
+function parseLockTimeoutValue(raw, source) {
+  const text = String(raw);
+  if (!/^\d+$/.test(text)) {
+    throw usage(`${source} must be a non-negative integer (got ${JSON.stringify(text)})`);
+  }
+  const value = Number(text);
+  if (!Number.isSafeInteger(value)) throw usage(`${source} is out of range`);
+  return value;
+}
+
+/**
+ * Resolve the timeout from the environment when no flag was given.
+ * @param {Record<string, string|undefined>} [env] Environment to read.
+ * @returns {number} Timeout in milliseconds.
+ */
+function readLockTimeoutEnv(env = process.env) {
+  const raw = env.GITBUG_LOCK_TIMEOUT;
+  if (raw === undefined || raw === '') return DEFAULT_LOCK_TIMEOUT_MS;
+  return parseLockTimeoutValue(raw, 'GITBUG_LOCK_TIMEOUT');
+}
+
+/**
+ * Read the lock file's metadata without throwing.
+ * @param {string} lockPath Lock file path.
+ * @returns {{parsed: Record<string, unknown>|null, stat: import('node:fs').Stats|null}} Snapshot.
+ */
+function inspectLock(lockPath) {
+  let stat = null;
+  try {
+    stat = statSync(lockPath);
+  } catch {
+    stat = null;
+  }
+  let parsed = null;
+  try {
+    const value = JSON.parse(readFileSync(lockPath, 'utf8'));
+    if (value !== null && typeof value === 'object') parsed = value;
+  } catch {
+    parsed = null;
+  }
+  return { parsed, stat };
+}
+
+/**
+ * Age of the lock, preferring the holder's `startedAt` over the file mtime.
+ * @param {{parsed: Record<string, unknown>|null, stat: import('node:fs').Stats|null}} inspected Snapshot.
+ * @param {number} now Current epoch milliseconds.
+ * @returns {number} Age in milliseconds (never negative).
+ */
+function lockAgeMs(inspected, now) {
+  const startedAt = inspected.parsed && typeof inspected.parsed.startedAt === 'string'
+    ? Date.parse(inspected.parsed.startedAt)
+    : Number.NaN;
+  if (Number.isFinite(startedAt)) return Math.max(0, now - startedAt);
+  return inspected.stat ? Math.max(0, now - inspected.stat.mtimeMs) : 0;
+}
+
+/**
+ * Check whether a pid is alive.
+ * @param {number} pid Process id.
+ * @returns {boolean} True when the process exists (or cannot be probed).
+ */
+function isPidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code !== 'ESRCH';
+  }
+}
+
+/**
+ * Decide whether an existing lock is stale and may be reclaimed: dead holder on
+ * this host, or the hard cap exceeded (same host, or unparseable metadata).
+ * @param {{parsed: Record<string, unknown>|null, stat: import('node:fs').Stats|null}} inspected Snapshot.
+ * @param {string} hostname Current hostname.
+ * @param {number} now Current epoch milliseconds.
+ * @returns {boolean} True when the lock may be removed.
+ */
+function isLockReclaimable(inspected, hostname, now) {
+  if (!inspected.parsed) return lockAgeMs(inspected, now) > LOCK_HARD_CAP_MS;
+  if (inspected.parsed.hostname !== hostname) return false;
+  const pid = Number(inspected.parsed.pid);
+  if (Number.isInteger(pid) && pid > 0 && !isPidAlive(pid)) return true;
+  return lockAgeMs(inspected, now) > LOCK_HARD_CAP_MS;
+}
+
+/**
+ * Human-readable holder description for timeout errors.
+ * @param {{parsed: Record<string, unknown>|null, stat: import('node:fs').Stats|null}} inspected Snapshot.
+ * @param {number} now Current epoch milliseconds.
+ * @returns {string} Description naming pid, host, age, and command.
+ */
+function formatLockHolder(inspected, now) {
+  const ageMs = Math.round(lockAgeMs(inspected, now));
+  if (!inspected.parsed) return `unparseable or empty metadata, age ${ageMs}ms`;
+  const command = typeof inspected.parsed.command === 'string' && inspected.parsed.command.trim() !== ''
+    ? inspected.parsed.command.replace(/\s+/g, ' ').slice(0, 160)
+    : 'unknown';
+  return `pid ${inspected.parsed.pid ?? 'unknown'} on ${inspected.parsed.hostname ?? 'unknown host'}, `
+    + `age ${ageMs}ms, command: ${command}`;
+}
+
+/**
+ * Build the fail-closed timeout error.
+ * @param {string} lockPath Lock file path.
+ * @param {{parsed: Record<string, unknown>|null, stat: import('node:fs').Stats|null}} inspected Snapshot.
+ * @param {number} timeoutMs Configured timeout.
+ * @param {number} now Current epoch milliseconds.
+ * @returns {Error & {exitCode: number}} Error carrying exit code 1.
+ */
+function lockTimeoutError(lockPath, inspected, timeoutMs, now) {
+  const error = new Error(
+    `timed out after ${timeoutMs}ms waiting for lock ${lockPath} `
+    + `(held by ${formatLockHolder(inspected, now)}); refusing to run without the lock`
+  );
+  error.exitCode = EXIT_FAIL;
+  return error;
+}
+
+/**
+ * Acquire the advisory invocation lock for this process. The atomic `O_EXCL`
+ * create is the mutex; on `EEXIST` the holder is inspected and stale locks are
+ * reclaimed, otherwise the call sleeps with jittered backoff until `timeoutMs`.
+ * @param {string} lockPath Lock file path.
+ * @param {{command?: string, timeoutMs?: number, hostname?: string,
+ *   now?: () => number, sleep?: (ms: number) => void}} [options] Lock options.
+ * @returns {{path: string, nonce: string, pid: number, hostname: string,
+ *   startedAt: string, command: string}} Handle for `releaseLock`.
+ */
+export function acquireLock(lockPath, options = {}) {
+  const {
+    command = '',
+    timeoutMs = DEFAULT_LOCK_TIMEOUT_MS,
+    hostname = osHostname(),
+    now = () => Date.now(),
+    sleep = sleepSync,
+  } = options;
+
+  const handle = {
+    nonce: randomUUID(),
+    pid: process.pid,
+    hostname,
+    startedAt: new Date().toISOString(),
+    command,
+  };
+  const deadline = now() + timeoutMs;
+
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      const fd = openSync(lockPath, 'wx');
+      try {
+        writeSync(fd, `${JSON.stringify(handle)}\n`);
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
+      return { ...handle, path: lockPath };
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+    }
+    const inspected = inspectLock(lockPath);
+    if (isLockReclaimable(inspected, hostname, now())) {
+      try {
+        unlinkSync(lockPath);
+      } catch {
+        // Another waiter reclaimed it first; loop and retry the create.
+      }
+      continue;
+    }
+    if (now() >= deadline) throw lockTimeoutError(lockPath, inspected, timeoutMs, now());
+    sleep(lockBackoffDelay(attempt));
+  }
+}
+
+/**
+ * Release the lock, but only when the file still carries our nonce (never a
+ * foreign or reclaimed lock).
+ * @param {{path: string, nonce: string}|null} handle Handle returned by `acquireLock`.
+ * @returns {boolean} True when our lock file was removed.
+ */
+export function releaseLock(handle) {
+  if (!handle || typeof handle.path !== 'string' || typeof handle.nonce !== 'string') return false;
+  let current = null;
+  try {
+    current = JSON.parse(readFileSync(handle.path, 'utf8'));
+  } catch {
+    return false;
+  }
+  if (!current || current.nonce !== handle.nonce) return false;
+  try {
+    unlinkSync(handle.path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Run `fn` with the advisory lock held. Releases in `finally`; SIGINT/SIGTERM
+ * trigger a best-effort release before the default signal disposition. The
+ * handlers survive one extra event-loop turn because a signal received during
+ * a blocking `spawnSync` is delivered only after the call returns.
+ * @param {{lockPath: string, command?: string, timeoutMs?: number}} options Lock options.
+ * @param {() => number} fn Work to run under the lock.
+ * @returns {number} `fn`'s return value.
+ */
+export function withLock(options, fn) {
+  const handle = acquireLock(options.lockPath, options);
+  let released = false;
+  /** @type {Array<{signal: string, handler: () => void}>} */
+  const handlers = [];
+  const release = () => {
+    if (!released) {
+      released = true;
+      releaseLock(handle);
+    }
+  };
+  const onSignal = (signal) => {
+    for (const entry of handlers) process.off(entry.signal, entry.handler);
+    release();
+    process.kill(process.pid, signal);
+  };
+  for (const signal of ['SIGINT', 'SIGTERM']) {
+    const handler = () => onSignal(signal);
+    process.on(signal, handler);
+    handlers.push({ signal, handler });
+  }
+  try {
+    return fn();
+  } finally {
+    release();
+    setImmediate(() => {
+      for (const entry of handlers) process.off(entry.signal, entry.handler);
+    });
+  }
 }
 
 function runGit(args, global, input) {
@@ -404,32 +725,44 @@ function cmdLabels(tokens, global) {
   return EXIT_OK;
 }
 
+function dispatch(command, tokens, global) {
+  switch (command) {
+    case 'list': return cmdList(tokens, global);
+    case 'show': return cmdShow(tokens, global);
+    case 'resolve': return cmdResolve(tokens);
+    case 'new': return cmdNew(tokens, global);
+    case 'comment': return cmdComment(tokens, global);
+    case 'close': return cmdStatus(tokens, global, 'close');
+    case 'open': return cmdStatus(tokens, global, 'open');
+    case 'labels': return cmdLabels(tokens, global);
+    default: throw usage(`unknown command: ${JSON.stringify(command)} (see --help)`);
+  }
+}
+
 /**
- * Run the wrapper.
+ * Run the wrapper. Every known command except `--dry-run` and `--help` runs
+ * under the advisory invocation lock.
  * @param {string[]} argv Arguments after `node scripts/gitbug.mjs`.
  * @returns {number} Process exit code.
  */
 export function main(argv = []) {
-  const { global, rest } = parse(argv);
-  if (global.help || rest.length === 0) {
-    const target = rest.length === 0 && !global.help ? process.stderr : process.stdout;
-    target.write(`${USAGE}\n`);
-    return global.help ? EXIT_OK : EXIT_USAGE;
-  }
-  const command = rest[0];
-  const tokens = rest.slice(1);
   try {
-    switch (command) {
-      case 'list': return cmdList(tokens, global);
-      case 'show': return cmdShow(tokens, global);
-      case 'resolve': return cmdResolve(tokens);
-      case 'new': return cmdNew(tokens, global);
-      case 'comment': return cmdComment(tokens, global);
-      case 'close': return cmdStatus(tokens, global, 'close');
-      case 'open': return cmdStatus(tokens, global, 'open');
-      case 'labels': return cmdLabels(tokens, global);
-      default: throw usage(`unknown command: ${JSON.stringify(command)} (see --help)`);
+    const { global, rest } = parse(argv);
+    if (global.help || rest.length === 0) {
+      const target = rest.length === 0 && !global.help ? process.stderr : process.stdout;
+      target.write(`${USAGE}\n`);
+      return global.help ? EXIT_OK : EXIT_USAGE;
     }
+    const command = rest[0];
+    const tokens = rest.slice(1);
+    if (!LOCKABLE_COMMANDS.has(command)) {
+      throw usage(`unknown command: ${JSON.stringify(command)} (see --help)`);
+    }
+    if (global.dryRun) return dispatch(command, tokens, global);
+    const timeoutMs = global.lockTimeout !== undefined ? global.lockTimeout : readLockTimeoutEnv();
+    const lockPath = resolveLockPath();
+    const lockCommand = ['gitbug', ...rest].join(' ');
+    return withLock({ lockPath, command: lockCommand, timeoutMs }, () => dispatch(command, tokens, global));
   } catch (err) {
     const code = err && err.exitCode ? err.exitCode : EXIT_FAIL;
     process.stderr.write(`gitbug: ${err && err.message ? err.message : 'unexpected failure'}\n`);
