@@ -4752,3 +4752,158 @@ test('63. a format-v2 payload pin mismatch fails closed unless allowVersionMisma
     sharedLocalStorage.clear();
   }
 });
+
+// ============================================================================
+// 64. [7d2c314] realm-exact selection/actions + boot director adoption
+// ============================================================================
+
+test('64. [7d2c314] realm-exact selection and actions keep a realm-local director independent', async () => {
+  sharedLocalStorage.clear();
+  const store = await createOperatorStore();
+  try {
+    store.createRealm({ id: 'realm_sel_7d', name: 'Selection Realm' });
+
+    const realmDirector = await store.launchAgent({
+      id: 'director',
+      name: 'Realm Director',
+      realmId: 'realm_sel_7d',
+      allowedTools: ['read_file'],
+      model: createMockModel()
+    });
+
+    // Snapshots carry the canonical (realmId, agentId) identity key.
+    assert.strictEqual(
+      realmDirector.identityKey,
+      createAgentIdentityKey('realm_sel_7d', 'director'),
+      'the launch snapshot exposes its canonical identity key'
+    );
+    const systemDirector = store.agents.find(
+      (agent) => agent.id === 'director' && (agent.config?.realmId ?? null) === null
+    );
+    assert.ok(systemDirector, 'the bootstrapped system director stays live');
+    assert.strictEqual(systemDirector.identityKey, createAgentIdentityKey(null, 'director'));
+    assert.notStrictEqual(
+      realmDirector.identityKey,
+      systemDirector.identityKey,
+      'the same literal id registers under two distinct canonical keys'
+    );
+
+    // Realm-scoped selection addresses each director independently.
+    store.selectAgent('director', 'realm_sel_7d');
+    assert.strictEqual(store.selectedAgent?.identityKey, realmDirector.identityKey);
+    assert.strictEqual(store.selectedAgent?.name, 'Realm Director');
+    assert.strictEqual(store.selectedAgentId, 'director');
+
+    store.selectAgent('director', null);
+    assert.strictEqual(store.selectedAgent?.identityKey, systemDirector.identityKey);
+    assert.strictEqual(store.selectedAgent?.name, systemDirector.name);
+
+    // An exact identity key resolves its own registration.
+    store.selectAgent(realmDirector.identityKey);
+    assert.strictEqual(store.selectedAgent?.identityKey, realmDirector.identityKey);
+
+    // An ambiguous bare-id selection fails closed (never a wrong-realm pick).
+    store.selectAgent('director');
+    assert.strictEqual(store.selectedAgent, null);
+
+    // Realm-exact kill: only the realm-local registration is recycled.
+    const killed = store.killAgent(realmDirector.identityKey, 'realm-exact kill');
+    assert.strictEqual(killed, true);
+    assert.ok(
+      store.agents.some((agent) => agent.identityKey === systemDirector.identityKey),
+      'the system director survives the realm-exact kill'
+    );
+    assert.ok(
+      !store.agents.some((agent) => agent.identityKey === realmDirector.identityKey),
+      'the realm-local director leaves the active roster'
+    );
+    const recycled = store.recycleBin.filter((agent) => agent.id === 'director');
+    assert.strictEqual(recycled.length, 1);
+    assert.strictEqual(recycled[0].identityKey, realmDirector.identityKey);
+    assert.ok(store.selectedAgent, 'selection falls back to a live agent after the kill');
+    assert.notStrictEqual(store.selectedAgent?.identityKey, realmDirector.identityKey);
+
+    // A second realm-local director + boot adoption: ensureDirector must adopt
+    // the system-scope record realm-exactly instead of re-provisioning it
+    // (which threw AGENT_ALREADY_EXISTS before the fix).
+    store.createRealm({ id: 'realm_sel_7d2', name: 'Selection Realm Two' });
+    const secondRealmDirector = await store.launchAgent({
+      id: 'director',
+      name: 'Second Realm Director',
+      realmId: 'realm_sel_7d2',
+      allowedTools: ['read_file'],
+      model: createMockModel()
+    });
+    assert.notStrictEqual(secondRealmDirector.identityKey, realmDirector.identityKey);
+
+    const ensured = await store.ensureDirector();
+    assert.strictEqual(
+      ensured.identityKey,
+      systemDirector.identityKey,
+      'ensureDirector adopts the system-scope director, never a realm-local twin'
+    );
+    assert.strictEqual(ensured.config?.realmId ?? null, null);
+    assert.strictEqual(
+      store.agents.filter((agent) => agent.id === 'director').length,
+      3,
+      'no director is re-provisioned or duplicated by the boot adoption'
+    );
+  } finally {
+    store.destroy();
+    sharedLocalStorage.clear();
+  }
+});
+
+// ============================================================================
+// 65. [7d2c314] persisted selection restores the realm-exact identity key
+// ============================================================================
+
+test('65. [7d2c314] persisted selection restores the realm-exact identity key', async () => {
+  sharedLocalStorage.clear();
+  const store = await createOperatorStore();
+  let hydratedStore = null;
+  try {
+    store.createRealm({ id: 'realm_persist_7d', name: 'Persistence Realm' });
+    const realmDirector = await store.launchAgent({
+      id: 'director',
+      name: 'Persisted Realm Director',
+      realmId: 'realm_persist_7d',
+      allowedTools: ['read_file'],
+      model: createMockModel()
+    });
+    assert.strictEqual(
+      realmDirector.identityKey,
+      createAgentIdentityKey('realm_persist_7d', 'director')
+    );
+
+    store.selectAgent(realmDirector.identityKey);
+    assert.strictEqual(store.selectedAgent?.identityKey, realmDirector.identityKey);
+
+    const snapshot = store.serialize();
+    assert.strictEqual(
+      snapshot.activeAgentKey,
+      realmDirector.identityKey,
+      'serialize exposes the canonical selection key'
+    );
+    assert.strictEqual(snapshot.activeAgentId, 'director', 'activeAgentId stays the bare realm-local id');
+    assert.strictEqual(store.saveToStorage(), true);
+
+    hydratedStore = createSandboxStore({ autoBootstrapDirector: false, autoHydrate: true });
+    assert.strictEqual(
+      hydratedStore.agents.filter((agent) => agent.id === 'director').length,
+      2,
+      'both same-literal-id directors restore'
+    );
+    assert.strictEqual(
+      hydratedStore.selectedAgent?.identityKey,
+      realmDirector.identityKey,
+      'the realm-exact selection restores instead of the first bare-id match'
+    );
+    assert.strictEqual(hydratedStore.selectedAgent?.name, 'Persisted Realm Director');
+    assert.strictEqual(hydratedStore.selectedAgentId, 'director');
+  } finally {
+    if (hydratedStore) hydratedStore.destroy();
+    store.destroy();
+    sharedLocalStorage.clear();
+  }
+});
