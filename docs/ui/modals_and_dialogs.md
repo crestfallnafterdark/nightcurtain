@@ -80,7 +80,7 @@ Agent ids are unique per Realm: the launcher denies a duplicate inside the same 
 
 ### 2.2 Model & Inference Configuration Schema
 
-The launcher shows a catalog preset select plus a resolved summary (provider, model, temperature, reasoning, optional routing/URL). Presets and per-vendor defaults come from the preset catalog (`src/lib/sandbox/presetCatalog/`) seeded from `PRESET_MODELS` / `getDefaultModelId()` (`sandbox/modelConfig/`).
+The launcher shows a catalog preset select plus a resolved summary (provider, model, temperature, reasoning, optional routing/URL). Presets and per-vendor defaults come from the preset catalog (`src/lib/sandbox/presetCatalog/`) seeded from `PRESET_MODELS` / `getDefaultModelId()` (`sandbox/modelConfig/`). Preset-editor fields are capability-gated from one source (`modelConfig.getProviderCapabilities`): **Routing Provider** renders only for `nanogpt` and **Endpoint URL** only for `custom`; the agent-level editor and the global modal share the same flags, and unsupported values are never persisted into a preset.
 
 | Configuration Field | Form Control | Default | Description |
 | :--- | :--- | :--- | :--- |

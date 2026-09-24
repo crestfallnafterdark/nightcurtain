@@ -7,7 +7,7 @@ Durable engine notes: intentional quirks and accepted exceptions for the sandbox
 ## Sandbox shape (rules)
 
 - **36 folder modules**; `index.ts` (store: `index.svelte.ts`) is the sole importable surface; deep imports into module folders are banned (verifier + dependency-cruiser). No hand-written `.d.ts` pairs, no `@contractExports`, **no default exports**.
-- **Gate chain:** verifier (default + `--enforce-boundaries`) · module-contracts (Tier 1 + graph truth) · `verify:contract-types` (strict) · `verify:api-reports` (0 drift) · `gate:arch` (**0 errors / 0 warnings**) · `lint:sandbox` (0 problems) · `lint:docs` (0) · `typecheck` ratchets (`tsc` **0 total / 0 sandbox**; svelte-check ≤96); `npm test` = 95 suites (includes the 7 gate cases).
+- **Gate chain:** verifier (default + `--enforce-boundaries`) · module-contracts (Tier 1 + graph truth) · `verify:contract-types` (strict) · `verify:api-reports` (0 drift) · `gate:arch` (**0 errors / 0 warnings**) · `lint:sandbox` (0 problems) · `lint:docs` (0) · `typecheck` ratchets (`tsc` **0 total / 0 sandbox**; svelte-check ≤96); `npm test` = 96 suites (includes the 7 gate cases).
 - End state: all modules `--strict` clean; explicit `any` only at PremProvider's SDK boundary (see exceptions).
 
 ## Intentional behavioral quirks (do not "fix" without a decision)

@@ -1,7 +1,7 @@
 # Testing Strategy, Quality Assurance & Verification Architecture
 
 **Status:** CANONICAL
-**Last verified: 2026-09-22**
+**Last verified: 2026-09-24**
 
 > **Authoritative Technical Standard for Agentic Sandbox Studio Test Engineering**  
 > *Target Systems: Multi-Agent Sandbox Studio, AgentRuntime, VirtualFS, MessagingBus, ToolDispatcher, preset catalog & credential vault*
@@ -23,7 +23,7 @@ graph TD
     end
 
     subgraph L1["Tier 1: Atomic Unit & Contract Testing (node --test)"]
-        UNIT["49 Unit Suites (tests/unit/)<br/>• Pure Functions & Algorithms<br/>• DeepSeek Reasoning Hygiene (INV-REASONING-STRING)<br/>• JSON Pointers, Parsers, Preset Catalog, LoRA Tags<br/>• Module Contracts & Provider Adapters"]
+        UNIT["50 Unit Suites (tests/unit/)<br/>• Pure Functions & Algorithms<br/>• DeepSeek Reasoning Hygiene (INV-REASONING-STRING)<br/>• JSON Pointers, Parsers, Preset Catalog, LoRA Tags<br/>• Module Contracts & Provider Adapters"]
     end
 
     L1 --> L2
@@ -101,7 +101,7 @@ The master runner executes all Unit and Integration suites in strict sub-process
 // Sample output format from tests/runner.js:
 // ======================================================================
 //   AGENTIC SANDBOX STUDIO MASTER TEST SUITE RUNNER
-//   Total Suites: 95 (49 Unit, 46 Integration)
+//   Total Suites: 96 (50 Unit, 46 Integration)
 // ======================================================================
 //   [Unit       ] deepseek_provider_test.js                  ✔ PASS (42ms)
 //   [Unit       ] deepseek_reasoning_hygiene_test.js         ✔ PASS (18ms)
@@ -133,6 +133,7 @@ The project includes **92 native test suites** (46 unit, 46 integration) and **8
 ### 4.1 Unit Test Suites (`tests/unit/`)
 | Suite File | Primary Target Module | Verification Focus |
 |---|---|---|
+| [`agent_model_config_helpers_test.js`](../../tests/unit/agent_model_config_helpers_test.js) | `src/lib/components/sandbox/agentModelConfigHelpers.ts` | Bound-preset model-config resolution, capability-gated preset-editor field visibility, capability-gated config building (no dead `routing`/`url` fields). |
 | [`contracts_gate_test.js`](../../tests/unit/contracts_gate_test.js) | `scripts/verify_sandbox_contracts.js` + gate tooling | Seven static encapsulation gates execute and pass (verifier, dependency-cruiser, TSDoc, contract-types, module contracts, report freshness, sandbox lint). |
 | [`custom_tool_gate_test.js`](../../tests/unit/custom_tool_gate_test.js) | `src/lib/sandbox/runtime/turnExecutionEngine/index.ts` | Custom-handler gate: wildcard/authority-only invocation, explicit allowlists insufficient, anonymous denial, schema exposure blocked, no name-shadow fallthrough. |
 | [`deepseek_provider_test.js`](../../tests/unit/deepseek_provider_test.js) | `src/lib/sandbox/inference/DeepSeekProvider/index.ts` | DeepSeek adapter wire contract, SSE streaming, retry/backoff defaults. |
@@ -147,7 +148,7 @@ The project includes **92 native test suites** (46 unit, 46 integration) and **8
 | [`markdown_parser_test.js`](../../tests/unit/markdown_parser_test.js) | `src/lib/components/sandbox/markdown/render.ts` | Prose rendering (GFM via `marked`) + DOMPurify allowlist sanitization (fail-closed fallback), XSS vectors. |
 | [`messaging_bus_module_test.js`](../../tests/unit/messaging_bus_module_test.js) | `src/lib/sandbox/messagingBus/index.ts` | Module 2 ICD: strict dequeue on read, clean drain, non-destructive peek. |
 | [`messaging_bus_realm_scope_test.js`](../../tests/unit/messaging_bus_realm_scope_test.js) | `src/lib/sandbox/messagingBus/index.ts` | Realm-scoped delivery: cross-realm direct/inline/broadcast denial, bypass principals, filtered fan-out, legacy parity. |
-| [`model_config_module_test.js`](../../tests/unit/model_config_module_test.js) | `src/lib/sandbox/modelConfig/index.ts` | Strict export whitelist, 5-entry preset catalog, 100K token cap. |
+| [`model_config_module_test.js`](../../tests/unit/model_config_module_test.js) | `src/lib/sandbox/modelConfig/index.ts` | Strict export whitelist, 5-entry preset catalog, provider capability flags, 100K token cap. |
 | [`nanogpt_provider_test.js`](../../tests/unit/nanogpt_provider_test.js) | `src/lib/sandbox/inference/NanoGptProvider/index.ts` | NanoGPT adapter wire contract, routing headers, retry policy. |
 | [`openai_provider_test.js`](../../tests/unit/openai_provider_test.js) | `src/lib/sandbox/inference/OpenAIProvider/index.ts` | Custom provider `url` enforcement, OpenAI-compatible streaming, retry. |
 | [`precall_gate_adversarial_test.js`](../../tests/unit/precall_gate_adversarial_test.js) | `src/lib/sandbox/tools/descriptors/precallTools.ts` | Forbidden-precall gate adversarial coverage, allowlist resolution. |
@@ -266,8 +267,8 @@ sequenceDiagram
     G1-->>Dev: Gate 1 Passed (0 lint / sync errors)
 
     Dev->>G2: npm test (tests/runner.js)
-    Note over G2: Executes 95 suites (49 Unit, 46 Integration) under 120s timeout
-    G2-->>Dev: Gate 2 Passed (95/95 passed, 0 failures)
+    Note over G2: Executes 96 suites (50 Unit, 46 Integration) under 120s timeout
+    G2-->>Dev: Gate 2 Passed (96/96 passed, 0 failures)
 
     Dev->>G3: npm run build (vite build)
     Note over G3: Compiles Svelte 5 runes, WASM modules, top-level awaits

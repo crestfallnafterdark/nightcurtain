@@ -19,7 +19,7 @@
 5. **Sent Context Inspector**: Exact formatted message context arrays dispatched to model APIs with token estimations per message.
 6. **Recovery & Failure Diagnostics**: A dismissible session-recovery notice when persisted state could not be loaded, plus a live execution-error banner with Retry Turn / Undo Turn & Edit Prompt / Dismiss actions.
 
-The header **Model** / **Thinking** / **Provider** chips resolve from the agent's bound catalog preset, falling back to `agent.config.modelConfig` and then the active-preset projection `sandboxStore.modelConfig` (`AgentInspector.svelte:48-54`).
+The header **Model** / **Thinking** / **Provider** / **Temp** chips resolve from the agent's bound catalog preset through the shared `agentModelConfigHelpers.resolveAgentModelConfig` (falling back to `agent.config.modelConfig`, then the active-preset projection `sandboxStore.modelConfig`); the turn path independently materializes the same preset config at turn start (`materializeEffectiveModel`), so the chips are display-only.
 
 ```mermaid
 flowchart TD
