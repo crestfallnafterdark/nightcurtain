@@ -153,7 +153,63 @@ test('discoverModels: descriptor normalization through the real adapters', async
     assert.match(String(calls[0].init.headers.Authorization), /^Bearer /, 'the active vault credential must authenticate discovery');
   });
 
-  await t.test('5. the custom provider draft URL drives the listing endpoint', async (t2) => {
+  await t.test('5. duplicate model ids collapse to a single first-wins entry', async (t2) => {
+    const calls = mockFetch(t2, async (url) => {
+      if (url === 'https://nano-gpt.com/api/models') {
+        return jsonResponse({
+          models: {
+            text: {
+              'minimax-a': {
+                model: 'minimax/minimax-m2.7',
+                name: 'MiniMax M2.7 (first entry)',
+                maxInputTokens: 200000
+              },
+              'minimax-b': {
+                model: 'minimax/minimax-m2.7',
+                name: 'MiniMax M2.7 (alias entry)',
+                context_length: 64000
+              },
+              'other-entry': {
+                model: 'other-model',
+                name: 'Other Model'
+              }
+            }
+          }
+        });
+      }
+      if (url === 'http://localhost:11434/v1/models') {
+        return jsonResponse({ data: ['string-dup', 'string-dup', 'string-unique'] });
+      }
+      throw new Error(`unexpected URL ${url}`);
+    });
+
+    const catalogResult = await discoverModels(
+      { providerId: 'nanogpt', modelId: 'minimax/minimax-m2.7' },
+      createResolverPort()
+    );
+    assert.deepEqual(catalogResult.models, [
+      { id: 'minimax/minimax-m2.7', name: 'MiniMax M2.7 (first entry)', contextLength: '200k' },
+      { id: 'other-model', name: 'Other Model' }
+    ], 'the first duplicate catalog entry must win, keeping its name and context length');
+
+    const stringResult = await discoverModels(
+      { providerId: 'custom', url: 'http://localhost:11434/v1', modelId: 'string-dup' },
+      createResolverPort()
+    );
+    assert.deepEqual(stringResult.models, [
+      { id: 'string-dup', name: 'string-dup' },
+      { id: 'string-unique', name: 'string-unique' }
+    ], 'duplicate string entries must collapse to a single id');
+
+    assert.equal(calls.length, 2);
+    for (const result of [catalogResult, stringResult]) {
+      assert.equal(result.ok, true);
+      const ids = result.models.map((model) => model.id);
+      assert.equal(new Set(ids).size, ids.length, 'discovered model ids must be unique for keyed rendering');
+    }
+  });
+
+  await t.test('6. the custom provider draft URL drives the listing endpoint', async (t2) => {
     const calls = mockFetch(t2, async () => jsonResponse({ data: [{ id: 'llama3.2', name: 'Llama 3.2' }] }));
 
     const result = await discoverModels(
@@ -167,7 +223,7 @@ test('discoverModels: descriptor normalization through the real adapters', async
 });
 
 test('discoverRoutes: nanogpt-only, normalized, failures collapse to []', async (t) => {
-  await t.test('6. nanogpt routes normalize to {id, name} without provider metadata', async (t2) => {
+  await t.test('7. nanogpt routes normalize to {id, name} without provider metadata', async (t2) => {
     const calls = mockFetch(t2, async (url) => {
       assert.match(url, /\/api\/models\/.+\/providers$/);
       return jsonResponse({
@@ -192,7 +248,33 @@ test('discoverRoutes: nanogpt-only, normalized, failures collapse to []', async 
     assert.equal(calls.length, 1);
   });
 
-  await t.test('7. non-nanogpt providers resolve [] without any request (stubbed adapters)', async (t2) => {
+  await t.test('8. duplicate route ids collapse to a single first-wins entry', async (t2) => {
+    mockFetch(t2, async (url) => {
+      assert.match(url, /\/api\/models\/.+\/providers$/);
+      return jsonResponse({
+        providers: [
+          { provider: 'neuralwatt', available: true, tps: 210.2 },
+          { provider: 'neuralwatt', available: false },
+          { provider: 'runware', available: true }
+        ]
+      });
+    });
+
+    const routes = await discoverRoutes(
+      { providerId: 'nanogpt', modelId: 'minimax/minimax-m2.7' },
+      createResolverPort(),
+      'minimax/minimax-m2.7'
+    );
+
+    assert.deepEqual(routes, [
+      { id: 'neuralwatt', name: 'neuralwatt' },
+      { id: 'runware', name: 'runware' }
+    ], 'the first duplicate route entry must win');
+    const ids = routes.map((route) => route.id);
+    assert.equal(new Set(ids).size, ids.length, 'discovered route ids must be unique for keyed rendering');
+  });
+
+  await t.test('9. non-nanogpt providers resolve [] without any request (stubbed adapters)', async (t2) => {
     const calls = mockFetch(t2, async () => {
       throw new Error('non-nanogpt providers must not perform route discovery');
     });
@@ -207,7 +289,7 @@ test('discoverRoutes: nanogpt-only, normalized, failures collapse to []', async 
     assert.equal(calls.length, 0);
   });
 
-  await t.test('8. blank model ids and failed route lookups resolve []', async (t2) => {
+  await t.test('10. blank model ids and failed route lookups resolve []', async (t2) => {
     const calls = mockFetch(t2, async () => new Response('upstream exploded', { status: 503 }));
 
     assert.deepEqual(await discoverRoutes({ providerId: 'nanogpt' }, createResolverPort(), '   '), []);

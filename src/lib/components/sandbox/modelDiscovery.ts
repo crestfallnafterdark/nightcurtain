@@ -202,24 +202,32 @@ function readProviderId(modelConfig: DiscoveryModelConfig | null | undefined): s
 
 /**
  * Normalizes a provider listing to the display shape, dropping every extra
- * provider field (cost, pricing, raw payloads, ...).
+ * provider field (cost, pricing, raw payloads, ...). Provider catalogs can
+ * alias the same model id across multiple entries; the listing is deduped by
+ * trimmed id (first entry wins, keeping its name/contextLength), so the
+ * consumer can key its list by id.
  *
  * @param list - Provider result: `string | ModelDescriptor` entries.
- * @returns Normalized entries with usable ids.
+ * @returns Normalized entries with unique usable ids.
  */
 function normalizeModels(list: unknown): DiscoveredModel[] {
   if (!Array.isArray(list)) return [];
   const models: DiscoveredModel[] = [];
+  const seenIds = new Set<string>();
   for (const entry of list) {
     if (typeof entry === 'string') {
       const id = entry.trim();
-      if (id) models.push({ id, name: id });
+      if (id && !seenIds.has(id)) {
+        seenIds.add(id);
+        models.push({ id, name: id });
+      }
       continue;
     }
     if (!entry || typeof entry !== 'object') continue;
     const candidate = entry as { id?: unknown; name?: unknown; contextLength?: unknown };
     const id = typeof candidate.id === 'string' ? candidate.id.trim() : '';
-    if (!id) continue;
+    if (!id || seenIds.has(id)) continue;
+    seenIds.add(id);
     const rawName = typeof candidate.name === 'string' ? candidate.name.trim() : '';
     const name = rawName || id;
     const contextLength = candidate.contextLength;
@@ -233,24 +241,31 @@ function normalizeModels(list: unknown): DiscoveredModel[] {
 }
 
 /**
- * Normalizes a route listing to `{id, name}`, dropping provider metadata.
+ * Normalizes a route listing to `{id, name}`, dropping provider metadata and
+ * deduping by trimmed id (first entry wins) — upstream route payloads may
+ * alias the same provider id twice.
  *
  * @param routes - Provider result: `string | ProviderRoute` entries.
- * @returns Normalized routes with usable ids.
+ * @returns Normalized routes with unique usable ids.
  */
 function normalizeRoutes(routes: unknown): DiscoveredRoute[] {
   if (!Array.isArray(routes)) return [];
   const normalized: DiscoveredRoute[] = [];
+  const seenIds = new Set<string>();
   for (const entry of routes) {
     if (typeof entry === 'string') {
       const id = entry.trim();
-      if (id) normalized.push({ id, name: id });
+      if (id && !seenIds.has(id)) {
+        seenIds.add(id);
+        normalized.push({ id, name: id });
+      }
       continue;
     }
     if (!entry || typeof entry !== 'object') continue;
     const candidate = entry as { id?: unknown; name?: unknown };
     const id = typeof candidate.id === 'string' ? candidate.id.trim() : '';
-    if (!id) continue;
+    if (!id || seenIds.has(id)) continue;
+    seenIds.add(id);
     const rawName = typeof candidate.name === 'string' ? candidate.name.trim() : '';
     normalized.push({ id, name: rawName || id });
   }
