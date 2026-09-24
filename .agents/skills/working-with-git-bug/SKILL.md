@@ -153,7 +153,7 @@ Fallback without the bridge: `gh issue list --json … | node scripts/gitbug.mjs
 8. **Ids:** 7-char `shortId` is the durable ref; full 64-hex lives in `refs/bugs/`.
 9. **`git bug user user <id>`** is the working form; the usage string's `... user show` errors.
 10. **`push`/`pull`** move `refs/bugs/*` to/from a remote — off-limits without explicit approval.
-11. **Locks:** a stale `.git/git-bug/lock` can fail commands; retry, don't delete blindly.
+11. **Locks:** the wrapper serializes its own invocations with an advisory lock (`<git-common-dir>/gitbug-wrapper.lock`; `--lock-timeout`/`GITBUG_LOCK_TIMEOUT`, default 120 s; stale locks are reclaimed automatically) — concurrent wrapper calls queue instead of failing, and the old one-command-at-a-time/retry workaround is retired. Raw `git bug` calls made outside the wrapper are not serialized; prefer the wrapper.
 
 ## Derived data (index/cache)
 
