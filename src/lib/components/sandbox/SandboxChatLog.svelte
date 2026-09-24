@@ -146,7 +146,7 @@
               <button
                 type="button"
                 class="btn-undo-turn-header"
-                onclick={() => sandboxStore.undoAgentTurn(agent.id)}
+                onclick={() => sandboxStore.undoAgentTurn(agent.identityKey)}
                 title="Undo last completed turn for this agent"
                 disabled={isStreaming}
               >
@@ -197,10 +197,10 @@
               message={msg}
               isLatest={index === messages.length - 1}
               isLatestAssistant={index === lastAssistantIndex}
-              agentId={agent?.id}
+              agentId={agent?.identityKey}
               onEditMessage={handleEditMessage}
-              onDeleteMessage={(msgId) => sandboxStore.deleteAgentMessage(msgId, agent?.id)}
-              onUndoTurn={() => sandboxStore.undoAgentTurn(agent?.id)}
+              onDeleteMessage={(msgId) => sandboxStore.deleteAgentMessage(msgId, agent?.identityKey)}
+              onUndoTurn={() => sandboxStore.undoAgentTurn(agent?.identityKey)}
             />
           {/each}
         </div>
@@ -224,7 +224,7 @@
             <button
               type="button"
               class="btn-sm btn-resend-sandbox"
-              onclick={() => sandboxStore.retryAgentTurn(agent.id)}
+              onclick={() => sandboxStore.retryAgentTurn(agent.identityKey)}
               title="Retry the failed turn"
             >
               <svg class="icon-svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg>
@@ -233,7 +233,7 @@
             <button
               type="button"
               class="btn-sm btn-undo-sandbox"
-              onclick={() => sandboxStore.undoAgentTurn(agent.id)}
+              onclick={() => sandboxStore.undoAgentTurn(agent.identityKey)}
               title="Undo the failed turn and restore the prompt to the editor"
             >
               <svg class="icon-svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5v0a5.5 5.5 0 0 1-5.5 5.5H11"/></svg>
@@ -242,7 +242,7 @@
             <button
               type="button"
               class="btn-sm btn-dismiss-sandbox"
-              onclick={() => sandboxStore.clearAgentLastError(agent.id)}
+              onclick={() => sandboxStore.clearAgentLastError(agent.identityKey)}
               title="Dismiss error"
             >
               <span>Dismiss</span>
@@ -252,7 +252,7 @@
       {/if}
 
       <!-- Interrupted Agent Turn Notice (genuine cancellations only) -->
-      {#if agent && !failureReason && sandboxStore.isAgentInterrupted(agent.id) && !isStreaming}
+      {#if agent && !failureReason && sandboxStore.isAgentInterrupted(agent.identityKey) && !isStreaming}
         <div class="sandbox-interrupted-card glass-panel">
           <div class="sandbox-interrupted-header">
             <span class="sandbox-interrupted-dot"></span>
@@ -265,7 +265,7 @@
             <button
               type="button"
               class="btn-sm btn-resend-sandbox"
-              onclick={() => sandboxStore.retryAgentTurn(agent.id)}
+              onclick={() => sandboxStore.retryAgentTurn(agent.identityKey)}
               title="Resend this turn to the agent"
             >
               <svg class="icon-svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg>
@@ -274,7 +274,7 @@
             <button
               type="button"
               class="btn-sm btn-undo-sandbox"
-              onclick={() => sandboxStore.undoAgentTurn(agent.id)}
+              onclick={() => sandboxStore.undoAgentTurn(agent.identityKey)}
               title="Undo this turn and remove from history"
             >
               <svg class="icon-svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5v0a5.5 5.5 0 0 1-5.5 5.5H11"/></svg>

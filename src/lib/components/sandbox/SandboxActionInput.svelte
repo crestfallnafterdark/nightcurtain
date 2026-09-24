@@ -71,10 +71,15 @@
   // Reactive agent snapshot for the failure surface (QA-012). `lastError` is
   // redacted at the store boundary and survives reloads via persistence, so a
   // failed turn keeps its diagnostic reason instead of a generic notice.
+  // Defect 7d2c314: the caller passes the canonical identity key, so resolve
+  // it exactly first and keep a unique bare-id fallback for legacy callers.
   let inspectedAgent = $derived.by(() => {
-    const id = agentId || sandboxStore.selectedAgentId;
-    if (!id) return null;
-    return sandboxStore.agents.find(a => a.id === id) || null;
+    const ref = agentId || sandboxStore.selectedAgent?.identityKey;
+    if (!ref) return null;
+    const exact = sandboxStore.agents.find(a => a.identityKey === ref);
+    if (exact) return exact;
+    const matches = sandboxStore.agents.filter(a => a.id === ref);
+    return matches.length === 1 ? matches[0] : null;
   });
 
   let failureReason = $derived.by(() => {
@@ -92,7 +97,8 @@
 
   function handleDismissFailure() {
     if (!inspectedAgent) return;
-    sandboxStore.clearAgentLastError(inspectedAgent.id);
+    // Defect 7d2c314: clear through the exact registration key.
+    sandboxStore.clearAgentLastError(inspectedAgent.identityKey);
   }
 
   function autoResize() {

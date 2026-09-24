@@ -55,10 +55,11 @@
     }
   }
 
-  function handleRestore(agentId, agentName) {
+  function handleRestore(agent) {
     try {
-      const restored = sandboxStore.restoreAgent(agentId);
-      actionFeedback = `Agent "${agentName || agentId}" restored to active roster.`;
+      // Defect 7d2c314: restore the exact recycled registration.
+      const restored = sandboxStore.restoreAgent(agent.identityKey);
+      actionFeedback = `Agent "${agent.name || agent.id}" restored to active roster.`;
       setTimeout(() => { actionFeedback = ''; }, 3000);
     } catch (err) {
       actionFeedback = `Failed to restore agent: ${err.message}`;
@@ -66,13 +67,14 @@
     }
   }
 
-  function handlePurge(agentId, agentName) {
-    const ok = confirm(`Permanently purge agent "${agentName || agentId}"?\n\nThis will permanently delete the agent's memory, inboxes, private workspace files, and browser persistence.`);
+  function handlePurge(agent) {
+    const ok = confirm(`Permanently purge agent "${agent.name || agent.id}"?\n\nThis will permanently delete the agent's memory, inboxes, private workspace files, and browser persistence.`);
     if (!ok) return;
 
     try {
-      sandboxStore.purgeAgent(agentId);
-      actionFeedback = `Agent "${agentName || agentId}" permanently purged.`;
+      // Defect 7d2c314: purge the exact recycled registration.
+      sandboxStore.purgeAgent(agent.identityKey);
+      actionFeedback = `Agent "${agent.name || agent.id}" permanently purged.`;
       setTimeout(() => { actionFeedback = ''; }, 3000);
     } catch (err) {
       actionFeedback = `Failed to purge agent: ${err.message}`;
@@ -188,7 +190,7 @@
           </div>
         {:else}
           <div class="recycled-agent-list">
-            {#each sandboxStore.recycleBin as agent (agent.id)}
+            {#each sandboxStore.recycleBin as agent (agent.identityKey)}
               <div class="recycled-card glass-panel">
                 <div class="card-main">
                   <div class="card-top-row">
@@ -233,7 +235,7 @@
                   <button
                     type="button"
                     class="btn-restore"
-                    onclick={() => handleRestore(agent.id, agent.name)}
+                    onclick={() => handleRestore(agent)}
                     title="Restore agent back into active studio roster"
                   >
                     <svg class="icon-svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -246,7 +248,7 @@
                   <button
                     type="button"
                     class="btn-purge font-mono"
-                    onclick={() => handlePurge(agent.id, agent.name)}
+                    onclick={() => handlePurge(agent)}
                     title="Permanently obliterate this agent from memory and storage"
                   >
                     <svg class="icon-svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">

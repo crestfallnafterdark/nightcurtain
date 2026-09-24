@@ -106,7 +106,8 @@
     if (!ag) return;
     const ok = confirm(`Terminate agent "${ag.name || ag.id}" and move to Recycle Bin?\n\nThe agent will be soft-killed and moved to the Recycle Bin. You can restore it later with full conversation history preserved.`);
     if (ok) {
-      sandboxStore.killAgent(ag.id, 'Terminated by user');
+      // Defect 7d2c314: address the exact registration, never a bare-id twin.
+      sandboxStore.killAgent(ag.identityKey, 'Terminated by user');
     }
   }
 
@@ -122,11 +123,11 @@
 {#snippet agentCard(ag)}
   <div
     class="agent-card"
-    class:selected={sandboxStore.selectedAgentId === ag.id}
+    class:selected={sandboxStore.selectedAgent?.identityKey === ag.identityKey}
     role="button"
     tabindex="0"
-    onclick={() => sandboxStore.selectAgent(ag.id)}
-    onkeydown={(e) => { if (e.key === 'Enter') sandboxStore.selectAgent(ag.id); }}
+    onclick={() => sandboxStore.selectAgent(ag.identityKey)}
+    onkeydown={(e) => { if (e.key === 'Enter') sandboxStore.selectAgent(ag.identityKey); }}
   >
     <div class="card-top">
       <div class="agent-name-line">
@@ -169,7 +170,7 @@
         <button
           type="button"
           class="btn-cancel-mini"
-          onclick={(e) => { e.stopPropagation(); sandboxStore.cancelAgent(ag.id); }}
+          onclick={(e) => { e.stopPropagation(); sandboxStore.cancelAgent(ag.identityKey); }}
           title="Cancel active turn"
         >
           Cancel
@@ -500,15 +501,15 @@
               onEditAgent={() => sandboxStore.setActiveTab('settings')}
             />
             <SandboxActionInput
-              agentId={sandboxStore.selectedAgent?.id}
+              agentId={sandboxStore.selectedAgent?.identityKey}
               disabled={!sandboxStore.selectedAgent || sandboxStore.selectedAgent?.state === 'terminated'}
               isLoading={sandboxStore.isAgentStreaming}
-              hasInterruptedTurn={sandboxStore.isAgentInterrupted(sandboxStore.selectedAgent?.id)}
+              hasInterruptedTurn={sandboxStore.isAgentInterrupted(sandboxStore.selectedAgent?.identityKey)}
               hasHistory={Boolean(sandboxStore.selectedAgent?.history && sandboxStore.selectedAgent.history.length > 0)}
               onSend={handleSendChat}
               onCancel={() => sandboxStore.cancelActiveTurn()}
-              onResend={() => sandboxStore.retryAgentTurn(sandboxStore.selectedAgent?.id)}
-              onUndo={() => sandboxStore.undoAgentTurn(sandboxStore.selectedAgent?.id)}
+              onResend={() => sandboxStore.retryAgentTurn(sandboxStore.selectedAgent?.identityKey)}
+              onUndo={() => sandboxStore.undoAgentTurn(sandboxStore.selectedAgent?.identityKey)}
             />
           </div>
         {:else if sandboxStore.activeTab === 'settings'}

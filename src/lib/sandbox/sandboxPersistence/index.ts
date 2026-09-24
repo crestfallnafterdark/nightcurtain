@@ -275,6 +275,14 @@ export type PersistedTemplateAuthorityTrust =
 export interface SessionMetadata {
   /** Identifier of the currently selected active agent in the user interface. */
   readonly activeAgentId?: string | null;
+  /**
+   * Canonical `(realmId, agentId)` identity key of the currently selected
+   * active agent (defect 7d2c314). Additive optional field: absent on legacy
+   * snapshots, where hydration falls back to `activeAgentId`'s unique-match
+   * resolution; a realm-local agent whose literal id equals another scope's id
+   * is restored realm-exactly through this field.
+   */
+  readonly activeAgentKey?: string | null;
   /** Identifier of the currently selected virtual filesystem workspace partition. */
   readonly activeFsWorkspace?: string;
   /** Identifier of the currently active navigation tab (e.g., 'chat', 'fs', 'clock'). */
@@ -370,6 +378,12 @@ export interface RestoredMetadata {
   readonly timestamp: number;
   /** ID of the active agent selected prior to serialization. */
   readonly activeAgentId: string | null;
+  /**
+   * Canonical `(realmId, agentId)` identity key of the selected agent
+   * (defect 7d2c314), or `null` on legacy snapshots without the additive
+   * field.
+   */
+  readonly activeAgentKey: string | null;
   /** Active virtual filesystem workspace partition identifier. */
   readonly activeFsWorkspace: string;
   /** Active UI tab identifier. */
@@ -731,6 +745,13 @@ export interface SandboxPersistedState {
   readonly timestamp: number;
   /** ID of active agent in UI; null if none selected. */
   readonly activeAgentId: string | null;
+  /**
+   * Canonical `(realmId, agentId)` identity key of the selected agent
+   * (additive optional field, defect 7d2c314). Absent on legacy snapshots;
+   * an invalid (non-string) value is dropped during validation so an
+   * otherwise valid snapshot still loads.
+   */
+  readonly activeAgentKey?: string | null;
   /** Active virtual filesystem workspace identifier. */
   readonly activeFsWorkspace: string;
   /** Active UI navigation tab identifier. */
@@ -1927,10 +1948,32 @@ function inspectSandboxState(state: unknown): ValidationResult {
   // snapshots byte-compatible).
   return {
     valid: true,
-    state: normalizeImportedTemplateSnapshotFields(
-      normalizeRealmSnapshotFields(normalizePresetSnapshotFields(candidate))
+    state: normalizeActiveAgentKeyField(
+      normalizeImportedTemplateSnapshotFields(
+        normalizeRealmSnapshotFields(normalizePresetSnapshotFields(candidate))
+      )
     ) as unknown as SandboxPersistedState
   };
+}
+
+/**
+ * Normalizes the additive canonical selection key of an already structurally
+ * valid snapshot (defect 7d2c314). A non-empty string is kept verbatim, an
+ * absent or `null` value is preserved (the field is optional), and any other
+ * value is dropped, so a malformed key can never reach hydration. Returns the
+ * input reference when no field needs dropping, so clean legacy snapshots
+ * keep their exact identity.
+ *
+ * @param candidate - Structurally valid snapshot record.
+ * @returns The input reference, or a shallow copy with an invalid key dropped.
+ */
+function normalizeActiveAgentKeyField(candidate: Record<string, unknown>): Record<string, unknown> {
+  const value = candidate.activeAgentKey;
+  if (value === undefined || value === null) return candidate;
+  if (typeof value === 'string' && value.trim().length > 0) return candidate;
+  const normalized: Record<string, unknown> = { ...candidate };
+  delete normalized.activeAgentKey;
+  return normalized;
 }
 
 /**
@@ -2052,6 +2095,13 @@ export function serializeRuntimeEnvironment(
     ? sessionMeta.activeAgentId
     : (serializedAgents.length > 0 ? serializedAgents[0].id : null);
 
+  // Additive canonical selection key (defect 7d2c314): emitted as plain data
+  // alongside the legacy bare `activeAgentId`, so a realm-local agent whose
+  // literal id equals another scope's id restores its exact registration.
+  const activeAgentKey = typeof sessionMeta.activeAgentKey === 'string' && sessionMeta.activeAgentKey
+    ? sessionMeta.activeAgentKey
+    : null;
+
   const activeFsWorkspace = sessionMeta.activeFsWorkspace || 'global';
   const activeTab = sessionMeta.activeTab || 'inspector';
 
@@ -2108,6 +2158,7 @@ export function serializeRuntimeEnvironment(
     version: SANDBOX_PERSISTENCE_VERSION,
     timestamp: Date.now(),
     activeAgentId: activeAgentId || null,
+    activeAgentKey,
     activeFsWorkspace,
     activeTab,
     agents: serializedAgents,
@@ -2271,6 +2322,11 @@ export function restoreRuntimeEnvironment(
     version: persistedState.version,
     timestamp: persistedState.timestamp,
     activeAgentId: persistedState.activeAgentId || null,
+    // Additive canonical selection key (defect 7d2c314): `null` on legacy
+    // snapshots that predate the field.
+    activeAgentKey: typeof persistedState.activeAgentKey === 'string' && persistedState.activeAgentKey
+      ? persistedState.activeAgentKey
+      : null,
     activeFsWorkspace: persistedState.activeFsWorkspace || 'global',
     activeTab: persistedState.activeTab || 'inspector',
     agentDraftInputs: (persistedState.agentDraftInputs && typeof persistedState.agentDraftInputs === 'object')

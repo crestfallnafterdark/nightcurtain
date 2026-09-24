@@ -1488,7 +1488,11 @@ export class AgentRuntime {
     // import templates and submit hydration packages without an operator
     // grant; no other agent is composed this way.
     this.#directorHost = Object.freeze({
-      getAgent: (agentId: string) => this.getAgent(agentId),
+      // System-scope adoption (defect 7d2c314): the bootstrap-only director
+      // lives in the `system:<agentId>` namespace, so a realm-local agent whose
+      // literal id equals the director id is never adopted as the system
+      // director; when the system record is absent the domain re-provisions it.
+      getAgent: (agentId: string) => this.getAgent(createAgentIdentityKey(null, agentId)),
       launchAgent: (
         config: AgentConfig,
         model: LaunchAgentOptions['model'] = null,
@@ -3396,8 +3400,22 @@ export class AgentRuntime {
   /**
    * Clears the diagnostic error banner on an active or recycled agent without
    * mutating conversational history.
+   *
+   * Canonical-key resolution (defect 7d2c314): the lifecycle lookup only
+   * resolves bare ids, so the facade resolves the exact registration first —
+   * a canonical `(realmId, agentId)` identity key clears its own record even
+   * when the same literal id is live in another Realm — and clears through
+   * the entity's public `clearLastError` seam (the same call the lifecycle
+   * method makes). An unresolvable reference falls back to the lifecycle
+   * lookup, keeping the legacy bare-id semantics byte-compatible.
    */
   clearAgentLastError(agentId: string): boolean {
+    if (!agentId || typeof agentId !== 'string') return false;
+    const resolved = this.#activeByRef(agentId) || this.#recycledByRef(agentId);
+    if (resolved && typeof resolved.clearLastError === 'function') {
+      resolved.clearLastError();
+      return true;
+    }
     return this.#lifecycleManager.clearAgentLastError(agentId);
   }
 

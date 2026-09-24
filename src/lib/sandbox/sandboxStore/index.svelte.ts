@@ -487,6 +487,7 @@ export interface SandboxHydrationNotice {
  * ```typescript
  * const agentSnapshot: AgentStateSnapshot = {
  *   id: 'agent-writer',
+ *   identityKey: 'realm:realm_generic:agent-writer',
  *   name: 'Lead Writer',
  *   config: { id: 'agent-writer', name: 'Lead Writer', role: 'Author' },
  *   state: 'idle',
@@ -509,6 +510,14 @@ export interface SandboxHydrationNotice {
 export interface AgentStateSnapshot {
   /** Unique agent identifier string (e.g. `'director'`, `'agent-scout'`). */
   readonly id: string;
+  /**
+   * Canonical `(realmId, agentId)` identity key of this registration
+   * (`createAgentIdentityKey`; defect 7d2c314). Internal-only addressing
+   * reference: selection, lifecycle actions, and clock/event partitions
+   * resolve it realm-exactly, so the same literal id registered in another
+   * Realm is never shadowed.
+   */
+  readonly identityKey: string;
   /** Human-readable display name of the agent. */
   readonly name: string;
   /** Immutable launch and model configuration for this agent. */
@@ -557,6 +566,7 @@ export interface AgentStateSnapshot {
  * ```typescript
  * const recycled: RecycledAgentStateSnapshot = {
  *   id: 'agent-scout',
+ *   identityKey: 'realm:realm_generic:agent-scout',
  *   name: 'Scout Unit',
  *   config: { id: 'agent-scout', name: 'Scout Unit', role: 'Recon' },
  *   state: 'recycled',
@@ -578,6 +588,13 @@ export interface AgentStateSnapshot {
 export interface RecycledAgentStateSnapshot {
   /** Unique agent identifier string (e.g. `'agent-scout'`). */
   readonly id: string;
+  /**
+   * Canonical `(realmId, agentId)` identity key of this recycled
+   * registration (`createAgentIdentityKey`; defect 7d2c314), so restore and
+   * purge address the exact record even when the literal id is live in
+   * another Realm.
+   */
+  readonly identityKey: string;
   /** Human-readable display name of the agent. */
   readonly name: string;
   /** Immutable launch and model configuration for this agent. */
@@ -2724,15 +2741,18 @@ export class SandboxStore {
    */
   recycleBin = $state<RecycledAgentStateSnapshot[]>([]);
   /**
-   * Currently selected / focused agent ID across Chat Studio and Agent Inspector.
-   * `null` if no agent is currently active or selected.
+   * Canonical `(realmId, agentId)` identity key of the currently selected /
+   * focused agent across Chat Studio and Agent Inspector, or `null` when no
+   * agent is selected. The single source of truth for selection (defect
+   * 7d2c314): a realm-local agent whose literal id equals another scope's id
+   * is addressed realm-exactly and never shadowed by a bare-id match.
    * 
    * @example
    * ```typescript
-   * console.log('Currently focused agent:', sandboxStore.selectedAgentId);
+   * console.log('Currently focused agent key:', sandboxStore.selectedAgentKey);
    * ```
    */
-  selectedAgentId = $state<string | null>(null);
+  selectedAgentKey = $state<string | null>(null);
   /**
    * Complete chronological audit log of all messages routed through the `MessagingBus`.
    * Includes point-to-point, broadcast, and system delivery envelopes.
@@ -3266,8 +3286,14 @@ export class SandboxStore {
   }
 
   /**
-   * Pure derived getter returning the full normalized agent snapshot for `selectedAgentId`,
-   * or `null` if no agent is selected.
+   * Pure derived getter returning the full normalized agent snapshot for
+   * `selectedAgentKey`, or `null` if no agent is selected.
+   *
+   * Resolution (defect 7d2c314): an exact canonical `identityKey` match wins;
+   * otherwise a unique bare-id match keeps the legacy behavior for a raw
+   * reference (a pre-fix persisted selection or an explicit bare-id select);
+   * an ambiguous bare id resolves `null` (fail closed — never a wrong-Realm
+   * pick).
    * 
    * @example
    * ```typescript
@@ -3278,8 +3304,27 @@ export class SandboxStore {
    * ```
    */
   get selectedAgent(): AgentStateSnapshot | null {
-    if (!this.selectedAgentId) return null;
-    return this.agents.find(a => a.id === this.selectedAgentId) || null;
+    if (!this.selectedAgentKey) return null;
+    const exact = this.agents.find((agent) => agent.identityKey === this.selectedAgentKey);
+    if (exact) return exact;
+    const matches = this.agents.filter((agent) => agent.id === this.selectedAgentKey);
+    return matches.length === 1 ? matches[0] : null;
+  }
+
+  /**
+   * Derived bare realm-local id of the selected agent, or `null` when no
+   * agent is selected. Legacy read surface: selection is keyed by
+   * `selectedAgentKey`, so two same-literal-id registrations resolve
+   * independently through the key while this getter stays the realm-opaque
+   * display/label form.
+   * 
+   * @example
+   * ```typescript
+   * console.log('Currently focused agent:', sandboxStore.selectedAgentId);
+   * ```
+   */
+  get selectedAgentId(): string | null {
+    return this.selectedAgent?.id ?? null;
   }
 
   /**
@@ -3604,7 +3649,10 @@ export class SandboxStore {
    * ```
    */
   get selectedAgentClock(): AgentClockState | null {
-    const targetId = this.selectedAgentId || 'global';
+    // Defect 7d2c314: the selected registration's canonical partition is
+    // addressed exactly; the legacy bare fallback would collide for a
+    // same-literal-id pair.
+    const targetId = this.selectedAgent?.identityKey || 'global';
     return this.clockSnapshot[this.#agentPartitionKey(targetId)] || this.clockSnapshot['global'] || null;
   }
 
@@ -3627,7 +3675,7 @@ export class SandboxStore {
         pendingCount: 0
       };
     }
-    const targetId = this.selectedAgentId || 'global';
+    const targetId = this.selectedAgent?.identityKey || 'global';
     // Self-scope read: the selected agent's own partition plus public global
     // events; caller-declared privilege flags never widen visibility. Wave I
     // (ticket d57cbc1): the agent-scoped context forwards the canonical
@@ -3745,9 +3793,10 @@ export class SandboxStore {
       this.#syncMessages();
       this.#syncFsSnapshot();
       this.#syncClockSnapshot();
-      this.selectedAgentId = agent.id;
+      const launchedSnapshot = this.#requireAgentSnapshot(agent.id, agent.config?.realmId ?? null);
+      this.selectAgent(launchedSnapshot.identityKey);
       this.#scheduleAutoSave();
-      return this.#requireAgentSnapshot(agent.id, agent.config?.realmId ?? null);
+      return launchedSnapshot;
     } catch (err) {
       this.error = thrownMessage(err, String(err));
       throw err;
@@ -3786,14 +3835,20 @@ export class SandboxStore {
     // are never honored by the runtime.
     const operatorContext = this.#operatorContext();
     const authority = operatorContext.principal ? operatorContext : callerContext;
-    const killed = this.#runtime.killAgent(agentId, reason, authority);
+    // Action-boundary normalization (defect 7d2c314): a canonical identity
+    // key or a unique bare id resolves to the exact registration; an
+    // ambiguous or unresolvable reference is forwarded raw and the runtime
+    // fails closed.
+    const targetRef = this.#canonicalRef(agentId) || agentId;
+    const selectedBefore = this.selectedAgent;
+    const killed = this.#runtime.killAgent(targetRef, reason, authority);
     this.#syncAgents();
     this.#syncRecycleBin();
     this.#syncMessages();
     this.#syncFsSnapshot();
     this.#syncClockSnapshot();
-    if (this.selectedAgentId === agentId) {
-      this.selectedAgentId = this.agents.length > 0 ? this.agents[0].id : null;
+    if (selectedBefore && (selectedBefore.identityKey === targetRef || selectedBefore.id === agentId)) {
+      this.selectAgent(this.agents.length > 0 ? this.agents[0].identityKey : null);
     }
     this.#scheduleAutoSave();
     return Boolean(killed);
@@ -3817,12 +3872,15 @@ export class SandboxStore {
    * ```
    */
   restoreAgent(agentId: string): AgentStateSnapshot {
-    if (!agentId || !this.getRecycledAgent(agentId)) {
+    // Action-boundary normalization (defect 7d2c314): a canonical identity
+    // key or a unique bare id resolves the exact recycled registration.
+    const targetRef = this.#canonicalRef(agentId) || agentId;
+    if (!targetRef || !this.#recycledSnapshotForRef(targetRef)) {
       const err: CodedError = new Error(SANDBOX_STORE_ERROR_CODES.ERR_STORE_AGENT_NOT_FOUND);
       err.code = SANDBOX_STORE_ERROR_CODES.ERR_STORE_AGENT_NOT_FOUND;
       throw err;
     }
-    const restored = this.#runtime.restoreAgent(agentId, this.#lifecycleAuthorityContext(agentId));
+    const restored = this.#runtime.restoreAgent(targetRef, this.#lifecycleAuthorityContext(targetRef));
     // Wave R (ticket 56ba4b9): membership never moves, so restore never
     // re-groups. Deletion now refuses non-empty realms and the recursive
     // override empties recycled members, so a restored member can no longer
@@ -3832,9 +3890,10 @@ export class SandboxStore {
     this.#syncMessages();
     this.#syncFsSnapshot();
     this.#syncClockSnapshot();
-    this.selectedAgentId = restored.id;
+    const restoredSnapshot = this.#requireAgentSnapshot(restored.id, restored.config?.realmId ?? null);
+    this.selectAgent(restoredSnapshot.identityKey);
     this.#scheduleAutoSave();
-    return this.#requireAgentSnapshot(restored.id);
+    return restoredSnapshot;
   }
 
   /**
@@ -3853,14 +3912,18 @@ export class SandboxStore {
    * ```
    */
   purgeAgent(agentId: string): boolean {
-    const purged = this.#runtime.purgeAgent(agentId, this.#operatorContext());
+    // Action-boundary normalization (defect 7d2c314): a canonical identity
+    // key or a unique bare id resolves the exact registration.
+    const targetRef = this.#canonicalRef(agentId) || agentId;
+    const selectedBefore = this.selectedAgent;
+    const purged = this.#runtime.purgeAgent(targetRef, this.#operatorContext());
     this.#syncAgents();
     this.#syncRecycleBin();
     this.#syncMessages();
     this.#syncFsSnapshot();
     this.#syncClockSnapshot();
-    if (this.selectedAgentId === agentId) {
-      this.selectedAgentId = this.agents.length > 0 ? this.agents[0].id : null;
+    if (selectedBefore && (selectedBefore.identityKey === targetRef || selectedBefore.id === agentId)) {
+      this.selectAgent(this.agents.length > 0 ? this.agents[0].identityKey : null);
     }
     this.#scheduleAutoSave();
     return purged;
@@ -3921,6 +3984,10 @@ export class SandboxStore {
    * ```
    */
   getRecycledAgent(agentId: string): RecycledAgentStateSnapshot | null {
+    // Defect 7d2c314: a canonical identity key addresses its exact recycled
+    // registration; the bare-id fallback keeps the legacy first-match read.
+    const exact = this.recycleBin.find((agent) => agent.identityKey === agentId);
+    if (exact) return exact;
     return this.recycleBin.find(a => a.id === agentId) || null;
   }
 
@@ -3954,8 +4021,11 @@ export class SandboxStore {
    * ```
    */
   updateAgentConfig(agentId: string, updatedConfig: AgentConfigUpdate): AgentStateSnapshot {
-    const targetId = agentId || this.selectedAgentId;
-    if (!targetId || !this.agents.some(a => a.id === targetId)) {
+    // Action-boundary normalization (defect 7d2c314): the target resolves to
+    // the exact active registration (identity key first, unique bare id
+    // otherwise); an empty ref falls back to the selected registration.
+    const targetRef = agentId ? this.#canonicalRef(agentId) : this.selectedAgentKey;
+    if (!targetRef || !this.#activeSnapshotForRef(targetRef)) {
       const err: CodedError = new Error(SANDBOX_STORE_ERROR_CODES.ERR_STORE_AGENT_NOT_FOUND);
       err.code = SANDBOX_STORE_ERROR_CODES.ERR_STORE_AGENT_NOT_FOUND;
       throw err;
@@ -3965,10 +4035,10 @@ export class SandboxStore {
     // roles) are validated by the runtime against the host operator principal
     // before any mutation; they are never applied silently through an
     // anonymous update.
-    const updated = this.#runtime.updateAgentConfig(targetId, updatedConfig, this.#operatorContext());
+    const updated = this.#runtime.updateAgentConfig(targetRef, updatedConfig, this.#operatorContext());
     this.#syncAgents();
     this.#scheduleAutoSave();
-    return this.#requireAgentSnapshot(updated.id);
+    return this.#requireAgentSnapshot(updated.id, updated.config?.realmId ?? null);
   }
 
   /**
@@ -4239,23 +4309,56 @@ export class SandboxStore {
     const director = await this.#runtime.ensureDirector();
     this.#syncAgents();
     this.#syncClockSnapshot();
-    return this.#requireAgentSnapshot(director.id);
+    // System-scope resolution (defect 7d2c314): the adopted director is the
+    // bootstrap-only `realmId: null` registration, never a realm-local
+    // same-literal-id member.
+    return this.#requireAgentSnapshot(director.id, director.config?.realmId ?? null);
   }
 
   /**
-   * Changes the focused agent ID for chat conversation, action input, and telemetry inspection.
+   * Changes the focused agent for chat conversation, action input, and telemetry inspection.
    * Persists selection preference to storage.
+   *
+   * Resolution (defect 7d2c314): an exact canonical `identityKey` match wins;
+   * otherwise the reference is filtered by bare id (plus Realm when `realmId`
+   * is supplied) and a unique match selects its canonical key. An unresolvable
+   * or ambiguous reference is stored raw — `selectedAgent` then resolves it
+   * only while it is unique and otherwise fails closed.
    * 
-   * @param agentId - ID of the agent to select, or `null` to clear selection.
+   * @param agentId - Canonical identity key, bare agent id, or `null` to clear selection.
+   * @param realmId - Optional Realm scope for a bare id (`null` = system scope).
    * 
    * @example
    * ```typescript
    * sandboxStore.selectAgent('agent-scout');
+   * sandboxStore.selectAgent('director', null);
    * console.log('Selected agent:', sandboxStore.selectedAgent?.name);
    * ```
    */
-  selectAgent(agentId: string | null): void {
-    this.selectedAgentId = agentId;
+  selectAgent(agentId: string | null, realmId?: string | null): void {
+    const ref = typeof agentId === 'string' && agentId ? agentId : null;
+    if (!ref) {
+      this.selectedAgentKey = null;
+      this.#scheduleAutoSave();
+      return;
+    }
+    const exact = this.agents.find((agent) => agent.identityKey === ref);
+    if (exact) {
+      this.selectedAgentKey = exact.identityKey;
+      this.#scheduleAutoSave();
+      return;
+    }
+    const scoped = realmId !== undefined;
+    const candidates = this.agents.filter((agent) => agent.id === ref
+      && (!scoped || (agent.config?.realmId ?? null) === (realmId ?? null)));
+    if (candidates.length === 1) {
+      this.selectedAgentKey = candidates[0].identityKey;
+      this.#scheduleAutoSave();
+      return;
+    }
+    // An explicit Realm scope is authoritative: a scoped miss fails closed
+    // instead of falling through to another scope's same-literal-id twin.
+    this.selectedAgentKey = scoped ? null : ref;
     this.#scheduleAutoSave();
   }
 
@@ -4289,14 +4392,18 @@ export class SandboxStore {
    * ```
    */
   async submitChatTurn(text: string, options: TurnOptions | string = 'directive'): Promise<TurnResult> {
-    if (!this.selectedAgentId) {
+    // Defect 7d2c314: the turn targets the selected registration exactly; an
+    // unresolved/ambiguous selection reports NO_AGENT_SELECTED instead of
+    // letting a bare-id fallback retarget another Realm's twin.
+    const selected = this.selectedAgent;
+    if (!selected) {
       const err: CodedError = new Error(SANDBOX_STORE_ERROR_CODES.ERR_STORE_NO_AGENT_SELECTED);
       err.code = SANDBOX_STORE_ERROR_CODES.ERR_STORE_NO_AGENT_SELECTED;
       throw err;
     }
-    const agentId = this.selectedAgentId;
-    const result = await this.triggerTurn(agentId, text, options);
-    this.clearAgentDraft(agentId);
+    const agentRef = selected.identityKey;
+    const result = await this.triggerTurn(agentRef, text, options);
+    this.clearAgentDraft(agentRef);
     return result;
   }
 
@@ -4324,13 +4431,16 @@ export class SandboxStore {
    * ```
    */
   async triggerTurn(agentId: string, prompt: TurnInput = null, options: TurnOptions | string = {}): Promise<TurnResult> {
-    const targetId = agentId || this.selectedAgentId;
-    if (!targetId) {
+    // Action-boundary normalization (defect 7d2c314): identity key or unique
+    // bare id resolves the exact registration; an empty ref uses the
+    // selected registration.
+    const targetRef = agentId ? this.#canonicalRef(agentId) : this.selectedAgentKey;
+    if (!targetRef) {
       const err: CodedError = new Error(SANDBOX_STORE_ERROR_CODES.ERR_STORE_NO_AGENT_SELECTED);
       err.code = SANDBOX_STORE_ERROR_CODES.ERR_STORE_NO_AGENT_SELECTED;
       throw err;
     }
-    if (!this.agents.some(a => a.id === targetId)) {
+    if (!this.#activeSnapshotForRef(targetRef)) {
       const err: CodedError = new Error(SANDBOX_STORE_ERROR_CODES.ERR_STORE_AGENT_NOT_FOUND);
       err.code = SANDBOX_STORE_ERROR_CODES.ERR_STORE_AGENT_NOT_FOUND;
       throw err;
@@ -4352,7 +4462,7 @@ export class SandboxStore {
           /* Best-effort forwarding: an upstream onChunk throw must not break the live mirror. */
         }
       }
-      this.#mirrorAgentLiveFields(targetId);
+      this.#mirrorAgentLiveFields(targetRef);
     };
     // The runtime's `TurnExecutionOptions.mode` narrows to the canonical
     // orchestrator actions, while its turn engine also accepts the legacy
@@ -4365,14 +4475,14 @@ export class SandboxStore {
       // turn is enqueued as a TRIGGER_TYPES.USER trigger and executed by
       // TriggerDispatcher; the direct call remains only as a no-queue fallback.
       const result = (this.#runtime.triggerQueue && typeof this.#runtime.enqueueUserTurn === 'function')
-        ? await this.#runtime.enqueueUserTurn(targetId, prompt, forwardedOptions)
-        : await this.#runtime.executeAgentTurn(targetId, prompt, forwardedOptions);
+        ? await this.#runtime.enqueueUserTurn(targetRef, prompt, forwardedOptions)
+        : await this.#runtime.executeAgentTurn(targetRef, prompt, forwardedOptions);
       this.#syncAgents();
       this.#syncMessages();
       this.#syncFsSnapshot();
       this.#syncClockSnapshot();
       this.#scheduleAutoSave();
-      const updatedAgent = this.agents.find(a => a.id === targetId) || result?.agent;
+      const updatedAgent = this.#activeSnapshotForRef(targetRef) || result?.agent;
       return {
         agent: updatedAgent,
         output: result?.output ?? '',
@@ -4412,10 +4522,13 @@ export class SandboxStore {
    * ```
    */
   unstickAgent(agentId: string | null = null): UnstickResult {
-    const targetId = agentId || this.selectedAgentId;
-    if (!targetId) return { success: false };
+    // Action-boundary normalization (defect 7d2c314): identity key or unique
+    // bare id resolves the exact registration; an empty ref uses the
+    // selected registration.
+    const targetRef = agentId ? this.#canonicalRef(agentId) : this.selectedAgentKey;
+    if (!targetRef) return { success: false };
 
-    const result = this.#runtime.unstickAgent(targetId, undefined, this.#lifecycleAuthorityContext(targetId));
+    const result = this.#runtime.unstickAgent(targetRef, undefined, this.#lifecycleAuthorityContext(targetRef));
     this.#syncAgents();
     this.#syncMessages();
     this.#syncFsSnapshot();
@@ -4434,8 +4547,8 @@ export class SandboxStore {
    * ```
    */
   cancelActiveTurn(): void {
-    if (this.selectedAgentId) {
-      this.unstickAgent(this.selectedAgentId);
+    if (this.selectedAgentKey) {
+      this.unstickAgent(this.selectedAgentKey);
     }
   }
 
@@ -4452,7 +4565,9 @@ export class SandboxStore {
    * ```
    */
   cancelAgent(agentId: string): void {
-    this.#runtime.cancelAgent(agentId, undefined, this.#lifecycleAuthorityContext(agentId));
+    // Action-boundary normalization (defect 7d2c314).
+    const targetRef = this.#canonicalRef(agentId) || agentId;
+    this.#runtime.cancelAgent(targetRef, undefined, this.#lifecycleAuthorityContext(targetRef));
     this.#syncAgents();
     this.#scheduleAutoSave();
   }
@@ -4490,17 +4605,20 @@ export class SandboxStore {
    * ```
    */
   async retryAgentTurn(agentId: string | null = null): Promise<TurnResult | null> {
-    const targetId = agentId || this.selectedAgentId;
-    if (!targetId) return null;
+    // Action-boundary normalization (defect 7d2c314): identity key or unique
+    // bare id resolves the exact registration; an empty ref uses the
+    // selected registration.
+    const targetRef = agentId ? this.#canonicalRef(agentId) : this.selectedAgentKey;
+    if (!targetRef) return null;
     this.error = null;
     try {
-      const res = await this.#runtime.retryAgentTurn(targetId);
+      const res = await this.#runtime.retryAgentTurn(targetRef);
       this.#syncAgents();
       this.#syncMessages();
       this.#syncFsSnapshot();
       this.#syncClockSnapshot();
       this.#scheduleAutoSave();
-      const updatedAgent = this.agents.find(a => a.id === targetId) || res?.agent;
+      const updatedAgent = this.#activeSnapshotForRef(targetRef) || res?.agent;
       return {
         agent: updatedAgent,
         output: res?.output ?? '',
@@ -4537,9 +4655,10 @@ export class SandboxStore {
    * ```
    */
   undoAgentTurn(agentId: string | null = null): UndoTurnResult | null {
-    const targetId = agentId || this.selectedAgentId;
-    if (!targetId) return null;
-    const runtimeRes = this.#runtime.undoAgentTurn(targetId);
+    // Action-boundary normalization (defect 7d2c314).
+    const targetRef = agentId ? this.#canonicalRef(agentId) : this.selectedAgentKey;
+    if (!targetRef) return null;
+    const runtimeRes = this.#runtime.undoAgentTurn(targetRef);
     if ('success' in runtimeRes) {
       // Selection failures require an explicit turn selector; this surface
       // never forwards one, so the runtime always returns a successful receipt.
@@ -4549,7 +4668,7 @@ export class SandboxStore {
     if (res) {
       const restoredText = res.restoredPrompt || (typeof res.undoneUserContent === 'string' ? res.undoneUserContent : String(res.undoneUserContent?.content || ''));
       if (restoredText) {
-        this.setAgentDraft(targetId, restoredText);
+        this.setAgentDraft(targetRef, restoredText);
       }
     }
     this.#syncAgents();
@@ -4577,13 +4696,14 @@ export class SandboxStore {
    * ```
    */
   redoAgentTurn(agentId: string | null = null): RedoTurnResult | null {
-    const targetId = agentId || this.selectedAgentId;
-    if (!targetId) return null;
-    const res = this.#runtime.redoAgentTurn(targetId);
+    // Action-boundary normalization (defect 7d2c314).
+    const targetRef = agentId ? this.#canonicalRef(agentId) : this.selectedAgentKey;
+    if (!targetRef) return null;
+    const res = this.#runtime.redoAgentTurn(targetRef);
     if (res && res.success) {
-      const currentDraft = this.getAgentDraft(targetId);
+      const currentDraft = this.getAgentDraft(targetRef);
       if (currentDraft && currentDraft === res.restoredPrompt) {
-        this.clearAgentDraft(targetId);
+        this.clearAgentDraft(targetRef);
       }
     }
     this.#syncAgents();
@@ -4608,9 +4728,10 @@ export class SandboxStore {
    * ```
    */
   isAgentInterrupted(agentId: string | null = null): boolean {
-    const targetId = agentId || this.selectedAgentId;
-    if (!targetId) return false;
-    return this.#runtime.isAgentInterrupted(targetId);
+    // Action-boundary normalization (defect 7d2c314).
+    const targetRef = agentId ? this.#canonicalRef(agentId) : this.selectedAgentKey;
+    if (!targetRef) return false;
+    return this.#runtime.isAgentInterrupted(targetRef);
   }
 
   /**
@@ -4624,9 +4745,11 @@ export class SandboxStore {
    * ```
    */
   clearAgentLastError(agentId: string | null = null): void {
-    const targetId = agentId || this.selectedAgentId;
-    if (!targetId || !this.#runtime) return;
-    this.#runtime.clearAgentLastError(targetId);
+    // Action-boundary normalization (defect 7d2c314); the runtime resolves a
+    // canonical key realm-exactly over active and recycled registrations.
+    const targetRef = agentId ? this.#canonicalRef(agentId) : this.selectedAgentKey;
+    if (!targetRef || !this.#runtime) return;
+    this.#runtime.clearAgentLastError(targetRef);
     this.#syncAgents();
     this.#scheduleAutoSave();
   }
@@ -4644,10 +4767,11 @@ export class SandboxStore {
    * ```
    */
   clearAgentTelemetry(agentId: string | null = null): boolean {
-    const targetId = agentId || this.selectedAgentId;
-    if (!targetId || !this.#runtime) return false;
-    const res = this.#runtime.clearAgentTelemetry(targetId);
-    const agent = this.agents.find(a => a.id === targetId);
+    // Action-boundary normalization (defect 7d2c314).
+    const targetRef = agentId ? this.#canonicalRef(agentId) : this.selectedAgentKey;
+    if (!targetRef || !this.#runtime) return false;
+    const res = this.#runtime.clearAgentTelemetry(targetRef);
+    const agent = this.#snapshotForRef(targetRef);
     this.#syncAgents();
     this.#scheduleAutoSave();
     return Boolean(res || agent);
@@ -4671,7 +4795,11 @@ export class SandboxStore {
    */
   getAgentDraft(agentId: string): string {
     if (!agentId) return '';
-    return this.agentDraftInputs[agentId] || '';
+    // Defect 7d2c314: an identity-key ref resolves to the snapshot's bare id
+    // (the persisted draft map key contract), so UI call sites passing
+    // `identityKey` keep reading their own agent's draft.
+    const key = this.#draftKeyForRef(agentId);
+    return this.agentDraftInputs[key] || '';
   }
 
   /**
@@ -4687,10 +4815,14 @@ export class SandboxStore {
    */
   setAgentDraft(agentId: string, text: string): void {
     if (!agentId) return;
-    this.agentDraftInputs = {
-      ...this.agentDraftInputs,
-      [agentId]: String(text ?? '')
-    };
+    // Defect 7d2c314: normalize an identity-key ref onto the snapshot's bare
+    // id (the persisted draft map key contract) and migrate a legacy
+    // bare-keyed entry so no stale shared draft survives the write.
+    const key = this.#draftKeyForRef(agentId);
+    const next = { ...this.agentDraftInputs };
+    if (key !== agentId) delete next[agentId];
+    next[key] = String(text ?? '');
+    this.agentDraftInputs = next;
     this.#scheduleAutoSave();
   }
 
@@ -4706,8 +4838,12 @@ export class SandboxStore {
    */
   clearAgentDraft(agentId: string): void {
     if (!agentId) return;
+    // Defect 7d2c314: clear both the resolved bare-id key and the raw ref so
+    // an identity-key call clears the legacy entry too.
+    const key = this.#draftKeyForRef(agentId);
     const next = { ...this.agentDraftInputs };
-    delete next[agentId];
+    delete next[key];
+    if (key !== agentId) delete next[agentId];
     this.agentDraftInputs = next;
     this.#scheduleAutoSave();
   }
@@ -4733,13 +4869,14 @@ export class SandboxStore {
    * ```
    */
   updateHistoryMessage(agentId: string, messageIndexOrId: string | number, updatedFields: HistoryMessageUpdate): HistoryMessage {
-    const targetId = agentId || this.selectedAgentId;
-    if (!targetId || !this.agents.some(a => a.id === targetId)) {
+    // Action-boundary normalization (defect 7d2c314).
+    const targetRef = agentId ? this.#canonicalRef(agentId) : this.selectedAgentKey;
+    if (!targetRef || !this.#activeSnapshotForRef(targetRef)) {
       const err: CodedError = new Error(SANDBOX_STORE_ERROR_CODES.ERR_STORE_AGENT_NOT_FOUND);
       err.code = SANDBOX_STORE_ERROR_CODES.ERR_STORE_AGENT_NOT_FOUND;
       throw err;
     }
-    const updated = this.#runtime.updateHistoryMessage(targetId, messageIndexOrId, updatedFields);
+    const updated = this.#runtime.updateHistoryMessage(targetRef, messageIndexOrId, updatedFields);
     this.#syncAgents();
     this.#scheduleAutoSave();
     return updated;
@@ -4759,12 +4896,12 @@ export class SandboxStore {
    * ```
    */
   editAgentMessage(messageId: string | number, newContent: string): HistoryMessage {
-    if (!this.selectedAgentId) {
+    if (!this.selectedAgentKey) {
       const err: CodedError = new Error(SANDBOX_STORE_ERROR_CODES.ERR_STORE_NO_AGENT_SELECTED);
       err.code = SANDBOX_STORE_ERROR_CODES.ERR_STORE_NO_AGENT_SELECTED;
       throw err;
     }
-    return this.updateHistoryMessage(this.selectedAgentId, messageId, { content: newContent });
+    return this.updateHistoryMessage(this.selectedAgentKey, messageId, { content: newContent });
   }
 
   /**
@@ -4782,13 +4919,14 @@ export class SandboxStore {
    * ```
    */
   deleteHistoryMessage(agentId: string, messageIndexOrId: string | number): boolean {
-    const targetId = agentId || this.selectedAgentId;
-    if (!targetId || !this.agents.some(a => a.id === targetId)) {
+    // Action-boundary normalization (defect 7d2c314).
+    const targetRef = agentId ? this.#canonicalRef(agentId) : this.selectedAgentKey;
+    if (!targetRef || !this.#activeSnapshotForRef(targetRef)) {
       const err: CodedError = new Error(SANDBOX_STORE_ERROR_CODES.ERR_STORE_AGENT_NOT_FOUND);
       err.code = SANDBOX_STORE_ERROR_CODES.ERR_STORE_AGENT_NOT_FOUND;
       throw err;
     }
-    const deleted = this.#runtime.deleteHistoryMessage(targetId, messageIndexOrId);
+    const deleted = this.#runtime.deleteHistoryMessage(targetRef, messageIndexOrId);
     this.#syncAgents();
     this.#scheduleAutoSave();
     return deleted;
@@ -4807,13 +4945,14 @@ export class SandboxStore {
    * ```
    */
   deleteAgentMessage(messageIndexOrId: string | number, agentId: string | null = null): boolean {
-    const targetId = agentId || this.selectedAgentId;
-    if (!targetId) {
+    // Action-boundary normalization (defect 7d2c314).
+    const targetRef = agentId ? this.#canonicalRef(agentId) : this.selectedAgentKey;
+    if (!targetRef) {
       const err: CodedError = new Error(SANDBOX_STORE_ERROR_CODES.ERR_STORE_NO_AGENT_SELECTED);
       err.code = SANDBOX_STORE_ERROR_CODES.ERR_STORE_NO_AGENT_SELECTED;
       throw err;
     }
-    return this.deleteHistoryMessage(targetId, messageIndexOrId);
+    return this.deleteHistoryMessage(targetRef, messageIndexOrId);
   }
 
   // ==========================================================================
@@ -5028,14 +5167,17 @@ export class SandboxStore {
       err.code = SANDBOX_STORE_ERROR_CODES.ERR_STORE_INVALID_PARAMS;
       throw err;
     }
-    const targetId = agentId || this.selectedAgentId;
-    if (!targetId || !this.agents.some(a => a.id === targetId)) {
+    // Action-boundary normalization (defect 7d2c314): identity key or unique
+    // bare id resolves the exact active registration; an empty ref uses the
+    // selected registration.
+    const targetRef = agentId ? this.#canonicalRef(agentId) : this.selectedAgentKey;
+    if (!targetRef || !this.#activeSnapshotForRef(targetRef)) {
       const err: CodedError = new Error(SANDBOX_STORE_ERROR_CODES.ERR_STORE_INVALID_PARAMS);
       err.code = SANDBOX_STORE_ERROR_CODES.ERR_STORE_INVALID_PARAMS;
       throw err;
     }
     const result = this.#runtime.schedule({
-      agentId: targetId,
+      agentId: targetRef,
       durationSeconds,
       prompt,
       timerCondition
@@ -5533,7 +5675,10 @@ export class SandboxStore {
    * ```
    */
   resetAgentEvents(agentId: string | null = null): NarrativeResetReceipt {
-    const targetId = agentId || this.selectedAgentId || 'global';
+    // Defect 7d2c314: identity key or unique bare id resolves the exact
+    // registration before the existing `#agentPartitionKey` canonicalization
+    // (never bypassed).
+    const targetId = this.#canonicalRef(agentId || this.selectedAgentKey) || 'global';
     if (!this.#worldClock) return { success: false, cleared: 0 };
     const result = this.#worldClock.clearEvents(this.#agentPartitionKey(targetId), this.#clockAuthorityContext(targetId));
     this.#syncFsSnapshot();
@@ -5558,7 +5703,10 @@ export class SandboxStore {
    * ```
    */
   resetAgentClock(agentId: string | null = null): ClockResetReceipt {
-    const targetId = agentId || this.selectedAgentId || 'global';
+    // Defect 7d2c314: identity key or unique bare id resolves the exact
+    // registration before the existing `#agentPartitionKey` canonicalization
+    // (never bypassed).
+    const targetId = this.#canonicalRef(agentId || this.selectedAgentKey) || 'global';
     if (!this.#worldClock) return { success: false };
     const result = this.#worldClock.resetClock(this.#agentPartitionKey(targetId), this.#clockAuthorityContext(targetId));
     this.#syncFsSnapshot();
@@ -5581,7 +5729,10 @@ export class SandboxStore {
    * ```
    */
   advanceAgentClock(seconds: number, agentId: string | null = null): AgentClockState {
-    const targetId = agentId || this.selectedAgentId || 'global';
+    // Defect 7d2c314: identity key or unique bare id resolves the exact
+    // registration before the existing `#agentPartitionKey` canonicalization
+    // (never bypassed).
+    const targetId = this.#canonicalRef(agentId || this.selectedAgentKey) || 'global';
     if (!this.#worldClock) {
       return this.getAgentClock(targetId);
     }
@@ -5621,7 +5772,10 @@ export class SandboxStore {
    * ```
    */
   getAgentClock(agentId: string | null = null): AgentClockState {
-    const targetId = agentId || this.selectedAgentId || 'global';
+    // Defect 7d2c314: identity key or unique bare id resolves the exact
+    // registration before the existing `#agentPartitionKey` canonicalization
+    // (never bypassed).
+    const targetId = this.#canonicalRef(agentId || this.selectedAgentKey) || 'global';
     // Wave I (ticket d57cbc1): resolve the partition form the runtime currently
     // keys by (canonical once wiring lands, bare otherwise) so a realm-bound
     // agent's own clock is found instead of silently falling back to global.
@@ -5664,7 +5818,10 @@ export class SandboxStore {
    * ```
    */
   queryAgentEvents(options: EventQueryOptions = {}, agentId: string | null = null): AgentEventsQueryState {
-    const targetId = agentId || this.selectedAgentId || 'global';
+    // Defect 7d2c314: identity key or unique bare id resolves the exact
+    // registration before the existing `#agentPartitionKey` canonicalization
+    // (never bypassed).
+    const targetId = this.#canonicalRef(agentId || this.selectedAgentKey) || 'global';
     if (!this.#worldClock || typeof this.#worldClock.queryEvents !== 'function') {
       return {
         events: [],
@@ -7450,6 +7607,10 @@ export class SandboxStore {
   serialize(): SandboxPersistedState {
     const snapshot: AuthorityGrantSnapshot = serializeRuntimeEnvironment(this.#runtime, {
       activeAgentId: this.selectedAgentId,
+      // Defect 7d2c314: the canonical selection key rides the additive
+      // `activeAgentKey` field so hydration restores the exact registration
+      // (the bare `activeAgentId` stays the legacy realm-opaque display form).
+      activeAgentKey: this.selectedAgentKey,
       activeFsWorkspace: this.activeFsWorkspace,
       activeTab: this.activeTab,
       agentDraftInputs: { ...this.agentDraftInputs },
@@ -7614,8 +7775,16 @@ export class SandboxStore {
         this.#syncFsSnapshot();
         this.#syncScheduledTimers();
         this.#syncClockSnapshot();
-        if (persistedState.activeAgentId) {
-          this.selectedAgentId = persistedState.activeAgentId;
+        // Defect 7d2c314: prefer the persisted canonical selection key; a
+        // legacy snapshot without it falls back to the bare `activeAgentId`
+        // (unique-match resolution or none).
+        const persistedSelectionKey = typeof persistedState.activeAgentKey === 'string' && persistedState.activeAgentKey
+          ? persistedState.activeAgentKey
+          : null;
+        if (persistedSelectionKey) {
+          this.selectAgent(persistedSelectionKey);
+        } else if (persistedState.activeAgentId) {
+          this.selectAgent(persistedState.activeAgentId);
         }
         if (persistedState.activeFsWorkspace) {
           this.activeFsWorkspace = persistedState.activeFsWorkspace;
@@ -7758,7 +7927,7 @@ export class SandboxStore {
     this.#unsubRuntime = this.#runtime.subscribe(this.#handleRuntimeEvent.bind(this));
     this.agents = [];
     this.recycleBin = [];
-    this.selectedAgentId = null;
+    this.selectedAgentKey = null;
     this.messages = [];
     this.scheduledTimers = [];
     this.fsSnapshot = {};
@@ -8115,6 +8284,90 @@ export class SandboxStore {
   #canonicalAgentKeyFor(bareId: string): string | null {
     const projection = this.#resolveUniqueAgentProjection(bareId);
     return projection && typeof projection.key === 'string' && projection.key ? projection.key : null;
+  }
+
+  /**
+   * Resolves the reactive snapshot a selection/action reference addresses
+   * (defect 7d2c314): an exact canonical `(realmId, agentId)` identity key
+   * wins over active then recycled registrations; otherwise exactly one bare
+   * match across both registries resolves (an id registered in more than one
+   * scope fails closed), and an unresolvable reference resolves `null`.
+   *
+   * @param ref - Canonical identity key or bare realm-local agent id.
+   * @returns The matching snapshot, or `null`.
+   */
+  #snapshotForRef(ref: string | null | undefined): AgentStateSnapshot | RecycledAgentStateSnapshot | null {
+    if (!ref || typeof ref !== 'string') return null;
+    const exact = this.agents.find((agent) => agent.identityKey === ref)
+      || this.recycleBin.find((agent) => agent.identityKey === ref);
+    if (exact) return exact;
+    const matches: Array<AgentStateSnapshot | RecycledAgentStateSnapshot> = [
+      ...this.agents.filter((agent) => agent.id === ref),
+      ...this.recycleBin.filter((agent) => agent.id === ref)
+    ];
+    return matches.length === 1 ? matches[0] : null;
+  }
+
+  /**
+   * Resolves the active snapshot a selection/action reference addresses
+   * (defect 7d2c314): an exact canonical identity key first, then a unique
+   * bare-id match; ambiguous or recycled references resolve `null`.
+   *
+   * @param ref - Canonical identity key or bare realm-local agent id.
+   * @returns The matching active snapshot, or `null`.
+   */
+  #activeSnapshotForRef(ref: string | null | undefined): AgentStateSnapshot | null {
+    if (!ref || typeof ref !== 'string') return null;
+    const exact = this.agents.find((agent) => agent.identityKey === ref);
+    if (exact) return exact;
+    const matches = this.agents.filter((agent) => agent.id === ref);
+    return matches.length === 1 ? matches[0] : null;
+  }
+
+  /**
+   * Resolves the recycled snapshot a restore/purge reference addresses
+   * (defect 7d2c314): an exact canonical identity key first, then a unique
+   * bare-id match inside the recycle bin.
+   *
+   * @param ref - Canonical identity key or bare realm-local agent id.
+   * @returns The matching recycled snapshot, or `null`.
+   */
+  #recycledSnapshotForRef(ref: string | null | undefined): RecycledAgentStateSnapshot | null {
+    if (!ref || typeof ref !== 'string') return null;
+    const exact = this.recycleBin.find((agent) => agent.identityKey === ref);
+    if (exact) return exact;
+    const matches = this.recycleBin.filter((agent) => agent.id === ref);
+    return matches.length === 1 ? matches[0] : null;
+  }
+
+  /**
+   * Canonical action-boundary reference (defect 7d2c314): the exact
+   * `identityKey` of the snapshot a reference resolves to, the raw reference
+   * when nothing resolves (the runtime's own fail-closed resolution is
+   * preserved), or `null` for an absent reference.
+   *
+   * @param ref - Canonical identity key or bare realm-local agent id.
+   * @returns Canonical identity key, raw reference, or `null`.
+   */
+  #canonicalRef(ref: string | null | undefined): string | null {
+    if (!ref || typeof ref !== 'string') return null;
+    const snapshot = this.#snapshotForRef(ref);
+    return snapshot ? snapshot.identityKey : ref;
+  }
+
+  /**
+   * Draft-buffer map key of a reference (defect 7d2c314): the resolved
+   * snapshot's bare realm-local id (the persisted `agentDraftInputs` key
+   * contract) for either a canonical identity key or a bare id, else the raw
+   * reference. Keeps identity-key UI call sites working against the legacy
+   * bare-id draft map without rewriting persisted bytes.
+   *
+   * @param ref - Canonical identity key or bare realm-local agent id.
+   * @returns Draft map key.
+   */
+  #draftKeyForRef(ref: string): string {
+    const snapshot = this.#snapshotForRef(ref);
+    return snapshot ? snapshot.id : ref;
   }
 
   /**
@@ -9353,7 +9606,12 @@ export class SandboxStore {
     const apply = () => {
       this.#streamMirrorTimer = null;
       this.#lastStreamMirrorAt = Date.now();
-      const mirrored = this.agents.find(a => a.id === agentId) as DeepMutable<AgentStateSnapshot> | undefined;
+      // Defect 7d2c314: mirror by exact identity key first (the turn bridge
+      // addresses the canonical registration), then by a unique bare id for
+      // runtime events that carry the realm-opaque label.
+      const exact = this.agents.find(a => a.identityKey === agentId);
+      const bareMatches = exact ? null : this.agents.filter(a => a.id === agentId);
+      const mirrored = (exact ?? (bareMatches && bareMatches.length === 1 ? bareMatches[0] : undefined)) as DeepMutable<AgentStateSnapshot> | undefined;
       if (!mirrored) return;
       mirrored.state = live.state;
       mirrored.stateDetail = live.stateDetail;
@@ -9462,9 +9720,14 @@ export class SandboxStore {
       // canonical partition: the bare mailbox is shared/ambiguous.
       const exactOnly = (bareIdCounts.get(agent.id) || 0) > 1;
       const unreadCount = this.#busUnreadCountFor(agent.id, canonicalKey, exactOnly);
+      // Defect 7d2c314: the canonical registration key rides the snapshot
+      // (the same map the mailbox badge resolution already builds), so
+      // selection and actions address this exact registration.
+      const identityKey = canonicalKey || createAgentIdentityKey(rawRealmId || null, agent.id);
 
       return {
         id: agent.id,
+        identityKey,
         name: agent.name,
         config: { ...agent.config },
         state: agent.state,
@@ -9507,10 +9770,12 @@ export class SandboxStore {
       };
     });
 
-    if (!this.selectedAgentId && this.agents.length > 0) {
-      this.selectedAgentId = this.agents[0].id;
-    } else if (this.selectedAgentId && !this.agents.some(a => a.id === this.selectedAgentId)) {
-      this.selectedAgentId = this.agents.length > 0 ? this.agents[0].id : null;
+    // Selection reconciliation (defect 7d2c314): `selectedAgent` already
+    // resolves the key exactly (or a unique legacy bare ref); when nothing
+    // resolves (fresh store, killed/purged selection, stale key), fall back
+    // to the first active registration — the legacy auto-selection parity.
+    if (!this.selectedAgent && this.agents.length > 0) {
+      this.selectedAgentKey = this.agents[0].identityKey;
     }
   }
 
@@ -9524,8 +9789,13 @@ export class SandboxStore {
     }
     const rawRecycled = this.#runtime.listRecycledAgents();
 
-    this.recycleBin = rawRecycled.map(agent => ({
+    this.recycleBin = rawRecycled.map(agent => {
+      // Defect 7d2c314: the recycled snapshot carries its canonical
+      // registration key so restore/purge address the exact record.
+      const rawRealmId = typeof agent.config?.realmId === 'string' && agent.config.realmId ? agent.config.realmId : '';
+      return {
       id: agent.id,
+      identityKey: createAgentIdentityKey(rawRealmId || null, agent.id),
       name: agent.name,
       config: { ...agent.config },
       state: agent.state,
@@ -9563,7 +9833,8 @@ export class SandboxStore {
       createdAt: agent.createdAt,
       updatedAt: agent.updatedAt,
       lastError: agent.lastError || null
-    }));
+      };
+    });
   }
 
   /**

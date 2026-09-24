@@ -4370,9 +4370,17 @@ test('59. [7571ce5] the operator partition listing addresses realm-global and sa
       'no canonical key may appear in the agent-facing workspace list'
     );
     assert.ok(!store.allWorkspaces.includes(keyA) && !store.allWorkspaces.includes(keyB));
+    // Defect 7d2c314: the operator agent projection carries each
+    // registration's internal identity key (selection/action addressing),
+    // while every agent-facing surface stays realm-opaque — the bare ids and
+    // the workspace listing above never carry canonical vocabulary.
     assert.ok(
-      !JSON.stringify(store.agents).includes('realm:'),
-      'no canonical key may appear in the agent projection'
+      store.agents.every((agent) => !agent.id.startsWith('realm:') && !agent.id.startsWith('system:')),
+      'the agent projection keeps realm-opaque bare ids'
+    );
+    assert.ok(
+      store.agents.every((agent) => typeof agent.identityKey === 'string' && agent.identityKey.length > 0),
+      'each snapshot carries its internal identity key'
     );
   } finally {
     store.destroy();
@@ -4845,8 +4853,13 @@ test('64. [7d2c314] realm-exact selection and actions keep a realm-local directo
     assert.strictEqual(ensured.config?.realmId ?? null, null);
     assert.strictEqual(
       store.agents.filter((agent) => agent.id === 'director').length,
-      3,
-      'no director is re-provisioned or duplicated by the boot adoption'
+      2,
+      'only the live system and second-realm directors remain active (the first was recycled)'
+    );
+    assert.strictEqual(
+      store.agents.filter((agent) => agent.identityKey === createAgentIdentityKey(null, 'director')).length,
+      1,
+      'the boot adoption never re-provisions or duplicates the system registration'
     );
   } finally {
     store.destroy();

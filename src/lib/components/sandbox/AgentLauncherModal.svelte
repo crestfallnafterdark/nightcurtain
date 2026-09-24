@@ -120,20 +120,17 @@
     }
 
     const cleanId = trimmedId.toLowerCase().replace(/\s+/g, '-');
-    // Staged realm-opaque uniqueness (Wave R ticket ff2202a): ids are plain
-    // (no realm prefix), never auto-suffixed, and the registry keys them
-    // globally — so a duplicate is denied inline both inside the target Realm
-    // and across Realms until realm-local id namespacing lands.
-    const collision = sandboxStore.agents.find(a => a.id === cleanId);
+    // Realm-local uniqueness (defect 7d2c314): agent identity is the composite
+    // `(realmId, agentId)`, so only a same-literal id already registered in
+    // the SAME target Realm is denied inline — a duplicate in another Realm
+    // (the system-scope director included) is a distinct registration and
+    // launches normally. Ids are never auto-suffixed.
+    const targetRealmId = selectedRealmId || null;
+    const collision = sandboxStore.agents.find(
+      a => a.id === cleanId && (a.config?.realmId ?? null) === targetRealmId
+    );
     if (collision) {
-      const collisionRealmId = collision.config?.realmId ?? null;
-      if (selectedRealmId && collisionRealmId === selectedRealmId) {
-        validationError = `An agent with ID "${cleanId}" already exists in this Realm — ids are never auto-suffixed; choose a different id.`;
-      } else if (collisionRealmId) {
-        validationError = `An agent with ID "${cleanId}" already exists in another Realm — agent ids are realm-opaque and stay globally unique until realm-local namespacing lands; choose a different id.`;
-      } else {
-        validationError = `An agent with ID "${cleanId}" already exists — choose a different id.`;
-      }
+      validationError = `An agent with ID "${cleanId}" already exists in this Realm — ids are never auto-suffixed; choose a different id.`;
       return;
     }
 

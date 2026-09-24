@@ -26,6 +26,9 @@
   });
 
   let agent = $derived(sandboxStore.selectedAgent);
+  // Defect 7d2c314: config updates address the exact registration; the
+  // realm-aware meta-authority path below keeps its own canonical key.
+  let agentKey = $derived(agent?.identityKey ?? null);
 
   // Form State (mirrors the selected agent's live runtime configuration)
   let name = $state('');
@@ -75,7 +78,7 @@
     }
   ];
 
-  let lastAgentId = $state(null);
+  let lastAgentKey = $state(null);
 
   function clearPendingApplies() {
     for (const field of Object.keys(pendingApplies)) {
@@ -174,16 +177,16 @@
   }
 
   // Load runtime values as soon as an agent is selected; live edits are never
-  // clobbered by the store's post-apply state refreshes (same agent id).
+  // clobbered by the store's post-apply state refreshes (same agent key).
   $effect(() => {
-    const currentId = agent?.id ?? null;
-    if (currentId === null) {
-      lastAgentId = null;
+    const currentKey = agentKey;
+    if (currentKey === null) {
+      lastAgentKey = null;
       clearPendingApplies();
       return;
     }
-    if (currentId !== lastAgentId) {
-      lastAgentId = currentId;
+    if (currentKey !== lastAgentKey) {
+      lastAgentKey = currentKey;
       clearPendingApplies();
       fieldFeedback = {};
       syncFormFromAgent();
@@ -218,7 +221,8 @@
       clearTimeout(pendingApplies[field]);
       pendingApplies[field] = null;
     }
-    const id = targetId || agent?.id;
+    // Defect 7d2c314: target the exact registration by its identity key.
+    const id = targetId || agentKey;
     if (!id) return;
     try {
       sandboxStore.updateAgentConfig(id, patch);
@@ -231,9 +235,9 @@
   }
 
   // Debounced apply for free-text fields so each keystroke does not churn the
-  // runtime; the captured agent id prevents cross-agent leaks on fast switches.
+  // runtime; the captured agent key prevents cross-agent leaks on fast switches.
   function scheduleAgentUpdate(field, patch, successMsg) {
-    const targetId = agent?.id;
+    const targetId = agentKey;
     if (!targetId) return;
     if (pendingApplies[field]) clearTimeout(pendingApplies[field]);
     setFieldFeedback(field, 'Applying…', 'pending');
@@ -404,9 +408,9 @@
   }
 
   $effect(() => {
-    const currentId = agent?.id ?? null;
-    if (currentId !== lastMetaAuthorityAgentId) {
-      lastMetaAuthorityAgentId = currentId;
+    const currentKey = agentKey;
+    if (currentKey !== lastMetaAuthorityAgentId) {
+      lastMetaAuthorityAgentId = currentKey;
       refreshMetaAuthorityGrants();
     }
   });

@@ -44,6 +44,9 @@
   let copyContextTimer = null;
 
   let agent = $derived(sandboxStore.selectedAgent);
+  // Defect 7d2c314: every store call addresses the exact registration, never a
+  // bare-id twin from another Realm.
+  let agentKey = $derived(agent?.identityKey ?? null);
 
   let agentModelConfig = $derived.by(() => {
     const boundPresetId = typeof agent?.config?.presetId === 'string' ? agent.config.presetId.trim() : '';
@@ -56,7 +59,10 @@
 
   let agentTimers = $derived.by(() => {
     if (!agent) return [];
-    return sandboxStore.scheduledTimers.filter(t => t.targetAgentId === agent.id || t.agentId === agent.id);
+    // Defect 7d2c314: match the canonical key and keep the legacy bare-id
+    // comparison for scheduler projections that still emit the plain label.
+    return sandboxStore.scheduledTimers.filter(t => t.targetAgentId === agentKey || t.agentId === agentKey
+      || t.targetAgentId === agent.id || t.agentId === agent.id);
   });
 
   let activeTimers = $derived.by(() => {
@@ -75,7 +81,7 @@
     isSchedulingTimer = true;
     try {
       await sandboxStore.scheduleTimer({
-        agentId: agent.id,
+        agentId: agentKey,
         durationSeconds: Number(newTimerDuration) || 10,
         prompt: newTimerPrompt.trim(),
         timerCondition: 'never'
@@ -104,7 +110,7 @@
   let agentEventsQuery = $derived.by(() => {
     if (!agent) return { events: [], activeEvents: [], count: 0, activeCount: 0, pendingCount: 0 };
     const _ = sandboxStore.clockSnapshot; // re-query when narrative state syncs
-    return sandboxStore.queryAgentEvents({ all: false }, agent.id);
+    return sandboxStore.queryAgentEvents({ all: false }, agentKey);
   });
 
   let allEventsList = $derived(agentEventsQuery?.events || []);
@@ -114,7 +120,7 @@
     eventsError = '';
     isResettingEvents = true;
     try {
-      sandboxStore.resetAgentEvents(agent.id);
+      sandboxStore.resetAgentEvents(agentKey);
     } catch (err) {
       eventsError = err.message || 'Failed to reset events';
     } finally {
@@ -127,7 +133,7 @@
     eventsError = '';
     isResettingClock = true;
     try {
-      sandboxStore.resetAgentClock(agent.id);
+      sandboxStore.resetAgentClock(agentKey);
     } catch (err) {
       eventsError = err.message || 'Failed to reset world clock';
     } finally {
@@ -137,8 +143,8 @@
 
   // Reactive draft input synchronization with SandboxStore per-agent map
   $effect(() => {
-    if (agent?.id) {
-      const draft = sandboxStore.getAgentDraft(agent.id);
+    if (agentKey) {
+      const draft = sandboxStore.getAgentDraft(agentKey);
       if (draft !== promptInput) {
         promptInput = draft;
       }
@@ -149,14 +155,14 @@
 
   function handlePromptInput(e) {
     promptInput = e.target.value;
-    if (agent?.id) {
-      sandboxStore.setAgentDraft(agent.id, e.target.value);
+    if (agentKey) {
+      sandboxStore.setAgentDraft(agentKey, e.target.value);
     }
   }
 
   async function handleExecuteTurn(e) {
     if (e) e.preventDefault();
-    if (!agent) return;
+    if (!agent || !agentKey) return;
 
     if (agent.state === 'running' || (typeof agent.state === 'string' && agent.state.startsWith('waiting'))) {
       return;
@@ -168,8 +174,8 @@
 
     try {
       promptInput = '';
-      sandboxStore.clearAgentDraft(agent.id);
-      await sandboxStore.triggerTurn(agent.id, input || null);
+      sandboxStore.clearAgentDraft(agentKey);
+      await sandboxStore.triggerTurn(agentKey, input || null);
     } catch (err) {
       localError = err.message || 'Turn execution failed';
     } finally {
@@ -180,13 +186,13 @@
   function handleUndoTurn() {
     if (!agent) return;
     localError = '';
-    sandboxStore.undoAgentTurn(agent.id);
+    sandboxStore.undoAgentTurn(agentKey);
   }
 
   function handleRedoTurn() {
     if (!agent) return;
     localError = '';
-    sandboxStore.redoAgentTurn(agent.id);
+    sandboxStore.redoAgentTurn(agentKey);
   }
 
   async function handleRetryTurn() {
@@ -194,7 +200,7 @@
     localError = '';
     isExecuting = true;
     try {
-      await sandboxStore.retryAgentTurn(agent.id);
+      await sandboxStore.retryAgentTurn(agentKey);
     } catch (err) {
       localError = err.message || 'Retry failed';
     } finally {
@@ -205,32 +211,28 @@
   function handleDismissError() {
     localError = '';
     if (agent) {
-      if (typeof sandboxStore.clearAgentLastError === 'function') {
-        sandboxStore.clearAgentLastError(agent.id);
-      } else {
-        agent.lastError = null;
-        sandboxStore.syncAgents();
-      }
+      // Defect 7d2c314: clear through the exact registration key.
+      sandboxStore.clearAgentLastError(agentKey);
     }
   }
 
   function handleCancelTurn() {
-    if (!agent) return;
-    sandboxStore.cancelAgent(agent.id);
+    if (!agent || !agentKey) return;
+    sandboxStore.cancelAgent(agentKey);
   }
 
   function handleTerminateAgent() {
-    if (!agent) return;
+    if (!agent || !agentKey) return;
     const ok = confirm(`Terminate agent "${agent.name || agent.id}" and move to Recycle Bin?\n\nThe agent will be soft-killed and moved to the Recycle Bin. You can restore it later with full conversation history preserved.`);
     if (ok) {
-      sandboxStore.killAgent(agent.id, 'Terminated by user via Inspector');
+      sandboxStore.killAgent(agentKey, 'Terminated by user via Inspector');
     }
   }
 
   function applyQuickPrompt(text) {
     promptInput = text;
-    if (agent?.id) {
-      sandboxStore.setAgentDraft(agent.id, text);
+    if (agentKey) {
+      sandboxStore.setAgentDraft(agentKey, text);
     }
   }
 
@@ -283,7 +285,7 @@
 
   function handleClearTelemetry() {
     if (!agent) return;
-    sandboxStore.clearAgentTelemetry(agent.id);
+    sandboxStore.clearAgentTelemetry(agentKey);
   }
 
   function handleCopyContextJson() {
