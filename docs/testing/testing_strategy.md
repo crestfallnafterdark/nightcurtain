@@ -23,7 +23,7 @@ graph TD
     end
 
     subgraph L1["Tier 1: Atomic Unit & Contract Testing (node --test)"]
-        UNIT["48 Unit Suites (tests/unit/)<br/>• Pure Functions & Algorithms<br/>• DeepSeek Reasoning Hygiene (INV-REASONING-STRING)<br/>• JSON Pointers, Parsers, Preset Catalog, LoRA Tags<br/>• Module Contracts & Provider Adapters"]
+        UNIT["49 Unit Suites (tests/unit/)<br/>• Pure Functions & Algorithms<br/>• DeepSeek Reasoning Hygiene (INV-REASONING-STRING)<br/>• JSON Pointers, Parsers, Preset Catalog, LoRA Tags<br/>• Module Contracts & Provider Adapters"]
     end
 
     L1 --> L2
@@ -101,7 +101,7 @@ The master runner executes all Unit and Integration suites in strict sub-process
 // Sample output format from tests/runner.js:
 // ======================================================================
 //   AGENTIC SANDBOX STUDIO MASTER TEST SUITE RUNNER
-//   Total Suites: 94 (48 Unit, 46 Integration)
+//   Total Suites: 95 (49 Unit, 46 Integration)
 // ======================================================================
 //   [Unit       ] deepseek_provider_test.js                  ✔ PASS (42ms)
 //   [Unit       ] deepseek_reasoning_hygiene_test.js         ✔ PASS (18ms)
@@ -170,6 +170,7 @@ The project includes **92 native test suites** (46 unit, 46 integration) and **8
 | [`sandbox_persistence_module_test.js`](../../tests/unit/sandbox_persistence_module_test.js) | `src/lib/sandbox/sandboxPersistence/index.ts` | Module 6 persistence: export whitelist, schema validation, hydration; imported-template payloads + realm instance provenance round-trip. |
 | [`sandbox_store_module_test.js`](../../tests/unit/sandbox_store_module_test.js) | `src/lib/sandbox/sandboxStore/index.svelte.ts` | Module 14 store: reactive state, substrate DI, encapsulation, realm registry projection/CRUD; template registry (import/export/delete, effective-catalog shadowing), package launch, caps/rollback, instance provenance, realm-scoped seed resolution; publishing grants + trust override, launch authority approvals, session-only pending payloads. |
 | [`scheduler_realm_scope_test.js`](../../tests/unit/scheduler_realm_scope_test.js) | `src/lib/sandbox/runtime/runtimeScheduler/index.ts` + `triggerQueue/index.ts` | Realm-confined scheduling/cancel and trigger dispatch, bypass/internal paths, legacy parity. |
+| [`sensitive_content_guard_test.js`](../../tests/unit/sensitive_content_guard_test.js) | `scripts/check_sensitive_content.mjs` + `scripts/install_git_hooks.mjs` | Staged-content guard: path deny-list, machine-path detection, credential patterns (value never echoed), oversized/binary blobs, config merge + reasoned allowlist, hook install/idempotence/foreign-refusal/uninstall. |
 | [`settings_modal_presets_test.js`](../../tests/unit/settings_modal_presets_test.js) | `src/lib/components/sandbox/SandboxSettingsModal.svelte` + `presetCatalog`/`credentialVault` | Catalog-driven settings modal, official model catalogs, custom preset persistence, credential-vault separation (no `keyId` writes). |
 | [`tool_alias_normalizer_test.js`](../../tests/unit/tool_alias_normalizer_test.js) | `src/lib/sandbox/tools/normalizers/aliasMap.ts`, `paramSanitizer.ts` + `tools/constants/index.ts` | Master alias map, precall allowlist, prototype-safe normalization, alias-map uniqueness/cross-family invariants, alias-written allowlist semantics. |
 | [`tool_authorization_gate_test.js`](../../tests/unit/tool_authorization_gate_test.js) | `src/lib/sandbox/toolDefinitions/index.ts` | Descriptor-authoritative authorization: a present descriptor decides alone, no widen channels, innate universal, legacy only for descriptor-less callers. |
@@ -265,8 +266,8 @@ sequenceDiagram
     G1-->>Dev: Gate 1 Passed (0 lint / sync errors)
 
     Dev->>G2: npm test (tests/runner.js)
-    Note over G2: Executes 94 suites (48 Unit, 46 Integration) under 120s timeout
-    G2-->>Dev: Gate 2 Passed (94/94 passed, 0 failures)
+    Note over G2: Executes 95 suites (49 Unit, 46 Integration) under 120s timeout
+    G2-->>Dev: Gate 2 Passed (95/95 passed, 0 failures)
 
     Dev->>G3: npm run build (vite build)
     Note over G3: Compiles Svelte 5 runes, WASM modules, top-level awaits

@@ -68,7 +68,7 @@ npm run lint:docs                          # TSDoc syntax gate over sandbox .ts:
 npm run typecheck                          # scripts/typecheck.mjs: jsconfig tsc + strict contracts tsc + svelte-check all run; ratchet baselines (tsc 0 total / 0 sandbox; contracts 0; svelte-check ≤96)
 timeout 90 node tests/unit/<suite>.js      # single suite (timeout 180 for heavy suites)
 timeout 90 node tests/audit/repros/<id>.test.js # audit repros (red-before-fix evidence; not part of npm test)
-timeout 600 npm test                       # 94 suites — single-flight: lead runs after each round lands + at convergence (includes contracts_gate_test)
+timeout 600 npm test                       # 95 suites — single-flight: lead runs after each round lands + at convergence (includes contracts_gate_test)
 npm run build
 npm run test:e2e                           # Playwright (9 specs) — outside the main gate
 node tests/qa/seed_vault.mjs               # QA: seed provider keys into the MCP profile (browser closed first)
@@ -122,6 +122,7 @@ Mechanical facts (counts, file lists, command lists) are generated or omitted, n
 
 ## 8. Safety
 - **Never commit secrets.** `.env.local` is local-only; never log/dump API keys or KEKs (see BUG-ENC-006 redaction policy).
+- **Sensitive-content guard.** A pre-commit hook (`scripts/check_sensitive_content.mjs`; install with `node scripts/install_git_hooks.mjs` / `npm run guard:install`, run manually with `npm run guard:check`) scans staged blobs and fails closed on local-only paths, absolute machine paths, credential-like patterns, and oversized/binary blobs. Rules and the reasoned allowlist live in `.sensitive-content.json` plus an optional gitignored `.sensitive-content.local.json` overlay; `git commit --no-verify` bypasses the hook — it catches accidents, not a determined user.
 - Commit only intended paths; never add unrelated untracked files.
 - Do not install/upgrade tooling (`npm install`, dependency bumps) without approval.
 
