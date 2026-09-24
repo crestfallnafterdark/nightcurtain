@@ -335,11 +335,14 @@ export interface RealmLaunchFromTemplateOptions {
 
 // @public
 export interface RealmLaunchReceipt {
-    readonly agents: ReadonlyArray<AgentStateSnapshot>;
+    readonly agents: ReadonlyArray<RealmLaunchReceiptAgent>;
     // Warning: (ae-forgotten-export) The symbol "RealmRecord" needs to be exported by the entry point index.svelte.d.ts
     readonly realm: RealmRecord;
     readonly warnings?: readonly string[];
 }
+
+// @public
+export type RealmLaunchReceiptAgent = Omit<AgentStateSnapshot, 'identityKey'>;
 
 // @public
 export interface RealmSeedFile {
@@ -1297,9 +1300,13 @@ Successful result of `SandboxStore.launchRealmFromTemplate()`.
 
 #### Members
 
-- **`agents`** — Active member snapshots in template launch order.
+- **`agents`** — Active member snapshots in template launch order (realm-opaque projections).
 - **`realm`** — Frozen registry record created for the launch (including recorded `instance` provenance).
 - **`warnings`** — Hydration warnings collected during launch (present only when non-empty; e.g. an allowed version mismatch).
+
+### `RealmLaunchReceiptAgent` — type alias
+
+Realm-opaque member projection carried by RealmLaunchReceipt (defect 7d2c314): the normalized `AgentStateSnapshot` shape minus the internal canonical `identityKey`, so an operator launch receipt never carries canonical-key vocabulary. Receipt consumers use `{ id, name }` and counts; exact addressing stays on the store's selection/action surfaces.
 
 ### `RealmSeedFile` — interface
 
@@ -1996,9 +2003,9 @@ console.log(`Uploaded ${receipt.count} files:`, receipt.files);
 
 ## Doc coverage
 
-- Top-level exports: 62
-- Declarations (exports + members): 437
-- Documented declarations: 437 / 437 (100%)
+- Top-level exports: 63
+- Declarations (exports + members): 438
+- Documented declarations: 438 / 438 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): `Agent`, `AgentConfig`, `AgentConfigUpdate`, `AgentIdentityScope`, `AgentRuntime`, `AgentState`, `ArchiveDownloadReceipt`, `AuthorityDescriptor`, `BatchDownloadFailure`, `BusMessageEnvelope`, `CopyReceipt`, `CredentialResolverPort`, `CredentialStoragePort`, `CredentialVault`, `DownloadReceipt`, `FileRecord`, `GrepMatch`, `GrepOptions`, `InboxHeader`, `InboxListOptions`, `LaunchHistoryEntry`, `MessageEnvelope`, `MessagingBus`, `NarrativeEvent`, `PendingInstancePayload`, `PresetCatalog`, `PresetModelConfig`, `ReadMessageResult`, `RealmInputValues`, `RealmPublishingPort`, `RealmRecord`, `RealmRegistry`, `RealmTemplate`, `RealmUpdatePatch`, `SandboxPersistedState`, `ScheduleReceipt`, `SendMessageReceipt`, `TurnBundle`, `TurnExecutionResult`, `TurnInput`, `VfsCopyOptions`, `VfsWriteOptions`, `VirtualFS`, `WriteReceipt`
