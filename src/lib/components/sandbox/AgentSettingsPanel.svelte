@@ -9,6 +9,10 @@
     buildMetaAuthorityToggleState
   } from './realmReviewHelpers.ts';
   import { resolveAgentRealmId } from './realmGroups.ts';
+  import {
+    buildPresetModelConfig,
+    presetEditorFieldVisibility
+  } from './agentModelConfigHelpers.ts';
 
   // MOD-20 preset catalog: the single source of model truth. The panel binds
   // agents to catalog presets (binding-only, OPEN-1) and edits the bound
@@ -89,6 +93,13 @@
 
   let selectedCatalogPreset = $derived(catalogPresets.find(p => p.id === modelPresetId) || null);
 
+  // Ticket 1448f5a: the Routing Provider / Endpoint URL fields follow the bound
+  // preset's provider capabilities (the same single capability source the
+  // global Sandbox Settings modal consumes).
+  let presetFieldVisibility = $derived(
+    presetEditorFieldVisibility(selectedCatalogPreset?.modelConfig?.providerId)
+  );
+
   function serializePresetDraft() {
     return JSON.stringify({
       modelId: presetDraft.modelId.trim(),
@@ -118,21 +129,6 @@
       url: mc?.url || ''
     };
     presetDraftSnapshot = serializePresetDraft();
-  }
-
-  function buildDraftModelConfig(base) {
-    const config = {
-      ...base,
-      modelId: presetDraft.modelId.trim(),
-      temperature: Number(presetDraft.temperature)
-    };
-    const reasoning = presetDraft.reasoningEffort.trim();
-    if (reasoning) config.reasoningEffort = reasoning;
-    const routing = presetDraft.routing.trim();
-    if (routing) config.routing = routing; else delete config.routing;
-    const url = presetDraft.url.trim();
-    if (url) config.url = url; else delete config.url;
-    return config;
   }
 
   // Hydrate the form from the selected agent's live runtime configuration.
@@ -312,7 +308,11 @@
         id: preset.id,
         name: preset.name,
         isCustom: preset.isCustom,
-        modelConfig: buildDraftModelConfig(preset.modelConfig)
+        modelConfig: buildPresetModelConfig(
+          presetDraft,
+          preset.modelConfig,
+          presetEditorFieldVisibility(preset.modelConfig?.providerId)
+        )
       });
       seedPresetDraft(presetCatalog.getPreset(preset.id));
       setFieldFeedback('model', 'Preset saved', 'success');
@@ -342,7 +342,11 @@
         id: newId,
         name: `${source.name} (Custom)`,
         isCustom: true,
-        modelConfig: buildDraftModelConfig(source.modelConfig)
+        modelConfig: buildPresetModelConfig(
+          presetDraft,
+          source.modelConfig,
+          presetEditorFieldVisibility(source.modelConfig?.providerId)
+        )
       });
       modelPresetId = newId;
       seedPresetDraft(presetCatalog.getPreset(newId));
@@ -658,27 +662,31 @@
                   />
                 </div>
 
-                <div class="form-group">
-                  <label for="preset-routing">Routing Provider</label>
-                  <input
-                    id="preset-routing"
-                    type="text"
-                    class="input-field font-mono"
-                    placeholder="Auto (or default)"
-                    bind:value={presetDraft.routing}
-                  />
-                </div>
+                {#if presetFieldVisibility.routing}
+                  <div class="form-group">
+                    <label for="preset-routing">Routing Provider</label>
+                    <input
+                      id="preset-routing"
+                      type="text"
+                      class="input-field font-mono"
+                      placeholder="Auto (or default)"
+                      bind:value={presetDraft.routing}
+                    />
+                  </div>
+                {/if}
 
-                <div class="form-group">
-                  <label for="preset-endpoint-url">Endpoint URL</label>
-                  <input
-                    id="preset-endpoint-url"
-                    type="text"
-                    class="input-field font-mono"
-                    placeholder="http://localhost:11434/v1"
-                    bind:value={presetDraft.url}
-                  />
-                </div>
+                {#if presetFieldVisibility.url}
+                  <div class="form-group">
+                    <label for="preset-endpoint-url">Endpoint URL</label>
+                    <input
+                      id="preset-endpoint-url"
+                      type="text"
+                      class="input-field font-mono"
+                      placeholder="http://localhost:11434/v1"
+                      bind:value={presetDraft.url}
+                    />
+                  </div>
+                {/if}
 
                 <div class="preset-editor-actions">
                   <button

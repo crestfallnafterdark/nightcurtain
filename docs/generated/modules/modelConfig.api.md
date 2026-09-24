@@ -31,6 +31,7 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 - Master default and preset literals have their single home in this module
 - Resolution overlays explicit non-`'inherit'` `settings.modelConfig` fields onto the module default; missing `keyId` derives `canonical_<providerId>`
 - `custom` preset is included verbatim (placeholder model, localhost URL, `isCustom: false`)
+- Provider capability flags have their single home here (`getProviderCapabilities`): `routing` is a nanogpt-only concept and `url` a custom-only concept, so every preset editor gates the same fields identically
 
 ## Surface
 
@@ -55,6 +56,9 @@ export function getDefaultModelConfig(): AgentModelConfig;
 export function getDefaultModelId(providerId?: string): string;
 
 // @public
+export function getProviderCapabilities(providerId?: string): ProviderCapabilities;
+
+// @public
 export interface ModelPreset {
     id: string;
     isCustom: boolean;
@@ -64,6 +68,12 @@ export interface ModelPreset {
 
 // @public
 export const PRESET_MODELS: readonly ModelPreset[];
+
+// @public
+export interface ProviderCapabilities {
+    readonly supportsRouting: boolean;
+    readonly supportsUrl: boolean;
+}
 
 // @public
 export function resolveModelConfig(settings?: {
@@ -117,6 +127,20 @@ Lookup is by `modelConfig.providerId`: `runware` → `'deepseek-v4-flash'`, `nan
 
 The preset's `modelId`, or the master `modelId` when unknown/omitted.
 
+### `getProviderCapabilities` — function
+
+Resolves the preset-editor capability flags for a provider.
+
+Today `routing` is a nanogpt-only concept and `url` a custom-only concept; every other provider — including unknown ids and `deepseek_native`, which this module deliberately does not alias — supports neither. This is the single capability source for the preset editors (the agent-level `AgentSettingsPanel` and the global `SandboxSettingsModal`), so both gate the same fields identically.
+
+#### Parameters
+
+- `providerId` — Provider id to look up (e.g. `'nanogpt'`).
+
+#### Returns
+
+A fresh `{ supportsRouting, supportsUrl }` flag object.
+
 ### `ModelPreset` — interface
 
 An approved base preset entry. `id`/`modelConfig.providerId` are kept identical for the five base entries; `modelConfig` is a complete config.
@@ -145,6 +169,15 @@ const ids = PRESET_MODELS.map(preset => preset.id);
 // ['runware', 'nanogpt', 'deepseek', 'prem', 'custom']
 ```
 
+### `ProviderCapabilities` — interface
+
+Provider capability flags consumed by the model-preset editors (ticket 1448f5a): whether the provider understands an upstream routing preference and whether it consumes a per-preset endpoint URL.
+
+#### Members
+
+- **`supportsRouting`** — Whether the provider consumes an upstream routing preference (`routing`).
+- **`supportsUrl`** — Whether the provider consumes a per-preset endpoint URL (`url`).
+
 ### `resolveModelConfig` — function
 
 Resolves a complete model config from an optional partial settings layer.
@@ -165,9 +198,9 @@ A complete resolved model config.
 
 ## Doc coverage
 
-- Top-level exports: 6
-- Declarations (exports + members): 19
-- Documented declarations: 19 / 19 (100%)
+- Top-level exports: 8
+- Declarations (exports + members): 23
+- Documented declarations: 23 / 23 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): none

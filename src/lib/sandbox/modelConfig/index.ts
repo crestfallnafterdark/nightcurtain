@@ -9,6 +9,8 @@
  * - The approved presets (`PRESET_MODELS`: `runware`, `nanogpt`, `deepseek`,
  *   `prem`, `custom`).
  * - Provider → default model id lookup (`getDefaultModelId`).
+ * - Provider capability flags for the preset editors
+ *   (`getProviderCapabilities`).
  * - Explicit → default resolution with `'inherit'` sentinel stripping
  *   (`resolveModelConfig`).
  * - Convenience type re-export of `AgentModelConfig` (single home remains
@@ -40,6 +42,7 @@
  * @decision Master default and preset literals have their single home in this module
  * @decision Resolution overlays explicit non-`'inherit'` `settings.modelConfig` fields onto the module default; missing `keyId` derives `canonical_<providerId>`
  * @decision `custom` preset is included verbatim (placeholder model, localhost URL, `isCustom: false`)
+ * @decision Provider capability flags have their single home here (`getProviderCapabilities`): `routing` is a nanogpt-only concept and `url` a custom-only concept, so every preset editor gates the same fields identically
  */
 
 import type { AgentModelConfig } from '../inference/index.ts';
@@ -214,6 +217,39 @@ export function getDefaultModelId(providerId?: string): string {
     if (preset) return preset.modelConfig.modelId;
   }
   return MASTER_MODEL_CONFIG.modelId;
+}
+
+/**
+ * Provider capability flags consumed by the model-preset editors
+ * (ticket 1448f5a): whether the provider understands an upstream routing
+ * preference and whether it consumes a per-preset endpoint URL.
+ */
+export interface ProviderCapabilities {
+  /** Whether the provider consumes an upstream routing preference (`routing`). */
+  readonly supportsRouting: boolean;
+
+  /** Whether the provider consumes a per-preset endpoint URL (`url`). */
+  readonly supportsUrl: boolean;
+}
+
+/**
+ * Resolves the preset-editor capability flags for a provider.
+ *
+ * Today `routing` is a nanogpt-only concept and `url` a custom-only concept;
+ * every other provider — including unknown ids and `deepseek_native`, which
+ * this module deliberately does not alias — supports neither. This is the
+ * single capability source for the preset editors (the agent-level
+ * `AgentSettingsPanel` and the global `SandboxSettingsModal`), so both gate
+ * the same fields identically.
+ *
+ * @param providerId - Provider id to look up (e.g. `'nanogpt'`).
+ * @returns A fresh `{ supportsRouting, supportsUrl }` flag object.
+ */
+export function getProviderCapabilities(providerId?: string): ProviderCapabilities {
+  return {
+    supportsRouting: providerId === 'nanogpt',
+    supportsUrl: providerId === 'custom'
+  };
 }
 
 /**

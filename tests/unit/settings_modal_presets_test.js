@@ -251,8 +251,9 @@ test('Sandbox Settings Modal: Catalog Architecture & Vault Separation', async (t
     assert.match(buildBody, /providerId,/);
     assert.match(buildBody, /modelId: modelId\.trim\(\)/);
     assert.doesNotMatch(buildBody, /keyId|apiKey|encryptionKey/, 'built model configs must stay credential-free');
-    assert.match(buildBody, /providerId === 'nanogpt'[\s\S]*?routing/, 'nanogpt routing is included only for nanogpt');
-    assert.match(buildBody, /providerId === 'custom'[\s\S]*?url/, 'custom URL is included only for custom');
+    assert.match(buildBody, /getProviderCapabilities\(providerId\)/, 'field gating must come from the single capability source');
+    assert.match(buildBody, /capabilities\.supportsRouting[\s\S]*?routing/, 'routing is included only when the provider supports it');
+    assert.match(buildBody, /capabilities\.supportsUrl[\s\S]*?url/, 'the custom URL is included only when the provider supports it');
 
     const saveBody = extractFunction(source, 'handleSavePreset');
     assert.match(saveBody, /catalog\.savePreset\(\{/, 'Save Preset must go through the catalog');

@@ -1,7 +1,7 @@
 <script>
   import { getSandboxStore } from '../../sandbox/sandboxStore/index.svelte.ts';
   import { CredentialVault } from '../../sandbox/credentialVault/index.ts';
-  import { getDefaultModelId } from '../../sandbox/modelConfig/index.ts';
+  import { getDefaultModelId, getProviderCapabilities } from '../../sandbox/modelConfig/index.ts';
 
   let { onclose = () => {} } = $props();
 
@@ -86,13 +86,14 @@
   }
 
   function buildModelConfig() {
+    const capabilities = getProviderCapabilities(providerId);
     return {
       providerId,
       modelId: modelId.trim(),
       temperature,
       reasoningEffort,
-      ...(providerId === 'nanogpt' && routing.trim() ? { routing: routing.trim() } : {}),
-      ...(providerId === 'custom' && customUrl.trim() ? { url: customUrl.trim() } : {})
+      ...(capabilities.supportsRouting && routing.trim() ? { routing: routing.trim() } : {}),
+      ...(capabilities.supportsUrl && customUrl.trim() ? { url: customUrl.trim() } : {})
     };
   }
 

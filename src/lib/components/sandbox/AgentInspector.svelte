@@ -2,6 +2,7 @@
   import { sandboxStore } from '../../sandbox/sandboxStore/index.svelte.ts';
   import { renderMarkdownProse } from './markdown/index.ts';
   import { estimateTokens } from './estimateTokens.ts';
+  import { resolveAgentModelConfig } from './agentModelConfigHelpers.ts';
 
   function formatMessageContent(content) {
     if (content === null || content === undefined) return '';
@@ -48,14 +49,9 @@
   // bare-id twin from another Realm.
   let agentKey = $derived(agent?.identityKey ?? null);
 
-  let agentModelConfig = $derived.by(() => {
-    const boundPresetId = typeof agent?.config?.presetId === 'string' ? agent.config.presetId.trim() : '';
-    if (boundPresetId) {
-      const boundPreset = sandboxStore.getPresetCatalog().getPreset(boundPresetId);
-      if (boundPreset) return boundPreset.modelConfig;
-    }
-    return agent?.config?.modelConfig || sandboxStore.modelConfig;
-  });
+  let agentModelConfig = $derived.by(() =>
+    resolveAgentModelConfig(agent, sandboxStore.getPresetCatalog(), sandboxStore.modelConfig)
+  );
 
   let agentTimers = $derived.by(() => {
     if (!agent) return [];
@@ -437,7 +433,7 @@
             </button>
             <div class="meta-chip">
               <span class="chip-label">Temp</span>
-              <span class="chip-value font-mono">{agent.config.temperature}</span>
+              <span class="chip-value font-mono">{agentModelConfig?.temperature ?? 'default'}</span>
             </div>
             <div class="meta-chip" title="Max tool calls per execution turn">
               <span class="chip-label">Max Calls</span>
