@@ -2,6 +2,7 @@
   import { getSandboxStore } from '../../sandbox/sandboxStore/index.svelte.ts';
   import { CredentialVault } from '../../sandbox/credentialVault/index.ts';
   import { getDefaultModelId, getProviderCapabilities } from '../../sandbox/modelConfig/index.ts';
+  import { discoverModels, discoverRoutes } from './modelDiscovery.ts';
 
   let { onclose = () => {} } = $props();
 
@@ -9,6 +10,7 @@
   const catalog = store.getPresetCatalog();
   const presetSource = catalog.createPresetSourcePort();
   const vault = store.getCredentialVault();
+  const resolverPort = vault.createResolverPort();
 
   const PROVIDER_OPTIONS = [
     { id: 'runware', label: 'Runware' },
@@ -24,6 +26,7 @@
 
   const DEFAULT_CUSTOM_URL = 'http://localhost:11434/v1';
 
+  let activeView = $state('presets');
   let catalogRevision = $state(0);
 
   $effect(() => {
@@ -83,6 +86,7 @@
     reasoningEffort = readString(conf.reasoningEffort) || 'high';
     routing = readString(conf.routing) || 'auto';
     customUrl = readString(conf.url) || DEFAULT_CUSTOM_URL;
+    resetDiscoveryState();
   }
 
   function buildModelConfig() {
@@ -163,6 +167,88 @@
     if (nextDefault) modelId = nextDefault;
     if (providerId === 'nanogpt' && !routing.trim()) routing = 'auto';
     if (providerId === 'custom' && !customUrl.trim()) customUrl = DEFAULT_CUSTOM_URL;
+    resetDiscoveryState();
+  }
+
+  // Model discovery: the editor draft (provider/url) drives the provider listing.
+  let discoveredModels = $state([]);
+  let modelFilter = $state('');
+  let isFetchingModels = $state(false);
+  let fetchModelsError = $state('');
+  let fetchedRoutes = $state([]);
+  let isFetchingRoutes = $state(false);
+  let routesNote = $state('');
+
+  let filteredModels = $derived.by(() => {
+    const query = modelFilter.trim().toLowerCase();
+    if (!query) return discoveredModels;
+    return discoveredModels.filter(
+      (model) => model.id.toLowerCase().includes(query) || model.name.toLowerCase().includes(query)
+    );
+  });
+
+  function buildDiscoveryConfig() {
+    return {
+      providerId,
+      modelId: modelId.trim(),
+      ...(getProviderCapabilities(providerId).supportsUrl && customUrl.trim()
+        ? { url: customUrl.trim() }
+        : {})
+    };
+  }
+
+  function resetDiscoveryState() {
+    discoveredModels = [];
+    modelFilter = '';
+    fetchModelsError = '';
+    fetchedRoutes = [];
+    routesNote = '';
+  }
+
+  async function handleFetchModels() {
+    isFetchingModels = true;
+    fetchModelsError = '';
+    try {
+      const result = await discoverModels(buildDiscoveryConfig(), resolverPort);
+      if (result.ok) {
+        discoveredModels = result.models;
+        modelFilter = '';
+      } else {
+        discoveredModels = [];
+        fetchModelsError = result.error;
+      }
+    } catch (err) {
+      discoveredModels = [];
+      fetchModelsError = describeError(err);
+    } finally {
+      isFetchingModels = false;
+    }
+  }
+
+  async function handleRefreshRoutes() {
+    if (providerId !== 'nanogpt') {
+      fetchedRoutes = [];
+      routesNote = '';
+      return;
+    }
+    isFetchingRoutes = true;
+    routesNote = '';
+    try {
+      const result = await discoverRoutes(buildDiscoveryConfig(), resolverPort, modelId);
+      fetchedRoutes = result;
+      if (result.length === 0) routesNote = 'No upstream routes returned for this model.';
+    } catch (err) {
+      fetchedRoutes = [];
+      routesNote = describeError(err);
+    } finally {
+      isFetchingRoutes = false;
+    }
+  }
+
+  function handlePickModel(id) {
+    if (!id) return;
+    modelId = id;
+    if (providerId === 'nanogpt') handleRefreshRoutes();
   }
 
   function handleSavePreset() {
@@ -381,8 +467,41 @@
       <button type="button" class="btn-close" onclick={handleClose} aria-label="Close settings">✕</button>
     </header>
 
+    <div class="settings-tabs" role="tablist" aria-label="Settings sections">
+      <button
+        type="button"
+        role="tab"
+        id="settings-tab-presets"
+        aria-controls="settings-panel-presets"
+        aria-selected={activeView === 'presets'}
+        class="settings-tab"
+        class:active={activeView === 'presets'}
+        onclick={() => (activeView = 'presets')}
+      >
+        Model Presets
+      </button>
+      <button
+        type="button"
+        role="tab"
+        id="settings-tab-vault"
+        aria-controls="settings-panel-vault"
+        aria-selected={activeView === 'vault'}
+        class="settings-tab"
+        class:active={activeView === 'vault'}
+        onclick={() => (activeView = 'vault')}
+      >
+        API Keys
+      </button>
+    </div>
+
     <div class="modal-body">
-      <section class="section-card" aria-labelledby="preset-section-heading">
+      {#if activeView === 'presets'}
+      <div
+        class="section-card"
+        id="settings-panel-presets"
+        role="tabpanel"
+        aria-labelledby="settings-tab-presets preset-section-heading"
+      >
         <div class="section-header">
           <div class="section-title-wrap">
             <span class="section-title" id="preset-section-heading">Model Presets</span>
@@ -454,15 +573,69 @@
 
           <div class="form-group">
             <label for="model-input" class="form-label">Model ID</label>
-            <input
-              id="model-input"
-              type="text"
-              class="styled-input font-mono"
-              bind:value={modelId}
-              placeholder="Model identifier"
-            />
+            <div class="discovery-row">
+              <input
+                id="model-input"
+                type="text"
+                class="styled-input font-mono"
+                bind:value={modelId}
+                placeholder="Model identifier"
+              />
+              <button
+                type="button"
+                class="btn-fetch"
+                onclick={handleFetchModels}
+                disabled={isFetchingModels}
+              >
+                {isFetchingModels ? 'Fetching…' : 'Fetch Models'}
+              </button>
+            </div>
           </div>
         </div>
+
+        {#if fetchModelsError}
+          <div class="err-note" role="status">{fetchModelsError}</div>
+        {/if}
+
+        {#if discoveredModels.length > 0}
+          <div class="fetched-models-list">
+            <input
+              type="text"
+              class="styled-input"
+              placeholder="Filter fetched models…"
+              aria-label="Filter fetched models"
+              bind:value={modelFilter}
+            />
+            <div class="models-scroll">
+              {#each filteredModels as model (model.id)}
+                <button
+                  type="button"
+                  class="model-item-row"
+                  class:selected={modelId === model.id}
+                  onclick={() => handlePickModel(model.id)}
+                >
+                  <span class="model-item-info">
+                    <code class="model-item-id">{model.id}</code>
+                    {#if model.name && model.name !== model.id}
+                      <span class="model-item-name">{model.name}</span>
+                    {/if}
+                  </span>
+                  <span class="model-item-badges">
+                    {#if model.contextLength}
+                      <span class="meta-badge" title="Context length">{model.contextLength} ctx</span>
+                    {/if}
+                    {#if modelId === model.id}
+                      <span class="check-icon" aria-hidden="true">✓</span>
+                    {/if}
+                  </span>
+                </button>
+              {/each}
+            </div>
+            {#if filteredModels.length === 0}
+              <div class="empty-state">No fetched models match "{modelFilter}".</div>
+            {/if}
+          </div>
+        {/if}
 
         {#if providerId === 'custom'}
           <div class="form-group">
@@ -480,13 +653,40 @@
         {#if providerId === 'nanogpt'}
           <div class="form-group">
             <label for="routing-input" class="form-label">Upstream Routing</label>
-            <input
-              id="routing-input"
-              type="text"
-              class="styled-input font-mono"
-              bind:value={routing}
-              placeholder="auto"
-            />
+            <div class="discovery-row">
+              <input
+                id="routing-input"
+                type="text"
+                class="styled-input font-mono"
+                bind:value={routing}
+                placeholder="auto"
+              />
+              <button
+                type="button"
+                class="btn-fetch"
+                onclick={handleRefreshRoutes}
+                disabled={isFetchingRoutes || !modelId.trim()}
+              >
+                {isFetchingRoutes ? 'Loading…' : 'Refresh Routes'}
+              </button>
+            </div>
+            {#if routesNote}
+              <span class="route-note" role="status">{routesNote}</span>
+            {/if}
+            {#if fetchedRoutes.length > 0}
+              <select
+                id="route-select"
+                class="styled-select font-mono"
+                aria-label="Upstream route"
+                value={routing}
+                onchange={(event) => (routing = /** @type {HTMLSelectElement} */ (event.currentTarget).value)}
+              >
+                <option value="auto">auto — platform default</option>
+                {#each fetchedRoutes as route (route.id)}
+                  <option value={route.id}>{route.id}</option>
+                {/each}
+              </select>
+            {/if}
           </div>
         {/if}
 
@@ -579,9 +779,14 @@
             </button>
           </div>
         {/if}
-      </section>
-
-      <section class="section-card" aria-labelledby="vault-section-heading">
+      </div>
+      {:else}
+      <div
+        class="section-card"
+        id="settings-panel-vault"
+        role="tabpanel"
+        aria-labelledby="settings-tab-vault vault-section-heading"
+      >
         <div class="section-header">
           <div class="section-title-wrap">
             <span class="section-title" id="vault-section-heading">API Key Vault</span>
@@ -769,7 +974,8 @@
             </button>
           </div>
         </div>
-      </section>
+      </div>
+      {/if}
     </div>
 
     <footer class="modal-footer">
@@ -1022,6 +1228,155 @@
     display: grid;
     grid-template-columns: 1fr 1.4fr;
     gap: 0.8rem;
+  }
+
+  .settings-tabs {
+    display: flex;
+    gap: 0.35rem;
+    padding: 0.55rem 1.5rem 0;
+    background: var(--bg-surface, #1e293b);
+    border-bottom: 1px solid var(--border-color, #334155);
+  }
+
+  .settings-tab {
+    padding: 0.5rem 0.9rem;
+    font-size: 0.8rem;
+    font-weight: 700;
+    color: var(--text-muted, #94a3b8);
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    cursor: pointer;
+  }
+
+  .settings-tab.active {
+    color: var(--accent-primary, #38bdf8);
+    border-bottom-color: var(--accent-primary, #38bdf8);
+  }
+
+  .discovery-row {
+    display: flex;
+    gap: 0.45rem;
+    align-items: center;
+  }
+
+  .discovery-row .styled-input {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .btn-fetch {
+    flex-shrink: 0;
+    padding: 0.5rem 0.8rem;
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: var(--accent-primary, #38bdf8);
+    background: var(--accent-primary-subtle, rgba(56, 189, 248, 0.12));
+    border: 1px solid var(--accent-primary-border, rgba(56, 189, 248, 0.35));
+    border-radius: 6px;
+    cursor: pointer;
+  }
+
+  .btn-fetch:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+
+  .err-note {
+    display: block;
+    padding: 0.4rem 0.6rem;
+    border-radius: 6px;
+    font-size: 0.72rem;
+    color: #f87171;
+    background: rgba(239, 68, 68, 0.1);
+    border: 1px solid rgba(239, 68, 68, 0.3);
+    overflow-wrap: anywhere;
+  }
+
+  .route-note {
+    font-size: 0.7rem;
+    color: var(--text-muted, #94a3b8);
+  }
+
+  .fetched-models-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+    padding: 0.7rem;
+    border-radius: 8px;
+    border: 1px solid var(--border-color, #334155);
+    background: var(--bg-surface, #1e293b);
+  }
+
+  .models-scroll {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    max-height: 220px;
+    overflow-y: auto;
+  }
+
+  .model-item-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    width: 100%;
+    padding: 0.45rem 0.6rem;
+    text-align: left;
+    color: var(--text-secondary, #cbd5e1);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+
+  .model-item-row:hover {
+    background: var(--bg-surface-elevated, #334155);
+  }
+
+  .model-item-row.selected {
+    border-color: var(--accent-primary, #38bdf8);
+    background: var(--accent-primary-subtle, rgba(56, 189, 248, 0.12));
+  }
+
+  .model-item-info {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    min-width: 0;
+  }
+
+  .model-item-id {
+    font-size: 0.78rem;
+    color: var(--text-primary, #f1f5f9);
+    overflow-wrap: anywhere;
+  }
+
+  .model-item-name {
+    font-size: 0.7rem;
+    color: var(--text-muted, #94a3b8);
+  }
+
+  .model-item-badges {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    flex-shrink: 0;
+  }
+
+  .meta-badge {
+    padding: 0.1rem 0.4rem;
+    border-radius: 4px;
+    font-size: 0.65rem;
+    color: #a855f7;
+    background: rgba(168, 85, 247, 0.12);
+    border: 1px solid rgba(168, 85, 247, 0.3);
+  }
+
+  .check-icon {
+    color: #34d399;
+    font-weight: 700;
   }
 
   .params-section {
