@@ -1,7 +1,7 @@
 # Agent Inspector & Telemetry Trace Architecture
 
 **Status:** CURRENT
-**Last verified: 2026-09-20**
+**Last verified: 2026-09-24**
 
 > [!NOTE]
 > This document details the technical implementation, reactive state synchronization, and observability features of `AgentInspector.svelte` within the `ai-story` Studio UI.
@@ -140,7 +140,7 @@ sequenceDiagram
 
     User->>UI: Types text into prompt textarea
     UI->>UI: handlePromptInput(e)
-    UI->>Store: setAgentDraft(agent.id, text)
+    UI->>Store: setAgentDraft(agent.identityKey, text)
     Store->>Storage: _scheduleAutoSave() (debounced 300ms)
 
     User->>Store: selectAgent('agent-commander')
@@ -150,8 +150,8 @@ sequenceDiagram
     UI->>UI: $effect updates promptInput = draft
 
     User->>UI: Clicks "Execute Turn"
-    UI->>Store: clearAgentDraft(agent.id)
-    UI->>Store: triggerTurn(agent.id, prompt)
+    UI->>Store: clearAgentDraft(agent.identityKey)
+    UI->>Store: triggerTurn(agent.identityKey, prompt)
     Store->>Storage: _scheduleAutoSave()
 ```
 

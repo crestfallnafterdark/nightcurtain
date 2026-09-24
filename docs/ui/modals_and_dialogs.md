@@ -1,7 +1,7 @@
 # Modals, Dialogs & Action Input Architecture
 
 **Status:** CURRENT
-**Last verified:** 2026-09-23
+**Last verified:** 2026-09-24
 
 > [!NOTE]
 > This document specifies the modal dialogs and action dock in the `ai-story` Studio UI: `AgentLauncherModal.svelte`, `RecycleBinModal.svelte`, `SandboxSettingsModal.svelte`, `AgentSettingsPanel.svelte` (the live-edit tab, not a modal), and `SandboxActionInput.svelte` — all under `src/lib/components/sandbox/`.
@@ -51,7 +51,7 @@ Provisioning and live customization are split between a modal and a Studio tab. 
 ```mermaid
 flowchart LR
     subgraph LauncherFlow ["Agent Provisioning (AgentLauncherModal.svelte)"]
-        L1["Unique ID Slug (pattern: a-z0-9_-)"] --> L2["Display Name & Role"]
+        L1["ID Slug (unique per Realm; pattern: a-z0-9_-)"] --> L2["Display Name & Role"]
         L2 --> L3["System Instructions (initial system prompt)"]
         L3 --> L4["Model Preset (catalog select; active preset is the default)"]
         L4 --> L5["Authority (⚡ Sudo Root Privileges)"]
@@ -66,6 +66,8 @@ flowchart LR
         E4 --> E5["sandboxStore.updateAgentConfig() / applyAgentUpdate()"]
     end
 ```
+
+Agent ids are unique per Realm: the launcher denies a duplicate inside the same Realm and allows the same literal id in another Realm — the engine keys registrations by the canonical `(realmId, agentId)` identity, and the UI selects and addresses agents by each snapshot's internal `identityKey` (agent-facing surfaces stay realm-opaque).
 
 **Edit Agent flow:** the Chat Studio header action and Inspector `onEditAgent` callback set `sandboxStore.setActiveTab('settings')`, which renders `AgentSettingsPanel` in the tab viewport.
 

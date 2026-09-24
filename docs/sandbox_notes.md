@@ -1,6 +1,6 @@
 # Sandbox Durable Notes — Quirks & Accepted Exceptions
 
-**Status:** ACTIVE · **Last verified:** 2026-09-22.
+**Status:** ACTIVE · **Last verified:** 2026-09-24.
 
 Durable engine notes: intentional quirks and accepted exceptions for the sandbox substrate. The per-module contract record is the generated ICD set ([`generated/modules/INDEX.md`](generated/modules/INDEX.md)).
 
@@ -32,6 +32,7 @@ Durable engine notes: intentional quirks and accepted exceptions for the sandbox
 18. **agentLifecycle claim-aware launch/eviction**: for resolved non-authority principals, launch denies a resolved workspace key already claimed by another registered record (active or recycled), own-id keys whose VFS workspace already exists, and every reserved key shape (`global`, `public`, `realm:<realmId>:global` — canonical predicate `isReservedWorkspaceKey` exported from `virtualFs`); mutating eviction (kill/purge/`emptyRecycleBin`) deletes a resolved workspace key only when the dying record is the last claimant. Consequences: a non-authority creator cannot spawn a second child into a workspace claimed by the first while the claim stands; an own-id relaunch is denied while its workspace still exists; without an injected VFS the shadow check is inert (no bytes to shadow) while claim confinement still applies.
 19. **Realm substrate scoping**: realm-bound callers are confined to `realm:<realmId>:global` (VFS alias-resolves `global`/`public`/`/global/` prefixes) plus their own workspace; identified ungrouped callers never span `realm:`-prefixed partitions (ungrouped privileged keeps only the legacy non-realm span); bypass = exact internal principal or hardcoded director. worldClock mutating single-target ops deny out of scope, while `getTime`/`queryEvents` silently narrow (their contracts have no failure branch); VFS `exportSnapshot` is refused for realm-bound callers (operator-level operation); VFS enumeration fails closed when a caller context is supplied but unresolvable, while context-free substrate calls keep the legacy spans.
 20. **Realm moves and schedule ownership** (superseded by membership immutability): changing/clearing `realmId` is denied for every caller — Realm membership is immutable after launch (terminate + relaunch to move), and generic lifecycle authority including `*` changes nothing; launch placement by lifecycle-authority callers uses the strict camelCase `realmId` composition key only (tool-spawned params are inert); `RuntimeScheduler`/`TriggerQueue` receive the identity port at the composition root and the `schedule` tool path forwards the trusted principal.
+21. **sandboxStore identity keys**: operator-facing agent snapshots carry the internal canonical `identityKey` (`realm:<realmId>:<agentId>` / `system:<agentId>`) for realm-exact selection and action addressing; `selectedAgentKey` is the selection source of truth and `selectedAgentId` stays a derived bare-id getter. Agent-facing surfaces stay realm-opaque — the realm launch receipt projects members without `identityKey`.
 
 These are also enforced by module `@invariant`/`@decision` tags and the suites/repros — prefer the module surfaces over line references here.
 

@@ -1,7 +1,7 @@
 # Svelte 5 Studio Architecture & Reactive Component Hierarchy
 
 **Status:** CANONICAL
-**Last verified: 2026-09-20**
+**Last verified: 2026-09-24**
 
 > [!NOTE]
 > This document provides an exhaustive, authoritative technical specification of the **Agentic Sandbox Studio** user interface within `ai-story`. It covers the Svelte 5 runes architecture, reactive stores, split-pane workspace layout, global shortcuts, and the obsidian design token system.
@@ -90,7 +90,7 @@ flowchart LR
         S3["fsSnapshot: Record<ws, Record<path, File>>"]
         S4["scheduledTimers: Timer[]"]
         S5["recycleBin: AgentInstance[]"]
-        S6["selectedAgentId: string | null"]
+        S6["selectedAgentKey: string | null"]
         S7["activeTab: string"]
         S8["agentDraftInputs: Record<id, string>"]
     end
@@ -120,13 +120,13 @@ flowchart LR
 
 ### 2.1 `$state` Reactive Fields in `sandboxStore/index.svelte.ts`
 
-The `$state` fields (including `agents`, `messages`, `fsSnapshot`, `scheduledTimers`, `recycleBin`, `selectedAgentId`, `activeTab`, `agentDraftInputs`, and `error`) are declared on the store class in `src/lib/sandbox/sandboxStore/index.svelte.ts`; the public surface is the generated [`sandboxStore` ICD](../generated/modules/sandboxStore.api.md).
+The `$state` fields (including `agents`, `messages`, `fsSnapshot`, `scheduledTimers`, `recycleBin`, `selectedAgentKey`, `activeTab`, `agentDraftInputs`, and `error`) are declared on the store class in `src/lib/sandbox/sandboxStore/index.svelte.ts`; the public surface is the generated [`sandboxStore` ICD](../generated/modules/sandboxStore.api.md). Selection is keyed by the canonical `(realmId, agentId)` identity (`selectedAgentKey`); `selectedAgentId` is a derived bare-id getter.
 
 The Studio's `activeTab` union is `'chat' | 'settings' | 'inspector' | 'filesystem' | 'messaging'` (default `'inspector'`). The demo fields (`isDemoRunning`, `demoStep`, `demoLogs`) are store-only: `runHandshakeDemo()` and the demo progress fields have no UI surface in the current Studio, so no demo banner or step-log drawer is rendered.
 
 ### 2.2 `$derived` and `$derived.by()` Telemetry & Getters
 
-The derived getters (`stats`, `selectedAgent`, `agentMessages`, `isAgentStreaming`, `streamingProse` / `streamingReasoning`, `activeToolCalls`, `activeFsFiles`, `allWorkspaces`, `recycleBinCount`) are declared on the same store class (`src/lib/sandbox/sandboxStore/index.svelte.ts`; `$state` only — derived values are plain getters).
+The derived getters (`stats`, `selectedAgent`, `selectedAgentId`, `agentMessages`, `isAgentStreaming`, `streamingProse` / `streamingReasoning`, `activeToolCalls`, `activeFsFiles`, `allWorkspaces`, `recycleBinCount`) are declared on the same store class (`src/lib/sandbox/sandboxStore/index.svelte.ts`; `$state` only — derived values are plain getters).
 
 ---
 
