@@ -188,17 +188,19 @@ Helper logic lives in `realmLauncherHelpers.ts` (preview projection, preset-bind
 
 ## 6. Sandbox Settings Modal (`SandboxSettingsModal.svelte`)
 
-`SandboxSettingsModal.svelte` is the catalog-driven global configuration surface. It has two sections:
+`SandboxSettingsModal.svelte` is the catalog-driven global configuration surface. It is a tabbed dialog (`role="tablist"` / `role="tabpanel"`) with two first-class views:
 
 ```mermaid
 graph TD
-    subgraph SettingsModalLayout ["SandboxSettingsModal.svelte"]
-        S1["Section 1: Model Presets\n- Catalog preset select (official + custom) with Active/Official/Custom badges\n- Provider / Model ID / Custom Endpoint URL / Upstream Routing / Temperature / Reasoning Effort\n- Save preset, Save as New, Delete custom preset (selecting a preset sets it active)\n- 'Unsaved changes' badge (.dirty-badge) while the editor differs from the selected preset"]
-        S2["Section 2: Credential Vault\n- Per-provider credential lists (runware / nanogpt / deepseek / prem / custom)\n- Labeled secrets: add, edit, reveal/mask, copy, delete, Set Active\n- Optional Prem Client KEK"]
+    subgraph SettingsModalLayout ["SandboxSettingsModal.svelte (tabbed)"]
+        S1["Tab 1: Model Presets\n- Catalog preset select (official + custom) with Active/Official/Custom badges\n- Provider / Model ID / Temperature / Reasoning Effort + capability-gated Endpoint URL (custom) / Upstream Routing (nanogpt)\n- Discovery: Fetch Models (filterable result list) and nanogpt-only Refresh Routes\n- Save preset, Save as New, Delete custom preset (selecting a preset sets it active)\n- 'Unsaved changes' badge (.dirty-badge) while the editor differs from the selected preset"]
+        S2["Tab 2: API Keys (Credential Vault)\n- Per-provider credential lists (runware / nanogpt / deepseek / prem / custom)\n- Labeled secrets: add, edit, reveal/mask, copy, delete, Set Active\n- Optional Prem Client KEK"]
     end
 ```
 
-### 4.1 Save Semantics & Credential Vault
+Model and route discovery live in `modelDiscovery.ts`: it builds the real transport via `createProvider(draft, vault.createResolverPort())`, normalizes listings to display shapes (deduplicated by id, raw provider payloads dropped), redacts credential values from failure messages, and surfaces the legacy empty/failure texts inline. Route discovery is nanogpt-only; every other provider keeps the free-text routing field.
+
+### 6.1 Save Semantics & Credential Vault
 
 - **Presets** are persisted by the `presetCatalog` module — the single writer of model configuration. Saving writes the preset; selecting a preset in the catalog sets the active pointer, and `sandboxStore.modelConfig` is a read-only projection of the active preset. The editor flags unsaved edits with an **Unsaved changes** badge (`.dirty-badge`) beside the save actions. Custom presets are `isCustom`, and the master-default fallback preset is undeletable.
 - **Credential Vault** stores secrets as `(keyId, secret)` pairs only — one credential per provider may be active (`Set Active`). Every vault mutation that changes a provider's active credential — saving an edit to the active credential, adding a credential (which is set active on creation), `Set Active`, or deleting the active credential — calls `sandboxStore.rebindProviderCredentials(providerId, credentialId)`. The status line reports that the change **applies at the next turn start**: the rebind walk rewrites only legacy/unbound agents that carry the provider in their `modelConfig`, while preset-bound agents are skipped by design and re-resolve the vault's active credential when their effective model is materialized at the next turn start. The custom base URL is a preset field, never a vault field.

@@ -91,7 +91,7 @@ docs/
 │
 └── testing/                                   # Verification, QA & Test Harnesses
     ├── testing_strategy.md                    # Multi-Tier Testing Pyramid, Zero-Mock Philosophy, CI/CD Gates
-    ├── unit_and_integration.md                # Node Native Runner (96 suites: 50 Unit / 46 Integration), Integration Test Contracts
+    ├── unit_and_integration.md                # Node Native Runner (97 suites: 51 Unit / 46 Integration), Integration Test Contracts
     ├── e2e_and_visual.md                      # Playwright Browser E2E Specs (8), Responsive Visual Baselines, Test Auditor
     ├── exploratory_qa_plan.md                 # Agent-Driven Exploratory QA via Playwright MCP, Charters, Secret Handling
     └── audit_and_repro.md                     # Audit Repro Mechanics, Test-First Fix Waves, Provider Smoke Pre-flight
@@ -128,7 +128,7 @@ docs/
 | Document | Focus | Key Highlights |
 | :--- | :--- | :--- |
 | [`testing/testing_strategy.md`](testing/testing_strategy.md) | QA Philosophy | The Zero-Mock Mandate, real DOM execution, prohibition of synthetic AST parsing, 4-stage CI/CD validation gates. |
-| [`testing/unit_and_integration.md`](testing/unit_and_integration.md) | Substrate Tests | 96 Node.js native test suites (50 Unit, 46 Integration), browser-polyfill test environment, runtime/messaging/tool-loop verification. |
+| [`testing/unit_and_integration.md`](testing/unit_and_integration.md) | Substrate Tests | 97 Node.js native test suites (51 Unit, 46 Integration), browser-polyfill test environment, runtime/messaging/tool-loop verification. |
 | [`testing/e2e_and_visual.md`](testing/e2e_and_visual.md) | Playwright E2E | 8 browser-driven user journey specs, responsive viewport capture baselines (Desktop 1440x900, Tablet 768x1024, Mobile 375x812). |
 | [`testing/exploratory_qa_plan.md`](testing/exploratory_qa_plan.md) | Agent-Driven Exploratory QA | Playwright MCP browser harness, sandbox-studio charters, live-key budget, vault seeding, secret-handling rules. |
 | [`testing/audit_and_repro.md`](testing/audit_and_repro.md) | Audit Repro Mechanics | Read-only auditors propose failing tests; fixes commit repros test-first (`tests/audit/`), promote them into suites, and run the provider smoke probe before attributing suite failures to code. |
@@ -156,7 +156,7 @@ npm run preview   # Preview production build locally
 # Default static battery: contracts + module contracts + contract types + api-report freshness + arch + lints + typecheck
 npm run verify
 
-# Execute master test suite (96 suites: 50 unit + 46 integration)
+# Execute master test suite (97 suites: 51 unit + 46 integration)
 npm test
 
 # Execute fast unit tests only

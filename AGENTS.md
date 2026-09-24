@@ -68,7 +68,7 @@ npm run lint:docs                          # TSDoc syntax gate over sandbox .ts:
 npm run typecheck                          # scripts/typecheck.mjs: jsconfig tsc + strict contracts tsc + svelte-check all run; ratchet baselines (tsc 0 total / 0 sandbox; contracts 0; svelte-check ≤96)
 timeout 90 node tests/unit/<suite>.js      # single suite (timeout 180 for heavy suites)
 timeout 90 node tests/audit/repros/<id>.test.js # audit repros (red-before-fix evidence; not part of npm test)
-timeout 600 npm test                       # 96 suites — single-flight: lead runs after each round lands + at convergence (includes contracts_gate_test)
+timeout 600 npm test                       # 97 suites — single-flight: lead runs after each round lands + at convergence (includes contracts_gate_test)
 npm run build
 npm run test:e2e                           # Playwright (9 specs) — outside the main gate
 node tests/qa/seed_vault.mjs               # QA: seed provider keys into the MCP profile (browser closed first)

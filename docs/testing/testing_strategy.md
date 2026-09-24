@@ -23,7 +23,7 @@ graph TD
     end
 
     subgraph L1["Tier 1: Atomic Unit & Contract Testing (node --test)"]
-        UNIT["50 Unit Suites (tests/unit/)<br/>• Pure Functions & Algorithms<br/>• DeepSeek Reasoning Hygiene (INV-REASONING-STRING)<br/>• JSON Pointers, Parsers, Preset Catalog, LoRA Tags<br/>• Module Contracts & Provider Adapters"]
+        UNIT["51 Unit Suites (tests/unit/)<br/>• Pure Functions & Algorithms<br/>• DeepSeek Reasoning Hygiene (INV-REASONING-STRING)<br/>• JSON Pointers, Parsers, Preset Catalog, LoRA Tags<br/>• Module Contracts & Provider Adapters"]
     end
 
     L1 --> L2
@@ -101,7 +101,7 @@ The master runner executes all Unit and Integration suites in strict sub-process
 // Sample output format from tests/runner.js:
 // ======================================================================
 //   AGENTIC SANDBOX STUDIO MASTER TEST SUITE RUNNER
-//   Total Suites: 96 (50 Unit, 46 Integration)
+//   Total Suites: 97 (51 Unit, 46 Integration)
 // ======================================================================
 //   [Unit       ] deepseek_provider_test.js                  ✔ PASS (42ms)
 //   [Unit       ] deepseek_reasoning_hygiene_test.js         ✔ PASS (18ms)
@@ -149,6 +149,7 @@ The project includes **92 native test suites** (46 unit, 46 integration) and **8
 | [`messaging_bus_module_test.js`](../../tests/unit/messaging_bus_module_test.js) | `src/lib/sandbox/messagingBus/index.ts` | Module 2 ICD: strict dequeue on read, clean drain, non-destructive peek. |
 | [`messaging_bus_realm_scope_test.js`](../../tests/unit/messaging_bus_realm_scope_test.js) | `src/lib/sandbox/messagingBus/index.ts` | Realm-scoped delivery: cross-realm direct/inline/broadcast denial, bypass principals, filtered fan-out, legacy parity. |
 | [`model_config_module_test.js`](../../tests/unit/model_config_module_test.js) | `src/lib/sandbox/modelConfig/index.ts` | Strict export whitelist, 5-entry preset catalog, provider capability flags, 100K token cap. |
+| [`model_discovery_test.js`](../../tests/unit/model_discovery_test.js) | `src/lib/components/sandbox/modelDiscovery.ts` | Provider model/route discovery: descriptor normalization + id dedupe, legacy empty/failure messages, credential redaction, nanogpt-only routes. |
 | [`nanogpt_provider_test.js`](../../tests/unit/nanogpt_provider_test.js) | `src/lib/sandbox/inference/NanoGptProvider/index.ts` | NanoGPT adapter wire contract, routing headers, retry policy. |
 | [`openai_provider_test.js`](../../tests/unit/openai_provider_test.js) | `src/lib/sandbox/inference/OpenAIProvider/index.ts` | Custom provider `url` enforcement, OpenAI-compatible streaming, retry. |
 | [`precall_gate_adversarial_test.js`](../../tests/unit/precall_gate_adversarial_test.js) | `src/lib/sandbox/tools/descriptors/precallTools.ts` | Forbidden-precall gate adversarial coverage, allowlist resolution. |
@@ -267,8 +268,8 @@ sequenceDiagram
     G1-->>Dev: Gate 1 Passed (0 lint / sync errors)
 
     Dev->>G2: npm test (tests/runner.js)
-    Note over G2: Executes 96 suites (50 Unit, 46 Integration) under 120s timeout
-    G2-->>Dev: Gate 2 Passed (96/96 passed, 0 failures)
+    Note over G2: Executes 97 suites (51 Unit, 46 Integration) under 120s timeout
+    G2-->>Dev: Gate 2 Passed (97/97 passed, 0 failures)
 
     Dev->>G3: npm run build (vite build)
     Note over G3: Compiles Svelte 5 runes, WASM modules, top-level awaits
