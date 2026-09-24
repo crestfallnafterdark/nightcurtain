@@ -1538,13 +1538,22 @@ export type PendingInstancePayloadView = PendingInstancePayload;
 export type RealmTemplateImportPreview = RealmTemplateImportReceipt & { readonly dryRun: true };
 
 /**
+ * Realm-opaque member projection carried by {@link RealmLaunchReceipt}
+ * (defect 7d2c314): the normalized `AgentStateSnapshot` shape minus the
+ * internal canonical `identityKey`, so an operator launch receipt never
+ * carries canonical-key vocabulary. Receipt consumers use `{ id, name }` and
+ * counts; exact addressing stays on the store's selection/action surfaces.
+ */
+export type RealmLaunchReceiptAgent = Omit<AgentStateSnapshot, 'identityKey'>;
+
+/**
  * Successful result of `SandboxStore.launchRealmFromTemplate()`.
  */
 export interface RealmLaunchReceipt {
   /** Frozen registry record created for the launch (including recorded `instance` provenance). */
   readonly realm: RealmRecord;
-  /** Active member snapshots in template launch order. */
-  readonly agents: ReadonlyArray<AgentStateSnapshot>;
+  /** Active member snapshots in template launch order (realm-opaque projections). */
+  readonly agents: ReadonlyArray<RealmLaunchReceiptAgent>;
   /** Hydration warnings collected during launch (present only when non-empty; e.g. an allowed version mismatch). */
   readonly warnings?: readonly string[];
 }
@@ -6910,9 +6919,17 @@ export class SandboxStore {
       }
 
       const uniqueWarnings = [...new Set(warnings)];
+      // Defect 7d2c314: the receipt is realm-opaque — strip the internal
+      // canonical identity key from each member projection (a shallow copy
+      // per member). Exact addressing lives on the store's selection/action
+      // surfaces, never on the receipt.
+      const receiptAgents: RealmLaunchReceiptAgent[] = launched.map((snapshot) => {
+        const { identityKey: _identityKey, ...realmOpaque } = snapshot;
+        return realmOpaque;
+      });
       return {
         realm: launchedRealm,
-        agents: launched,
+        agents: receiptAgents,
         ...(uniqueWarnings.length > 0 ? { warnings: Object.freeze(uniqueWarnings) } : {})
       };
     } catch (failure) {
