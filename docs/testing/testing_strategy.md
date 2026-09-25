@@ -23,7 +23,7 @@ graph TD
     end
 
     subgraph L1["Tier 1: Atomic Unit & Contract Testing (node --test)"]
-        UNIT["51 Unit Suites (tests/unit/)<br/>• Pure Functions & Algorithms<br/>• DeepSeek Reasoning Hygiene (INV-REASONING-STRING)<br/>• JSON Pointers, Parsers, Preset Catalog, LoRA Tags<br/>• Module Contracts & Provider Adapters"]
+        UNIT["52 Unit Suites (tests/unit/)<br/>• Pure Functions & Algorithms<br/>• DeepSeek Reasoning Hygiene (INV-REASONING-STRING)<br/>• JSON Pointers, Parsers, Preset Catalog, LoRA Tags<br/>• Module Contracts & Provider Adapters"]
     end
 
     L1 --> L2
@@ -101,7 +101,7 @@ The master runner executes all Unit and Integration suites in strict sub-process
 // Sample output format from tests/runner.js:
 // ======================================================================
 //   AGENTIC SANDBOX STUDIO MASTER TEST SUITE RUNNER
-//   Total Suites: 97 (51 Unit, 46 Integration)
+//   Total Suites: 98 (52 Unit, 46 Integration)
 // ======================================================================
 //   [Unit       ] deepseek_provider_test.js                  ✔ PASS (42ms)
 //   [Unit       ] deepseek_reasoning_hygiene_test.js         ✔ PASS (18ms)
@@ -141,6 +141,7 @@ The project includes **92 native test suites** (46 unit, 46 integration) and **8
 | [`descriptor_authority_hygiene_test.js`](../../tests/unit/descriptor_authority_hygiene_test.js) | `src/lib/sandbox/toolDefinitions/index.ts` + `tools/constants/index.ts` | Descriptor scope: identity-only caller forwarding, no authority-field leakage, `AuthorityDescriptor` allow-set gating. |
 | [`domain_director_module_test.js`](../../tests/unit/domain_director_module_test.js) | `src/lib/sandbox/domain/directorAgent/index.ts` | Director domain contract, strict whitelist, verbatim directive integrity. |
 | [`fs_download_utils_test.js`](../../tests/unit/fs_download_utils_test.js) | `src/lib/sandbox/fsDownloadUtils/index.ts` | VirtualFS folder/file download, upload, copy, Blob/ZIP packaging. |
+| [`gitbug_board_test.js`](../../tests/unit/gitbug_board_test.js) | `scripts/gitbug.mjs` | One-turn triage verbs (`board`/`next`/`brief`/`apply`): projections, filters, v1 JSON schemas + byte determinism, dry-run no-mutation, applied label/comment/status round-trips (isolated fixtures). |
 | [`gitbug_wrapper_test.js`](../../tests/unit/gitbug_wrapper_test.js) | `scripts/gitbug.mjs` | git-bug wrapper safety: ref resolution without silent fallback, label validation, argv builders. |
 | [`icd_a_history_test.js`](../../tests/unit/icd_a_history_test.js) | `src/lib/sandbox/runtime/historyManager/index.ts` + `tools/descriptors/lifecycleTools.ts` | ICD-A regressions: options-form emit resolution, `undo_turn` target selection, structured failure receipts. |
 | [`invocation_engine_module_test.js`](../../tests/unit/invocation_engine_module_test.js) | `src/lib/sandbox/invocationEngine/index.ts` | Module 5 ICD contract, direct RPC dispatch, parameter normalization. |
@@ -268,8 +269,8 @@ sequenceDiagram
     G1-->>Dev: Gate 1 Passed (0 lint / sync errors)
 
     Dev->>G2: npm test (tests/runner.js)
-    Note over G2: Executes 97 suites (51 Unit, 46 Integration) under 120s timeout
-    G2-->>Dev: Gate 2 Passed (97/97 passed, 0 failures)
+    Note over G2: Executes 98 suites (52 Unit, 46 Integration) under 120s timeout
+    G2-->>Dev: Gate 2 Passed (98/98 passed, 0 failures)
 
     Dev->>G3: npm run build (vite build)
     Note over G3: Compiles Svelte 5 runes, WASM modules, top-level awaits
