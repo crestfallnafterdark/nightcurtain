@@ -2,9 +2,11 @@
 name: working-with-git-bug
 description: >-
   Operate this repository's local git-bug issue tracker without guessing its command grammar.
-  Use whenever reading, searching, filing, labelling, commenting on, closing, or syncing
-  git-bug tickets (running `git bug`, `git bug bug`, `git bug bug show|new|comment|label|status`,
-  or `git bug push`/`pull`), or when a `git bug` command fails with "unknown command".
+  Use whenever reading, searching, filing, labelling, commenting on, closing, syncing, or
+  triaging git-bug tickets (running `git bug`, `git bug bug`,
+  `git bug bug show|new|comment|label|status`, or the wrapper verbs
+  `board`/`next`/`brief`/`apply`, or `git bug push`/`pull`), or when a `git bug` command
+  fails with "unknown command".
   Prevents the top-level-subcommand confusion (`git bug ls|show|new` do not exist — every bug
   operation nests under `git bug bug`), the silent fallback of unresolvable ids to the selected
   bug (which can silently MUTATE an unrelated ticket), interactive `$EDITOR` hangs from missing
@@ -30,17 +32,56 @@ Older upstream docs/READMEs use `git bug ls` / `git bug add`; those do not exist
 id resolution (never the selection fallback), JSON/`--dry-run` output.
 
 ```bash
-node scripts/gitbug.mjs list -s open --json
+node scripts/gitbug.mjs board                     # one call: triage board
+node scripts/gitbug.mjs next                      # one call: highest-priority open item
+node scripts/gitbug.mjs brief 20a885f --tail 3    # one call: metadata + refs + last 3 comments
 node scripts/gitbug.mjs resolve 20a885f          # exit 1 if not a real ticket
 node scripts/gitbug.mjs show 20a885f --json
 node scripts/gitbug.mjs new --title "…" --body "…" --label area:tooling --label sev:minor
-node scripts/gitbug.mjs comment 20a885f --body "…"
-node scripts/gitbug.mjs close 20a885f
-node scripts/gitbug.mjs --dry-run new --title "…" --body "…"   # prints the git argv only
+node scripts/gitbug.mjs apply 20a885f --label prio:high --comment "…" --status closed
+node scripts/gitbug.mjs --dry-run apply 20a885f --status closed   # prints planned git argv only
 ```
 
 Use raw `git bug` only for verbs the wrapper lacks (`title`, `comment edit`, `user`,
-`bridge`, `push`/`pull`).
+`rm`, `bridge`, `push`/`pull`, full-text search).
+
+## One-turn triage workflow
+
+Four verbs cover read → pick → inspect → update; each is one call with compact,
+deterministic output (no ANSI, stable sort), so an agent needs no follow-up
+discovery turns:
+
+```bash
+node scripts/gitbug.mjs board                          # all open, triage-sorted
+node scripts/gitbug.mjs board --area tooling --sev major --limit 5
+node scripts/gitbug.mjs board --status closed --json   # gitbug.board.v1 schema
+node scripts/gitbug.mjs next                           # single best open item
+node scripts/gitbug.mjs next --area runtime --json     # gitbug.next.v1
+node scripts/gitbug.mjs brief 20a885f                  # full ticket view
+node scripts/gitbug.mjs brief 20a885f --tail 3 --json  # last 3 comments only
+node scripts/gitbug.mjs apply 20a885f --label sev:major --label-rm qa \
+    --comment "closing: fixed in <sha>" --status closed
+```
+
+- Board/next ordering: `sev:critical > sev:major > prio:high > sev:minor >
+  prio:normal > prio:low > sev:low > sev:cosmetic > untagged`, then oldest,
+  then id. Filters AND together; `--area/--prio/--sev/--type` take bare values
+  or prefixed labels and repeat.
+- `board` line: `id status prio sev type area age title` (≤140 chars; header
+  starts with `#`). `next` prints the same line untruncated, or `none`.
+- `brief` adds `refs:` (real ticket ids mentioned in the ticket) and caps
+  comments with `--tail N` (`--tail 0` = metadata only).
+- `apply` is one locked call: add labels, remove labels, comment, status (that
+  order; stops at the first failure, earlier steps persist; absent
+  `--label-rm` labels are skipped, not errors). An `apply` with no action flags
+  is exit 2.
+
+Why it beats the old flow (measured 2026-09-25 on the live board): `list -s
+open --json` was ~45 KB (~11k tokens) and still needed in-head sorting; `board`
+is ~4 KB and `next` ~180 chars. `show` dumps every comment with no limit;
+`brief --tail 3` bounds a 30 KB ticket to ~4.4 KB. Updates took a `comment` call
+plus raw unserialized `git bug bug label …` plus `close`; `apply` does it in one
+locked call (raw label calls are not serialized against other agents).
 
 ## Rule 1 — everything nests under `git bug bug`
 
@@ -170,7 +211,7 @@ git bug bug -f id >/dev/null      # rebuilds
 ## Quick verification
 
 ```bash
-node scripts/gitbug.mjs list -s open --json     # board
+node scripts/gitbug.mjs board                   # one-call triage board
 git for-each-ref refs/bugs | wc -l              # ticket refs
 node scripts/gitbug.mjs resolve <ref>           # 0 = real ticket, 1 = not
 ```
