@@ -11,9 +11,9 @@
  * - `-t` and `-F` are never combined (`-F` silently overrides `-t`). The default
  *   path uses `-m` so `-t` is honoured; `-F -` is used only with `--title-from-body`.
  * - Ticket refs are prefix-matched against `git for-each-ref refs/bugs` before any
- *   `show`/`close`/`open`/`comment`, so an unknown ref fails instead of silently
- *   falling back to the *selected* bug. `refs/bugs/<7-hex>` is never passed to
- *   `git rev-parse`.
+ *   `show`/`brief`/`apply`/`close`/`open`/`comment`, so an unknown ref fails instead
+ *   of silently falling back to the *selected* bug. `refs/bugs/<7-hex>` is never
+ *   passed to `git rev-parse`.
  * - Labels are validated individually (one argv element each); malformed or unknown
  *   labels are rejected with exit code 2 instead of creating a space-containing label.
  * - Concurrent invocations are serialized through an advisory O_EXCL lock file
@@ -23,6 +23,9 @@
  *   `--lock-timeout`/`GITBUG_LOCK_TIMEOUT` (default 120000 ms), reclaims stale locks,
  *   and fails closed with holder details on timeout. `.git/git-bug/lock` is never
  *   touched. `--help` and `--dry-run` never take the lock.
+ * - `board`/`next`/`brief`/`apply` project git-bug JSON into compact deterministic
+ *   output: versioned schemas, stable sort/key order, whole-day ages, no ANSI, and
+ *   a one-line error naming the fix for every validation failure.
  *
  * @remarks
  * `--dry-run` prints the exact `git` argv instead of executing a mutation. Ticket
@@ -61,7 +64,36 @@ const DEFAULT_LOCK_TIMEOUT_MS = 120_000;
 const LOCK_HARD_CAP_MS = 15 * 60 * 1000;
 const LOCK_POLL_MIN_MS = 50;
 const LOCK_POLL_MAX_MS = 500;
-const LOCKABLE_COMMANDS = new Set(['list', 'show', 'resolve', 'new', 'comment', 'close', 'open', 'labels']);
+const LOCKABLE_COMMANDS = new Set([
+  'list', 'show', 'resolve', 'board', 'next', 'brief', 'new', 'comment', 'close', 'open', 'labels', 'apply',
+]);
+
+const BOARD_SCHEMA = 'gitbug.board.v1';
+const NEXT_SCHEMA = 'gitbug.next.v1';
+const BRIEF_SCHEMA = 'gitbug.brief.v1';
+const APPLY_SCHEMA = 'gitbug.apply.v1';
+
+/** Board lines are capped at this many characters (title truncated to fit). */
+const BOARD_LINE_MAX = 140;
+/** A board title is never truncated below this many characters. */
+const BOARD_TITLE_MIN = 24;
+const DAY_MS = 24 * 60 * 60 * 1000;
+/**
+ * Triage tier per canonical label; lower sorts first. A ticket's rank is the
+ * best (lowest) tier among its labels, so `sev:minor` + `prio:high` ranks as
+ * `prio:high`. Untagged tickets rank last.
+ */
+const TRIAGE_TIERS = new Map([
+  ['sev:critical', 0],
+  ['sev:major', 1],
+  ['prio:high', 2],
+  ['sev:minor', 3],
+  ['prio:normal', 4],
+  ['prio:low', 5],
+  ['sev:low', 6],
+  ['sev:cosmetic', 7],
+]);
+const TRIAGE_UNTAGGED = 8;
 
 const USAGE = `Usage: gitbug <command> [options]
 
@@ -69,11 +101,26 @@ Commands:
   list      [--status open|closed] [--label <l>]... [--json]
   show      <ref> [--json]
   resolve   <ref>
+  board     [--status open|closed] [--label <l>]... [--area <v>]... [--prio <v>]...
+            [--sev <v>]... [--type <v>]... [--limit <n>] [--json]
+  next      same filters as board (no --limit; default --status open) [--json]
+  brief     <ref> [--tail <n>] [--json]
   new       --title <t> (--body <b> | --body-file <f>) [--label <l>]... [--title-from-body]
+  apply     <ref> [--label <l>]... [--label-rm <l>]... [--comment <t> | --comment-file <f>]
+            [--status open|closed] [--json]
   comment   <ref> (--body <b> | --body-file <f>)
   close     <ref>
   open      <ref>
   labels
+
+Board/next filters AND together; --area/--prio/--sev/--type accept a bare value
+(--area tooling) or a prefixed label (--area area:tooling) and repeat.
+Board/next order: sev:critical > sev:major > prio:high > sev:minor >
+prio:normal > prio:low > sev:low > sev:cosmetic > untagged, then oldest, then id.
+board caps each line at 140 chars (titles truncated to fit); next prints the
+full title. apply executes add-labels, remove-labels, comment, status in that
+order; a failing step stops the run (no rollback, earlier steps persist);
+already-absent --label-rm labels are skipped, not errors.
 
 Global:
   --dry-run            Print the git argv that would run; perform no mutation.
@@ -616,8 +663,386 @@ function validateOrThrow(labels) {
   const result = validateLabels(labels);
   if (!result.ok) {
     const detail = result.invalid.map((entry) => entry.reason).join('; ');
-    throw usage(`invalid label(s): ${detail}`);
+    throw usage(`invalid label(s): ${detail}; allowed: ${LABEL_PREFIXES.map((prefix) => `${prefix}:*`).join(' ')} ${[...LEGACY_LABELS].join(' ')}`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Board / next / brief: pure projections
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract the canonical triage fields from a ticket's labels. Missing fields
+ * are `null`; areas are sorted so output is input-order independent.
+ * @param {unknown} labels Ticket labels.
+ * @returns {{prio: string|null, sev: string|null, type: string|null, areas: string[]}} Fields.
+ */
+export function canonicalFields(labels) {
+  const list = (Array.isArray(labels) ? labels : []).filter((label) => typeof label === 'string');
+  const firstValue = (prefix) => {
+    const match = list.find((label) => label.startsWith(`${prefix}:`));
+    return match === undefined ? null : match.slice(prefix.length + 1);
+  };
+  return {
+    prio: firstValue('prio'),
+    sev: firstValue('sev'),
+    type: firstValue('type'),
+    areas: list.filter((label) => label.startsWith('area:')).map((label) => label.slice(5)).sort(),
+  };
+}
+
+/**
+ * Triage tier of a ticket: the best (lowest) tier among its canonical labels.
+ * @param {unknown} labels Ticket labels.
+ * @returns {number} Tier 0 (`sev:critical`) .. 8 (untagged).
+ */
+export function triageRank(labels) {
+  let best = TRIAGE_UNTAGGED;
+  for (const label of Array.isArray(labels) ? labels : []) {
+    const tier = TRIAGE_TIERS.get(label);
+    if (tier !== undefined && tier < best) best = tier;
+  }
+  return best;
+}
+
+/**
+ * Whole days since a git-bug `create_time.timestamp` (seconds); never negative.
+ * @param {unknown} createdSeconds git-bug `create_time.timestamp`.
+ * @param {number} [nowMs] Current epoch milliseconds.
+ * @returns {number} Age in whole days.
+ */
+export function formatAgeDays(createdSeconds, nowMs = Date.now()) {
+  const createdMs = Number(createdSeconds) * 1000;
+  if (!Number.isFinite(createdMs)) return 0;
+  return Math.max(0, Math.floor((nowMs - createdMs) / DAY_MS));
+}
+
+/**
+ * Truncate a title to `max` characters using a trailing ASCII ellipsis.
+ * @param {unknown} title Raw title.
+ * @param {number} [max] Maximum length.
+ * @returns {string} Full or truncated title.
+ */
+export function truncateTitle(title, max = BOARD_LINE_MAX) {
+  const text = String(title ?? '');
+  if (text.length <= max) return text;
+  return `${text.slice(0, Math.max(0, max - 3))}...`;
+}
+
+/**
+ * Deterministic triage order: `triageRank`, then oldest `create_time`, then
+ * short id (code-point compare, locale-independent).
+ * @param {unknown} tickets git-bug ticket objects.
+ * @returns {Array<Record<string, unknown>>} New sorted array.
+ */
+export function sortTickets(tickets) {
+  return [...(Array.isArray(tickets) ? tickets : [])].sort((a, b) => {
+    const tier = triageRank(a && a.labels) - triageRank(b && b.labels);
+    if (tier !== 0) return tier;
+    const aCreated = Number(a && a.create_time && a.create_time.timestamp) || 0;
+    const bCreated = Number(b && b.create_time && b.create_time.timestamp) || 0;
+    if (aCreated !== bCreated) return aCreated - bCreated;
+    const aId = String((a && (a.human_id || a.id)) || '');
+    const bId = String((b && (b.human_id || b.id)) || '');
+    return aId < bId ? -1 : aId > bId ? 1 : 0;
+  });
+}
+
+/**
+ * Compact ticket header line: `id status prio sev type area age` (no title).
+ * @param {Record<string, unknown>} ticket git-bug ticket object.
+ * @param {number} [nowMs] Current epoch milliseconds.
+ * @returns {string} Header line.
+ */
+export function formatTicketHeader(ticket, nowMs = Date.now()) {
+  const { prio, sev, type, areas } = canonicalFields(ticket && ticket.labels);
+  const created = ticket && ticket.create_time ? ticket.create_time.timestamp : undefined;
+  return [
+    ticket && ticket.human_id,
+    ticket && ticket.status,
+    prio === null ? '-' : `prio:${prio}`,
+    sev === null ? '-' : `sev:${sev}`,
+    type === null ? '-' : `type:${type}`,
+    areas.length === 0 ? '-' : `area:${areas.join(',')}`,
+    `${formatAgeDays(created, nowMs)}d`,
+  ].join(' ');
+}
+
+/**
+ * One board line: ticket header plus title, truncated so the whole line fits
+ * `BOARD_LINE_MAX` characters (title budget `maxTitle` overrides the fit).
+ * @param {Record<string, unknown>} ticket git-bug ticket object.
+ * @param {{nowMs?: number, maxTitle?: number}} [options] Formatting options.
+ * @returns {string} Line.
+ */
+export function formatBoardLine(ticket, options = {}) {
+  const { nowMs = Date.now(), maxTitle } = options;
+  const header = formatTicketHeader(ticket, nowMs);
+  const budget = maxTitle ?? Math.max(BOARD_TITLE_MIN, BOARD_LINE_MAX - header.length - 1);
+  return `${header} ${truncateTitle(ticket && ticket.title, budget)}`;
+}
+
+/**
+ * Board/next JSON projection. Key order is stable by construction; `short` is
+ * the 7-char ref every wrapper verb accepts.
+ * @param {Record<string, unknown>} ticket git-bug ticket object.
+ * @param {number} [nowMs] Current epoch milliseconds.
+ * @returns {Record<string, unknown>} Projection.
+ */
+export function boardTicketJson(ticket, nowMs = Date.now()) {
+  const { prio, sev, type, areas } = canonicalFields(ticket && ticket.labels);
+  const created = ticket && ticket.create_time ? ticket.create_time : null;
+  return {
+    short: ticket && ticket.human_id,
+    status: ticket && ticket.status,
+    prio,
+    sev,
+    type,
+    area: areas,
+    ageDays: formatAgeDays(created ? created.timestamp : undefined, nowMs),
+    created: created ? created.time : null,
+    title: (ticket && ticket.title) || '',
+  };
+}
+
+/**
+ * Extract 7-hex tokens from free text that name real tickets (prefix match
+ * against known short ids). Longer hex runs and unknown ids are ignored.
+ * @param {unknown} texts Texts to scan (title, comment bodies).
+ * @param {unknown} knownShortIds Short ids of all known tickets.
+ * @param {string[]} [exclude] Short ids to ignore (e.g. the ticket itself).
+ * @returns {string[]} Sorted unique short ids.
+ */
+export function extractCrossRefs(texts, knownShortIds, exclude = []) {
+  const known = new Set((Array.isArray(knownShortIds) ? knownShortIds : []).map(String));
+  const skip = new Set((Array.isArray(exclude) ? exclude : []).map(String));
+  const found = new Set();
+  for (const text of Array.isArray(texts) ? texts : []) {
+    const matches = String(text ?? '').match(/(?<![0-9a-f])[0-9a-f]{7}(?![0-9a-f])/g);
+    if (!matches) continue;
+    for (const token of matches) {
+      if (!skip.has(token) && known.has(token)) found.add(token);
+    }
+  }
+  return [...found].sort();
+}
+
+/**
+ * Select the comments to render: the last `tail`, or all when `tail` is null.
+ * @param {unknown} comments All comments.
+ * @param {number|null} tail Maximum comments to render.
+ * @returns {{shown: Array<Record<string, unknown>>, firstIndex: number}} Selection.
+ */
+function selectComments(comments, tail) {
+  const list = Array.isArray(comments) ? comments : [];
+  if (tail === null || tail >= list.length) return { shown: list, firstIndex: 0 };
+  return { shown: list.slice(list.length - tail), firstIndex: list.length - tail };
+}
+
+/**
+ * Brief JSON projection (versioned schema, stable key order).
+ * @param {Record<string, unknown>} ticket git-bug `show -f json` output.
+ * @param {{nowMs?: number, tail?: number|null, refs?: string[]}} [options] Options.
+ * @returns {Record<string, unknown>} Projection.
+ */
+export function briefTicketJson(ticket, options = {}) {
+  const { nowMs = Date.now(), tail = null, refs = [] } = options;
+  const { prio, sev, type, areas } = canonicalFields(ticket && ticket.labels);
+  const comments = Array.isArray(ticket && ticket.comments) ? ticket.comments : [];
+  const { shown, firstIndex } = selectComments(comments, tail);
+  const created = ticket && ticket.create_time ? ticket.create_time : null;
+  const edited = ticket && ticket.edit_time ? ticket.edit_time : null;
+  return {
+    schema: BRIEF_SCHEMA,
+    ticket: {
+      id: ticket && ticket.id,
+      short: ticket && ticket.human_id,
+      status: ticket && ticket.status,
+      prio,
+      sev,
+      type,
+      area: areas,
+      ageDays: formatAgeDays(created ? created.timestamp : undefined, nowMs),
+      created: created ? created.time : null,
+      edited: edited ? edited.time : null,
+      author: ticket && ticket.author ? ticket.author.name : '',
+      labels: [...(ticket && Array.isArray(ticket.labels) ? ticket.labels : [])].sort(),
+      refs: [...new Set(Array.isArray(refs) ? refs : [])].sort(),
+      commentCount: comments.length,
+      comments: shown.map((comment, index) => ({
+        index: firstIndex + index,
+        short: comment.human_id,
+        author: comment.author ? comment.author.name : '',
+        message: comment.message ?? '',
+      })),
+    },
+  };
+}
+
+/**
+ * Brief plain-text rendering: header, metadata, then comment blocks.
+ * @param {Record<string, unknown>} ticket git-bug `show -f json` output.
+ * @param {{nowMs?: number, tail?: number|null, refs?: string[]}} [options] Options.
+ * @returns {string} Text ending with a newline.
+ */
+export function formatBriefPlain(ticket, options = {}) {
+  const { nowMs = Date.now(), tail = null, refs = [] } = options;
+  const comments = Array.isArray(ticket && ticket.comments) ? ticket.comments : [];
+  const { shown, firstIndex } = selectComments(comments, tail);
+  const labels = [...(ticket && Array.isArray(ticket.labels) ? ticket.labels : [])].sort();
+  const shownNote = shown.length < comments.length ? ` (showing last ${shown.length})` : '';
+  const created = ticket && ticket.create_time ? ticket.create_time.time : '-';
+  const edited = ticket && ticket.edit_time ? ticket.edit_time.time : '-';
+  const author = ticket && ticket.author ? ticket.author.name : '-';
+  const lines = [
+    formatTicketHeader(ticket, nowMs),
+    `title: ${(ticket && ticket.title) || ''}`,
+    `created: ${created}`,
+    `edited: ${edited}`,
+    `author: ${author}`,
+    `labels: ${labels.join(', ') || '-'}`,
+    `refs: ${[...new Set(Array.isArray(refs) ? refs : [])].sort().join(', ') || '-'}`,
+    `comments: ${comments.length}${shownNote}`,
+  ];
+  for (let i = 0; i < shown.length; i += 1) {
+    const comment = shown[i];
+    const commentAuthor = comment.author ? comment.author.name : '-';
+    lines.push(`[#${firstIndex + i} ${comment.human_id} ${commentAuthor}]`);
+    lines.push(String(comment.message ?? '').replace(/\n+$/, ''));
+    lines.push('');
+  }
+  return `${lines.join('\n').replace(/\n+$/, '')}\n`;
+}
+
+/**
+ * Build the `git bug bug` JSON query argv for board/next.
+ * @param {{status?: string, labels?: string[]}} [filters] Filters.
+ * @returns {string[]} Argv without `git`.
+ */
+export function buildBugListArgs(filters = {}) {
+  const args = ['bug', 'bug'];
+  if (filters.status !== undefined) args.push('-s', filters.status);
+  for (const label of Array.isArray(filters.labels) ? filters.labels : []) args.push('-l', label);
+  args.push('-f', 'json');
+  return args;
+}
+
+/**
+ * Parse and validate the shared board/next filter flags.
+ * @param {string[]} tokens Command tokens.
+ * @param {string} verb Command name for error messages.
+ * @param {string} defaultStatus Status used when `--status` is absent.
+ * @param {{allowLimit?: boolean}} [options] Verb capabilities.
+ * @returns {{labels: string[], status: string, json: boolean, limit: number|undefined}} Filters.
+ */
+function parseListFilters(tokens, verb, defaultStatus, options = {}) {
+  const { allowLimit = true } = options;
+  const { opts, positional } = parseOptions(tokens, {
+    strings: ['--status', '--label', '--area', '--prio', '--sev', '--type', '--limit'],
+    bools: ['--json'],
+  });
+  if (positional.length > 0) {
+    throw usage(`${verb} takes no positional arguments (got ${JSON.stringify(positional[0])})`);
+  }
+  const status = single(opts.status, '--status') ?? defaultStatus;
+  if (!VALID_STATUS.has(status)) throw usage(`invalid --status ${JSON.stringify(status)} (expected open|closed)`);
+  const labels = [...(opts.label || [])];
+  for (const [flag, prefix] of [['--area', 'area'], ['--prio', 'prio'], ['--sev', 'sev'], ['--type', 'type']]) {
+    for (const raw of opts[flag.slice(2)] || []) {
+      const text = String(raw);
+      const value = text.startsWith(`${prefix}:`) ? text.slice(prefix.length + 1) : text;
+      if (value === '' || /\s/.test(value) || value.includes(':')) {
+        throw usage(`${flag} must be a bare ${prefix} value or ${prefix}:<value> (got ${JSON.stringify(raw)})`);
+      }
+      labels.push(`${prefix}:${value}`);
+    }
+  }
+  validateOrThrow(labels);
+  const rawLimit = single(opts.limit, '--limit');
+  if (rawLimit !== undefined && !allowLimit) {
+    throw usage(`${verb} does not accept --limit (use board --limit <n>)`);
+  }
+  let limit;
+  if (rawLimit !== undefined) {
+    if (!/^\d+$/.test(String(rawLimit)) || Number(rawLimit) < 1) {
+      throw usage(`--limit must be a positive integer (got ${JSON.stringify(rawLimit)})`);
+    }
+    limit = Number(rawLimit);
+  }
+  return { labels, status, json: opts.json === true, limit };
+}
+
+/**
+ * Run a read-only git-bug JSON query. Under `--dry-run` the argv is printed and
+ * null is returned.
+ * @param {string[]} args git argv without `git`.
+ * @param {{dryRun: boolean}} global Global flags.
+ * @param {string} verb Command name for errors.
+ * @returns {unknown|null} Parsed JSON or null under --dry-run.
+ */
+function queryBugJson(args, global, verb) {
+  if (global.dryRun) {
+    process.stdout.write(`${formatCommand(args)}\n`);
+    return null;
+  }
+  const result = execGit(args);
+  if (result.status !== EXIT_OK) {
+    const detail = result.stderr.trim().split('\n')[0];
+    throw new Error(`${verb} failed (exit ${result.status})${detail ? `: ${detail}` : ''}`);
+  }
+  try {
+    return JSON.parse(result.stdout);
+  } catch {
+    throw new Error(`${verb}: could not parse git-bug json output`);
+  }
+}
+
+/**
+ * Assert that a parsed git-bug value is an array.
+ * @param {unknown} value Parsed value.
+ * @param {string} verb Command name for errors.
+ * @returns {Array<Record<string, unknown>>} The array.
+ */
+function requireBugArray(value, verb) {
+  if (!Array.isArray(value)) throw new Error(`${verb}: unexpected git-bug json (expected an array)`);
+  return value;
+}
+
+/**
+ * Assert that a parsed git-bug value is an object.
+ * @param {unknown} value Parsed value.
+ * @param {string} verb Command name for errors.
+ * @returns {Record<string, unknown>} The object.
+ */
+function requireBugObject(value, verb) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`${verb}: unexpected git-bug json (expected an object)`);
+  }
+  return value;
+}
+
+/**
+ * Filter git-bug tickets by all required labels (AND semantics, re-checked
+ * in-process because git-bug's repeated `-l` behavior is version-sensitive).
+ * @param {Array<Record<string, unknown>>} tickets Tickets.
+ * @param {string[]} labels Required labels.
+ * @returns {Array<Record<string, unknown>>} Matching tickets.
+ */
+function filterByLabels(tickets, labels) {
+  return tickets.filter((ticket) => labels.every((label) => (
+    Array.isArray(ticket.labels) && ticket.labels.includes(label)
+  )));
+}
+
+/**
+ * Read a ticket's labels (one per line) from git-bug.
+ * @param {string} id Full ticket id.
+ * @returns {Set<string>} Label set.
+ */
+function readTicketLabels(id) {
+  const result = execGit(['bug', 'bug', 'label', id]);
+  if (result.status !== EXIT_OK) throw new Error(`apply: could not read current labels (exit ${result.status})`);
+  return new Set(result.stdout.split('\n').map((line) => line.trim()).filter((line) => line.length > 0));
 }
 
 function cmdList(tokens, global) {
@@ -743,12 +1168,184 @@ function cmdLabels(tokens, global) {
   return EXIT_OK;
 }
 
+function cmdBoard(tokens, global) {
+  const { labels, status, json, limit } = parseListFilters(tokens, 'board', 'open');
+  const parsed = queryBugJson(buildBugListArgs({ status, labels }), global, 'board');
+  if (parsed === null) return EXIT_OK;
+  const tickets = requireBugArray(parsed, 'board');
+  const matching = filterByLabels(tickets, labels);
+  const sorted = sortTickets(matching);
+  const selected = limit === undefined ? sorted : sorted.slice(0, limit);
+  const nowMs = Date.now();
+  if (json) {
+    process.stdout.write(`${JSON.stringify({
+      schema: BOARD_SCHEMA,
+      count: selected.length,
+      tickets: selected.map((ticket) => boardTicketJson(ticket, nowMs)),
+    })}\n`);
+  } else {
+    process.stdout.write('# id status prio sev type area age title\n');
+    for (const ticket of selected) process.stdout.write(`${formatBoardLine(ticket, { nowMs })}\n`);
+  }
+  return EXIT_OK;
+}
+
+function cmdNext(tokens, global) {
+  const { labels, status, json } = parseListFilters(tokens, 'next', 'open', { allowLimit: false });
+  const parsed = queryBugJson(buildBugListArgs({ status, labels }), global, 'next');
+  if (parsed === null) return EXIT_OK;
+  const tickets = requireBugArray(parsed, 'next');
+  const sorted = sortTickets(filterByLabels(tickets, labels));
+  const ticket = sorted.length > 0 ? sorted[0] : null;
+  const nowMs = Date.now();
+  if (json) {
+    process.stdout.write(`${JSON.stringify({
+      schema: NEXT_SCHEMA,
+      ticket: ticket === null ? null : boardTicketJson(ticket, nowMs),
+    })}\n`);
+  } else {
+    process.stdout.write(`${ticket === null ? 'none' : formatBoardLine(ticket, { nowMs, maxTitle: Number.MAX_SAFE_INTEGER })}\n`);
+  }
+  return EXIT_OK;
+}
+
+function cmdBrief(tokens, global) {
+  const { opts, positional } = parseOptions(tokens, { strings: ['--tail'], bools: ['--json'] });
+  if (positional.length !== 1) throw usage('brief requires exactly one <ref>');
+  const rawTail = single(opts.tail, '--tail');
+  let tail = null;
+  if (rawTail !== undefined) {
+    if (!/^\d+$/.test(String(rawTail))) {
+      throw usage(`--tail must be a non-negative integer (got ${JSON.stringify(rawTail)})`);
+    }
+    tail = Number(rawTail);
+  }
+  const resolved = resolveOrThrow(positional[0]);
+  const parsed = queryBugJson(['bug', 'bug', 'show', '-f', 'json', resolved.id], global, 'brief');
+  if (parsed === null) return EXIT_OK;
+  const ticket = requireBugObject(parsed, 'brief');
+  const texts = [
+    ticket.title,
+    ...(Array.isArray(ticket.comments) ? ticket.comments.map((comment) => comment && comment.message) : []),
+  ];
+  const refs = extractCrossRefs(
+    texts.filter((text) => typeof text === 'string'),
+    listRefs().map((name) => name.replace(/^refs\/bugs\//, '').slice(0, 7)),
+    [resolved.shortId]
+  );
+  const nowMs = Date.now();
+  if (opts.json === true) {
+    process.stdout.write(`${JSON.stringify(briefTicketJson(ticket, { nowMs, tail, refs }))}\n`);
+  } else {
+    process.stdout.write(formatBriefPlain(ticket, { nowMs, tail, refs }));
+  }
+  return EXIT_OK;
+}
+
+function cmdApply(tokens, global) {
+  const { opts, positional } = parseOptions(tokens, {
+    strings: ['--label', '--label-rm', '--comment', '--comment-file', '--status'],
+    bools: ['--json'],
+  });
+  if (positional.length !== 1) throw usage('apply requires exactly one <ref>');
+  const addLabels = opts.label || [];
+  const rmLabels = opts['label-rm'] || [];
+  validateOrThrow([...addLabels, ...rmLabels]);
+  for (const label of rmLabels) {
+    if (addLabels.includes(label)) {
+      throw usage(`apply: ${JSON.stringify(label)} cannot be both added and removed (drop one flag)`);
+    }
+  }
+  const status = single(opts.status, '--status');
+  if (status !== undefined && !VALID_STATUS.has(status)) {
+    throw usage(`invalid --status ${JSON.stringify(status)} (expected open|closed)`);
+  }
+  const comment = single(opts.comment, '--comment');
+  const commentFile = single(opts['comment-file'], '--comment-file');
+  if (comment !== undefined && commentFile !== undefined) {
+    throw usage('--comment and --comment-file are mutually exclusive');
+  }
+  const hasAction = addLabels.length > 0 || rmLabels.length > 0
+    || comment !== undefined || commentFile !== undefined || status !== undefined;
+  if (!hasAction) {
+    throw usage('apply requires at least one of --label, --label-rm, --comment/--comment-file, --status');
+  }
+  const commentContent = commentFile === undefined ? comment : readBodyFile(commentFile);
+  const resolved = resolveOrThrow(positional[0]);
+
+  let effectiveRm = rmLabels;
+  const skippedRm = [];
+  if (rmLabels.length > 0) {
+    const current = readTicketLabels(resolved.id);
+    effectiveRm = rmLabels.filter((label) => current.has(label));
+    for (const label of rmLabels) {
+      if (!current.has(label)) skippedRm.push(label);
+    }
+  }
+
+  const steps = [];
+  if (addLabels.length > 0) {
+    steps.push({ name: 'label add', args: ['bug', 'bug', 'label', 'new', resolved.id, ...addLabels] });
+  }
+  if (effectiveRm.length > 0) {
+    steps.push({ name: 'label rm', args: ['bug', 'bug', 'label', 'rm', resolved.id, ...effectiveRm] });
+  }
+  if (commentContent !== undefined) {
+    steps.push({
+      name: 'comment',
+      args: ['bug', 'bug', 'comment', 'new', '--non-interactive', '-m', commentContent, resolved.id],
+    });
+  }
+  if (status !== undefined) {
+    const action = status === 'closed' ? 'close' : 'open';
+    steps.push({ name: `status ${action}`, args: ['bug', 'bug', 'status', action, resolved.id] });
+  }
+
+  if (global.dryRun) {
+    for (const step of steps) process.stdout.write(`# ${step.name}: ${formatCommand(step.args)}\n`);
+    for (const label of skippedRm) process.stdout.write(`# label rm skipped (not present): ${label}\n`);
+    return EXIT_OK;
+  }
+  for (const step of steps) {
+    const result = execGit(step.args);
+    if (result.status !== EXIT_OK) {
+      const detail = result.stderr.trim().split('\n')[0];
+      throw new Error(`apply ${step.name} failed (exit ${result.status})${detail ? `: ${detail}` : ''}`);
+    }
+  }
+  const receipt = {
+    schema: APPLY_SCHEMA,
+    short: resolved.shortId,
+    labelsAdded: [...addLabels],
+    labelsRemoved: [...effectiveRm],
+    labelsSkipped: [...skippedRm],
+    commentAdded: commentContent !== undefined,
+    status: status === undefined ? null : status,
+  };
+  if (opts.json === true) {
+    process.stdout.write(`${JSON.stringify(receipt)}\n`);
+  } else {
+    const parts = [];
+    for (const label of addLabels) parts.push(`+${label}`);
+    for (const label of effectiveRm) parts.push(`-${label}`);
+    if (commentContent !== undefined) parts.push('comment');
+    if (status !== undefined) parts.push(`status:${status}`);
+    if (skippedRm.length > 0) parts.push(`skipped-rm:${skippedRm.join(',')}`);
+    process.stdout.write(`${resolved.shortId} applied ${parts.join(' ') || '(no-op)'}\n`);
+  }
+  return EXIT_OK;
+}
+
 function dispatch(command, tokens, global) {
   switch (command) {
     case 'list': return cmdList(tokens, global);
     case 'show': return cmdShow(tokens, global);
     case 'resolve': return cmdResolve(tokens);
+    case 'board': return cmdBoard(tokens, global);
+    case 'next': return cmdNext(tokens, global);
+    case 'brief': return cmdBrief(tokens, global);
     case 'new': return cmdNew(tokens, global);
+    case 'apply': return cmdApply(tokens, global);
     case 'comment': return cmdComment(tokens, global);
     case 'close': return cmdStatus(tokens, global, 'close');
     case 'open': return cmdStatus(tokens, global, 'open');
