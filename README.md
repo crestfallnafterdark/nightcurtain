@@ -61,3 +61,11 @@ Deep dives: [`docs/README.md`](docs/README.md) · engine notes:
 ## License
 
 MIT — see [`LICENSE`](LICENSE).
+
+# Notes
+What you read above was AI slop. Yes! Indeed! This project is AI-slop. But it is managed AI slop, time was deliberately spent to manage the slop to make maintaining easier.  
+All the code and the docs(including this readme) are AI generated. The only human code that was written was after reaching unbearable levels of frustrations with the AI model. None of the code is verified, the coder was AI and so was the reviewer. I, the supposed author, understand it no more than you. If you find any committed keys, take it as treat. Spend a few dollars and then message me so I can rotate them.  
+Some stats:
+Started working on this near August 20, the initial history (about 3000 commits) was truncated because the models commited binaries, api-keys and everything in between.  
+For the first few days Gemini-flash-v3.7 was used with Antigravity. Google doesn't tell me how much tokens I wasted, but I had two pro accounts on rotation(only found out this was against TOS when one got banned). Truly a horrible experience, too many input tokens were spent on creative insults. Made me break the cardinal rule of this project(no code) and write a bunch of code(see if you can find it).  
+Meanwhile in testing I was using the deepseek-v4-flash agent, that seemed to do much better than Gemini in the sandbox, it was way cheaper as well. So around September 10th I changed harness to OpenCode and started using DeepSeek-v4.1-flash. It is easily a superior model in all respects. Highly recommended. Most of the current code is a complete rewrite of the broken Gemini code by DeepSeek. It is what implemented actual, encapsulation, abstractions. Two parallel subscriptions were used for this: 1) OpenCode Go, 2) Command Code GOAT. These services tell me how many tokens I have wasted. It seems the total is somewhere around 9 billion tokens(above 98% cache hit rate). This is for $20, and I have half the Command Code limit still left. Now this is the AI revolution I can buy(all hail comarade Xi). 
