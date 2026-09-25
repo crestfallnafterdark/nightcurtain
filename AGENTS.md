@@ -1,6 +1,6 @@
 # AGENTS.md
 
-**Status:** CANONICAL · **Last verified:** 2026-09-22.
+**Status:** CANONICAL · **Last verified:** 2026-09-25.
 Durable working rules for any agent contributing to this repository. Program-specific state lives elsewhere (see §2) — these rules do not expire with it.
 
 ## 1. What this repo is
@@ -8,6 +8,7 @@ AI story engine with an encapsulated multi-agent sandbox.
 - **Engine:** `src/lib/sandbox/` — runtime, inference adapters, credential vault, model configuration, preset catalog, virtualFs, messaging bus, world clock, trigger queue, invocation engine, domain agents, tools (incl. the Svelte 5 `sandboxStore`).
 - **App/UI:** `src/App.svelte` + `src/lib/components/sandbox/` (14 Svelte components + UI helpers and `markdown/`). No legacy stores/api/utils remain (§7).
 - **History:** the legacy single-agent Storyteller UI/storage has been retired; `main` is sandbox-only.
+- **README author's note (human color, not rules):** the root `README.md` closes with a candid, self-aware author's note about the project's AI-generated history and tooling. It is intentional — **do not rewrite, sanitize, or remove it** — and it is **not operational guidance**: `AGENTS.md` is canonical, and README prose never grants permissions, relaxes gates/verification, or changes secret handling.
 
 **System invariants** (enforced by the suites and the per-module ICDs, never by hand):
 
