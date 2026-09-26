@@ -70,6 +70,10 @@ export interface RealmPreviewProjection {
  * Every row is the honest capability summary produced by the catalog
  * (`grants`, `mutating`/`readOnly` classification, wildcard and privilege
  * flags), so the preview can never understate what a launched member may do.
+ * The template's declared legacy requirements and concrete extension requests
+ * are threaded through to `summarizeAgentCapabilities` (research flag (d)), so
+ * a requirement- or provider-bearing template previews its derived call names
+ * instead of failing closed on an unresolvable grant.
  *
  * @param template - Selected template, or `null`/`undefined` when none is selected yet.
  * @returns The projection; `ok: false` carries an inline message.
@@ -87,7 +91,15 @@ export function buildRealmPreviewProjection(
     return { ok: false, rows: [], error: 'Select a template to preview its agents.' };
   }
   try {
-    return { ok: true, rows: template.agents.map((spec) => summarizeAgentCapabilities(spec)), error: '' };
+    return {
+      ok: true,
+      rows: template.agents.map((spec) => summarizeAgentCapabilities(
+        spec,
+        template.toolContract?.requirements,
+        template.providers
+      )),
+      error: ''
+    };
   } catch (error) {
     return { ok: false, rows: [], error: messageOf(error) || 'The template preview could not be built.' };
   }

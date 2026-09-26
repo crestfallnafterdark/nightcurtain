@@ -93,10 +93,12 @@
   } from './realmTemplateHelpers.ts';
   import {
     assembleRealmAuthorityApprovals,
+    assembleRealmExtensionApprovals,
     buildRealmAgentDisclosureRows,
     buildRealmAuthorityDecisions,
     buildRealmAuthorityDecisionKey,
     buildRealmAuthorityReviewAgents,
+    buildRealmExtensionDecisions,
     buildRealmHistoryEditorViews,
     buildRealmPartProvenanceViews,
     buildRealmPayloadFilename,
@@ -110,6 +112,16 @@
     serializeRealmPendingPayload
   } from './realmReviewHelpers.ts';
   import { safeRealmColor } from './realmGroups.ts';
+  import ExtensionInstallDialog from './ExtensionInstallDialog.svelte';
+  import {
+    REALM_EXTENSION_TRUST_DISCLOSURE,
+    buildExtensionInstallPrefill,
+    buildMissingExtensionFlowViews,
+    buildRealmExtensionReferenceViews,
+    buildRealmExtensionRequestViews,
+    describeExtensionAttachError,
+    describeRealmExtensionState
+  } from './extensionUiHelpers.ts';
 
   /** @typedef {import('../../sandbox/sandboxStore/index.svelte.ts').RealmLaunchReceipt} RealmLaunchReceipt */
   /** @typedef {import('../../sandbox/sandboxStore/index.svelte.ts').RealmSeedReceipt} RealmSeedReceipt */
@@ -293,6 +305,135 @@
     ...new Set(authorityAgents.flatMap((row) => row.unknownAuthorities.map((entry) => entry.authority)))
   ]);
 
+  // ---- Extension disclosure and attach approvals (extension wave) ----------
+
+  let extensionRevision = $state(0);
+  let extensionDecisions = $state(/** @type {Record<string, 'approved' | 'declined'>} */({}));
+  let installAssist = $state(
+    /** @type {{ prefill: import('./extensionUiHelpers.ts').ExtensionInstallDraft, authorComment: string } | null} */(null)
+  );
+
+  /** Global install records (re-read after an assist install). */
+  let installedExtensions = $derived.by(() => {
+    void extensionRevision;
+    return sandboxStore.listExtensions();
+  });
+
+  /** Requested extensions with their pre-launch resolution state (no Realm attachments exist yet). */
+  let extensionRequests = $derived(buildRealmExtensionRequestViews(selectedTemplate, installedExtensions));
+
+  /** Per-agent `<providerId>::<serverToolName>` references with their resolution state. */
+  let extensionReferences = $derived(buildRealmExtensionReferenceViews(selectedTemplate, installedExtensions));
+
+  /**
+   * Live missing-extension flow of the launched Realm (step 2): the requested
+   * extensions recorded as missing at launch, with the install/attach actions
+   * that are currently available. Nothing installs or attaches automatically.
+   */
+  let launchMissingFlow = $derived.by(() => {
+    void extensionRevision;
+    const receipt = launchReceipt;
+    if (!receipt) return [];
+    const realm = sandboxStore.getRealm(receipt.realm.id) ?? receipt.realm;
+    const missing = realm.instance && Array.isArray(realm.instance.missingExtensions)
+      ? realm.instance.missingExtensions
+      : [];
+    if (missing.length === 0) return [];
+    return buildMissingExtensionFlowViews({
+      missingExtensionIds: missing,
+      template: selectedTemplate,
+      installs: installedExtensions,
+      attachments: sandboxStore.listRealmExtensions(realm.id)
+    }).filter((view) => view.state !== 'active');
+  });
+
+  /**
+   * Resolves the declared provider behind one requested extension id.
+   *
+   * @param {string} extensionId - Requested extension id.
+   * @returns {import('../../sandbox/realmCatalog/index.ts').RealmProvider | null} Provider, or null.
+   */
+  function providerFor(extensionId) {
+    if (!selectedTemplate) return null;
+    const providers = Array.isArray(selectedTemplate.providers) ? selectedTemplate.providers : [];
+    return providers.find((provider) => provider && provider.id === extensionId) ?? null;
+  }
+
+  /**
+   * Records one requested-extension approval decision (unchecked = declined);
+   * every change re-arms the review acknowledgement.
+   *
+   * @param {string} extensionId - Requested extension id.
+   * @param {boolean} checked - New checkbox state.
+   */
+  function setExtensionDecision(extensionId, checked) {
+    extensionDecisions = { ...extensionDecisions, [extensionId]: checked ? 'approved' : 'declined' };
+    reviewAcknowledged = false;
+    clearMessages();
+  }
+
+  /**
+   * Opens the prefilled install assist for one requested extension (review
+   * surface). Nothing is fetched or installed until the operator submits the
+   * dialog.
+   *
+   * @param {string} extensionId - Requested extension id.
+   */
+  function openProviderInstallAssist(extensionId) {
+    clearMessages();
+    installAssist = {
+      prefill: buildExtensionInstallPrefill(providerFor(extensionId), {
+        templateId: selectedTemplateId,
+        templateNotes: selectedTemplate ? selectedTemplate.notes : undefined,
+        installSource: 'template-assist'
+      }),
+      authorComment: selectedTemplate && typeof selectedTemplate.notes === 'string'
+        ? selectedTemplate.notes.trim().slice(0, 600)
+        : ''
+    };
+  }
+
+  /**
+   * Opens the install assist from a missing-extension flow row (step 2), using
+   * the row's template-derived prefill.
+   *
+   * @param {import('./extensionUiHelpers.ts').MissingExtensionFlowView} view - Missing flow row.
+   */
+  function openMissingInstallAssist(view) {
+    clearMessages();
+    installAssist = { prefill: view.installPrefill, authorComment: view.authorComment };
+  }
+
+  /**
+   * Records one assist install; attachment stays an explicit operator action.
+   *
+   * @param {{ id: string, displayName?: string }} record - Installed record.
+   */
+  function handleExtensionAssistInstalled(record) {
+    installAssist = null;
+    extensionRevision += 1;
+    notice = `Installed "${record.displayName || record.id}". Attach it to a Realm when ready — nothing attaches automatically.`;
+  }
+
+  /**
+   * Attaches one installed extension to the launched Realm (step 2) with the
+   * realm-level `'all'` selection; nothing connects.
+   *
+   * @param {import('./extensionUiHelpers.ts').MissingExtensionFlowView} view - Missing flow row.
+   */
+  function handleAttachMissingExtension(view) {
+    const receipt = launchReceipt;
+    if (!receipt) return;
+    clearMessages();
+    try {
+      sandboxStore.attachExtension(receipt.realm.id, view.extensionId);
+      extensionRevision += 1;
+      notice = `Attached "${view.displayName || view.extensionId}" to "${receipt.realm.name}".`;
+    } catch (err) {
+      validationError = describeExtensionAttachError(err);
+    }
+  }
+
   // ---- Format-v2 launch inputs (ticket a71198f) ---------------------------
 
   /**
@@ -470,6 +611,8 @@
     reviewAcknowledged = false;
     mismatchConfirmed = false;
     launchApprovals = [];
+    installAssist = null;
+    extensionDecisions = buildRealmExtensionDecisions(template);
     const trust = template ? sandboxStore.listTemplateAuthorityTrust()[template.id] ?? null : null;
     authorityDecisions = buildRealmAuthorityDecisions(template, trust);
     trustTemplate = trust !== null;
@@ -1369,6 +1512,7 @@
     const attachedSources = authorityAgents.length > 0
       ? authorityApprovals.map((entry) => `${entry.agentKey} → ${entry.authority}`)
       : [];
+    const extensionApprovals = assembleRealmExtensionApprovals(selectedTemplate, extensionDecisions);
     const launchInputs = inputProjection.launchInputs;
 
     isLaunching = true;
@@ -1382,6 +1526,7 @@
         ...(launchPayload ? { payload: launchPayload } : {}),
         ...(payloadPreview.mismatch && mismatchConfirmed ? { allowVersionMismatch: true } : {}),
         ...(authorityApprovals.length > 0 ? { authorityApprovals } : {}),
+        ...(extensionApprovals.length > 0 ? { extensionApprovals } : {}),
         ...(trustTemplate && authorityAgents.length > 0 ? { trustAuthorities: true } : {})
       });
       launchReceipt = receipt;
@@ -1399,6 +1544,15 @@
         notice += ` Approved publishing authorities: ${attachedSources.join(', ')}.`;
       } else if (authorityAgents.length > 0) {
         notice += ' Declared publishing authorities were declined (unchecked).';
+      }
+      if (extensionApprovals.length > 0) {
+        notice += ` Approved extension requests: ${extensionApprovals.map((entry) => entry.extensionId).join(', ')}.`;
+      }
+      const missingAtLaunch = receipt.realm.instance && Array.isArray(receipt.realm.instance.missingExtensions)
+        ? receipt.realm.instance.missingExtensions
+        : [];
+      if (missingAtLaunch.length > 0) {
+        notice += ` Requested extensions still missing: ${missingAtLaunch.join(', ')} — install or attach them below.`;
       }
     } catch (err) {
       validationError = describeRealmLaunchError(err);
@@ -2353,6 +2507,100 @@
               </div>
             </div>
           {/if}
+
+          {#if extensionRequests.requests.length > 0 || extensionReferences.references.length > 0}
+            <div class="settings-section-card">
+              <div class="section-card-header">
+                <div class="section-title-wrap">
+                  <span class="section-badge">Extensions</span>
+                  <h4 class="section-title">Requested extensions</h4>
+                </div>
+              </div>
+
+              {#if !extensionRequests.ok}
+                <p class="payload-error" role="alert">{extensionRequests.error}</p>
+              {:else if extensionRequests.requests.length > 0}
+                <p class="field-hint">
+                  This template requests these extensions. Approving records an attach approval for the Realm being
+                  created: only globally installed extensions actually attach, and an approved-but-uninstalled request
+                  stays disclosed and listed after the launch. Nothing connects automatically.
+                </p>
+                {#each extensionRequests.requests as request (request.id)}
+                  {@const stateView = describeRealmExtensionState(request.state)}
+                  <div class="extension-request">
+                    <label class="extension-approval">
+                      <input
+                        type="checkbox"
+                        checked={extensionDecisions[request.id] === 'approved'}
+                        onchange={(event) => setExtensionDecision(request.id, event.currentTarget.checked)}
+                      />
+                      <div class="extension-request-info">
+                        <div class="extension-request-title-row">
+                          <span class="extension-request-name font-mono">{request.id}</span>
+                          <span class="kind-chip font-mono">{request.kind}</span>
+                          <span class="status-chip state-{stateView.state} font-mono">{stateView.label}</span>
+                          {#if request.installed && request.installSource === 'template-assist'}
+                            <span class="source-chip font-mono">template-assist</span>
+                          {/if}
+                        </div>
+                        <span class="extension-request-detail">{stateView.description}</span>
+                        {#if request.declaredTransportSummary}
+                          <span class="extension-request-transport font-mono">{request.declaredTransportSummary}</span>
+                        {/if}
+                        {#if request.approvedUrl}
+                          <span class="extension-request-detail">
+                            approved URL: <code class="font-mono">{request.approvedUrl}</code>
+                          </span>
+                        {/if}
+                        {#if request.credentialId}
+                          <span class="extension-request-detail">
+                            credential: <code class="font-mono">{request.credentialId}</code>
+                          </span>
+                        {/if}
+                      </div>
+                    </label>
+                    {#if !request.installed}
+                      <button type="button" class="btn-secondary btn-xs" onclick={() => openProviderInstallAssist(request.id)}>
+                        Install…
+                      </button>
+                    {/if}
+                  </div>
+                {/each}
+              {/if}
+
+              {#if extensionReferences.references.length > 0}
+                <details class="extension-references">
+                  <summary>
+                    Extension tool references ({extensionReferences.references.length}) — resolved against installed
+                    extensions
+                  </summary>
+                  {#if !extensionReferences.ok}
+                    <p class="payload-error" role="alert">{extensionReferences.error}</p>
+                  {:else}
+                    <ul class="extension-reference-list">
+                      {#each extensionReferences.references as ref, index (`${ref.agentKey}::${ref.reference}::${index}`)}
+                        <li class="extension-reference-row">
+                          <span class="extension-reference-agent">{ref.agentName}</span>
+                          <span class="extension-reference-name font-mono">{ref.callName}</span>
+                          <span class="extension-reference-origin font-mono">{ref.reference}</span>
+                          <span class="ref-state ref-state-{ref.referenceState} font-mono">{ref.referenceState}</span>
+                        </li>
+                      {/each}
+                    </ul>
+                  {/if}
+                </details>
+              {/if}
+
+              <div class="trust-disclosure">
+                <span class="trust-disclosure-title">Third-party trust</span>
+                <ul class="trust-disclosure-list">
+                  {#each REALM_EXTENSION_TRUST_DISCLOSURE as line (line.key)}
+                    <li><span class="trust-disclosure-line-title">{line.title}</span> — {line.body}</li>
+                  {/each}
+                </ul>
+              </div>
+            </div>
+          {/if}
         {/if}
 
         {#if selectedTemplate}
@@ -2360,8 +2608,8 @@
             <label class="review-ack">
               <input type="checkbox" checked={reviewAcknowledged} onchange={handleReviewAcknowledge} />
               <span>
-                I reviewed the composed prompts, the resolved input values and file contents, and the declared
-                publishing authorities for this launch.
+                I reviewed the composed prompts, the resolved input values and file contents, the declared publishing
+                authorities, and the requested extensions for this launch.
               </span>
             </label>
             {#if launchGate.disabled}
@@ -2395,6 +2643,64 @@
             </p>
           {/if}
         </div>
+
+        {#if launchMissingFlow.length > 0}
+          <div class="settings-section-card missing-card">
+            <div class="section-card-header">
+              <div class="section-title-wrap">
+                <span class="section-badge missing-badge">Attention</span>
+                <h4 class="section-title">Missing extensions ({launchMissingFlow.length})</h4>
+              </div>
+            </div>
+            <p class="field-hint">
+              These requested extensions are not available in this Realm. Nothing installs or attaches automatically —
+              the actions below are explicit operator steps; this list follows the live state.
+            </p>
+            <ul class="missing-list">
+              {#each launchMissingFlow as view (view.extensionId)}
+                {@const stateView = describeRealmExtensionState(view.state)}
+                <li class="missing-row">
+                  <div class="missing-info">
+                    <div class="missing-title-row">
+                      <span class="missing-name">{view.displayName || view.extensionId}</span>
+                      <span class="kind-chip font-mono">{view.kind}</span>
+                      <span class="status-chip state-{stateView.state} font-mono">{stateView.label}</span>
+                    </div>
+                    <span class="missing-note">{stateView.description}</span>
+                    {#if view.transportHintSummary}
+                      <span class="missing-transport font-mono">{view.transportHintSummary}</span>
+                    {/if}
+                    {#if view.authorComment}
+                      <span class="missing-author">Template note: {view.authorComment}</span>
+                    {/if}
+                  </div>
+                  <div class="missing-actions">
+                    {#if view.canInstall}
+                      <button type="button" class="btn-primary btn-xs" onclick={() => openMissingInstallAssist(view)}>
+                        Install…
+                      </button>
+                    {/if}
+                    {#if view.canAttach}
+                      <button type="button" class="btn-secondary btn-xs" onclick={() => handleAttachMissingExtension(view)}>
+                        Attach to this Realm
+                      </button>
+                    {/if}
+                  </div>
+                </li>
+              {/each}
+            </ul>
+            {#if launchReceipt.warnings && launchReceipt.warnings.length > 0}
+              <details class="launch-warnings">
+                <summary>Launch warnings ({launchReceipt.warnings.length})</summary>
+                <ul class="written-paths">
+                  {#each launchReceipt.warnings as warning, index (index)}
+                    <li>{warning}</li>
+                  {/each}
+                </ul>
+              </details>
+            {/if}
+          </div>
+        {/if}
 
         {#if seedReceipt}
           <div class="settings-section-card">
@@ -2585,6 +2891,16 @@
           </div>
         </div>
       </div>
+    {/if}
+
+    {#if installAssist}
+      <ExtensionInstallDialog
+        prefill={installAssist.prefill}
+        contextLabel={selectedTemplate ? `template "${selectedTemplate.id}"` : ''}
+        authorComment={installAssist.authorComment}
+        oninstalled={handleExtensionAssistInstalled}
+        onclose={() => (installAssist = null)}
+      />
     {/if}
   </div>
 </div>
@@ -4105,6 +4421,256 @@
   .file-slot-conflict {
     border-color: var(--accent-danger-border);
     background: var(--accent-danger-subtle);
+  }
+
+  /* ---- Extension disclosure, approvals, and missing flow (extension wave) ---- */
+
+  .extension-request {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.7rem;
+    padding: 0.6rem 0.7rem;
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    background: var(--bg-secondary);
+  }
+
+  .extension-approval {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.55rem;
+    cursor: pointer;
+    min-width: 0;
+  }
+
+  .extension-approval input {
+    margin-top: 0.15rem;
+    accent-color: var(--accent-primary);
+  }
+
+  .extension-request-info {
+    display: flex;
+    flex-direction: column;
+    gap: 0.18rem;
+    min-width: 0;
+  }
+
+  .extension-request-title-row,
+  .missing-title-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+  }
+
+  .extension-request-name {
+    font-size: 0.82rem;
+    color: var(--text-primary);
+    font-weight: 600;
+  }
+
+  .extension-request-detail,
+  .missing-note,
+  .missing-author {
+    font-size: 0.72rem;
+    line-height: 1.4;
+    color: var(--text-muted);
+  }
+
+  .extension-request-transport,
+  .missing-transport {
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+    word-break: break-all;
+  }
+
+  .kind-chip,
+  .status-chip,
+  .source-chip {
+    font-size: 0.65rem;
+    border-radius: 4px;
+    padding: 0.08rem 0.36rem;
+    border: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    background: var(--bg-base);
+  }
+
+  .source-chip {
+    color: var(--accent-primary);
+    border-color: var(--accent-primary-border);
+    background: var(--accent-primary-subtle);
+  }
+
+  .status-chip.state-active {
+    color: #34d399;
+    border-color: rgba(52, 211, 153, 0.4);
+    background: rgba(52, 211, 153, 0.1);
+  }
+
+  .status-chip.state-conflict {
+    color: #f87171;
+    border-color: var(--accent-danger-border);
+    background: var(--accent-danger-subtle);
+  }
+
+  .status-chip.state-unavailable,
+  .status-chip.state-not-attached,
+  .status-chip.state-not-installed {
+    color: #f59e0b;
+    border-color: rgba(245, 158, 11, 0.4);
+    background: rgba(245, 158, 11, 0.1);
+  }
+
+  .extension-references summary {
+    cursor: pointer;
+    font-size: 0.74rem;
+    font-weight: 600;
+    color: var(--text-muted);
+  }
+
+  .extension-reference-list {
+    list-style: none;
+    margin: 0.4rem 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+
+  .extension-reference-row {
+    display: grid;
+    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1fr) minmax(0, 1.4fr) auto;
+    gap: 0.5rem;
+    align-items: baseline;
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+  }
+
+  .extension-reference-agent {
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .extension-reference-origin {
+    color: var(--text-muted);
+    word-break: break-all;
+  }
+
+  .ref-state {
+    border-radius: 4px;
+    padding: 0.06rem 0.34rem;
+    border: 1px solid var(--border-color);
+    color: var(--text-muted);
+    text-transform: uppercase;
+    font-size: 0.62rem;
+  }
+
+  .ref-state-resolved {
+    color: #34d399;
+    border-color: rgba(52, 211, 153, 0.4);
+    background: rgba(52, 211, 153, 0.1);
+  }
+
+  .ref-state-missing,
+  .ref-state-excluded {
+    color: #f59e0b;
+    border-color: rgba(245, 158, 11, 0.4);
+    background: rgba(245, 158, 11, 0.1);
+  }
+
+  .trust-disclosure {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    padding: 0.55rem 0.65rem;
+    border: 1px dashed var(--border-subtle);
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.12);
+  }
+
+  .trust-disclosure-title {
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+  }
+
+  .trust-disclosure-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    font-size: 0.72rem;
+    line-height: 1.4;
+    color: var(--text-secondary);
+  }
+
+  .trust-disclosure-line-title {
+    color: var(--text-primary);
+    font-weight: 600;
+  }
+
+  .missing-card {
+    border-color: rgba(245, 158, 11, 0.4);
+  }
+
+  .missing-badge {
+    background: rgba(245, 158, 11, 0.13);
+    color: #f59e0b;
+    border-color: rgba(245, 158, 11, 0.4);
+  }
+
+  .missing-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+  }
+
+  .missing-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 0.7rem;
+    padding: 0.55rem 0.7rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+  }
+
+  .missing-info {
+    display: flex;
+    flex-direction: column;
+    gap: 0.18rem;
+    min-width: 0;
+  }
+
+  .missing-name {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .missing-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .launch-warnings summary {
+    cursor: pointer;
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--text-muted);
   }
 
   @keyframes fade-in {

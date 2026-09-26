@@ -3,6 +3,8 @@
   import { CredentialVault } from '../../sandbox/credentialVault/index.ts';
   import { getDefaultModelId, getProviderCapabilities } from '../../sandbox/modelConfig/index.ts';
   import { discoverModels, discoverRoutes } from './modelDiscovery.ts';
+  import ExtensionInstallDialog from './ExtensionInstallDialog.svelte';
+  import { describeExtensionRemovalError, describeExtensionTransportHint } from './extensionUiHelpers.ts';
 
   let { onclose = () => {} } = $props();
 
@@ -445,6 +447,86 @@
       vaultStatus = { ok: false, msg: describeError(err) };
     }
   }
+
+  // ---- Global extension installs (extension wave) ---------------------------
+
+  let extensionsRevision = $state(0);
+  let showInstallDialog = $state(false);
+  let extensionStatus = $state({ ok: true, msg: '' });
+  let removingExtensionId = $state('');
+
+  let installedExtensions = $derived.by(() => {
+    void extensionsRevision;
+    return store.listExtensions();
+  });
+
+  /**
+   * Resolves a record's credential id to its vault label for display (an id
+   * only — the secret is never read here).
+   *
+   * @param {string} credentialId - Bound credential id.
+   * @returns {string} Display label, or an explicit not-in-vault marker.
+   */
+  function describeCredentialLabel(credentialId) {
+    if (!credentialId) return '';
+    const entry = vault.getAllCredentials().find((candidate) => candidate.id === credentialId) ?? null;
+    return entry ? `${entry.label} (${entry.providerId})` : `${credentialId} (not in vault)`;
+  }
+
+  /**
+   * Renders a record's creation timestamp for the install list.
+   *
+   * @param {number} createdAt - Epoch milliseconds.
+   * @returns {string} `YYYY-MM-DD HH:MM UTC`, or an empty string for malformed values.
+   */
+  function formatExtensionTimestamp(createdAt) {
+    if (typeof createdAt !== 'number' || !Number.isFinite(createdAt)) return '';
+    const iso = new Date(createdAt).toISOString();
+    return `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
+  }
+
+  /**
+   * Removes one global install record; the typed `ERR_STORE_EXTENSION_ATTACHED`
+   * refusal surfaces with detach-first guidance instead of failing silently.
+   *
+   * @param {{ id: string, displayName?: string }} record - Install record to remove.
+   */
+  function handleRemoveExtension(record) {
+    const label = record.displayName || record.id;
+    if (!confirm(`Remove the install record "${label}"? Any Realm attaching it must be detached first.`)) return;
+    removingExtensionId = record.id;
+    extensionStatus = { ok: true, msg: '' };
+    try {
+      const removed = store.removeExtension(record.id);
+      extensionsRevision += 1;
+      extensionStatus = removed
+        ? { ok: true, msg: `Removed "${label}".` }
+        : { ok: false, msg: `"${label}" was no longer installed; the list was refreshed.` };
+    } catch (err) {
+      extensionStatus = { ok: false, msg: describeExtensionRemovalError(err) };
+    } finally {
+      removingExtensionId = '';
+    }
+  }
+
+  /**
+   * Records one successful install from the shared dialog.
+   *
+   * @param {{ id: string, kind: string, displayName?: string }} record - Installed record.
+   */
+  function handleExtensionInstalled(record) {
+    showInstallDialog = false;
+    extensionsRevision += 1;
+    extensionStatus = {
+      ok: true,
+      msg: `Installed "${record.displayName || record.id}" (${record.kind}). Attach it to a Realm from the Realm Manager.`
+    };
+  }
+
+  function openInstallDialog() {
+    extensionStatus = { ok: true, msg: '' };
+    showInstallDialog = true;
+  }
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
@@ -491,6 +573,18 @@
         onclick={() => (activeView = 'vault')}
       >
         API Keys
+      </button>
+      <button
+        type="button"
+        role="tab"
+        id="settings-tab-extensions"
+        aria-controls="settings-panel-extensions"
+        aria-selected={activeView === 'extensions'}
+        class="settings-tab"
+        class:active={activeView === 'extensions'}
+        onclick={() => (activeView = 'extensions')}
+      >
+        Extensions
       </button>
     </div>
 
@@ -780,7 +874,7 @@
           </div>
         {/if}
       </div>
-      {:else}
+      {:else if activeView === 'vault'}
       <div
         class="section-card"
         id="settings-panel-vault"
@@ -975,15 +1069,111 @@
           </div>
         </div>
       </div>
+      {:else}
+      <div
+        class="section-card"
+        id="settings-panel-extensions"
+        role="tabpanel"
+        aria-labelledby="settings-tab-extensions extensions-section-heading"
+      >
+        <div class="section-header">
+          <div class="section-title-wrap">
+            <span class="section-title" id="extensions-section-heading">Installed Extensions</span>
+            <span class="status-pill pill-active">
+              <span class="pill-dot"></span>
+              <span>{installedExtensions.length} installed</span>
+            </span>
+          </div>
+        </div>
+
+        <p class="extensions-note">
+          Global install records only: installing stores the extension identity and non-secret metadata (transport
+          hint, optional approved URL, optional vault credential id). Nothing connects, and a Realm accepts an
+          extension's tools only after it is attached there (Realm Manager → Extensions).
+        </p>
+
+        {#if extensionStatus.msg}
+          <div
+            class="status-banner"
+            class:status-ok={extensionStatus.ok}
+            class:status-err={!extensionStatus.ok}
+            role="status"
+          >
+            {extensionStatus.msg}
+          </div>
+        {/if}
+
+        {#if installedExtensions.length === 0}
+          <div class="empty-state">
+            No extensions installed. Install one below to make it attachable to Realms.
+          </div>
+        {:else}
+          <div class="extension-list">
+            {#each installedExtensions as record (record.id)}
+              <div class="extension-card">
+                <div class="extension-info">
+                  <div class="extension-title-row">
+                    <span class="extension-name">{record.displayName || record.id}</span>
+                    <span class="kind-chip font-mono">{record.kind}</span>
+                    <span class="status-chip status-{record.status} font-mono">{record.status}</span>
+                    {#if record.installSource === 'template-assist'}
+                      <span class="source-chip font-mono">template-assist</span>
+                    {/if}
+                  </div>
+                  <span class="extension-id font-mono">{record.id}</span>
+                  <span class="extension-transport font-mono">
+                    {describeExtensionTransportHint(record.transportHint) || 'no transport hint'}
+                  </span>
+                  <div class="extension-meta">
+                    {#if record.approvedUrl}
+                      <span>approved URL: <code class="font-mono">{record.approvedUrl}</code></span>
+                    {/if}
+                    {#if record.credentialId}
+                      <span>credential: <code class="font-mono">{describeCredentialLabel(record.credentialId)}</code></span>
+                    {/if}
+                    <span>installed {formatExtensionTimestamp(record.createdAt)}</span>
+                  </div>
+                </div>
+                <div class="extension-actions">
+                  <button
+                    type="button"
+                    class="btn-action-sm btn-delete"
+                    onclick={() => handleRemoveExtension(record)}
+                    disabled={removingExtensionId === record.id}
+                    aria-label="Remove extension {record.id}"
+                    title="Remove install record"
+                  >
+                    ✕
+                  </button>
+                </div>
+              </div>
+            {/each}
+          </div>
+        {/if}
+
+        <div class="extensions-actions">
+          <button type="button" class="btn-primary btn-action-sm" onclick={openInstallDialog}>
+            Install Extension…
+          </button>
+        </div>
+      </div>
       {/if}
     </div>
 
     <footer class="modal-footer">
       <span class="footer-meta font-mono">
-        {allPresets.length} presets · {vaultKeys.length} {vaultProvider} credentials
+        {allPresets.length} presets · {vaultKeys.length} {vaultProvider} credentials ·
+        {installedExtensions.length} extensions
       </span>
       <button type="button" class="btn-secondary" onclick={handleClose}>Close</button>
     </footer>
+
+    {#if showInstallDialog}
+      <ExtensionInstallDialog
+        oninstalled={handleExtensionInstalled}
+        onclose={() => (showInstallDialog = false)}
+      />
+    {/if}
   </div>
 </div>
 
@@ -1712,6 +1902,109 @@
 
   .font-mono {
     font-family: monospace;
+  }
+
+  /* ---- Installed extensions (extension wave) ---- */
+
+  .extensions-note {
+    margin: 0;
+    font-size: 0.74rem;
+    line-height: 1.45;
+    color: var(--text-muted, #94a3b8);
+  }
+
+  .extension-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+
+  .extension-card {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.7rem 0.85rem;
+    border: 1px solid var(--border-color, #334155);
+    border-radius: 8px;
+    background: var(--bg-surface, #1e293b);
+  }
+
+  .extension-info {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    min-width: 0;
+  }
+
+  .extension-title-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+  }
+
+  .extension-name {
+    font-size: 0.88rem;
+    font-weight: 600;
+    color: var(--text-primary, #f1f5f9);
+  }
+
+  .kind-chip,
+  .status-chip,
+  .source-chip {
+    font-size: 0.66rem;
+    border-radius: 4px;
+    padding: 0.1rem 0.38rem;
+    border: 1px solid var(--border-color, #334155);
+    color: var(--text-secondary, #cbd5e1);
+    background: var(--bg-base, #0b1220);
+  }
+
+  .status-chip.status-installed {
+    color: #34d399;
+    border-color: rgba(52, 211, 153, 0.4);
+    background: rgba(52, 211, 153, 0.1);
+  }
+
+  .status-chip.status-unavailable,
+  .status-chip.status-error {
+    color: #f59e0b;
+    border-color: rgba(245, 158, 11, 0.4);
+    background: rgba(245, 158, 11, 0.1);
+  }
+
+  .source-chip {
+    color: var(--accent-primary, #38bdf8);
+    border-color: var(--accent-primary-border, rgba(56, 189, 248, 0.3));
+    background: var(--accent-primary-subtle, rgba(56, 189, 248, 0.12));
+  }
+
+  .extension-id,
+  .extension-transport {
+    font-size: 0.72rem;
+    color: var(--text-secondary, #cbd5e1);
+    word-break: break-all;
+  }
+
+  .extension-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem 0.9rem;
+    font-size: 0.7rem;
+    color: var(--text-muted, #94a3b8);
+  }
+
+  .extension-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    flex-shrink: 0;
+  }
+
+  .extensions-actions {
+    display: flex;
+    justify-content: flex-end;
   }
 
   @media (max-width: 640px) {

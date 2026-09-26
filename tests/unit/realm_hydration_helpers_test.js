@@ -399,7 +399,47 @@ test('buildRealmProvenanceDetailView reads hashes and paths only', () => {
   assert.match(view.inputRows[0].shortHash, /…$/);
   assert.equal(view.inputRows[1].shortHash, 'sha256:short');
   assert.deepEqual(view.seedPaths, ['/handoff/README.md']);
-  assert.deepEqual(buildRealmProvenanceDetailView(null), { visible: false, inputRows: [], seedPaths: [] });
+  assert.deepEqual(view.resolvedTools, [], 'no extension resolution is recorded for this launch');
+  assert.deepEqual(view.missingExtensions, []);
+  assert.deepEqual(buildRealmProvenanceDetailView(null), {
+    visible: false,
+    inputRows: [],
+    seedPaths: [],
+    resolvedTools: [],
+    missingExtensions: []
+  });
+});
+
+test('the provenance detail carries the recorded extension resolution (P2.3)', () => {
+  const view = buildRealmProvenanceDetailView({
+    instance: {
+      templateId: 'session_zero',
+      templateVersion: SESSION_VERSION,
+      launchedAt: '2026-09-21T12:00:00.000Z',
+      inputHashes: {},
+      seedPaths: [],
+      resolvedTools: { similarity: 'acme-scoring', notes_search: 'acme/notes' },
+      missingExtensions: ['acme/ghost', '  ']
+    }
+  });
+  assert.equal(view.visible, true);
+  assert.deepEqual(view.resolvedTools, [
+    { callName: 'similarity', extensionId: 'acme-scoring' },
+    { callName: 'notes_search', extensionId: 'acme/notes' }
+  ]);
+  assert.deepEqual(view.missingExtensions, ['acme/ghost'], 'malformed entries never render');
+
+  const malformed = buildRealmProvenanceDetailView({
+    instance: {
+      templateId: 'x',
+      templateVersion: 'sha256:a',
+      launchedAt: '2026-09-21T12:00:00.000Z',
+      resolvedTools: 'nope',
+      missingExtensions: 'nope'
+    }
+  });
+  assert.deepEqual(malformed.resolvedTools, []);
+  assert.deepEqual(malformed.missingExtensions, []);
 });
 
 test('the rehydrate plan matches the launch materialization agent ids', () => {

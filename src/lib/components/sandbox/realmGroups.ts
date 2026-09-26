@@ -482,3 +482,50 @@ export function safeRealmColor(color: unknown): string | null {
   const trimmed = color.trim();
   return /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(trimmed) ? trimmed : null;
 }
+
+/**
+ * Realm-card extension indicator: the sidebar group header badge shown when a
+ * Realm's launch provenance recorded requested extensions that did not resolve
+ * (`instance.missingExtensions`).
+ */
+export interface RealmExtensionIndicator {
+  /** Whether the badge renders (at least one recorded missing extension). */
+  readonly visible: boolean;
+  /** Number of recorded missing requested extensions. */
+  readonly count: number;
+  /** Short badge text (`2 missing`). */
+  readonly label: string;
+  /** Tooltip text naming the affected extensions. */
+  readonly title: string;
+}
+
+/**
+ * Builds the Realm-card missing-extension indicator from a Realm record's
+ * launch provenance. The badge is descriptive: it never installs, attaches, or
+ * re-resolves anything — the Realm settings/missing panel holds the actions.
+ *
+ * @param realm - Realm record (structural; `instance.missingExtensions` read only).
+ * @returns The indicator; hidden when no missing extensions were recorded.
+ *
+ * @example
+ * ```typescript
+ * describeRealmExtensionIndicator(sandboxStore.realms[0]).visible;
+ * ```
+ */
+export function describeRealmExtensionIndicator(
+  realm: { readonly instance?: unknown } | null | undefined
+): RealmExtensionIndicator {
+  const instance = realm && typeof realm === 'object' && realm.instance && typeof realm.instance === 'object'
+    ? (realm.instance as Record<string, unknown>)
+    : null;
+  const missing = instance && Array.isArray(instance.missingExtensions)
+    ? instance.missingExtensions.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+    : [];
+  if (missing.length === 0) return { visible: false, count: 0, label: '', title: '' };
+  return {
+    visible: true,
+    count: missing.length,
+    label: `${missing.length} missing`,
+    title: `${missing.length} requested extension${missing.length === 1 ? '' : 's'} not available in this Realm: ${missing.join(', ')}. Open Realm settings to install or attach.`
+  };
+}

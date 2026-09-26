@@ -30,6 +30,12 @@
  *   shape-tagged `inputs` payload a real launch accepts, the placement writes
  *   it produces, the typed shape-mismatch refusal, and an edited review slot
  *   whose assembled package lands the edited content in the seeded file.
+ *
+ *   P2.3 (extension wave) adds the extension management surface against the
+ *   real store: install/attach/detach round-trips with typed refusals, the
+ *   live missing-tools flow over a real launch's disclosure, and the
+ *   provenance rows plus the realm-card badge for recorded extension
+ *   resolution (`extensionUiHelpers.ts` + `realmGroups.ts`).
  */
 
 import '../test_env.js';
@@ -42,11 +48,17 @@ import {
   DIRECTOR_GROUP_LABEL,
   GENERIC_REALM_ID,
   describeRealmDeletion,
+  describeRealmExtensionIndicator,
   groupAgentsByRealm,
   isDirectorAgent,
   resolveAgentRealmId,
   safeRealmColor
 } from '../../src/lib/components/sandbox/realmGroups.ts';
+import {
+  buildMissingExtensionFlowViews,
+  buildRealmExtensionRequestViews,
+  describeExtensionRemovalError
+} from '../../src/lib/components/sandbox/extensionUiHelpers.ts';
 import {
   buildRealmProvenanceView,
   buildRealmTemplateCatalogEntries,
@@ -1226,6 +1238,259 @@ test('19. an edited review slot launches through the assembled package and lands
       store.agents.find((agent) => agent.id === 'u-payload-writer').config.systemPrompt,
       'Write.\n\nTides'
     );
+  } finally {
+    store.destroy();
+    sharedLocalStorage.clear();
+  }
+});
+
+// ============================================================================
+// 20-21. Extension management over the real store (P2.3)
+// ============================================================================
+
+/**
+ * Builds an extension-requesting transport bundle: one installed-able MCP
+ * request, one pack request, and one agent referencing the MCP tool.
+ *
+ * @returns {object} Transport bundle.
+ */
+function uiExtensionBundle() {
+  return {
+    formatVersion: 1,
+    template: {
+      formatVersion: 1,
+      id: 'u-extension-bundle',
+      name: 'Extension Bundle',
+      description: 'One MCP request and one pack request.',
+      notes: 'Install the scoring server, then attach it here.',
+      agents: [
+        {
+          key: 'observer',
+          idPattern: 'u-ext-observer',
+          name: 'Observer',
+          role: 'observer',
+          prompt: [{ kind: 'text', text: 'Observe the extension seam.' }],
+          toolProfile: { tools: ['acme-scoring::similarity'] },
+          privileged: false
+        }
+      ],
+      providers: [
+        { kind: 'mcp', id: 'acme-scoring', transport: { kind: 'http', url: 'https://mcp.example.com' } },
+        { kind: 'pack', id: 'acme/text-tools', source: 'acme/text-tools-pack' }
+      ]
+    },
+    files: {}
+  };
+}
+
+test('20. install/attach/detach round-trips through the real store and the missing flow follows it', async () => {
+  sharedLocalStorage.clear();
+  const store = createSandboxStore({ autoBootstrapDirector: false, autoHydrate: false });
+  try {
+    const bundle = uiExtensionBundle();
+    store.importRealmTemplate(bundle);
+    const template = store.getRealmTemplateBundle(bundle.template.id).template;
+
+    // Nothing installed or approved: the launch proceeds with the missing
+    // disclosure and records the unresolved request ids.
+    const receipt = await store.launchRealmFromTemplate(bundle.template.id, { name: 'Extensions Realm' });
+    assert.deepStrictEqual(
+      receipt.realm.instance.missingExtensions,
+      ['acme-scoring', 'acme/text-tools'],
+      'both requested extensions stay disclosed'
+    );
+    assert.strictEqual(receipt.warnings.length, 2, JSON.stringify(receipt.warnings));
+
+    const realm = store.getRealm(receipt.realm.id);
+    const initialFlow = buildMissingExtensionFlowViews({
+      missingExtensionIds: realm.instance.missingExtensions,
+      template,
+      installs: store.listExtensions(),
+      attachments: store.listRealmExtensions(realm.id)
+    });
+    assert.deepStrictEqual(
+      initialFlow.map((view) => [view.extensionId, view.reason, view.canInstall, view.canAttach]),
+      [
+        ['acme-scoring', 'not-installed', true, false],
+        ['acme/text-tools', 'not-installed', true, false]
+      ]
+    );
+    assert.strictEqual(initialFlow[0].authorComment, template.notes);
+    assert.strictEqual(initialFlow[0].installPrefill.url, 'https://mcp.example.com');
+
+    // Operator install (the dialog's store call), then the flow offers attach.
+    const installed = store.installExtension({
+      id: 'acme-scoring',
+      kind: 'mcp',
+      displayName: 'Acme Scoring',
+      transportHint: { kind: 'http', url: 'https://mcp.example.com' },
+      approvedUrl: 'https://mcp.example.com'
+    });
+    assert.strictEqual(installed.status, 'installed');
+    assert.strictEqual(store.listExtensions().length, 1);
+
+    const afterInstall = buildMissingExtensionFlowViews({
+      missingExtensionIds: realm.instance.missingExtensions,
+      template,
+      installs: store.listExtensions(),
+      attachments: store.listRealmExtensions(realm.id)
+    });
+    assert.deepStrictEqual(
+      afterInstall.map((view) => [view.extensionId, view.canInstall, view.canAttach]),
+      [['acme-scoring', false, true], ['acme/text-tools', true, false]]
+    );
+
+    // Operator attach with an explicit sanitized call-name selection.
+    store.attachExtension(realm.id, 'acme-scoring', { toolSelection: ['similarity'] });
+    const attachments = store.listRealmExtensions(realm.id);
+    assert.deepStrictEqual(
+      attachments.map((entry) => [entry.extensionId, entry.toolSelection, entry.status, entry.approvedBy]),
+      [['acme-scoring', ['similarity'], 'active', 'operator']]
+    );
+
+    const afterAttach = buildMissingExtensionFlowViews({
+      missingExtensionIds: realm.instance.missingExtensions,
+      template,
+      installs: store.listExtensions(),
+      attachments
+    }).filter((view) => view.state !== 'active');
+    assert.deepStrictEqual(
+      afterAttach.map((view) => [view.extensionId, view.state, view.reason]),
+      [['acme/text-tools', 'not-installed', 'not-installed']],
+      'the components filter resolved rows; the since-attached request drops out'
+    );
+
+    // The request views carry the live attachment state too.
+    const requestViews = buildRealmExtensionRequestViews(template, store.listExtensions(), attachments);
+    assert.deepStrictEqual(
+      requestViews.requests.map((view) => [view.id, view.state, view.installed]),
+      [['acme-scoring', 'active', true], ['acme/text-tools', 'not-installed', false]]
+    );
+
+    // A malformed selection on an installed, unattached extension fails closed
+    // with the registry's own message and writes nothing.
+    store.installExtension({
+      id: 'acme-extra',
+      kind: 'mcp',
+      transportHint: { kind: 'http', url: 'https://extra.example.com' }
+    });
+    assert.throws(
+      () => store.attachExtension(realm.id, 'acme-extra', { toolSelection: ['docs.search'] }),
+      (err) => {
+        assert.strictEqual(err.code, 'ERR_STORE_INVALID_PARAMS');
+        assert.match(err.message, /sanitized call name/);
+        return true;
+      }
+    );
+    assert.deepStrictEqual(
+      store.listRealmExtensions(realm.id).map((entry) => entry.extensionId),
+      ['acme-scoring'],
+      'a refused attach leaves the attachment list unchanged'
+    );
+    assert.strictEqual(store.removeExtension('acme-extra'), true);
+
+    // Removal is refused while the Realm attaches the extension, and the
+    // refusal copy carries the detach-first guidance.
+    assert.throws(
+      () => store.removeExtension('acme-scoring'),
+      (err) => {
+        assert.strictEqual(err.code, 'ERR_STORE_EXTENSION_ATTACHED');
+        const copy = describeExtensionRemovalError(err);
+        assert.match(copy, /still attached to 1 Realm\(s\)/);
+        assert.match(copy, /Detach it from every Realm before removing the install record/);
+        return true;
+      }
+    );
+    assert.ok(store.getExtension('acme-scoring'), 'the refused removal changed nothing');
+
+    // Detach, then the removal succeeds and the install record disappears.
+    store.detachExtension(realm.id, 'acme-scoring');
+    assert.deepStrictEqual(store.listRealmExtensions(realm.id), []);
+    assert.strictEqual(store.removeExtension('acme-scoring'), true);
+    assert.deepStrictEqual(store.listExtensions(), []);
+
+    // A second launch with the explicit attach approval resolves and attaches.
+    const approvedReceipt = await store.launchRealmFromTemplate(bundle.template.id, {
+      name: 'Approved Realm',
+      extensionApprovals: [{ extensionId: 'acme/text-tools' }]
+    });
+    assert.deepStrictEqual(
+      approvedReceipt.realm.instance.missingExtensions,
+      ['acme-scoring', 'acme/text-tools'],
+      'approving an uninstalled request attaches nothing and stays disclosed'
+    );
+    assert.deepStrictEqual(store.listRealmExtensions(approvedReceipt.realm.id), []);
+  } finally {
+    store.destroy();
+    sharedLocalStorage.clear();
+  }
+});
+
+test('21. provenance rows and the realm badge surface the recorded extension resolution', async () => {
+  const record = realmWithProvenance({
+    templateId: 'ui-template',
+    templateVersion: 'sha256:abc',
+    inputHashes: {},
+    seedPaths: [],
+    launchedAt: '2026-09-26T12:00:00.000Z',
+    resolvedTools: { similarity: 'acme-scoring' },
+    missingExtensions: ['acme/ghost']
+  });
+  const view = buildRealmProvenanceView(record);
+  assert.strictEqual(view.visible, true);
+  assert.deepStrictEqual(
+    view.rows.map((row) => row.key),
+    [
+      'templateId',
+      'templateVersion',
+      'launchedAt',
+      'resolvedTool:similarity',
+      'missingExtension:acme/ghost'
+    ],
+    'extension rows append after the launch rows with collision-free keys'
+  );
+  assert.deepStrictEqual(
+    view.rows.map((row) => [row.label, row.value]),
+    [
+      ['Template', 'ui-template'],
+      ['Template version', 'sha256:abc'],
+      ['Launched', '2026-09-26 12:00:00 UTC'],
+      ['Resolved tool', 'similarity → acme-scoring'],
+      ['Missing extension', 'acme/ghost']
+    ]
+  );
+  assert.deepStrictEqual(view.resolvedTools, [{ callName: 'similarity', extensionId: 'acme-scoring' }]);
+  assert.deepStrictEqual(view.missingExtensions, ['acme/ghost']);
+
+  const indicator = describeRealmExtensionIndicator(record);
+  assert.strictEqual(indicator.visible, true);
+  assert.strictEqual(indicator.count, 1);
+  assert.strictEqual(indicator.label, '1 missing');
+  assert.match(indicator.title, /acme\/ghost/);
+  assert.match(indicator.title, /Open Realm settings/);
+  assert.strictEqual(describeRealmExtensionIndicator(realmWithProvenance({
+    templateId: 'ui-template',
+    templateVersion: 'sha256:abc',
+    inputHashes: {},
+    seedPaths: [],
+    launchedAt: '2026-09-26T12:00:00.000Z'
+  })).visible, false);
+  assert.strictEqual(describeRealmExtensionIndicator(null).visible, false);
+  assert.strictEqual(describeRealmExtensionIndicator({ instance: { missingExtensions: 'nope' } }).visible, false);
+
+  // The same rows come out of a real launch that recorded a missing request.
+  sharedLocalStorage.clear();
+  const store = createSandboxStore({ autoBootstrapDirector: false, autoHydrate: false });
+  try {
+    const bundle = uiExtensionBundle();
+    store.importRealmTemplate(bundle);
+    const receipt = await store.launchRealmFromTemplate(bundle.template.id, { name: 'Badge Realm' });
+    const launched = buildRealmProvenanceView(store.getRealm(receipt.realm.id));
+    assert.deepStrictEqual(
+      launched.rows.filter((row) => row.key.startsWith('missingExtension:')).map((row) => row.value),
+      ['acme-scoring', 'acme/text-tools']
+    );
+    assert.strictEqual(describeRealmExtensionIndicator(store.getRealm(receipt.realm.id)).count, 2);
   } finally {
     store.destroy();
     sharedLocalStorage.clear();

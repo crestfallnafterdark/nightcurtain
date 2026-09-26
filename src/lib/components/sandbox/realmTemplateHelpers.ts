@@ -403,10 +403,15 @@ export function formatRealmLaunchTimestamp(value: unknown): string {
 
 /**
  * One rendered provenance row.
+ *
+ * The base rows carry fixed keys (`templateId`/`templateVersion`/
+ * `packageDigest`/`launchedAt`); extension rows append composite keys
+ * (`resolvedTool:<callName>`, `missingExtension:<id>`) so a single record's
+ * mapping or missing list can never collide in a keyed render.
  */
 export interface RealmProvenanceRow {
-  /** Stable row key (`templateId`/`templateVersion`/`packageDigest`/`launchedAt`). */
-  readonly key: 'templateId' | 'templateVersion' | 'packageDigest' | 'launchedAt';
+  /** Stable row key (`templateId`/`templateVersion`/`packageDigest`/`launchedAt`/`resolvedTool:<callName>`/`missingExtension:<id>`). */
+  readonly key: string;
   /** Display label. */
   readonly label: string;
   /** Display value (the `launchedAt` row is the formatted timestamp). */
@@ -421,8 +426,16 @@ export interface RealmProvenanceView {
   readonly visible: boolean;
   /** Provenance template id; empty when hidden. */
   readonly templateId: string;
-  /** Rows in display order (`templateId`, `templateVersion`, optional `packageDigest`, `launchedAt`). */
+  /**
+   * Rows in display order (`templateId`, `templateVersion`, optional
+   * `packageDigest`, `launchedAt`, then one row per resolved extension tool and
+   * one per missing requested extension).
+   */
   readonly rows: readonly RealmProvenanceRow[];
+  /** Resolved extension tools in record order (call name → extension id). */
+  readonly resolvedTools: ReadonlyArray<{ readonly callName: string; readonly extensionId: string }>;
+  /** Missing requested extension ids in record order. */
+  readonly missingExtensions: readonly string[];
 }
 
 /**
@@ -430,10 +443,14 @@ export interface RealmProvenanceView {
  *
  * The `instance` block is the authoritative launch provenance (Wave T, ticket
  * 0df20ae): it records the effective template revision, the optional hydration
- * package digest, input hashes, seed paths, and the launch timestamp. A record
+ * package digest, input hashes, seed paths, the launch timestamp, and the
+ * extension resolution result (`resolvedTools`/`missingExtensions`). A record
  * without a valid provenance block — or with a malformed one (missing
  * `templateId`/`templateVersion`/`launchedAt`) — renders nothing rather than
- * guessing from `templateId` alone, so the panel is never dishonest.
+ * guessing from `templateId` alone, so the panel is never dishonest. The
+ * extension lists are decoded from the same validated block: rows append
+ * `Tool <callName>` rows and `Missing extension` rows, and the lists stay
+ * available for structured rendering.
  *
  * @param realm - Realm record (structural; `instance` read only).
  * @returns The panel projection; hidden with empty rows when provenance is absent.
@@ -450,23 +467,51 @@ export function buildRealmProvenanceView(
   const instance = realm && typeof realm === 'object' && realm.instance && typeof realm.instance === 'object'
     ? (realm.instance as Record<string, unknown>)
     : null;
-  if (!instance) return { visible: false, templateId: '', rows: [] };
+  if (!instance) {
+    return { visible: false, templateId: '', rows: [], resolvedTools: [], missingExtensions: [] };
+  }
 
   const templateId = typeof instance.templateId === 'string' ? instance.templateId.trim() : '';
   const templateVersion = typeof instance.templateVersion === 'string' ? instance.templateVersion.trim() : '';
   const launchedAt = typeof instance.launchedAt === 'string' ? instance.launchedAt.trim() : '';
   if (!templateId || !templateVersion || !launchedAt) {
-    return { visible: false, templateId: '', rows: [] };
+    return { visible: false, templateId: '', rows: [], resolvedTools: [], missingExtensions: [] };
   }
   const packageDigest = typeof instance.packageDigest === 'string' ? instance.packageDigest.trim() : '';
+  const resolvedTools: Array<{ callName: string; extensionId: string }> = [];
+  if (instance.resolvedTools && typeof instance.resolvedTools === 'object' && !Array.isArray(instance.resolvedTools)) {
+    for (const [callName, extensionId] of Object.entries(instance.resolvedTools as Record<string, unknown>)) {
+      if (typeof extensionId !== 'string' || callName.length === 0) continue;
+      resolvedTools.push({ callName, extensionId });
+    }
+  }
+  const missingExtensions = Array.isArray(instance.missingExtensions)
+    ? instance.missingExtensions.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+    : [];
 
   const rows: RealmProvenanceRow[] = [
     { key: 'templateId', label: 'Template', value: templateId },
     { key: 'templateVersion', label: 'Template version', value: templateVersion },
     ...(packageDigest
-      ? [{ key: 'packageDigest' as const, label: 'Hydration package', value: packageDigest }]
+      ? [{ key: 'packageDigest', label: 'Hydration package', value: packageDigest }]
       : []),
-    { key: 'launchedAt', label: 'Launched', value: formatRealmLaunchTimestamp(launchedAt) }
+    { key: 'launchedAt', label: 'Launched', value: formatRealmLaunchTimestamp(launchedAt) },
+    ...resolvedTools.map((entry) => ({
+      key: `resolvedTool:${entry.callName}`,
+      label: 'Resolved tool',
+      value: `${entry.callName} → ${entry.extensionId}`
+    })),
+    ...missingExtensions.map((id) => ({
+      key: `missingExtension:${id}`,
+      label: 'Missing extension',
+      value: id
+    }))
   ];
-  return { visible: true, templateId, rows };
+  return {
+    visible: true,
+    templateId,
+    rows,
+    resolvedTools: Object.freeze(resolvedTools),
+    missingExtensions: Object.freeze(missingExtensions)
+  };
 }

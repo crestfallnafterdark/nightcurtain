@@ -24,6 +24,14 @@
  * publishing-authority toggle state. The review launch-payload resolution is
  * pinned too: an edited slot rebuilds the launch package and the assembled
  * payload validates through the real catalog with the edited content present.
+ *
+ * P2.3 (extension wave) adds the extension disclosure covers: the preview
+ * projection threads the template's requirements/providers (research flag (d)),
+ * requested-extension and per-agent tool-reference views resolve through the
+ * real `extensionRegistry` resolution, attach approvals default declined and
+ * assemble only approved requests, the missing-tools flow is live and
+ * actionable, and the install draft validates/prefixes exactly like the
+ * registry's own record rules.
  */
 
 import '../test_env.js';
@@ -60,12 +68,14 @@ import {
 import {
   META_AUTHORITY_TOGGLES,
   assembleRealmAuthorityApprovals,
+  assembleRealmExtensionApprovals,
   assembleRealmReviewPackage,
   buildMetaAuthorityToggleState,
   buildRealmAgentDisclosureRows,
   buildRealmAuthorityDecisions,
   buildRealmAuthorityDecisionKey,
   buildRealmAuthorityReviewAgents,
+  buildRealmExtensionDecisions,
   buildRealmHistoryEditorViews,
   buildRealmPartProvenanceViews,
   buildRealmPayloadFilename,
@@ -79,6 +89,23 @@ import {
   resolveRealmReviewLaunchPayload,
   serializeRealmPendingPayload
 } from '../../src/lib/components/sandbox/realmReviewHelpers.ts';
+import {
+  REALM_EXTENSION_TRUST_DISCLOSURE,
+  buildExtensionInstallPrefill,
+  buildExtensionInstallPrefillFromRecord,
+  buildMissingExtensionFlowViews,
+  buildRealmExtensionReferenceViews,
+  buildRealmExtensionRequestViews,
+  collectRealmExtensionRequests,
+  describeExtensionAttachError,
+  describeExtensionInstallError,
+  describeExtensionRemovalError,
+  describeExtensionTransportHint,
+  describeRealmExtensionState,
+  emptyExtensionInstallDraft,
+  isRealmExtensionStateMissing,
+  validateExtensionInstallDraft
+} from '../../src/lib/components/sandbox/extensionUiHelpers.ts';
 import { formatRealmLaunchTimestamp } from '../../src/lib/components/sandbox/realmTemplateHelpers.ts';
 import {
   DEMO_TEMPLATE,
@@ -2149,4 +2176,449 @@ test('45. payload-provided filesets satisfy the attachment gate (0ea4c2b)', () =
     validateRealmInputAttachments(V2_TEMPLATE, [setRealmV2InputFiles(rosterDraft, [])]).issues[0].code,
     'required-empty'
   );
+});
+
+// ============================================================================
+// 46-53. Extension disclosure, approvals, install flow, and copy (P2.3)
+// ============================================================================
+
+/**
+ * Extension-bearing template fixture: one HTTP MCP request, one pack request,
+ * and one agent referencing both extension tools plus an internal canonical
+ * name. (A structurally duplicated provider id is rejected by the catalog; the
+ * collector's first-wins dedupe is pinned separately below.)
+ */
+const EXTENSION_TEMPLATE = {
+  id: 'p23-extension-fixture',
+  name: 'P2.3 Extension Fixture',
+  description: 'Declares extension requests and references.',
+  notes: 'Scoring tools for the reviewer.',
+  formatVersion: 1,
+  agents: [
+    {
+      key: 'observer',
+      idPattern: 'p23-observer',
+      name: 'Observer',
+      role: 'observer',
+      prompt: [{ kind: 'text', text: 'Observe the extension seam.' }],
+      toolProfile: { tools: ['acme-scoring::similarity', 'acme/notes::notes.search', 'read_file'] },
+      privileged: false
+    }
+  ],
+  providers: [
+    { kind: 'mcp', id: 'acme-scoring', transport: { kind: 'http', url: 'https://mcp.example.com' } },
+    { kind: 'pack', id: 'acme/notes', source: 'acme/notes-pack', range: '^1' }
+  ]
+};
+
+/**
+ * Builds one valid install record for the extension fixtures.
+ *
+ * @param {object} [overrides] - Field overrides.
+ * @returns {object} Install record.
+ */
+function extensionInstall(overrides = {}) {
+  return {
+    id: 'acme-scoring',
+    kind: 'mcp',
+    transportHint: { kind: 'http', url: 'https://mcp.example.com' },
+    status: 'installed',
+    installSource: 'operator',
+    createdAt: 1,
+    ...overrides
+  };
+}
+
+/**
+ * Builds one valid realm attachment for the extension fixtures.
+ *
+ * @param {object} [overrides] - Field overrides.
+ * @returns {object} Attachment record.
+ */
+function extensionAttachment(overrides = {}) {
+  return {
+    extensionId: 'acme-scoring',
+    toolSelection: 'all',
+    status: 'active',
+    approvedAt: '2026-09-26T00:00:00.000Z',
+    approvedBy: 'operator',
+    ...overrides
+  };
+}
+
+test('46. the preview projection threads the template requirements and providers (research flag (d))', () => {
+  const projection = buildRealmPreviewProjection(EXTENSION_TEMPLATE);
+  assert.strictEqual(projection.ok, true, projection.error);
+  const observer = projection.rows[0];
+  assert.ok(observer.grants.includes('similarity'), JSON.stringify(observer.grants));
+  assert.ok(observer.grants.includes('notes_search'), JSON.stringify(observer.grants));
+  assert.ok(observer.grants.includes('read_file'), 'internal canonical grants stay classified');
+  assert.deepStrictEqual(observer.unrecognized, [], 'declared references are recognized, not unrecognized');
+  assert.ok(observer.readOnly.includes('read_file'), 'the canonical grant keeps its classification');
+
+  // Without the providers the same reference is undeclared and the preview
+  // fails closed with the catalog's own message (the pre-fix behavior).
+  const noProviders = buildRealmPreviewProjection({ ...EXTENSION_TEMPLATE, providers: undefined });
+  assert.strictEqual(noProviders.ok, false);
+  assert.match(noProviders.error, /undeclared provider/);
+
+  // The legacy requirement path is threaded the same way.
+  const legacyRequirements = buildRealmPreviewProjection({
+    ...EXTENSION_TEMPLATE,
+    providers: undefined,
+    agents: [{ ...EXTENSION_TEMPLATE.agents[0], toolProfile: { tools: ['text.similarity'] } }],
+    toolContract: {
+      requirements: [{ id: 'text.similarity', brief: 'Similarity', io: { in: {}, out: {} } }]
+    }
+  });
+  assert.strictEqual(legacyRequirements.ok, true, legacyRequirements.error);
+  assert.ok(legacyRequirements.rows[0].grants.includes('text_similarity'));
+});
+
+test('47. requested-extension views resolve through the real registry resolution', () => {
+  const requests = collectRealmExtensionRequests(EXTENSION_TEMPLATE);
+  assert.deepStrictEqual(
+    requests.map((request) => request.id),
+    ['acme-scoring', 'acme/notes'],
+    'declared order with first-wins deduplication'
+  );
+  const duplicated = collectRealmExtensionRequests({
+    ...EXTENSION_TEMPLATE,
+    providers: [
+      ...EXTENSION_TEMPLATE.providers,
+      { kind: 'mcp', id: 'acme-scoring', transport: { kind: 'http', url: 'https://duplicate.example.com' } }
+    ]
+  });
+  assert.deepStrictEqual(
+    duplicated.map((request) => request.id),
+    ['acme-scoring', 'acme/notes'],
+    'a structurally repeated provider id keeps its first declaration'
+  );
+  assert.strictEqual(
+    duplicated[0].transportHint.url,
+    'https://mcp.example.com',
+    'the first declared transport hint wins over the duplicate id'
+  );
+
+  const missing = buildRealmExtensionRequestViews(EXTENSION_TEMPLATE, []);
+  assert.strictEqual(missing.ok, true, missing.error);
+  assert.deepStrictEqual(
+    missing.requests.map((request) => request.state),
+    ['not-installed', 'not-installed']
+  );
+  assert.strictEqual(missing.requests[0].declaredTransportSummary, 'https://mcp.example.com');
+  assert.strictEqual(missing.requests[1].declaredTransportSummary, 'pack: acme/notes-pack');
+  assert.deepStrictEqual(
+    missing.missingExtensions.map((entry) => [entry.extensionId, entry.reason]),
+    [['acme-scoring', 'not-installed'], ['acme/notes', 'not-installed']]
+  );
+  assert.deepStrictEqual(
+    missing.missingTools.map((entry) => [entry.callName, entry.reason]),
+    [['similarity', 'not-installed'], ['notes_search', 'not-installed']]
+  );
+
+  const installed = buildRealmExtensionRequestViews(EXTENSION_TEMPLATE, [extensionInstall({
+    displayName: 'Acme Scoring',
+    approvedUrl: 'https://approved.example.com',
+    credentialId: 'cred-1'
+  })]);
+  const scoring = installed.requests[0];
+  assert.strictEqual(scoring.installed, true);
+  assert.strictEqual(scoring.installStatus, 'installed');
+  assert.strictEqual(scoring.installSource, 'operator');
+  assert.strictEqual(scoring.displayName, 'Acme Scoring');
+  assert.strictEqual(scoring.approvedUrl, 'https://approved.example.com');
+  assert.strictEqual(scoring.credentialId, 'cred-1');
+  assert.strictEqual(scoring.state, 'not-attached');
+  assert.deepStrictEqual(
+    installed.missingExtensions.map((entry) => entry.reason),
+    ['not-attached', 'not-installed'],
+    'an installed-but-unattached request reports not-attached'
+  );
+
+  const attached = buildRealmExtensionRequestViews(
+    EXTENSION_TEMPLATE,
+    [extensionInstall()],
+    [extensionAttachment()]
+  );
+  assert.strictEqual(attached.requests[0].state, 'active');
+  assert.strictEqual(attached.requests[0].missing, false);
+  assert.deepStrictEqual(
+    attached.missingExtensions.map((entry) => entry.extensionId),
+    ['acme/notes'],
+    'an active attachment resolves its request'
+  );
+
+  // A narrowed selection excludes the reference without changing the request state.
+  const narrowed = buildRealmExtensionRequestViews(
+    EXTENSION_TEMPLATE,
+    [extensionInstall()],
+    [extensionAttachment({ toolSelection: ['other_call'] })]
+  );
+  assert.strictEqual(narrowed.requests[0].state, 'active');
+  assert.deepStrictEqual(
+    narrowed.missingTools.map((entry) => [entry.callName, entry.reason]),
+    [['similarity', 'selection-excluded'], ['notes_search', 'not-installed']]
+  );
+});
+
+test('48. extension tool references disclose their per-agent resolution state', () => {
+  const resolved = buildRealmExtensionReferenceViews(
+    EXTENSION_TEMPLATE,
+    [extensionInstall()],
+    [extensionAttachment()]
+  );
+  assert.strictEqual(resolved.ok, true, resolved.error);
+  assert.deepStrictEqual(
+    resolved.references.map((ref) => [ref.agentName, ref.callName, ref.extensionId, ref.referenceState, ref.state]),
+    [
+      ['Observer', 'similarity', 'acme-scoring', 'resolved', 'active'],
+      ['Observer', 'notes_search', 'acme/notes', 'missing', 'not-installed']
+    ]
+  );
+
+  const excluded = buildRealmExtensionReferenceViews(
+    EXTENSION_TEMPLATE,
+    [extensionInstall()],
+    [extensionAttachment({ toolSelection: ['other_call'] })]
+  );
+  assert.deepStrictEqual(
+    excluded.references.map((ref) => ref.referenceState),
+    ['excluded', 'missing']
+  );
+
+  assert.deepStrictEqual(
+    buildRealmExtensionReferenceViews({ id: 'x', name: 'X', description: '', formatVersion: 2, agents: [] }, []),
+    { ok: true, error: '', references: [], missingTools: [] }
+  );
+});
+
+test('49. extension attach approvals default declined and assemble only approved requests', () => {
+  const decisions = buildRealmExtensionDecisions(EXTENSION_TEMPLATE);
+  assert.deepStrictEqual(decisions, { 'acme-scoring': 'declined', 'acme/notes': 'declined' });
+  assert.deepStrictEqual(assembleRealmExtensionApprovals(EXTENSION_TEMPLATE, decisions), []);
+
+  const approved = { ...decisions, 'acme/notes': 'approved' };
+  assert.deepStrictEqual(
+    assembleRealmExtensionApprovals(EXTENSION_TEMPLATE, approved),
+    [{ extensionId: 'acme/notes' }],
+    'approvals follow declared request order'
+  );
+  assert.deepStrictEqual(
+    assembleRealmExtensionApprovals(EXTENSION_TEMPLATE, { 'acme-scoring': 'approved', 'acme/notes': 'approved' }),
+    [{ extensionId: 'acme-scoring' }, { extensionId: 'acme/notes' }],
+    'an approved-but-uninstalled request still travels so the store keeps it disclosed'
+  );
+  assert.deepStrictEqual(
+    assembleRealmExtensionApprovals(EXTENSION_TEMPLATE, { ghost: 'approved' }),
+    [],
+    'undeclared decisions never travel'
+  );
+  assert.deepStrictEqual(assembleRealmExtensionApprovals(null, decisions), []);
+});
+
+test('50. the install draft validates like the registry and prefills from a template request', () => {
+  const blank = validateExtensionInstallDraft(emptyExtensionInstallDraft());
+  assert.strictEqual(blank.ok, false);
+  assert.match(blank.fieldErrors.id, /id is required/);
+
+  const reserved = validateExtensionInstallDraft({ ...emptyExtensionInstallDraft(), id: '__proto__', url: 'https://x' });
+  assert.strictEqual(reserved.ok, false);
+  assert.match(reserved.fieldErrors.id, /reserved property name/);
+
+  const missingUrl = validateExtensionInstallDraft({ ...emptyExtensionInstallDraft(), id: 'acme-scoring' });
+  assert.strictEqual(missingUrl.ok, false);
+  assert.match(missingUrl.fieldErrors.url, /URL is required/);
+
+  const http = validateExtensionInstallDraft({
+    ...emptyExtensionInstallDraft(),
+    id: ' acme-scoring ',
+    url: ' https://mcp.example.com ',
+    approvedUrl: ' https://approved.example.com ',
+    credentialId: ' cred-1 ',
+    displayName: ' Acme '
+  });
+  assert.strictEqual(http.ok, true, http.error);
+  assert.deepStrictEqual(http.input, {
+    id: 'acme-scoring',
+    kind: 'mcp',
+    transportHint: { kind: 'http', url: 'https://mcp.example.com' },
+    displayName: 'Acme',
+    credentialId: 'cred-1',
+    approvedUrl: 'https://approved.example.com',
+    installSource: 'operator'
+  });
+
+  const stdio = validateExtensionInstallDraft({
+    ...emptyExtensionInstallDraft(),
+    id: 'acme-stdio',
+    transportKind: 'stdio',
+    command: ' npx ',
+    argsText: ' -y\n\n @acme/server ',
+    installSource: 'template-assist'
+  });
+  assert.strictEqual(stdio.ok, true, stdio.error);
+  assert.deepStrictEqual(stdio.input.transportHint, { kind: 'stdio', command: 'npx', args: ['-y', '@acme/server'] });
+  assert.strictEqual(stdio.input.installSource, 'template-assist');
+
+  const pack = validateExtensionInstallDraft({
+    ...emptyExtensionInstallDraft(),
+    id: 'acme/notes',
+    kind: 'pack',
+    transportKind: 'pack',
+    source: 'acme/notes-pack'
+  });
+  assert.strictEqual(pack.ok, true, pack.error);
+  assert.deepStrictEqual(pack.input.transportHint, { kind: 'pack', source: 'acme/notes-pack' });
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(pack.input, 'approvedUrl'), false);
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(pack.input, 'credentialId'), false);
+
+  const missingSource = validateExtensionInstallDraft({ ...emptyExtensionInstallDraft(), id: 'a/b', kind: 'pack', transportKind: 'pack' });
+  assert.strictEqual(missingSource.ok, false);
+  assert.match(missingSource.fieldErrors.source, /source is required/);
+});
+
+test('51. the install prefill carries the template request fields', () => {
+  const httpDraft = buildExtensionInstallPrefill(EXTENSION_TEMPLATE.providers[0], {
+    templateId: EXTENSION_TEMPLATE.id,
+    templateNotes: EXTENSION_TEMPLATE.notes
+  });
+  assert.strictEqual(httpDraft.id, 'acme-scoring');
+  assert.strictEqual(httpDraft.kind, 'mcp');
+  assert.strictEqual(httpDraft.transportKind, 'http');
+  assert.strictEqual(httpDraft.url, 'https://mcp.example.com');
+  assert.strictEqual(httpDraft.approvedUrl, 'https://mcp.example.com', 'the URL prefills the approval field, still editable');
+  assert.strictEqual(httpDraft.installSource, 'template-assist');
+
+  const stdioDraft = buildExtensionInstallPrefill({
+    kind: 'mcp',
+    id: 'acme-stdio',
+    transport: { kind: 'stdio', command: 'npx', args: ['-y', '@acme/server'] }
+  });
+  assert.strictEqual(stdioDraft.transportKind, 'stdio');
+  assert.strictEqual(stdioDraft.argsText, '-y\n@acme/server');
+  assert.strictEqual(stdioDraft.installSource, 'operator', 'no template id keeps the operator source');
+
+  const packDraft = buildExtensionInstallPrefill(EXTENSION_TEMPLATE.providers[1], { templateId: 'p23-extension-fixture' });
+  assert.strictEqual(packDraft.transportKind, 'pack');
+  assert.strictEqual(packDraft.source, 'acme/notes-pack');
+
+  const fromRecord = buildExtensionInstallPrefillFromRecord(extensionInstall({
+    displayName: 'Acme Scoring',
+    approvedUrl: 'https://approved.example.com',
+    credentialId: 'cred-1'
+  }));
+  assert.deepStrictEqual(fromRecord, {
+    id: 'acme-scoring',
+    kind: 'mcp',
+    displayName: 'Acme Scoring',
+    transportKind: 'http',
+    url: 'https://mcp.example.com',
+    command: '',
+    argsText: '',
+    source: '',
+    approvedUrl: 'https://approved.example.com',
+    credentialId: 'cred-1',
+    installSource: 'operator'
+  });
+  assert.strictEqual(buildExtensionInstallPrefillFromRecord(null).id, '');
+});
+
+test('52. the missing-tools flow is live, deduplicated, and actionable', () => {
+  const flow = buildMissingExtensionFlowViews({
+    missingExtensionIds: ['acme-scoring', 'acme/notes', 'acme-scoring'],
+    template: EXTENSION_TEMPLATE,
+    installs: []
+  });
+  assert.deepStrictEqual(flow.map((view) => view.extensionId), ['acme-scoring', 'acme/notes'], 'ids dedupe');
+  assert.deepStrictEqual(flow.map((view) => view.reason), ['not-installed', 'not-installed']);
+  assert.deepStrictEqual(flow.map((view) => view.canInstall), [true, true]);
+  assert.deepStrictEqual(flow.map((view) => view.canAttach), [false, false]);
+  assert.strictEqual(flow[0].authorComment, EXTENSION_TEMPLATE.notes, 'the template note prefills the assist');
+  assert.strictEqual(flow[0].transportHintSummary, 'https://mcp.example.com');
+  assert.strictEqual(flow[0].installPrefill.id, 'acme-scoring');
+  assert.strictEqual(flow[0].installPrefill.installSource, 'template-assist');
+  assert.strictEqual(flow[0].templateId, EXTENSION_TEMPLATE.id);
+
+  const afterInstall = buildMissingExtensionFlowViews({
+    missingExtensionIds: ['acme-scoring'],
+    template: EXTENSION_TEMPLATE,
+    installs: [extensionInstall()]
+  });
+  assert.strictEqual(afterInstall[0].canInstall, false);
+  assert.strictEqual(afterInstall[0].canAttach, true);
+  assert.strictEqual(afterInstall[0].reason, 'not-attached');
+
+  const afterAttach = buildMissingExtensionFlowViews({
+    missingExtensionIds: ['acme-scoring'],
+    template: EXTENSION_TEMPLATE,
+    installs: [extensionInstall()],
+    attachments: [extensionAttachment()]
+  });
+  assert.strictEqual(afterAttach[0].state, 'active');
+  assert.strictEqual(afterAttach[0].reason, '', 'a since-resolved request stops rendering as missing');
+  assert.strictEqual(afterAttach[0].canAttach, false);
+  assert.strictEqual(afterAttach[0].canInstall, false);
+
+  const unattached = buildMissingExtensionFlowViews({
+    missingExtensionIds: ['acme-scoring'],
+    template: EXTENSION_TEMPLATE,
+    installs: [extensionInstall()],
+    attachments: [extensionAttachment({ status: 'unavailable' })]
+  });
+  assert.strictEqual(unattached[0].state, 'unavailable');
+  assert.strictEqual(unattached[0].canAttach, false, 'an existing attachment is never silently re-attached');
+
+  const undeclared = buildMissingExtensionFlowViews({ missingExtensionIds: ['ghost'], template: null, installs: [] });
+  assert.strictEqual(undeclared.length, 1);
+  assert.strictEqual(undeclared[0].kind, 'mcp');
+  assert.strictEqual(undeclared[0].transportHintSummary, '');
+  assert.strictEqual(undeclared[0].installPrefill.id, 'ghost');
+
+  assert.deepStrictEqual(buildMissingExtensionFlowViews({ missingExtensionIds: [], template: null, installs: [] }), []);
+  assert.deepStrictEqual(buildMissingExtensionFlowViews({ missingExtensionIds: null, template: null, installs: [] }), []);
+});
+
+test('53. extension error copy and trust disclosure describe the typed refusals', () => {
+  const attachedError = Object.assign(
+    new Error("removeExtension refuses extension 'acme-scoring' — still attached to 1 Realm(s): realm_a"),
+    { code: 'ERR_STORE_EXTENSION_ATTACHED' }
+  );
+  assert.match(describeExtensionRemovalError(attachedError), /still attached to 1 Realm\(s\): realm_a/);
+  assert.match(describeExtensionRemovalError(attachedError), /Detach it from every Realm/);
+  assert.match(
+    describeExtensionInstallError(Object.assign(
+      new Error("installExtension refuses extension 'acme-scoring' — it is already installed"),
+      { code: 'ERR_STORE_EXTENSION_ALREADY_INSTALLED' }
+    )),
+    /Remove the existing install record or choose a different id/
+  );
+  assert.match(
+    describeExtensionAttachError(Object.assign(
+      new Error("attachExtension: extension 'acme-scoring' is not installed — install it first"),
+      { code: 'ERR_STORE_EXTENSION_NOT_INSTALLED' }
+    )),
+    /Install it globally first, then attach it/
+  );
+  assert.match(
+    describeExtensionRemovalError(Object.assign(new Error('denied'), { code: 'PERMISSION_DENIED' })),
+    /operator \(Director\) principal is required/
+  );
+  assert.strictEqual(describeExtensionRemovalError('plain failure'), 'plain failure');
+
+  assert.deepStrictEqual(
+    REALM_EXTENSION_TRUST_DISCLOSURE.map((line) => line.key),
+    ['third-party', 'no-connection', 'urls-hints', 'credentials-user-side']
+  );
+  assert.ok(REALM_EXTENSION_TRUST_DISCLOSURE.every((line) => line.body.length > 0));
+
+  assert.strictEqual(describeExtensionTransportHint({ kind: 'http', url: 'https://x' }), 'https://x');
+  assert.strictEqual(describeExtensionTransportHint({ kind: 'stdio', command: 'npx', args: ['-y', 'pkg'] }), 'stdio: npx -y pkg');
+  assert.strictEqual(describeExtensionTransportHint({ kind: 'stdio', command: 'npx' }), 'stdio: npx');
+  assert.strictEqual(describeExtensionTransportHint({ kind: 'pack', source: 'acme/pack' }), 'pack: acme/pack');
+  assert.strictEqual(describeExtensionTransportHint(null), '');
+  assert.strictEqual(isRealmExtensionStateMissing('active'), false);
+  assert.strictEqual(isRealmExtensionStateMissing('conflict'), true);
+  assert.strictEqual(describeRealmExtensionState('not-installed').label, 'Not installed');
+  assert.match(describeRealmExtensionState('conflict').description, /catalog-time/);
 });

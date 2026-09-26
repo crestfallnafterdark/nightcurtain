@@ -948,8 +948,10 @@ export interface RealmProvenanceInputRow {
 }
 
 /**
- * Detail projection of one Realm record's launch provenance: per-input hashes
- * and seeded paths (hashes and paths only — raw values are never recorded).
+ * Detail projection of one Realm record's launch provenance: per-input hashes,
+ * seeded paths, resolved extension tools, and missing requested extensions
+ * (hashes, paths, call names, and extension ids only — raw values and secrets
+ * are never recorded).
  */
 export interface RealmProvenanceDetailView {
   /** Whether the detail block renders. */
@@ -958,6 +960,10 @@ export interface RealmProvenanceDetailView {
   readonly inputRows: readonly RealmProvenanceInputRow[];
   /** Seeded placement paths recorded at launch. */
   readonly seedPaths: readonly string[];
+  /** Resolved extension tools recorded at launch (call name → extension id), in record order. */
+  readonly resolvedTools: ReadonlyArray<{ readonly callName: string; readonly extensionId: string }>;
+  /** Requested extension ids that did not resolve at launch, in record order. */
+  readonly missingExtensions: readonly string[];
 }
 
 /**
@@ -974,10 +980,17 @@ export interface RealmProvenanceDetailView {
 export function buildRealmProvenanceDetailView(
   realm: { readonly instance?: unknown } | null | undefined
 ): RealmProvenanceDetailView {
+  const empty: RealmProvenanceDetailView = {
+    visible: false,
+    inputRows: [],
+    seedPaths: [],
+    resolvedTools: [],
+    missingExtensions: []
+  };
   const instance = realm && typeof realm === 'object' && realm.instance && typeof realm.instance === 'object'
     ? (realm.instance as Record<string, unknown>)
     : null;
-  if (!instance) return { visible: false, inputRows: [], seedPaths: [] };
+  if (!instance) return empty;
   const inputHashes = instance.inputHashes && typeof instance.inputHashes === 'object' && !Array.isArray(instance.inputHashes)
     ? (instance.inputHashes as Record<string, unknown>)
     : {};
@@ -993,5 +1006,15 @@ export function buildRealmProvenanceDetailView(
   const seedPaths = Array.isArray(instance.seedPaths)
     ? instance.seedPaths.filter((path): path is string => typeof path === 'string' && path.length > 0)
     : [];
-  return { visible: true, inputRows, seedPaths };
+  const resolvedTools: Array<{ callName: string; extensionId: string }> = [];
+  if (instance.resolvedTools && typeof instance.resolvedTools === 'object' && !Array.isArray(instance.resolvedTools)) {
+    for (const [callName, extensionId] of Object.entries(instance.resolvedTools as Record<string, unknown>)) {
+      if (typeof extensionId !== 'string' || callName.length === 0) continue;
+      resolvedTools.push({ callName, extensionId });
+    }
+  }
+  const missingExtensions = Array.isArray(instance.missingExtensions)
+    ? instance.missingExtensions.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+    : [];
+  return { visible: true, inputRows, seedPaths, resolvedTools, missingExtensions };
 }

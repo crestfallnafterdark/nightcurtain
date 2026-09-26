@@ -38,6 +38,7 @@ import {
   normalizeTemplate,
   validatePayload
 } from '../../sandbox/realmCatalog/index.ts';
+import { collectRealmExtensionRequests } from './extensionUiHelpers.ts';
 import type {
   PromptPart,
   RealmAgentSpec,
@@ -1868,4 +1869,69 @@ export function buildRealmAgentDisclosureRows(
       present: true
     }
   ];
+}
+
+// ============================================================================
+// Extension attach approvals (extension wave)
+// ============================================================================
+
+/**
+ * Review decision for one declared template-requested extension.
+ *
+ * `approved` means the launch records the attach approval for the Realm being
+ * created (installed requests attach with the operator stamp; an approval of
+ * an uninstalled request attaches nothing and stays disclosed); `declined`
+ * (the default, absent decision) is a decline.
+ */
+export type RealmExtensionDecision = 'approved' | 'declined';
+
+/**
+ * Builds the initial review decisions for one template: every declared
+ * extension request starts declined — installation/attachment is never
+ * automatic — and the operator approves the requests to attach at launch.
+ *
+ * @param template - Selected template (structural; malformed providers skipped).
+ * @returns Decision map keyed by requested extension id.
+ *
+ * @example
+ * ```typescript
+ * buildRealmExtensionDecisions(template); // { 'acme-scoring': 'declined' }
+ * ```
+ */
+export function buildRealmExtensionDecisions(
+  template: RealmTemplate | null | undefined
+): Record<string, RealmExtensionDecision> {
+  const decisions: Record<string, RealmExtensionDecision> = {};
+  for (const request of collectRealmExtensionRequests(template)) {
+    decisions[request.id] = 'declined';
+  }
+  return decisions;
+}
+
+/**
+ * Assembles the `extensionApprovals` payload from the review decisions: only
+ * approved requests travel, in declared request order (absent = declined);
+ * approved-but-uninstalled requests still travel so the store keeps them
+ * disclosed rather than attaching nothing silently.
+ *
+ * @param template - Selected template.
+ * @param decisions - Decision map from {@link buildRealmExtensionDecisions} (edited by the review).
+ * @returns Approval entries for `launchRealmFromTemplate({ extensionApprovals })`.
+ *
+ * @example
+ * ```typescript
+ * assembleRealmExtensionApprovals(template, { 'acme-scoring': 'approved' });
+ * // => [{ extensionId: 'acme-scoring' }]
+ * ```
+ */
+export function assembleRealmExtensionApprovals(
+  template: RealmTemplate | null | undefined,
+  decisions: Readonly<Record<string, RealmExtensionDecision>> | null | undefined
+): Array<{ extensionId: string }> {
+  const approvals: Array<{ extensionId: string }> = [];
+  const map = isRecord(decisions) ? decisions : {};
+  for (const request of collectRealmExtensionRequests(template)) {
+    if (map[request.id] === 'approved') approvals.push({ extensionId: request.id });
+  }
+  return approvals;
 }

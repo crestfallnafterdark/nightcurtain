@@ -24,6 +24,12 @@
   import { buildRealmProvenanceView } from './realmTemplateHelpers.ts';
   import { buildRealmProvenanceDetailView } from './realmHydrationHelpers.ts';
   import { describeRealmDeletion, safeRealmColor } from './realmGroups.ts';
+  import ExtensionInstallDialog from './ExtensionInstallDialog.svelte';
+  import {
+    buildMissingExtensionFlowViews,
+    describeExtensionAttachError,
+    describeRealmExtensionState
+  } from './extensionUiHelpers.ts';
 
   let { onclose = () => {}, realmId = null, onlaunchtemplate = () => {}, onrehydrate = () => {} } = $props();
 
@@ -81,7 +87,162 @@
   );
   let isGenericRealm = $derived(selectedRealm?.id === GENERIC_REALM_ID);
 
+  // ---- Extensions (extension wave) ------------------------------------------
+
+  let extensionsRevision = $state(0);
+  let extensionStatus = $state({ ok: true, msg: '' });
+  let attachExtensionId = $state('');
+  let attachSelectionMode = $state('all');
+  let attachSelectionText = $state('');
+  let installAssist = $state(/** @type {import('./extensionUiHelpers.ts').MissingExtensionFlowView | null} */(null));
+
+  let installedExtensions = $derived.by(() => {
+    void extensionsRevision;
+    return sandboxStore.listExtensions();
+  });
+
+  let realmAttachments = $derived.by(() => {
+    void extensionsRevision;
+    const realm = selectedRealm;
+    return realm ? sandboxStore.listRealmExtensions(realm.id) : [];
+  });
+
+  let attachableExtensions = $derived(
+    installedExtensions.filter(
+      (record) => !realmAttachments.some((attachment) => attachment.extensionId === record.id)
+    )
+  );
+
+  let missingFlow = $derived.by(() => {
+    void extensionsRevision;
+    const realm = selectedRealm;
+    const instance = realm && realm.instance ? realm.instance : null;
+    if (!realm || !instance || !Array.isArray(instance.missingExtensions)) return [];
+    const templateId = typeof instance.templateId === 'string' ? instance.templateId : '';
+    const template = templateId
+      ? (sandboxStore.getRealmTemplateBundle(templateId)?.template ?? null)
+      : null;
+    return buildMissingExtensionFlowViews({
+      missingExtensionIds: instance.missingExtensions,
+      template,
+      installs: installedExtensions,
+      attachments: realmAttachments
+    }).filter((view) => view.state !== 'active');
+  });
+
+  /**
+   * Installed-record display label (`Name` or the raw id).
+   *
+   * @param {string} extensionId - Extension id.
+   * @returns {string} Display label.
+   */
+  function extensionLabel(extensionId) {
+    const record = installedExtensions.find((candidate) => candidate.id === extensionId) ?? null;
+    return record ? (record.displayName || record.id) : extensionId;
+  }
+
+  /**
+   * Renders one attachment's realm-level tool selection.
+   *
+   * @param {{ toolSelection: 'all' | readonly string[] }} attachment - Realm attachment.
+   * @returns {string} Display summary.
+   */
+  function describeToolSelection(attachment) {
+    if (!attachment || attachment.toolSelection === 'all') return 'all tools';
+    const names = attachment.toolSelection;
+    return `${names.length} call name${names.length === 1 ? '' : 's'}: ${names.join(', ')}`;
+  }
+
+  /**
+   * Attaches one globally installed extension to the selected Realm with the
+   * operator-chosen tool selection. Nothing connects.
+   *
+   * @param {string} extensionId - Installed extension id.
+   * @param {'all' | readonly string[]} toolSelection - Realm-level selection.
+   */
+  function attachToSelectedRealm(extensionId, toolSelection = 'all') {
+    const realm = selectedRealm;
+    if (!realm) return;
+    extensionStatus = { ok: true, msg: '' };
+    try {
+      sandboxStore.attachExtension(realm.id, extensionId, { toolSelection });
+      extensionsRevision += 1;
+      extensionStatus = {
+        ok: true,
+        msg: `Attached "${extensionLabel(extensionId)}" to "${realm.name}" — the extension is accepted here; nothing connects.`
+      };
+    } catch (err) {
+      extensionStatus = { ok: false, msg: describeExtensionAttachError(err) };
+    }
+  }
+
+  /** Attaches the extension picked in the attach editor with its selection. */
+  function handleAttachExtension() {
+    if (!attachExtensionId) {
+      extensionStatus = { ok: false, msg: 'Choose an installed extension to attach.' };
+      return;
+    }
+    const toolSelection = attachSelectionMode === 'custom'
+      ? attachSelectionText.split(',').map((entry) => entry.trim()).filter((entry) => entry.length > 0)
+      : 'all';
+    if (toolSelection !== 'all' && toolSelection.length === 0) {
+      extensionStatus = { ok: false, msg: 'List at least one sanitized call name, or use the "all tools" selection.' };
+      return;
+    }
+    attachToSelectedRealm(attachExtensionId, toolSelection);
+    attachExtensionId = '';
+    attachSelectionMode = 'all';
+    attachSelectionText = '';
+  }
+
+  /**
+   * Detaches one extension from the selected Realm (the global install record
+   * survives).
+   *
+   * @param {string} extensionId - Attached extension id.
+   */
+  function handleDetachExtension(extensionId) {
+    const realm = selectedRealm;
+    if (!realm) return;
+    if (!confirm(`Detach "${extensionLabel(extensionId)}" from "${realm.name}"? The global install record stays installed.`)) return;
+    extensionStatus = { ok: true, msg: '' };
+    try {
+      sandboxStore.detachExtension(realm.id, extensionId);
+      extensionsRevision += 1;
+      extensionStatus = { ok: true, msg: `Detached "${extensionLabel(extensionId)}" from "${realm.name}".` };
+    } catch (err) {
+      extensionStatus = { ok: false, msg: describeExtensionAttachError(err, 'Failed to detach the extension.') };
+    }
+  }
+
+  /**
+   * Opens the prefilled install dialog for one missing requested extension
+   * (the operator-initiated auto-install assist; nothing installs on its own).
+   *
+   * @param {import('./extensionUiHelpers.ts').MissingExtensionFlowView} view - Missing flow view.
+   */
+  function openInstallAssist(view) {
+    extensionStatus = { ok: true, msg: '' };
+    installAssist = view;
+  }
+
+  /**
+   * Records one assist install and leaves attachment to the operator.
+   *
+   * @param {{ id: string, displayName?: string }} record - Installed record.
+   */
+  function handleAssistInstalled(record) {
+    installAssist = null;
+    extensionsRevision += 1;
+    extensionStatus = {
+      ok: true,
+      msg: `Installed "${record.displayName || record.id}". Attach it to this Realm when ready — nothing attaches automatically.`
+    };
+  }
+
   // Seed the edit draft from the selected record; reseeded after each save.
+  // The extension editor follows the selection too: a picked extension, a
+  // half-typed selection, and an open assist dialog never leak across Realms.
   $effect(() => {
     const realm = selectedRealm;
     if (!realm) return;
@@ -90,6 +251,11 @@
     draftColor = safeRealmColor(realm.color) ?? '#7c9cff';
     deleteConfirming = false;
     deleteRecursive = false;
+    attachExtensionId = '';
+    attachSelectionMode = 'all';
+    attachSelectionText = '';
+    installAssist = null;
+    extensionStatus = { ok: true, msg: '' };
   });
 
   function clearMessages() {
@@ -388,8 +554,9 @@
               </details>
             {/if}
             <p class="provenance-note">
-              Recorded at launch: template revision, package digest, input hashes, and seeded paths — hashes and
-              paths only, never raw input values. Provenance is descriptive metadata, never authority.
+              Recorded at launch: template revision, package digest, input hashes, seeded paths, and the extension
+              resolution (resolved tool call names and missing requested extensions) — hashes, paths, call names, and
+              ids only, never raw input values or secrets. Provenance is descriptive metadata, never authority.
             </p>
             <div class="section-actions">
               <button type="button" class="btn-secondary" onclick={() => onrehydrate(selectedRealm)}>
@@ -414,6 +581,174 @@
                 Write files…
               </button>
             </div>
+          </div>
+        {/if}
+
+        <!-- Extensions (extension wave): realm-local attachments -->
+        <div class="settings-section-card">
+          <div class="section-card-header">
+            <div class="section-title-wrap">
+              <span class="section-badge">Extensions</span>
+              <h4 class="section-title">Attachments ({realmAttachments.length})</h4>
+            </div>
+          </div>
+
+          <p class="extensions-hint">
+            Attaching accepts a globally installed extension in this Realm with a realm-level tool selection.
+            Install records are managed in Sandbox Settings → Extensions. Nothing connects: an attachment is
+            recorded operator intent, and its tools stay inert until a runtime connection exists.
+          </p>
+
+          {#if extensionStatus.msg}
+            <div class="extension-status" class:ok={extensionStatus.ok} class:err={!extensionStatus.ok} role="status">
+              {extensionStatus.msg}
+            </div>
+          {/if}
+
+          {#if realmAttachments.length === 0}
+            <p class="members-empty">No extensions attached to this Realm yet.</p>
+          {:else}
+            <ul class="attachment-list">
+              {#each realmAttachments as attachment (attachment.extensionId)}
+                {@const stateView = describeRealmExtensionState(attachment.status)}
+                <li class="attachment-row">
+                  <div class="attachment-info">
+                    <div class="attachment-title-row">
+                      <span class="attachment-name">{extensionLabel(attachment.extensionId)}</span>
+                      <span class="attachment-id font-mono">{attachment.extensionId}</span>
+                      <span class="status-chip state-{stateView.state} font-mono">{stateView.label}</span>
+                    </div>
+                    <span class="attachment-selection font-mono">{describeToolSelection(attachment)}</span>
+                    <span class="attachment-note">
+                      {stateView.description}
+                      {#if stateView.state === 'unavailable'}
+                        It returns to active once the extension is installed again.
+                      {:else if stateView.state === 'conflict'}
+                        Conflict resolution is catalog-time work (P3).
+                      {/if}
+                    </span>
+                  </div>
+                  <div class="attachment-actions">
+                    <button
+                      type="button"
+                      class="btn-secondary btn-xs"
+                      onclick={() => handleDetachExtension(attachment.extensionId)}
+                      title="Detach from this Realm (the global install stays)"
+                    >
+                      Detach
+                    </button>
+                  </div>
+                </li>
+              {/each}
+            </ul>
+          {/if}
+
+          <div class="attach-editor">
+            <div class="attach-grid">
+              <div class="form-group grow">
+                <label for="realm-attach-extension">Attach an installed extension</label>
+                <select id="realm-attach-extension" class="select-field" bind:value={attachExtensionId} onchange={clearMessages}>
+                  <option value="">Choose an extension…</option>
+                  {#each attachableExtensions as record (record.id)}
+                    <option value={record.id}>{record.displayName || record.id} ({record.kind})</option>
+                  {/each}
+                </select>
+                {#if attachableExtensions.length === 0}
+                  <span class="attach-empty-hint">Every installed extension is already attached here, or none is installed.</span>
+                {/if}
+              </div>
+              <div class="form-group grow">
+                <span class="field-label">Tool selection</span>
+                <div class="selection-modes">
+                  <label class="mode-option" class:active={attachSelectionMode === 'all'}>
+                    <input type="radio" bind:group={attachSelectionMode} value="all" />
+                    <span>All tools</span>
+                  </label>
+                  <label class="mode-option" class:active={attachSelectionMode === 'custom'}>
+                    <input type="radio" bind:group={attachSelectionMode} value="custom" />
+                    <span>Only specific call names</span>
+                  </label>
+                </div>
+                {#if attachSelectionMode === 'custom'}
+                  <input
+                    type="text"
+                    class="input-field font-mono"
+                    placeholder="docs_search, similarity"
+                    bind:value={attachSelectionText}
+                    oninput={clearMessages}
+                  />
+                  <span class="attach-empty-hint">
+                    Sanitized model-facing call names (the derived form), comma-separated.
+                  </span>
+                {/if}
+              </div>
+            </div>
+            <div class="section-actions">
+              <button
+                type="button"
+                class="btn-primary btn-xs"
+                onclick={handleAttachExtension}
+                disabled={!attachExtensionId}
+              >
+                Attach to this Realm
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Missing requested extensions (extension wave): live install/attach flow -->
+        {#if missingFlow.length > 0}
+          <div class="settings-section-card missing-card">
+            <div class="section-card-header">
+              <div class="section-title-wrap">
+                <span class="section-badge missing-badge">Attention</span>
+                <h4 class="section-title">Missing extensions ({missingFlow.length})</h4>
+              </div>
+            </div>
+            <p class="extensions-hint">
+              The launch template requested these extensions, but their tools are not available in this Realm.
+              Nothing installs or attaches automatically — use an action below; this list follows the live state.
+            </p>
+            <ul class="missing-list">
+              {#each missingFlow as view (view.extensionId)}
+                {@const stateView = describeRealmExtensionState(view.state)}
+                <li class="missing-row">
+                  <div class="missing-info">
+                    <div class="missing-title-row">
+                      <span class="missing-name">{view.displayName || view.extensionId}</span>
+                      <span class="kind-chip font-mono">{view.kind}</span>
+                      <span class="status-chip state-{stateView.state} font-mono">{stateView.label}</span>
+                    </div>
+                    <span class="missing-note">{stateView.description}</span>
+                    {#if view.transportHintSummary}
+                      <span class="missing-transport font-mono">{view.transportHintSummary}</span>
+                    {/if}
+                    {#if view.authorComment}
+                      <span class="missing-author">Template note: {view.authorComment}</span>
+                    {/if}
+                  </div>
+                  <div class="missing-actions">
+                    {#if view.canInstall}
+                      <button type="button" class="btn-primary btn-xs" onclick={() => openInstallAssist(view)}>
+                        Install…
+                      </button>
+                    {/if}
+                    {#if view.canAttach}
+                      <button type="button" class="btn-secondary btn-xs" onclick={() => attachToSelectedRealm(view.extensionId)}>
+                        Attach to this Realm
+                      </button>
+                    {/if}
+                    {#if !view.canInstall && !view.canAttach && view.state !== 'active'}
+                      <span class="missing-passive">
+                        {view.state === 'conflict'
+                          ? 'Already attached — resolve the call-name conflict to activate it.'
+                          : 'Already attached — the extension is currently unavailable.'}
+                      </span>
+                    {/if}
+                  </div>
+                </li>
+              {/each}
+            </ul>
           </div>
         {/if}
 
@@ -521,6 +856,16 @@
     <div class="modal-footer">
       <button type="button" class="btn-secondary" onclick={() => onclose()}>Close</button>
     </div>
+
+    {#if installAssist}
+      <ExtensionInstallDialog
+        prefill={installAssist.installPrefill}
+        contextLabel={selectedRealm ? `realm "${selectedRealm.name}"` : ''}
+        authorComment={installAssist.authorComment}
+        oninstalled={handleAssistInstalled}
+        onclose={() => (installAssist = null)}
+      />
+    {/if}
   </div>
 </div>
 
@@ -807,6 +1152,223 @@
     margin: 0;
     font-size: 0.82rem;
     color: var(--text-muted);
+  }
+
+  /* ---- Extensions (extension wave) ---- */
+
+  .extensions-hint {
+    margin: 0;
+    font-size: 0.73rem;
+    line-height: 1.45;
+    color: var(--text-muted);
+  }
+
+  .extension-status {
+    font-size: 0.78rem;
+    line-height: 1.4;
+    padding: 0.5rem 0.65rem;
+    border-radius: 6px;
+    border: 1px solid var(--border-subtle);
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+  }
+
+  .extension-status.err {
+    color: #f87171;
+    border-color: var(--accent-danger-border, rgba(239, 68, 68, 0.4));
+    background: var(--accent-danger-subtle, rgba(239, 68, 68, 0.08));
+  }
+
+  .attachment-list,
+  .missing-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+  }
+
+  .attachment-row,
+  .missing-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 0.75rem;
+    padding: 0.55rem 0.7rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+  }
+
+  .attachment-info,
+  .missing-info {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    min-width: 0;
+  }
+
+  .attachment-title-row,
+  .missing-title-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+  }
+
+  .attachment-name,
+  .missing-name {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .attachment-id,
+  .attachment-selection,
+  .missing-transport {
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+    word-break: break-all;
+  }
+
+  .attachment-note,
+  .missing-note,
+  .missing-author,
+  .missing-passive {
+    font-size: 0.71rem;
+    line-height: 1.4;
+    color: var(--text-muted);
+  }
+
+  .kind-chip,
+  .status-chip {
+    font-size: 0.65rem;
+    border-radius: 4px;
+    padding: 0.08rem 0.36rem;
+    border: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    background: var(--bg-base);
+  }
+
+  .status-chip.state-active {
+    color: #34d399;
+    border-color: rgba(52, 211, 153, 0.4);
+    background: rgba(52, 211, 153, 0.1);
+  }
+
+  .status-chip.state-conflict {
+    color: #f87171;
+    border-color: var(--accent-danger-border, rgba(239, 68, 68, 0.4));
+    background: var(--accent-danger-subtle, rgba(239, 68, 68, 0.08));
+  }
+
+  .status-chip.state-unavailable,
+  .status-chip.state-not-attached,
+  .status-chip.state-not-installed {
+    color: #f59e0b;
+    border-color: rgba(245, 158, 11, 0.4);
+    background: rgba(245, 158, 11, 0.1);
+  }
+
+  .attachment-actions,
+  .missing-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .attach-editor {
+    display: flex;
+    flex-direction: column;
+    gap: 0.65rem;
+    border-top: 1px solid var(--border-subtle);
+    padding-top: 0.75rem;
+  }
+
+  .attach-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+    gap: 0.75rem;
+    align-items: start;
+  }
+
+  .field-label {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+  }
+
+  .selection-modes {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  .mode-option {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 0.3rem 0.55rem;
+    cursor: pointer;
+    background: var(--bg-secondary);
+  }
+
+  .mode-option.active {
+    border-color: var(--accent-primary);
+    color: var(--text-primary);
+    background: var(--accent-primary-subtle);
+  }
+
+  .mode-option input {
+    accent-color: var(--accent-primary);
+  }
+
+  .attach-empty-hint {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+  }
+
+  .missing-card {
+    border-color: rgba(245, 158, 11, 0.4);
+  }
+
+  .missing-badge {
+    background: rgba(245, 158, 11, 0.13);
+    color: #f59e0b;
+    border-color: rgba(245, 158, 11, 0.4);
+  }
+
+  .btn-xs {
+    border-radius: 6px;
+    padding: 0.28rem 0.6rem;
+    font-size: 0.74rem;
+    font-weight: 600;
+    cursor: pointer;
+    border: 1px solid transparent;
+  }
+
+  .btn-primary.btn-xs {
+    background: var(--accent-primary);
+    color: #fff;
+  }
+
+  .btn-secondary.btn-xs {
+    background: var(--bg-surface);
+    border-color: var(--border-color);
+    color: var(--text-primary);
+  }
+
+  .btn-primary.btn-xs:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
   }
 
   .provenance-list {

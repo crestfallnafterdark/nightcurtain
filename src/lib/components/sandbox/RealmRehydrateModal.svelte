@@ -42,6 +42,10 @@
   } from './realmHydrationHelpers.ts';
   import { realmPayloadLibrary } from './realmPayloadLibrary.ts';
   import { parseRealmPayloadFileText } from './realmReviewHelpers.ts';
+  import {
+    buildMissingExtensionFlowViews,
+    describeRealmExtensionState
+  } from './extensionUiHelpers.ts';
 
   let { realmId = null, onclose = () => {} } = $props();
 
@@ -70,6 +74,24 @@
   );
   let requirementReviews = $derived(buildRealmInputRequirementReviews(template));
   let canReplaceFromPayload = $derived(Boolean(realm && realm.instance && template));
+
+  /**
+   * Live views of the Realm's recorded missing requested extensions (reason,
+   * transport hint, and current install/attach state). Display-only: this
+   * modal never installs, attaches, or connects anything.
+   */
+  let missingExtensionViews = $derived.by(() => {
+    const instance = realm && realm.instance ? realm.instance : null;
+    if (!realm || !instance || !Array.isArray(instance.missingExtensions) || instance.missingExtensions.length === 0) {
+      return [];
+    }
+    return buildMissingExtensionFlowViews({
+      missingExtensionIds: instance.missingExtensions,
+      template,
+      installs: sandboxStore.listExtensions(),
+      attachments: sandboxStore.listRealmExtensions(realm.id)
+    }).filter((view) => view.state !== 'active');
+  });
 
   // ---- Mode -----------------------------------------------------------------
 
@@ -427,6 +449,36 @@
                 {/each}
               </ul>
             </details>
+          {/if}
+          {#if provenanceDetail.resolvedTools.length > 0}
+            <details class="provenance-details">
+              <summary>Resolved extension tools ({provenanceDetail.resolvedTools.length})</summary>
+              <ul class="detail-list">
+                {#each provenanceDetail.resolvedTools as tool (tool.callName)}
+                  <li class="detail-row">
+                    <span class="detail-label font-mono">{tool.callName}</span>
+                    <span class="detail-value font-mono">{tool.extensionId}</span>
+                  </li>
+                {/each}
+              </ul>
+            </details>
+          {/if}
+          {#if missingExtensionViews.length > 0}
+            <div class="missing-extensions">
+              <span class="missing-extensions-title">Missing requested extensions ({missingExtensionViews.length})</span>
+              <ul class="detail-list">
+                {#each missingExtensionViews as view (view.extensionId)}
+                  <li class="detail-row">
+                    <span class="detail-label font-mono">{view.extensionId}</span>
+                    <span class="missing-state">{describeRealmExtensionState(view.state).label}</span>
+                  </li>
+                {/each}
+              </ul>
+              <p class="provenance-note">
+                Manage installations and attachments in Realm Manager → Extensions. Rehydrating never installs,
+                attaches, or connects anything.
+              </p>
+            </div>
           {/if}
         {:else}
           <p class="provenance-note">
@@ -789,6 +841,30 @@
 
   .detail-value {
     word-break: break-all;
+  }
+
+  .missing-extensions {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    padding: 0.5rem 0.6rem;
+    border: 1px solid rgba(245, 158, 11, 0.4);
+    border-radius: 6px;
+    background: rgba(245, 158, 11, 0.08);
+  }
+
+  .missing-extensions-title {
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #f59e0b;
+  }
+
+  .missing-state {
+    font-size: 0.7rem;
+    color: #f59e0b;
+    font-weight: 600;
   }
 
   .write-group {

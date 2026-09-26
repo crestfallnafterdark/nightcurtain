@@ -15,6 +15,7 @@
   import {
     DIRECTOR_GROUP_KEY,
     DIRECTOR_GROUP_LABEL,
+    describeRealmExtensionIndicator,
     groupAgentsByRealm,
     isDirectorAgent,
     safeRealmColor,
@@ -359,6 +360,7 @@
           {#if realmGroups.length > 0}
             {#each realmGroups as group (group.key)}
             {@const realm = group.realm}
+            {@const extensionIndicator = describeRealmExtensionIndicator(realm)}
             <section class="realm-group" class:synthetic={realm === null}>
               <div class="realm-group-header">
                 <button
@@ -376,6 +378,15 @@
                     style="background: {realm ? (safeRealmColor(realm.color) ?? 'var(--text-muted)') : 'var(--text-muted)'}"
                   ></span>
                   <span class="realm-name">{group.label}</span>
+                  {#if extensionIndicator.visible}
+                    <span
+                      class="realm-extension-badge font-mono"
+                      title={extensionIndicator.title}
+                      aria-label={extensionIndicator.title}
+                    >
+                      ⚠ {extensionIndicator.count}
+                    </span>
+                  {/if}
                   <span class="realm-member-count font-mono">{group.agents.length}</span>
                 </button>
                 {#if realm}
@@ -901,6 +912,16 @@
     font-size: 0.68rem;
     color: var(--text-muted);
     background: var(--bg-surface);
+    border-radius: 4px;
+    padding: 0.05rem 0.35rem;
+    flex-shrink: 0;
+  }
+
+  .realm-extension-badge {
+    font-size: 0.66rem;
+    color: #f59e0b;
+    background: rgba(245, 158, 11, 0.13);
+    border: 1px solid rgba(245, 158, 11, 0.4);
     border-radius: 4px;
     padding: 0.05rem 0.35rem;
     flex-shrink: 0;
