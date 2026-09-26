@@ -404,3 +404,118 @@ test('14. a throwing removeEventListener cannot break best-effort teardown', asy
     assert.equal(await session.close(), undefined);
   });
 });
+
+test('15. a credentialed session scrubs exact secret echoes from tool results', async () => {
+  const secret = 'unit-scrub-secret-value';
+  const stub = createFetchStub({
+    'tools/call': ({ body }) =>
+      jsonResponse({
+        jsonrpc: '2.0',
+        id: body.id,
+        result: {
+          content: [
+            { type: 'text', text: `greeting ${secret} tail` },
+            {
+              type: 'resource',
+              resource: { uri: 'test://resource', mimeType: 'text/plain', text: `resource ${secret} text` }
+            }
+          ],
+          structuredContent: {
+            echo: secret,
+            nested: { list: [`prefix ${secret} suffix`] },
+            untouched: 'harmless value'
+          },
+          isError: false
+        }
+      })
+  });
+  await withFetchStub(stub, async () => {
+    const session = await createMcpClient({
+      transport: { kind: 'http', url: 'https://mcp.unit.test/mcp' },
+      credential: { id: 'unit-credential', secret }
+    });
+    try {
+      const result = await session.callTool('echo', {});
+      assert.equal(result.content[0].text, 'greeting [redacted] tail');
+      assert.equal(result.content[1].resource.text, 'resource [redacted] text');
+      assert.equal(result.structuredContent.echo, '[redacted]');
+      assert.equal(result.structuredContent.nested.list[0], 'prefix [redacted] suffix');
+      assert.equal(result.structuredContent.untouched, 'harmless value');
+      assert.ok(!JSON.stringify(result).includes(secret), 'raw secret must not survive in the result');
+    } finally {
+      await session.close();
+    }
+  });
+});
+
+test('16. an anonymous session passes tool-result content through unchanged', async () => {
+  const sentinel = 'unit-anonymous-sentinel';
+  const stub = createFetchStub({
+    'tools/call': ({ body }) =>
+      jsonResponse({
+        jsonrpc: '2.0',
+        id: body.id,
+        result: {
+          content: [{ type: 'text', text: `anonymous ${sentinel} text` }],
+          structuredContent: { echo: sentinel },
+          isError: false
+        }
+      })
+  });
+  await withFetchStub(stub, async () => {
+    const session = await createMcpClient({
+      transport: { kind: 'http', url: 'https://mcp.unit.test/mcp' }
+    });
+    try {
+      const result = await session.callTool('echo', {});
+      assert.equal(result.content[0].text, `anonymous ${sentinel} text`);
+      assert.equal(result.structuredContent.echo, sentinel);
+    } finally {
+      await session.close();
+    }
+  });
+});
+
+test('17. the credentialed scrub preserves own __proto__ keys as data', async () => {
+  // Guards the scrub path's prototype hygiene; this is not expected to be red
+  // at the pre-scrub HEAD (the gap only exists once scrubbing deep-copies
+  // server-controlled objects).
+  const secret = 'unit-proto-secret-value';
+  const nested = JSON.parse(`{"__proto__": {"secretEcho": "${secret}"}, "safe": "plain"}`);
+  const stub = createFetchStub({
+    'tools/call': ({ body }) =>
+      jsonResponse({
+        jsonrpc: '2.0',
+        id: body.id,
+        result: {
+          content: [{ type: 'text', text: 'no secret here' }],
+          structuredContent: { nested },
+          isError: false
+        }
+      })
+  });
+  await withFetchStub(stub, async () => {
+    const session = await createMcpClient({
+      transport: { kind: 'http', url: 'https://mcp.unit.test/mcp' },
+      credential: { id: 'unit-credential', secret }
+    });
+    try {
+      const result = await session.callTool('echo', {});
+      const scrubbed = result.structuredContent.nested;
+
+      assert.ok(Object.prototype.hasOwnProperty.call(scrubbed, '__proto__'));
+      const descriptor = Object.getOwnPropertyDescriptor(scrubbed, '__proto__');
+      assert.deepEqual(descriptor.value, { secretEcho: '[redacted]' });
+      assert.equal(descriptor.enumerable, true);
+      assert.equal(descriptor.writable, true);
+      assert.equal(descriptor.configurable, true);
+      assert.equal(Object.getPrototypeOf(scrubbed), Object.prototype);
+      assert.equal(scrubbed.secretEcho, undefined); // no inherited read
+      assert.equal(Object.prototype.polluted, undefined); // no global pollution
+      assert.equal(scrubbed.safe, 'plain');
+      assert.ok(!JSON.stringify(result).includes(secret));
+    } finally {
+      await session.close();
+    }
+  });
+});
