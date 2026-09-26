@@ -256,10 +256,12 @@
 
   let agentTelemetry = $derived(agent?.telemetry || {
     inputTokens: 0,
+    cachedInputTokens: 0,
     outputTokens: 0,
     totalTokens: 0,
     turnCount: 0,
     lastPromptTokens: 0,
+    lastCachedPromptTokens: 0,
     lastCompletionTokens: 0,
     lastSentContext: []
   });
@@ -426,9 +428,9 @@
             >
               <span class="chip-label">Tokens</span>
               <span class="chip-value font-mono">
-                <span class="token-in font-mono" title="Input Tokens">↓{agentTelemetry.inputTokens.toLocaleString()}</span>
-                <span class="token-sep">/</span>
-                <span class="token-out font-mono" title="Output Tokens">↑{agentTelemetry.outputTokens.toLocaleString()}</span>
+                <span class="token-in font-mono" title="Input tokens (uncached)">↓{agentTelemetry.inputTokens.toLocaleString()}</span>
+                <span class="token-cached font-mono" title="Cached input tokens (prompt cache hits)">⚡{agentTelemetry.cachedInputTokens.toLocaleString()}</span>
+                <span class="token-out font-mono" title="Output tokens">↑{agentTelemetry.outputTokens.toLocaleString()}</span>
               </span>
             </button>
             <div class="meta-chip">
@@ -1008,7 +1010,7 @@
               <div class="metric-info">
                 <span class="metric-label">Total Tokens</span>
                 <span class="metric-value font-mono">{agentTelemetry.totalTokens.toLocaleString()}</span>
-                <span class="metric-sub font-mono">Input + Output Combined</span>
+                <span class="metric-sub font-mono">Uncached + Cached + Output</span>
               </div>
             </div>
 
@@ -1022,13 +1024,35 @@
                 </svg>
               </div>
               <div class="metric-info">
-                <span class="metric-label">Input Tokens (Prompt)</span>
+                <span class="metric-label">Input Tokens (Uncached)</span>
                 <span class="metric-value font-mono">{agentTelemetry.inputTokens.toLocaleString()}</span>
                 <span class="metric-sub font-mono">
                   {#if agentTelemetry.totalTokens > 0}
                     {Math.round((agentTelemetry.inputTokens / agentTelemetry.totalTokens) * 100)}% of total
                   {:else}
                     0% of total
+                  {/if}
+                </span>
+              </div>
+            </div>
+
+            <div
+              class="metric-card glass-panel metric-cached"
+              title="Cache hit rate = cached / (cached + uncached)"
+            >
+              <div class="metric-icon cached-icon">
+                <svg class="icon-svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+                </svg>
+              </div>
+              <div class="metric-info">
+                <span class="metric-label">Cached Input</span>
+                <span class="metric-value font-mono">{agentTelemetry.cachedInputTokens.toLocaleString()}</span>
+                <span class="metric-sub font-mono">
+                  {#if agentTelemetry.cachedInputTokens + agentTelemetry.inputTokens > 0}
+                    {Math.round((agentTelemetry.cachedInputTokens / (agentTelemetry.cachedInputTokens + agentTelemetry.inputTokens)) * 100)}% cache hit rate
+                  {:else}
+                    0% cache hit rate
                   {/if}
                 </span>
               </div>
@@ -1087,8 +1111,12 @@
             </div>
             <div class="last-turn-stats font-mono">
               <div class="stat-pill">
-                <span class="stat-k">Last Prompt:</span>
+                <span class="stat-k">Last Prompt (Uncached):</span>
                 <span class="stat-v">{agentTelemetry.lastPromptTokens.toLocaleString()} tokens</span>
+              </div>
+              <div class="stat-pill">
+                <span class="stat-k">Last Cached Prompt:</span>
+                <span class="stat-v">{agentTelemetry.lastCachedPromptTokens.toLocaleString()} tokens</span>
               </div>
               <div class="stat-pill">
                 <span class="stat-k">Last Completion:</span>
@@ -1096,7 +1124,7 @@
               </div>
               <div class="stat-pill highlight">
                 <span class="stat-k">Last Turn Total:</span>
-                <span class="stat-v">{(agentTelemetry.lastPromptTokens + agentTelemetry.lastCompletionTokens).toLocaleString()} tokens</span>
+                <span class="stat-v">{(agentTelemetry.lastPromptTokens + agentTelemetry.lastCachedPromptTokens + agentTelemetry.lastCompletionTokens).toLocaleString()} tokens</span>
               </div>
             </div>
           </div>
@@ -2471,13 +2499,13 @@
     color: #38bdf8;
   }
 
-  .token-out {
-    color: #a78bfa;
+  .token-cached {
+    color: #fbbf24;
+    margin: 0 0.2rem;
   }
 
-  .token-sep {
-    color: var(--text-muted);
-    margin: 0 0.15rem;
+  .token-out {
+    color: #a78bfa;
   }
 
   /* --- INSPECTOR TAB NAVIGATION --- */
@@ -2622,6 +2650,12 @@
     background: rgba(56, 189, 248, 0.15);
     color: #38bdf8;
     border: 1px solid rgba(56, 189, 248, 0.35);
+  }
+
+  .cached-icon {
+    background: rgba(251, 191, 36, 0.15);
+    color: #fbbf24;
+    border: 1px solid rgba(251, 191, 36, 0.35);
   }
 
   .output-icon {

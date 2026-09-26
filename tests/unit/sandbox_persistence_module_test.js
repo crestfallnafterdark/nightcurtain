@@ -129,10 +129,12 @@ test('2. validateSandboxState validates canonical snapshots and rejects structur
         turnCount: 2,
         telemetry: {
           inputTokens: 100,
+          cachedInputTokens: 30,
           outputTokens: 50,
-          totalTokens: 150,
+          totalTokens: 180,
           turnCount: 2,
           lastPromptTokens: 50,
+          lastCachedPromptTokens: 15,
           lastCompletionTokens: 25,
           terminalStops: 0,
           injectedDeliveries: 1,
@@ -412,10 +414,12 @@ test('4. serializeRuntimeEnvironment deeply strips credentials and normalizes ru
   ];
   agentWriter.telemetry = {
     inputTokens: 500,
+    cachedInputTokens: 300,
     outputTokens: 250,
-    totalTokens: 750,
+    totalTokens: 1050,
     turnCount: 3,
     lastPromptTokens: 200,
+    lastCachedPromptTokens: 120,
     lastCompletionTokens: 100,
     terminalStops: 0,
     injectedDeliveries: 2,
@@ -462,7 +466,11 @@ test('4. serializeRuntimeEnvironment deeply strips credentials and normalizes ru
   assert.strictEqual(serializedWriter.id, 'writer');
   assert.strictEqual(serializedWriter.name, 'Story Writer');
   assert.strictEqual(serializedWriter.turnCount, 3);
-  assert.strictEqual(serializedWriter.telemetry.totalTokens, 750);
+  assert.strictEqual(serializedWriter.telemetry.totalTokens, 1050);
+  assert.strictEqual(serializedWriter.telemetry.inputTokens, 500, 'Persisted telemetry must carry the uncached input tier');
+  assert.strictEqual(serializedWriter.telemetry.cachedInputTokens, 300, 'Persisted telemetry must carry the cached input tier');
+  assert.strictEqual(serializedWriter.telemetry.lastPromptTokens, 200, 'Persisted telemetry must carry the uncached last prompt');
+  assert.strictEqual(serializedWriter.telemetry.lastCachedPromptTokens, 120, 'Persisted telemetry must carry the cached last prompt');
 
   // Verify all secret properties are completely stripped
   assert.strictEqual(serializedWriter.config.apiKey, undefined);
@@ -571,10 +579,12 @@ test('5. restoreRuntimeEnvironment performs topological hydration, IDLE normaliz
         turnCount: 5,
         telemetry: {
           inputTokens: 1200,
+          cachedInputTokens: 400,
           outputTokens: 600,
-          totalTokens: 1800,
+          totalTokens: 2200,
           turnCount: 5,
           lastPromptTokens: 240,
+          lastCachedPromptTokens: 120,
           lastCompletionTokens: 120,
           terminalStops: 0,
           injectedDeliveries: 1,
@@ -697,6 +707,12 @@ test('5. restoreRuntimeEnvironment performs topological hydration, IDLE normaliz
   assert.strictEqual(heroAgent.lastSummary, 'Hero explored the dungeon depths.');
   assert.strictEqual(heroAgent.history.length, 2);
   assert.strictEqual(heroAgent.history[0].id, 'msg_h1');
+  assert.strictEqual(heroAgent.telemetry.inputTokens, 1200, 'Hydration must restore the uncached input tier');
+  assert.strictEqual(heroAgent.telemetry.cachedInputTokens, 400, 'Hydration must restore the cached input tier');
+  assert.strictEqual(heroAgent.telemetry.outputTokens, 600);
+  assert.strictEqual(heroAgent.telemetry.totalTokens, 2200, 'Hydrated total must equal uncached + cached + output');
+  assert.strictEqual(heroAgent.telemetry.lastPromptTokens, 240);
+  assert.strictEqual(heroAgent.telemetry.lastCachedPromptTokens, 120, 'Hydration must restore the cached last prompt');
 
   // Verify MessagingBus registration for active agent
   assert.strictEqual(bus.isRegistered('hero_agent'), true);
@@ -707,6 +723,8 @@ test('5. restoreRuntimeEnvironment performs topological hydration, IDLE normaliz
   assert.ok(recycled);
   assert.strictEqual(recycled.state, AGENT_STATES.RECYCLED);
   assert.strictEqual(recycled.recycleReason, 'Fell in battle');
+  assert.strictEqual(recycled.telemetry.cachedInputTokens, 0, 'Absent cached telemetry must default to 0 on hydration');
+  assert.strictEqual(recycled.telemetry.lastCachedPromptTokens, 0, 'Absent cached last-turn telemetry must default to 0 on hydration');
 
   // Terminated agent rejects incoming messages on messaging bus with
   // AGENT_TERMINATED. The dead-letter address is the registration's canonical

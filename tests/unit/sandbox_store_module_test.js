@@ -116,8 +116,9 @@ function createMockModel(responses = []) {
  * Creates a streaming mock model that emits one chunk, then blocks on a gate
  * after each chunk until the matching `release*()` is called — lets tests
  * observe the store in a stable mid-turn state without racing completion.
+ * @param {Object} [usage] Finish-event usage payload reported to telemetry.
  */
-function createGatedStreamModel() {
+function createGatedStreamModel(usage = { promptTokens: 5, completionTokens: 5, totalTokens: 10 }) {
   let releaseFirst;
   let releaseSecond;
   const firstGate = new Promise((resolve) => { releaseFirst = resolve; });
@@ -149,7 +150,7 @@ function createGatedStreamModel() {
           content: '',
           reasoning: '',
           toolCalls: null,
-          usage: { promptTokens: 5, completionTokens: 5, totalTokens: 10 }
+          usage
         };
       }
     }
@@ -308,6 +309,9 @@ test('3. Reactive State Projection and Derived Getters Verification', async () =
   assert.strictEqual(initialStats.total, 0);
   assert.strictEqual(initialStats.running, 0);
   assert.strictEqual(initialStats.idle, 0);
+  assert.strictEqual(initialStats.cumulativeInputTokens, 0);
+  assert.strictEqual(initialStats.cumulativeCachedInputTokens, 0);
+  assert.strictEqual(initialStats.cumulativeOutputTokens, 0);
   assert.strictEqual(initialStats.cumulativeTotalTokens, 0);
 
   // Tab switching
@@ -331,6 +335,8 @@ test('3. Reactive State Projection and Derived Getters Verification', async () =
   assert.strictEqual(store.selectedAgent?.state, AGENT_STATES.IDLE);
   assert.strictEqual(store.stats.total, 1);
   assert.strictEqual(store.stats.idle, 1);
+  assert.strictEqual(store.selectedAgent?.telemetry.cachedInputTokens, 0, 'Fresh agents must default cached input tokens to 0');
+  assert.strictEqual(store.selectedAgent?.telemetry.lastCachedPromptTokens, 0, 'Fresh agents must default last cached prompt tokens to 0');
 
   store.destroy();
 });
@@ -379,6 +385,8 @@ test('4. Agent Lifecycle Management: soft-kill recycle bin, restore, purge, conf
   assert.strictEqual(typeof recycledSnapshot.turnCount, 'number');
   assert.ok(Array.isArray(recycledSnapshot.redoStack), 'Recycled projection must expose the turn-bundle redo stack');
   assert.ok(recycledSnapshot.telemetry && Array.isArray(recycledSnapshot.telemetry.lastSentContext));
+  assert.strictEqual(recycledSnapshot.telemetry.cachedInputTokens, 0, 'Recycled projection must carry the cached input tier');
+  assert.strictEqual(recycledSnapshot.telemetry.lastCachedPromptTokens, 0, 'Recycled projection must carry the last cached prompt tier');
   assert.ok(!('currentStream' in recycledSnapshot), 'Recycled projection must not claim live-turn stream fields');
   assert.ok(!('currentReasoning' in recycledSnapshot), 'Recycled projection must not claim live-turn reasoning fields');
   assert.ok(!('activeToolCalls' in recycledSnapshot), 'Recycled projection must not claim live-turn tool fields');
@@ -1793,6 +1801,18 @@ test('27. MOD-20 hydration reconciles the catalog and fingerprint-heals snapshot
     store.recycleBin.find(a => a.id === 'mod20-recycled').config.presetId,
     custom.id,
     'Recycled agent fingerprints must heal too'
+  );
+
+  // Legacy telemetry literals without cached fields hydrate the tier to 0.
+  assert.strictEqual(
+    store.agents.find(a => a.id === 'mod20-fingerprint').telemetry.cachedInputTokens,
+    0,
+    'Legacy snapshots without cached fields must hydrate cachedInputTokens to 0'
+  );
+  assert.strictEqual(
+    store.agents.find(a => a.id === 'mod20-fingerprint').telemetry.lastCachedPromptTokens,
+    0,
+    'Legacy snapshots without cached fields must hydrate lastCachedPromptTokens to 0'
   );
 
   // Heal is in-memory only: the persisted snapshot is not rewritten on load.
@@ -4919,4 +4939,104 @@ test('65. [7d2c314] persisted selection restores the realm-exact identity key', 
     store.destroy();
     sharedLocalStorage.clear();
   }
+});
+
+// ============================================================================
+// 66. [5224a4a] cached prompt tokens surface in the projection, live mirror,
+//     recycle bin, sandbox stats and the persisted snapshot
+// ============================================================================
+
+test('66. [5224a4a] cached input token tiers flow through projection, mirror, recycle bin and stats', async () => {
+  const runtime = new AgentRuntime({ autoBootstrapDirector: false });
+  const store = await createOperatorStore({ runtime });
+
+  // Provider usage shape: 50 prompt tokens, 30 of them prompt-cache hits.
+  const gated = createGatedStreamModel({
+    promptTokens: 50,
+    completionTokens: 5,
+    totalTokens: 55,
+    prompt_tokens_details: { cached_tokens: 30 }
+  });
+
+  await store.launchAgent({
+    id: 'cache-agent',
+    name: 'Cache Agent',
+    role: 'Writer',
+    systemPrompt: 'Track prompt cache usage',
+    model: gated.model
+  });
+
+  const turnPromise = store.submitChatTurn('Warm the prompt cache', { mode: 'directive' });
+
+  // Defaults stay zeroed until the first usage report lands.
+  const sawFirstChunk = await waitFor(() => Boolean(store.selectedAgent?.currentStream));
+  assert.ok(sawFirstChunk, 'Mirror must observe the first streamed chunk mid-turn');
+  assert.strictEqual(store.selectedAgent?.telemetry.cachedInputTokens, 0, 'No cache usage is projected before the turn usage is recorded');
+  assert.strictEqual(store.selectedAgent?.telemetry.lastCachedPromptTokens, 0);
+
+  // Live mirror: mutate the runtime agent's telemetry while the turn is still
+  // in flight; the mirror must patch the cached tiers into the existing
+  // reactive clone (patch-in-place, never a list rebuild).
+  const mirroredRef = store.agents.find(a => a.id === 'cache-agent');
+  runtime.getAgent('cache-agent').applyTelemetrySnapshot({
+    inputTokens: 10,
+    cachedInputTokens: 123,
+    outputTokens: 5,
+    totalTokens: 138,
+    turnCount: 1,
+    lastPromptTokens: 10,
+    lastCachedPromptTokens: 45,
+    lastCompletionTokens: 5,
+    lastSentContext: []
+  });
+  gated.releaseFirst();
+  const sawSecondChunk = await waitFor(() => store.selectedAgent?.currentStream.includes('chunk two'));
+  assert.ok(sawSecondChunk, 'Mirror must observe later streamed chunks mid-turn');
+  assert.strictEqual(store.agents.find(a => a.id === 'cache-agent'), mirroredRef, 'Cached-tier mirroring must patch the existing clone');
+  assert.strictEqual(mirroredRef.telemetry.cachedInputTokens, 123, 'Mirror must copy the cached input tier');
+  assert.strictEqual(mirroredRef.telemetry.lastCachedPromptTokens, 45, 'Mirror must copy the last cached prompt tier');
+
+  gated.releaseSecond();
+  await turnPromise;
+
+  // Post-turn projection: the provider usage splits the prompt count.
+  const projected = store.selectedAgent.telemetry;
+  assert.strictEqual(projected.inputTokens, 20, 'inputTokens must be the uncached prompt remainder (50 - 30)');
+  assert.strictEqual(projected.cachedInputTokens, 30, 'cachedInputTokens must carry the provider cached share');
+  assert.strictEqual(projected.outputTokens, 5);
+  assert.strictEqual(projected.totalTokens, 55, 'totalTokens must equal uncached + cached + output');
+  assert.strictEqual(projected.lastPromptTokens, 20);
+  assert.strictEqual(projected.lastCachedPromptTokens, 30);
+  assert.strictEqual(projected.lastCompletionTokens, 5);
+
+  // Sandbox-wide stats mirror the split across active agents.
+  assert.strictEqual(store.stats.cumulativeInputTokens, 20);
+  assert.strictEqual(store.stats.cumulativeCachedInputTokens, 30);
+  assert.strictEqual(store.stats.cumulativeOutputTokens, 5);
+  assert.strictEqual(store.stats.cumulativeTotalTokens, 55);
+
+  // The persisted snapshot carries the cached tiers verbatim.
+  const serializedAgent = store.serialize().agents.find(a => a.id === 'cache-agent');
+  assert.ok(serializedAgent, 'serialize must emit the cache agent');
+  assert.strictEqual(serializedAgent.telemetry.cachedInputTokens, 30);
+  assert.strictEqual(serializedAgent.telemetry.lastCachedPromptTokens, 30);
+
+  // Recycled projection carries the cached tiers; stats count recycle-bin
+  // agents without double-counting.
+  assert.strictEqual(store.killAgent('cache-agent', 'Cached telemetry captured'), true);
+  const recycled = store.recycleBin.find(a => a.id === 'cache-agent');
+  assert.ok(recycled, 'killed agent must land in the recycle bin');
+  assert.strictEqual(recycled.telemetry.cachedInputTokens, 30);
+  assert.strictEqual(recycled.telemetry.lastCachedPromptTokens, 30);
+  assert.strictEqual(store.stats.cumulativeCachedInputTokens, 30, 'Recycle-bin agents must not double-count stats');
+
+  // Restore + clear zeroes both cached tiers through the entity normalizer.
+  const restored = store.restoreAgent('cache-agent');
+  assert.strictEqual(store.clearAgentTelemetry(restored.identityKey), true);
+  assert.strictEqual(store.selectedAgent?.telemetry.cachedInputTokens, 0, 'Clear must zero the cached input tier');
+  assert.strictEqual(store.selectedAgent?.telemetry.lastCachedPromptTokens, 0, 'Clear must zero the last cached prompt tier');
+  assert.strictEqual(store.stats.cumulativeCachedInputTokens, 0);
+
+  store.destroy();
+  sharedLocalStorage.clear();
 });

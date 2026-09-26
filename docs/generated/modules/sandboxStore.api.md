@@ -119,8 +119,10 @@ export interface AgentStateSnapshot {
 
 // @public
 export interface AgentTelemetrySnapshot {
+    readonly cachedInputTokens: number;
     readonly injectedDeliveries: number;
     readonly inputTokens: number;
+    readonly lastCachedPromptTokens: number;
     readonly lastCompletionTokens: number;
     readonly lastPromptTokens: number;
     readonly lastSentContext: ReadonlyArray<FormattedContextMessage>;
@@ -655,6 +657,7 @@ export type SandboxTabId = 'chat' | 'settings' | 'inspector' | 'filesystem' | 'm
 // @public
 export interface SandboxTelemetryStats {
     readonly activeTimers: number;
+    readonly cumulativeCachedInputTokens: number;
     readonly cumulativeInputTokens: number;
     readonly cumulativeOutputTokens: number;
     readonly cumulativeTotalTokens: number;
@@ -882,10 +885,12 @@ Aggregate telemetry counters and token usage metrics for a specific agent.
 ```typescript
 const telemetry: AgentTelemetrySnapshot = {
   inputTokens: 1250,
+  cachedInputTokens: 300,
   outputTokens: 420,
-  totalTokens: 1670,
+  totalTokens: 1970,
   turnCount: 3,
   lastPromptTokens: 450,
+  lastCachedPromptTokens: 120,
   lastCompletionTokens: 150,
   terminalStops: 0,
   injectedDeliveries: 1,
@@ -896,15 +901,17 @@ const telemetry: AgentTelemetrySnapshot = {
 
 #### Members
 
+- **`cachedInputTokens`** — Cumulative cached input (prompt) tokens consumed across all turns.
 - **`injectedDeliveries`** — Number of async messages injected into context during turn execution.
-- **`inputTokens`** — Cumulative input (prompt) tokens consumed across all turns.
+- **`inputTokens`** — Cumulative uncached input (prompt) tokens consumed across all turns.
+- **`lastCachedPromptTokens`** — Cached prompt token count for the most recently completed turn.
 - **`lastCompletionTokens`** — Completion token count for the most recently completed turn.
-- **`lastPromptTokens`** — Prompt token count for the most recently completed turn.
+- **`lastPromptTokens`** — Uncached prompt token count for the most recently completed turn.
 - **`lastSentContext`** — Formatted chat-completion messages captured for the most recent inference call. Overwritten on every send (latest-wins), so consumers always read the context that was actually sent last.
 - **`outputTokens`** — Cumulative output (completion) tokens generated across all turns.
 - **`precallCount`** — Total count of precall tools executed prior to LLM generation.
 - **`terminalStops`** — Number of times turn execution terminated via terminal stop conditions.
-- **`totalTokens`** — Total tokens consumed by this agent (`inputTokens + outputTokens`).
+- **`totalTokens`** — Total tokens consumed by this agent (`inputTokens + cachedInputTokens + outputTokens`).
 - **`turnCount`** — Total number of conversational execution turns completed.
 
 ### `BatchDeleteReceipt` — interface
@@ -1722,9 +1729,10 @@ console.log(`Active agents: ${stats.total}, Running: ${stats.running}, Files: ${
 #### Members
 
 - **`activeTimers`** — Number of scheduled timers currently in `pending` status.
-- **`cumulativeInputTokens`** — Cumulative input (prompt) tokens consumed across all agents and history.
+- **`cumulativeCachedInputTokens`** — Cumulative cached input (prompt) tokens consumed across all agents and history.
+- **`cumulativeInputTokens`** — Cumulative uncached input (prompt) tokens consumed across all agents and history.
 - **`cumulativeOutputTokens`** — Cumulative output (completion) tokens generated across all agents and history.
-- **`cumulativeTotalTokens`** — Cumulative total tokens consumed across the sandbox (`input + output`).
+- **`cumulativeTotalTokens`** — Cumulative total tokens consumed across the sandbox (`uncached input + cached input + output`).
 - **`errored`** — Number of agents currently in `ERRORED` state.
 - **`idle`** — Number of agents currently in `IDLE` state.
 - **`injectedDeliveries`** — Cumulative count of async bus messages injected into turns across all agents.
@@ -2004,8 +2012,8 @@ console.log(`Uploaded ${receipt.count} files:`, receipt.files);
 ## Doc coverage
 
 - Top-level exports: 63
-- Declarations (exports + members): 438
-- Documented declarations: 438 / 438 (100%)
+- Declarations (exports + members): 441
+- Documented declarations: 441 / 441 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): `Agent`, `AgentConfig`, `AgentConfigUpdate`, `AgentIdentityScope`, `AgentRuntime`, `AgentState`, `ArchiveDownloadReceipt`, `AuthorityDescriptor`, `BatchDownloadFailure`, `BusMessageEnvelope`, `CopyReceipt`, `CredentialResolverPort`, `CredentialStoragePort`, `CredentialVault`, `DownloadReceipt`, `FileRecord`, `GrepMatch`, `GrepOptions`, `InboxHeader`, `InboxListOptions`, `LaunchHistoryEntry`, `MessageEnvelope`, `MessagingBus`, `NarrativeEvent`, `PendingInstancePayload`, `PresetCatalog`, `PresetModelConfig`, `ReadMessageResult`, `RealmInputValues`, `RealmPublishingPort`, `RealmRecord`, `RealmRegistry`, `RealmTemplate`, `RealmUpdatePatch`, `SandboxPersistedState`, `ScheduleReceipt`, `SendMessageReceipt`, `TurnBundle`, `TurnExecutionResult`, `TurnInput`, `VfsCopyOptions`, `VfsWriteOptions`, `VirtualFS`, `WriteReceipt`

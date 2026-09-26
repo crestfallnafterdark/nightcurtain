@@ -250,10 +250,12 @@ export type SandboxTabId = 'chat' | 'settings' | 'inspector' | 'filesystem' | 'm
  * ```typescript
  * const telemetry: AgentTelemetrySnapshot = {
  *   inputTokens: 1250,
+ *   cachedInputTokens: 300,
  *   outputTokens: 420,
- *   totalTokens: 1670,
+ *   totalTokens: 1970,
  *   turnCount: 3,
  *   lastPromptTokens: 450,
+ *   lastCachedPromptTokens: 120,
  *   lastCompletionTokens: 150,
  *   terminalStops: 0,
  *   injectedDeliveries: 1,
@@ -263,16 +265,20 @@ export type SandboxTabId = 'chat' | 'settings' | 'inspector' | 'filesystem' | 'm
  * ```
  */
 export interface AgentTelemetrySnapshot {
-  /** Cumulative input (prompt) tokens consumed across all turns. */
+  /** Cumulative uncached input (prompt) tokens consumed across all turns. */
   readonly inputTokens: number;
+  /** Cumulative cached input (prompt) tokens consumed across all turns. */
+  readonly cachedInputTokens: number;
   /** Cumulative output (completion) tokens generated across all turns. */
   readonly outputTokens: number;
-  /** Total tokens consumed by this agent (`inputTokens + outputTokens`). */
+  /** Total tokens consumed by this agent (`inputTokens + cachedInputTokens + outputTokens`). */
   readonly totalTokens: number;
   /** Total number of conversational execution turns completed. */
   readonly turnCount: number;
-  /** Prompt token count for the most recently completed turn. */
+  /** Uncached prompt token count for the most recently completed turn. */
   readonly lastPromptTokens: number;
+  /** Cached prompt token count for the most recently completed turn. */
+  readonly lastCachedPromptTokens: number;
   /** Completion token count for the most recently completed turn. */
   readonly lastCompletionTokens: number;
   /** Number of times turn execution terminated via terminal stop conditions. */
@@ -711,11 +717,13 @@ export interface SandboxTelemetryStats {
   readonly injectedDeliveries: number;
   /** Cumulative count of precall tool executions across all agents. */
   readonly precallCount: number;
-  /** Cumulative input (prompt) tokens consumed across all agents and history. */
+  /** Cumulative uncached input (prompt) tokens consumed across all agents and history. */
   readonly cumulativeInputTokens: number;
+  /** Cumulative cached input (prompt) tokens consumed across all agents and history. */
+  readonly cumulativeCachedInputTokens: number;
   /** Cumulative output (completion) tokens generated across all agents and history. */
   readonly cumulativeOutputTokens: number;
-  /** Cumulative total tokens consumed across the sandbox (`input + output`). */
+  /** Cumulative total tokens consumed across the sandbox (`uncached input + cached input + output`). */
   readonly cumulativeTotalTokens: number;
 }
 
@@ -3610,6 +3618,7 @@ export class SandboxStore {
     const activeTimers = this.scheduledTimers.filter(t => t.status === 'pending').length;
 
     let cumulativeInputTokens = 0;
+    let cumulativeCachedInputTokens = 0;
     let cumulativeOutputTokens = 0;
     let cumulativeTotalTokens = 0;
     let terminalStops = 0;
@@ -3620,6 +3629,7 @@ export class SandboxStore {
     for (const agent of allTrackedAgents) {
       if (agent.telemetry) {
         cumulativeInputTokens += agent.telemetry.inputTokens || 0;
+        cumulativeCachedInputTokens += agent.telemetry.cachedInputTokens || 0;
         cumulativeOutputTokens += agent.telemetry.outputTokens || 0;
         cumulativeTotalTokens += agent.telemetry.totalTokens || 0;
         terminalStops += agent.telemetry.terminalStops || 0;
@@ -3643,6 +3653,7 @@ export class SandboxStore {
       injectedDeliveries,
       precallCount,
       cumulativeInputTokens,
+      cumulativeCachedInputTokens,
       cumulativeOutputTokens,
       cumulativeTotalTokens
     };
@@ -9645,9 +9656,12 @@ export class SandboxStore {
       }
       if (mirrored.telemetry && live.telemetry) {
         mirrored.telemetry.inputTokens = live.telemetry.inputTokens || 0;
+        mirrored.telemetry.cachedInputTokens = live.telemetry.cachedInputTokens || 0;
         mirrored.telemetry.outputTokens = live.telemetry.outputTokens || 0;
         mirrored.telemetry.totalTokens = live.telemetry.totalTokens || 0;
         mirrored.telemetry.turnCount = live.telemetry.turnCount || 0;
+        mirrored.telemetry.lastPromptTokens = live.telemetry.lastPromptTokens || 0;
+        mirrored.telemetry.lastCachedPromptTokens = live.telemetry.lastCachedPromptTokens || 0;
       }
     };
 
@@ -9759,10 +9773,12 @@ export class SandboxStore {
         pendingPrecalls: Array.isArray(agent.pendingPrecalls) ? [...agent.pendingPrecalls] : [],
         telemetry: agent.telemetry ? {
           inputTokens: agent.telemetry.inputTokens || 0,
+          cachedInputTokens: agent.telemetry.cachedInputTokens || 0,
           outputTokens: agent.telemetry.outputTokens || 0,
           totalTokens: agent.telemetry.totalTokens || 0,
           turnCount: agent.telemetry.turnCount || 0,
           lastPromptTokens: agent.telemetry.lastPromptTokens || 0,
+          lastCachedPromptTokens: agent.telemetry.lastCachedPromptTokens || 0,
           lastCompletionTokens: agent.telemetry.lastCompletionTokens || 0,
           terminalStops: agent.telemetry.terminalStops || 0,
           injectedDeliveries: agent.telemetry.injectedDeliveries || 0,
@@ -9770,10 +9786,12 @@ export class SandboxStore {
           lastSentContext: Array.isArray(agent.telemetry.lastSentContext) ? [...agent.telemetry.lastSentContext] as FormattedContextMessage[] : []
         } : {
           inputTokens: 0,
+          cachedInputTokens: 0,
           outputTokens: 0,
           totalTokens: 0,
           turnCount: 0,
           lastPromptTokens: 0,
+          lastCachedPromptTokens: 0,
           lastCompletionTokens: 0,
           terminalStops: 0,
           injectedDeliveries: 0,
@@ -9826,10 +9844,12 @@ export class SandboxStore {
       pendingPrecalls: Array.isArray(agent.pendingPrecalls) ? [...agent.pendingPrecalls] : [],
       telemetry: agent.telemetry ? {
         inputTokens: agent.telemetry.inputTokens || 0,
+        cachedInputTokens: agent.telemetry.cachedInputTokens || 0,
         outputTokens: agent.telemetry.outputTokens || 0,
         totalTokens: agent.telemetry.totalTokens || 0,
         turnCount: agent.telemetry.turnCount || 0,
         lastPromptTokens: agent.telemetry.lastPromptTokens || 0,
+        lastCachedPromptTokens: agent.telemetry.lastCachedPromptTokens || 0,
         lastCompletionTokens: agent.telemetry.lastCompletionTokens || 0,
         terminalStops: agent.telemetry.terminalStops || 0,
         injectedDeliveries: agent.telemetry.injectedDeliveries || 0,
@@ -9837,10 +9857,12 @@ export class SandboxStore {
         lastSentContext: Array.isArray(agent.telemetry.lastSentContext) ? [...agent.telemetry.lastSentContext] as FormattedContextMessage[] : []
       } : {
         inputTokens: 0,
+        cachedInputTokens: 0,
         outputTokens: 0,
         totalTokens: 0,
         turnCount: 0,
         lastPromptTokens: 0,
+        lastCachedPromptTokens: 0,
         lastCompletionTokens: 0,
         terminalStops: 0,
         injectedDeliveries: 0,
