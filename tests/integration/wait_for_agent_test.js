@@ -182,12 +182,12 @@ test('1. wait_for_agent is the 36th canonical tool, invocation family, manager-o
 });
 
 test('2. invoke_agent stops advertising an await and points at the wait primitive', () => {
-  assert.ok(
-    !/await/i.test(invokeAgentDescriptor.description),
-    `invoke_agent must not advertise awaiting: '${invokeAgentDescriptor.description}'`
-  );
-  assert.ok(/invocation id/i.test(invokeAgentDescriptor.description), 'the return contract is named');
-  assert.ok(/wait_for_invocation/.test(invokeAgentDescriptor.description), 'the await follow-up is named');
+  const description = invokeAgentDescriptor.description;
+  assert.ok(/immediately/.test(description), 'the fire-and-forget return is stated');
+  assert.ok(!/and await/i.test(description), `invoke_agent must not promise an in-call await: '${description}'`);
+  assert.ok(!/await completion/i.test(description), 'the old await-completion claim is gone');
+  assert.ok(/wait_for_invocation/.test(description), 'the id-addressed await follow-up is named');
+  assert.ok(/wait_for_agent/.test(description), 'the agent-addressed await follow-up is named');
 });
 
 test('3. a manager dispatcher exposes the grants without wildcard tools', async () => {
@@ -375,14 +375,15 @@ test('9. notify registers a one-shot completion wake with bare ids and zero mail
       return { content: 'target completion payload' };
     }), { parentId: 'watcher' });
 
+    const targetTurn = runtime.enqueueUserTurn('target', 'gated target work');
+    await waitUntil(() => runtime.isAgentBusy('target'));
+
     const registration = await runtime.waitForAgent('target', { notify: true }, { callerAgentId: 'watcher' });
     assert.equal(registration.success, true, `notify failed: ${registration.error}`);
     assert.equal(registration.mode, 'notify');
     assert.equal(typeof registration.subscriptionId, 'string');
-    assert.equal(registration.alreadySettled, false);
+    assert.equal(registration.alreadySettled, false, 'a busy target registers a future settle wake');
 
-    const targetTurn = runtime.enqueueUserTurn('target', 'gated target work');
-    await waitUntil(() => runtime.isAgentBusy('target'));
     gate.resolve();
     await targetTurn;
 
@@ -486,6 +487,10 @@ test('12. killing the watcher drops its registration: the settle fires no wake',
       return { content: 'orphaned target output' };
     }), { parentId: 'watcher' });
 
+    const targetTurn = runtime.enqueueUserTurn('target', 'gated target work');
+    await waitUntil(() => runtime.isAgentBusy('target'));
+
+    const watcherKey = identityKeyOf(runtime, 'watcher');
     const registration = await runtime.waitForAgent('target', { notify: true }, { callerAgentId: 'watcher' });
     assert.equal(registration.success, true);
     assert.equal(registration.alreadySettled, false);
@@ -493,13 +498,10 @@ test('12. killing the watcher drops its registration: the settle fires no wake',
     runtime.killAgent('watcher', 'test kill', { callerAgentId: 'watcher' });
     assert.equal(runtime.isAgentTerminated('watcher'), true, 'the watcher is terminated');
 
-    const targetTurn = runtime.enqueueUserTurn('target', 'work after watcher death');
-    await waitUntil(() => runtime.isAgentBusy('target'));
     gate.resolve();
     await targetTurn;
     await new Promise((resolve) => setTimeout(resolve, 50));
 
-    const watcherKey = identityKeyOf(runtime, 'watcher');
     assert.equal(runtime.triggerQueue.getPendingCount(watcherKey), 0, 'the dropped registration queues no wake');
   } finally {
     runtime.destroy();
@@ -509,14 +511,24 @@ test('12. killing the watcher drops its registration: the settle fires no wake',
 test('13. authorization matrix: self / parent / @lifecycle:authority / denied peer / realm confinement', async () => {
   const runtime = new AgentRuntime({ autoBootstrapDirector: false });
   try {
+    const operator = runtime.getOperatorPrincipal();
     await runtime.launchAgent({ config: { id: 'manager', allowedTools: ['manager'] } });
     await launchAgent(runtime, 'child', createMockModel(async () => ({ content: 'child output' })), {
       parentId: 'manager'
     });
-    await runtime.launchAgent({ config: { id: 'authority_agent', allowedTools: ['@lifecycle:authority'] } });
+    await runtime.launchAgent({
+      config: { id: 'authority_agent', allowedTools: ['@lifecycle:authority'] },
+      principal: operator
+    });
     await runtime.launchAgent({ config: { id: 'peer', allowedTools: ['read_file'] } });
-    await runtime.launchAgent({ config: { id: 'alpha_root', allowedTools: ['*'], realmId: 'realm_alpha_wfa' } });
-    await runtime.launchAgent({ config: { id: 'beta_worker', allowedTools: ['read_file'], realmId: 'realm_beta_wfa' } });
+    await runtime.launchAgent({
+      config: { id: 'alpha_root', allowedTools: ['*'], realmId: 'realm_alpha_wfa' },
+      principal: operator
+    });
+    await runtime.launchAgent({
+      config: { id: 'beta_worker', allowedTools: ['read_file'], realmId: 'realm_beta_wfa' },
+      principal: operator
+    });
 
     // Self: an agent may watch its own next settle.
     const self = await runtime.waitForAgent('authority_agent', { timeout_ms: 50 }, { callerAgentId: 'authority_agent' });
