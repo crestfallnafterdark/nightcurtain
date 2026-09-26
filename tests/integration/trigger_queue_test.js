@@ -164,3 +164,47 @@ test('5. TriggerQueue integration with AgentRuntime mail arrival', async () => {
 
   runtime.triggerQueue.stopProcessing();
 });
+
+test('6. onTriggerDropped reports realm-confined drops through a real runtime identity port', async () => {
+  const runtime = new AgentRuntime({ autoBootstrapDirector: false });
+  const mockModel = createMockModel(async () => ({ text: 'Turn handled', toolCalls: [] }));
+  try {
+    await runtime.launchAgent({ id: 'realm_int_alpha', realmId: 'realm_int_alpha' }, mockModel);
+    await runtime.launchAgent({ id: 'realm_int_beta', realmId: 'realm_int_beta' }, mockModel);
+
+    const port = runtime.createAgentIdentityPort();
+    const alphaKey = port.getAgentIdentity('realm_int_alpha').key;
+    const betaKey = port.getAgentIdentity('realm_int_beta').key;
+    assert.notStrictEqual(alphaKey, betaKey, 'each realm registration keys independently');
+
+    const dropped = [];
+    const dispatched = [];
+    const queue = new TriggerQueue({
+      autoStart: false,
+      identityPort: port,
+      onTriggerDropped: (trigger, reason) => dropped.push({ trigger, reason }),
+      dispatchAction: async (trigger) => {
+        dispatched.push(trigger);
+        return true;
+      }
+    });
+
+    // Same-realm wakeup dispatches; the realm-bound source's foreign-realm
+    // wakeup is dropped and reported through the seam.
+    queue.enqueue({ type: TRIGGER_TYPES.MAIL, targetAgentId: betaKey, source: 'realm_int_beta' });
+    queue.enqueue({ type: TRIGGER_TYPES.MAIL, targetAgentId: alphaKey, source: 'realm_int_beta' });
+
+    await queue.processTick();
+
+    assert.strictEqual(dropped.length, 1, 'exactly the foreign-realm trigger is reported');
+    assert.strictEqual(dropped[0].reason, 'realm-confinement');
+    assert.strictEqual(dropped[0].trigger.targetAgentId, alphaKey);
+    assert.strictEqual(dispatched.length, 1, 'the same-realm trigger still dispatches');
+    assert.strictEqual(dispatched[0].targetAgentId, betaKey);
+    assert.strictEqual(queue.getPendingCount(), 0, 'dropped triggers are not re-queued');
+
+    queue.dispose();
+  } finally {
+    runtime.destroy();
+  }
+});

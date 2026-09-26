@@ -15,6 +15,7 @@
  * 10. Background Interval Ticking & Lifecycle Management
  * 11. Diagnostics & Non-Mutating Snapshots
  * 12. Realm-Confined Dispatch (injected identities)
+ * 12b. Realm-confinement Drop Notifications (onTriggerDropped)
  * 13. Canonical Identity Keys — Two Realms, One Bare Id (Wave I, d57cbc1)
  */
 
@@ -676,6 +677,88 @@ test('12. Realm-Confined Dispatch with injected identities', async () => {
   assert.strictEqual(dispatched[0].targetAgentId, 'agent-a2');
   assert.strictEqual(dispatched[0].source, 'agent-a1');
   assert.strictEqual(queue.getPendingCount(), 0, 'denied trigger is dropped, not re-queued');
+
+  queue.dispose();
+});
+
+test('12b. Realm-confinement drops notify onTriggerDropped with the dropped trigger and reason', async () => {
+  const identities = {
+    'agent-a1': { realmId: 'R1' },
+    'agent-a2': { realmId: 'R1' },
+    'agent-b1': { realmId: 'R2' }
+  };
+  const identityPort = {
+    getAgentIdentity: (id) => (identities[id] ? { id, ...identities[id] } : null)
+  };
+  const dropped = [];
+  const dispatched = [];
+  const queue = new TriggerQueue({
+    autoStart: false,
+    identityPort,
+    onTriggerDropped: (trigger, reason) => dropped.push({ trigger, reason }),
+    dispatchAction: async (trigger) => {
+      dispatched.push(trigger);
+      return true;
+    }
+  });
+
+  const crossRealmTriggerId = queue.enqueue({ type: TRIGGER_TYPES.MAIL, targetAgentId: 'agent-b1', source: 'agent-a1' });
+  queue.enqueue({ type: TRIGGER_TYPES.MAIL, targetAgentId: 'agent-a2', source: 'agent-a1' });
+
+  await queue.processTick();
+
+  assert.strictEqual(dropped.length, 1, 'exactly the denied trigger notifies the drop hook');
+  assert.strictEqual(dropped[0].trigger.triggerId, crossRealmTriggerId);
+  assert.strictEqual(dropped[0].trigger.targetAgentId, 'agent-b1');
+  assert.strictEqual(dropped[0].trigger.source, 'agent-a1');
+  assert.strictEqual(dropped[0].reason, 'realm-confinement');
+  assert.strictEqual(dispatched.length, 1, 'the same-realm trigger still dispatches');
+  assert.strictEqual(dispatched[0].targetAgentId, 'agent-a2');
+  assert.strictEqual(
+    queue.getPendingCount(),
+    0,
+    'the reported trigger is still dropped, not re-queued (drop-not-loop semantics unchanged)'
+  );
+
+  queue.dispose();
+});
+
+test('12c. A throwing onTriggerDropped hook cannot break the tick or other dispatches', async () => {
+  const identities = {
+    'agent-a1': { realmId: 'R1' },
+    'agent-b1': { realmId: 'R2' }
+  };
+  const identityPort = {
+    getAgentIdentity: (id) => (identities[id] ? { id, ...identities[id] } : null)
+  };
+  const dispatched = [];
+  let hookCalls = 0;
+  const queue = new TriggerQueue({
+    autoStart: false,
+    identityPort,
+    onTriggerDropped: () => {
+      hookCalls++;
+      throw new Error('Drop hook exploded');
+    },
+    dispatchAction: async (trigger) => {
+      dispatched.push(trigger.targetAgentId);
+      return true;
+    }
+  });
+
+  queue.enqueue({ type: TRIGGER_TYPES.MAIL, targetAgentId: 'agent-b1', source: 'agent-a1' });
+  queue.enqueue({ type: TRIGGER_TYPES.MAIL, targetAgentId: 'agent-a1', source: 'agent-a1' });
+
+  await queue.processTick();
+
+  assert.strictEqual(hookCalls, 1, 'the throwing hook was invoked for the dropped trigger');
+  assert.deepStrictEqual(dispatched, ['agent-a1'], 'the allowed trigger still dispatched despite the throwing hook');
+  assert.strictEqual(queue.getPendingCount(), 0, 'queue state stays consistent after the hook throws');
+
+  // Later ticks keep working (the throw did not corrupt queue state).
+  queue.enqueue({ type: TRIGGER_TYPES.MAIL, targetAgentId: 'agent-a1', source: 'agent-a1' });
+  await queue.processTick();
+  assert.deepStrictEqual(dispatched, ['agent-a1', 'agent-a1'], 'later ticks still dispatch');
 
   queue.dispose();
 });

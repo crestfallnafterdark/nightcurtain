@@ -518,13 +518,15 @@ export type RuntimeStatus = typeof RUNTIME_STATUS[keyof typeof RUNTIME_STATUS];
  * - `ERR_RUNTIME_DESTROYED`: Thrown by the guarded lifecycle, scheduling, turn, history, and snapshot operations on a destroyed instance. Read-only queries (`getAgent`, `hasAgent`, `listAgents`, `getAgentCount`, `listRecycledAgents`, `getRuntimeMetrics`, `subscribe`/`on`) keep answering.
  * - `ERR_AGENT_NOT_FOUND`: Passing an agentId that does not exist to the facade's own `whoami` lookup.
  * - `ERR_SNAPSHOT_INVALID`: Passing corrupted, non-conforming, or unparseable snapshot data to importSnapshot; the prior registry is left untouched.
+ * - `TURN_DROPPED`: `enqueueUserTurn`'s queued user trigger was discarded by the trigger queue's Realm-confinement gate before dispatch; the returned promise rejects with this code and no turn is executed.
  */
 export type RuntimeErrorCode =
   | 'ERR_RUNTIME_NOT_INITIALIZED'
   | 'ERR_RUNTIME_NOT_READY'
   | 'ERR_RUNTIME_DESTROYED'
   | 'ERR_AGENT_NOT_FOUND'
-  | 'ERR_SNAPSHOT_INVALID';
+  | 'ERR_SNAPSHOT_INVALID'
+  | 'TURN_DROPPED';
 
 /**
  * Error carrying an optional machine-readable runtime error code.
@@ -1361,7 +1363,10 @@ export class AgentRuntime {
    * Pending user-turn waiters keyed by queue triggerId. `enqueueUserTurn`
    * registers a waiter, and `executeAgentTurn` claims it when the dispatcher
    * forwards the queued `TRIGGER_TYPES.USER` trigger, so the caller receives
-   * the canonical turn receipt.
+   * the canonical turn receipt. A trigger the queue's Realm-confinement gate
+   * drops before dispatch never reaches the dispatcher, so
+   * `#handleTriggerDropped` removes and rejects its waiter with a
+   * `TURN_DROPPED` coded error instead of leaving it stranded.
    */
   #userTurnWaiters: Map<string, PendingUserTurnWaiter> = new Map();
 
@@ -1607,6 +1612,7 @@ export class AgentRuntime {
       dispatchAction: async (trigger) => this.#dispatchTrigger(trigger),
       isAgentBusy: (agentId) => this.isAgentBusy(agentId),
       identityPort: this.createAgentIdentityPort(),
+      onTriggerDropped: (trigger, reason) => this.#handleTriggerDropped(trigger, reason),
       tickIntervalMs: 25
     });
 
@@ -2921,6 +2927,10 @@ export class AgentRuntime {
    * queue-assigned `triggerId` and settles the caller's promise with the same
    * `TurnExecutionResult` a direct call would return. Falls back to a direct
    * `executeAgentTurn` only when no TriggerQueue is available.
+   *
+   * A trigger the queue's Realm-confinement gate drops before dispatch is
+   * never executed or re-queued; the returned promise rejects with a
+   * `TURN_DROPPED` coded error so the caller settles deterministically.
    */
   enqueueUserTurn(
     agentId: string,
@@ -3800,6 +3810,32 @@ export class AgentRuntime {
    */
   async #dispatchTrigger(trigger: AgentTrigger): Promise<boolean> {
     return this.#triggerDispatcher.dispatchTrigger(trigger);
+  }
+
+  /**
+   * Settles the pending `enqueueUserTurn` waiter correlated with a trigger the
+   * queue dropped before dispatch (Realm-confinement gate, A6). The drop is
+   * terminal — the trigger is neither dispatched nor re-queued — so the
+   * waiter is removed and rejected with a `TURN_DROPPED` coded error instead
+   * of hanging. Exactly-once settlement: the waiter is deleted before the
+   * rejection, so a later claim cannot double-settle it. A no-op when the
+   * dropped trigger has no registered waiter (non-user drops).
+   *
+   * @param trigger - The dropped immutable trigger record.
+   * @param reason - Short machine-readable drop reason forwarded by the queue.
+   */
+  #handleTriggerDropped(trigger: AgentTrigger, reason: string): void {
+    const waiter = this.#userTurnWaiters.get(trigger.triggerId);
+    if (!waiter) return;
+    this.#userTurnWaiters.delete(trigger.triggerId);
+    try {
+      waiter.reject(createRuntimeError(
+        `Queued user turn was dropped by realm confinement (reason: ${reason}); no turn was executed`,
+        'TURN_DROPPED'
+      ));
+    } catch {
+      // Best-effort rejection; the waiter is already removed from the map.
+    }
   }
 
   /**

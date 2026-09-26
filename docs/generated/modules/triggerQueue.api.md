@@ -121,6 +121,7 @@ export interface TriggerQueueOptions {
     readonly dispatchAction?: (trigger: AgentTrigger) => Promise<boolean>;
     readonly identityPort?: TriggerQueueIdentityPort | null;
     readonly isAgentBusy?: (agentId: string) => boolean;
+    readonly onTriggerDropped?: (trigger: AgentTrigger, reason: string) => void;
     readonly tickIntervalMs?: number;
 }
 
@@ -267,7 +268,7 @@ triggerQueue.dispose();
 - **`getPendingCount`** — Returns the count of pending triggers currently held in the queue.
 - **`getPendingTriggers`** — Returns an immutable shallow snapshot of pending triggers in arrival sequence. The returned array and every returned `AgentTrigger` record are frozen copies; mutating them has no effect on internal queue state. `payload` values are shared by reference with the internal records and are not deep-frozen. `targetAgentId` and `source` are projected to the registration's bare `id` when the stored identifier is a registered canonical key (Wave I, ticket d57cbc1).
 - **`isProcessing`** — Indicates whether the background recurring evaluation interval loop is currently active.
-- **`processTick`** — Evaluates pending triggers against agent busy states. ### Algorithmic Behavior: 1. Takes an atomic snapshot of the internal queue. 2. Drops triggers whose source is realm-bound and whose target resolves outside that realm (Realm wave A1); dropped triggers are neither dispatched nor re-queued. 3. Partitions the surviving triggers into `readyTriggers` (for idle agents) and `remainingTriggers` (for busy agents or agents already assigned a trigger this tick). 4. Prepends `remainingTriggers` back to the front of the queue to strictly preserve intra-agent arrival FIFO order. 5. Concurrently dispatches all `readyTriggers` via `Promise.allSettled(readyTriggers.map(...))`. 6. If `dispatchAction` resolves to `false`, re-inserts the trigger at the head of that agent's pending queue. 7. Catches and logs per-trigger dispatch errors; a rejected dispatch is discarded without aborting the remaining dispatches. Safe for concurrent and reentrant invocations; calls made while a tick is active return immediately and coalesce into at most one follow-up microtask tick.
+- **`processTick`** — Evaluates pending triggers against agent busy states. ### Algorithmic Behavior: 1. Takes an atomic snapshot of the internal queue. 2. Drops triggers whose source is realm-bound and whose target resolves outside that realm (Realm wave A1); dropped triggers are neither dispatched nor re-queued, and when `onTriggerDropped` is supplied it is notified per dropped trigger (exception-shielded). 3. Partitions the surviving triggers into `readyTriggers` (for idle agents) and `remainingTriggers` (for busy agents or agents already assigned a trigger this tick). 4. Prepends `remainingTriggers` back to the front of the queue to strictly preserve intra-agent arrival FIFO order. 5. Concurrently dispatches all `readyTriggers` via `Promise.allSettled(readyTriggers.map(...))`. 6. If `dispatchAction` resolves to `false`, re-inserts the trigger at the head of that agent's pending queue. 7. Catches and logs per-trigger dispatch errors; a rejected dispatch is discarded without aborting the remaining dispatches. Safe for concurrent and reentrant invocations; calls made while a tick is active return immediately and coalesce into at most one follow-up microtask tick.
 - **`startProcessing`** — Starts the background recurring interval evaluation loop at `tickIntervalMs`. When running under Node.js, the internal timer handle is `.unref()`'d so it does not prevent process exit. Idempotent if the loop is already running.
 - **`stopProcessing`** — Stops the background recurring evaluation loop and clears active timer handles. Idempotent if already stopped.
 - **`tickIntervalMs`** — Configured evaluation tick interval in milliseconds.
@@ -362,6 +363,7 @@ const options: TriggerQueueOptions = {
 - **`dispatchAction`** — Asynchronous dispatch hook invoked when a trigger is ready to be executed by an idle agent. - Any resolved value other than `false` marks the trigger as handled and removes it from the queue. - Resolving to exactly `false` re-inserts the trigger at the head of that agent's pending triggers for re-evaluation on a later tick. - If the hook throws or rejects, the error is caught and logged to prevent crashing the tick loop, and the trigger is discarded rather than re-inserted. Default: `async () => true`
 - **`identityPort`** — Trusted identity resolver used to resolve Realm scope (`realmId`/ `realmBypass`) for trigger sources at dispatch time (Realm wave A1). Optional and additive: without it no realm information is available and dispatch keeps the legacy, unfiltered behavior.
 - **`isAgentBusy`** — Synchronous query predicate checking whether a target agent is currently executing or occupied. Triggers for busy agents are retained in the queue while strictly preserving intra-agent FIFO order. Default: `() => false`
+- **`onTriggerDropped`** — Optional notification hook invoked for each trigger the Realm-confinement gate drops instead of dispatching or re-queuing it (Realm wave A1). Owners use it to settle state correlated with the dropped trigger — the runtime rejects the matching queued user-turn waiter so a confined drop cannot strand its caller. The hook is invoked synchronously inside `processTick` for each dropped trigger; a throwing hook is caught and logged and never aborts the tick, blocks other dispatches, or corrupts queue state. The drop-not-loop semantics are unchanged: the trigger is discarded either way. Omitted or non-function keeps the legacy silent drop.
 - **`tickIntervalMs`** — Interval in milliseconds for the background recurring evaluation tick loop. Numbers greater than 0 are used as-is; non-numeric or non-positive values fall back to the default. Default: `25` ms.
 
 ### `TriggerType` — type alias
@@ -371,8 +373,8 @@ Type alias representing valid canonical trigger type strings.
 ## Doc coverage
 
 - Top-level exports: 12
-- Declarations (exports + members): 50
-- Documented declarations: 50 / 50 (100%)
+- Declarations (exports + members): 51
+- Documented declarations: 51 / 51 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): none

@@ -709,6 +709,48 @@ test('15e. enqueueUserTurn: pending waiter rejects when its target is killed bef
   }
 });
 
+test('15f. enqueueUserTurn: a realm-confined drop rejects its waiter with TURN_DROPPED', async () => {
+  const runtime = createAgentRuntime({ autoBootstrapDirector: false });
+  try {
+    await runtime.launchAgent(
+      { id: 'realm_drop_alpha', realmId: 'realm_drop_alpha', allowedTools: ['read_file'] },
+      createMockModel([{ content: 'alpha reply' }])
+    );
+    await runtime.launchAgent(
+      { id: 'realm_drop_beta', realmId: 'realm_drop_beta', allowedTools: ['read_file'] },
+      createMockModel([{ content: 'beta reply' }])
+    );
+
+    // Realm-bound foreign sender: the queue's A6 gate drops the trigger, and
+    // the waiter must settle with the coded rejection instead of hanging.
+    const droppedTurn = runtime.enqueueUserTurn('realm_drop_alpha', 'cross-realm injection', {
+      mode: 'injection',
+      sender: 'realm_drop_beta'
+    });
+    await assert.rejects(
+      () => droppedTurn,
+      (err) =>
+        err.code === 'TURN_DROPPED' &&
+        /dropped by realm confinement/.test(err.message) &&
+        err.message.includes('realm-confinement') &&
+        /no turn was executed/.test(err.message),
+      'the dropped user trigger must reject its waiter with a clear coded error'
+    );
+    assert.strictEqual(
+      runtime.triggerQueue.getPendingCount(),
+      0,
+      'the dropped trigger is discarded, never re-queued'
+    );
+
+    // Unrelated waiters are unaffected: a normal same-realm queued turn still
+    // settles with its canonical receipt.
+    const okResult = await runtime.enqueueUserTurn('realm_drop_beta', 'same-realm turn');
+    assert.strictEqual(okResult.output, 'beta reply');
+  } finally {
+    runtime.destroy();
+  }
+});
+
 test('16. Turn Execution: Cooperative Cancellation via cancelAgent', async () => {
   const mockModel = createMockModel([
     { delayMs: 150, content: 'Delayed response' }

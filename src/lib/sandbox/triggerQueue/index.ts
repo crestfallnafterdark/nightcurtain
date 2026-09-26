@@ -373,6 +373,23 @@ export interface TriggerQueueOptions {
    * dispatch keeps the legacy, unfiltered behavior.
    */
   readonly identityPort?: TriggerQueueIdentityPort | null;
+
+  /**
+   * Optional notification hook invoked for each trigger the Realm-confinement
+   * gate drops instead of dispatching or re-queuing it (Realm wave A1).
+   * Owners use it to settle state correlated with the dropped trigger — the
+   * runtime rejects the matching queued user-turn waiter so a confined drop
+   * cannot strand its caller. The hook is invoked synchronously inside
+   * `processTick` for each dropped trigger; a throwing hook is caught and
+   * logged and never aborts the tick, blocks other dispatches, or corrupts
+   * queue state. The drop-not-loop semantics are unchanged: the trigger is
+   * discarded either way. Omitted or non-function keeps the legacy silent
+   * drop.
+   *
+   * @param trigger - The dropped immutable trigger record.
+   * @param reason - Short machine-readable drop reason (`'realm-confinement'`).
+   */
+  readonly onTriggerDropped?: (trigger: AgentTrigger, reason: string) => void;
 }
 
 // ============================================================================
@@ -430,6 +447,12 @@ export class TriggerQueue {
   #microtaskScheduled = false;
   #identityPort: TriggerQueueIdentityPort | null = null;
   /**
+   * Optional Realm-confinement drop notification hook (Realm wave A1). Invoked
+   * through `#notifyTriggerDropped`, which shields the tick from a throwing
+   * hook; `null` keeps the legacy silent drop.
+   */
+  #onTriggerDropped: ((trigger: AgentTrigger, reason: string) => void) | null = null;
+  /**
    * Private side-car of canonical source keys keyed by `triggerId` (Wave I,
    * ticket d57cbc1): the trusted `sourceKey` never rides the frozen
    * {@link AgentTrigger} record, so diagnostics and payloads cannot surface it.
@@ -468,6 +491,10 @@ export class TriggerQueue {
 
     this.#identityPort = (options.identityPort && typeof options.identityPort.getAgentIdentity === 'function')
       ? options.identityPort
+      : null;
+
+    this.#onTriggerDropped = typeof options.onTriggerDropped === 'function'
+      ? options.onTriggerDropped
       : null;
 
     if (options.autoStart !== false) {
@@ -633,6 +660,26 @@ export class TriggerQueue {
   }
 
   /**
+   * Notifies the injected drop hook that a pending trigger was discarded by
+   * the Realm-confinement gate (Realm wave A1), preserving the drop-not-loop
+   * semantics: the trigger is never re-queued or dispatched. Exception-
+   * shielded — a throwing hook is logged and swallowed, so it can never abort
+   * the tick, block other dispatches, or corrupt queue state.
+   *
+   * @param trigger - The dropped immutable trigger record.
+   * @param reason - Short machine-readable drop reason.
+   */
+  #notifyTriggerDropped(trigger: AgentTrigger, reason: string): void {
+    const notify = this.#onTriggerDropped;
+    if (!notify) return;
+    try {
+      notify(trigger, reason);
+    } catch (err) {
+      console.error(`TriggerQueue: drop notification failed for trigger ${trigger.triggerId}:`, err);
+    }
+  }
+
+  /**
    * Indicates whether the background recurring evaluation interval loop is currently active.
    * 
    * @example
@@ -762,7 +809,7 @@ export class TriggerQueue {
    * 
    * ### Algorithmic Behavior:
    * 1. Takes an atomic snapshot of the internal queue.
-   * 2. Drops triggers whose source is realm-bound and whose target resolves outside that realm (Realm wave A1); dropped triggers are neither dispatched nor re-queued.
+   * 2. Drops triggers whose source is realm-bound and whose target resolves outside that realm (Realm wave A1); dropped triggers are neither dispatched nor re-queued, and when `onTriggerDropped` is supplied it is notified per dropped trigger (exception-shielded).
    * 3. Partitions the surviving triggers into `readyTriggers` (for idle agents) and `remainingTriggers` (for busy agents or agents already assigned a trigger this tick).
    * 4. Prepends `remainingTriggers` back to the front of the queue to strictly preserve intra-agent arrival FIFO order.
    * 5. Concurrently dispatches all `readyTriggers` via `Promise.allSettled(readyTriggers.map(...))`.
@@ -810,6 +857,7 @@ export class TriggerQueue {
         // with it.
         if (!this.#isRealmDispatchAllowed(trigger)) {
           this.#sourceKeys.delete(trigger.triggerId);
+          this.#notifyTriggerDropped(trigger, 'realm-confinement');
           continue;
         }
 

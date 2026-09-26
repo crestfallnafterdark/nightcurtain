@@ -29,10 +29,12 @@
  * Two consecutive injection triggers on one store do not settle today (a
  * pre-existing quirk, reproduced on unmodified code), and a queued injection
  * whose explicit foreign-agent sender is dropped by the trigger queue's Realm
- * confinement leaves the store waiter unsettled; neither is related to
- * operator attribution. The explicit-sender behavior is therefore covered by
- * the runtime-level case (1c), which bypasses the queue, and the store-level
- * cross-realm denial is covered by the `sendMessage` cases.
+ * confinement now rejects its store waiter with a `TURN_DROPPED` coded error
+ * instead of leaving it unsettled (the previously stranded-waiter quirk is
+ * fixed: the queue reports the drop and the runtime settles the waiter);
+ * neither is related to operator attribution. The explicit-sender behavior is
+ * therefore covered by the runtime-level case (1c), which bypasses the queue,
+ * and the store-level cross-realm denial is covered by the `sendMessage` cases.
  *
  * Real classes only (Zero-Mock Verification): real `SandboxStore`, real
  * `AgentRuntime`, real `MessagingBus`, real `VirtualFS`; only the model provider
