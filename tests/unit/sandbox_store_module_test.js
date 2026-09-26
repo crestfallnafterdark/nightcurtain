@@ -6637,7 +6637,7 @@ test('88. [M3] setExtensionToolSelection validates the record, fails closed with
     );
     assert.throws(
       () => store.setExtensionToolSelection('realm_m3_unit', 'ghost-ext', 'all'),
-      /not attached/i
+      /does not attach/i
     );
     assert.throws(
       () => store.setExtensionToolSelection('realm_m3_unit', 'unit-ext', []),

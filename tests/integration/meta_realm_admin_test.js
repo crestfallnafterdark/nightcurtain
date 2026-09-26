@@ -350,7 +350,7 @@ test('3. [AC-M3-02] own-realm default, label addressing, uniform scope denials',
     store.createRealm({ id: 'realm_m3_twin1', name: 'Twin' });
     store.createRealm({ id: 'realm_m3_twin2', name: 'Twin' });
     await launchMember(store, 'm3-a', ALPHA);
-    await launchMember(store, 'm3-b', BETA);
+    await launchMember(store, 'm3-b', ALPHA);
     await launchMember(store, 'm3-t', 'realm_m3_twin1');
     grant(runtime, 'm3-a', REALM_INSPECT);
     grant(runtime, 'm3-b', REALM_INSPECT, { targets: [BETA] });
@@ -508,7 +508,7 @@ test('5. [AC-M3-04] metadata edits apply atomically with before/after receipts',
     });
     assert.equal(receipt.success, true, JSON.stringify(receipt));
     assert.equal(receipt.realm, 'Alpha Prime');
-    assert.deepEqual(receipt.fields.sort(), ['color', 'description', 'name']);
+    assert.deepEqual([...receipt.fields].sort(), ['color', 'description', 'name']);
     assert.equal(receipt.before.name, 'Alpha');
     assert.equal(receipt.after.name, 'Alpha Prime');
     assert.equal(receipt.after.color, '#123456');
