@@ -278,6 +278,7 @@ export interface ToolCall {
 
 // @public
 export interface ToolDescriptor {
+    readonly denialHint?: string;
     readonly description: string;
     readonly handler: ToolHandlerFn;
     readonly name: SandboxToolName;
@@ -803,6 +804,7 @@ const descriptor: ToolDescriptor = {
 
 #### Members
 
+- **`denialHint`** — Optional model-facing remedy appended to this tool's authorization denial (e.g. which preset/authority grants it). The remedy restates the published description — it never reveals registry state — so a denied caller learns the requirement without an existence/authority oracle.
 - **`description`** — Full human-readable tool description provided to the LLM.
 - **`handler`** — Delegation handler that routes to the injected capability and returns its receipt.
 - **`name`** — Canonical `snake_case` tool name.
@@ -911,8 +913,8 @@ function handleToolError(code: ToolSystemErrorCode, message: string) {
 ## Doc coverage
 
 - Top-level exports: 31
-- Declarations (exports + members): 110
-- Documented declarations: 110 / 110 (100%)
+- Declarations (exports + members): 111
+- Documented declarations: 111 / 111 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): `AgentIdentityPort`, `AgentIdentityProjection`, `AgentIdentityScope`, `AgentRuntime`, `BundleFiles`, `ExtensionExecutionPort`, `ExtensionToolDescriptor`, `LifecyclePort`, `PendingInstancePayload`, `RealmTemplate`

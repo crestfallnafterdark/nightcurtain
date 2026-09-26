@@ -2165,6 +2165,7 @@ export const lifecycleToolDescriptors: readonly (Readonly<{
         awaitCompletion: "await_completion";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
+    denialHint: "The spawn_agent tool requires the spawn_agent capability; the manager preset grants it (or an explicit authority grant).";
     handler: (params: ToolParams_3, context: ExecutionContext) => Promise<ToolParams_3>;
 }> | Readonly<{
     name: "kill_agent";
@@ -4088,6 +4089,7 @@ export const spawn_agent: Readonly<{
         awaitCompletion: "await_completion";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
+    denialHint: "The spawn_agent tool requires the spawn_agent capability; the manager preset grants it (or an explicit authority grant).";
     handler: (params: ToolParams_3, context: ExecutionContext) => Promise<ToolParams_3>;
 }>;
 
@@ -4160,6 +4162,7 @@ export const spawnAgent: Readonly<{
         awaitCompletion: "await_completion";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
+    denialHint: "The spawn_agent tool requires the spawn_agent capability; the manager preset grants it (or an explicit authority grant).";
     handler: (params: ToolParams_3, context: ExecutionContext) => Promise<ToolParams_3>;
 }>;
 
@@ -4232,6 +4235,7 @@ export const spawnAgentDescriptor: Readonly<{
         awaitCompletion: "await_completion";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
+    denialHint: "The spawn_agent tool requires the spawn_agent capability; the manager preset grants it (or an explicit authority grant).";
     handler: (params: ToolParams_3, context: ExecutionContext) => Promise<ToolParams_3>;
 }>;
 
@@ -5884,9 +5888,9 @@ export const writeJsonDescriptor: Readonly<{
 //
 // <declarations>/tools/descriptors/clockTools.d.ts:446:5 - (ae-forgotten-export) The symbol "ToolParams_6" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/invocationTools.d.ts:323:5 - (ae-forgotten-export) The symbol "ToolParams_4" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/lifecycleTools.d.ts:448:5 - (ae-forgotten-export) The symbol "ToolParams_3" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/lifecycleTools.d.ts:881:5 - (ae-forgotten-export) The symbol "PublicAgentDescriptor" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/lifecycleTools.d.ts:915:5 - (ae-forgotten-export) The symbol "UndoTurnPortResult" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/lifecycleTools.d.ts:451:5 - (ae-forgotten-export) The symbol "ToolParams_3" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/lifecycleTools.d.ts:885:5 - (ae-forgotten-export) The symbol "PublicAgentDescriptor" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/lifecycleTools.d.ts:919:5 - (ae-forgotten-export) The symbol "UndoTurnPortResult" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/messagingTools.d.ts:821:5 - (ae-forgotten-export) The symbol "ToolParams_2" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/precallTools.d.ts:136:5 - (ae-forgotten-export) The symbol "ToolParams_7" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/precallTools.d.ts:136:5 - (ae-forgotten-export) The symbol "ExecutionContext" needs to be exported by the entry point index.d.ts
