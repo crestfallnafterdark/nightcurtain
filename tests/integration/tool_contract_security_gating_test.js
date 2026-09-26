@@ -196,8 +196,8 @@ async function runEpic16TestSuite() {
       }
       assert.equal(Object.keys(PUBLISHING_TOOL_REGISTRY).length, 2, 'the publishing registry carries both meta tools');
       assert.equal(getPublishingToolSchemas(['*']).length, 0, 'the wildcard is never a publishing authority');
-      assert.equal(getPublishingToolSchemas([AGENT_AUTHORITIES.TEMPLATE]).length, 1, 'only the exact authority exposes import');
-      assert.equal(getPublishingToolSchemas([AGENT_AUTHORITIES.HYDRATION]).length, 1, 'only the exact authority exposes hydration');
+      assert.equal(getPublishingToolSchemas([AGENT_AUTHORITIES.TEMPLATE]).length, 3, 'the exact template authority exposes its full set (import + the two M5b reads, A29)');
+      assert.equal(getPublishingToolSchemas([AGENT_AUTHORITIES.HYDRATION]).length, 2, 'the exact hydration authority exposes its full set (submit + the M5b read, A29)');
     }
   );
 
@@ -245,7 +245,8 @@ async function runEpic16TestSuite() {
       }
       for (const descriptor of Object.values(PUBLISHING_TOOL_REGISTRY)) {
         const exposed = getPublishingToolSchemas([descriptor.authority]);
-        assert.equal(exposed.length, 1, `'${descriptor.name}' is exposed for its exact authority`);
+        const expectedWidth = descriptor.authority === AGENT_AUTHORITIES.TEMPLATE ? 3 : 2;
+        assert.equal(exposed.length, expectedWidth, `'${descriptor.name}' is exposed for its exact authority (A29: full ${expectedWidth}-tool set)`);
         assert.deepEqual(
           exposed[0].function.parameters.oneOf,
           descriptor.schema.oneOf,
