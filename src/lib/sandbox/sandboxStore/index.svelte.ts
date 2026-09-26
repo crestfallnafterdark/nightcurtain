@@ -58,7 +58,7 @@
  * @invariant Extension surface: the store is the extension composition root — global install records live in one injected registry persisted additively as `extensions`, realm attachments ride the realm records, install/remove/attach/detach validate and emit `extension_installed`/`extension_removed`/`extension_attached`/`extension_detached` audit events on the runtime stream, `removeExtension` refuses an extension any Realm still attaches (and drops its live session), an `active` attachment for an unknown extension degrades to `unavailable` and returns to `active` once the extension is installed again while the install-only heal never rewrites a `conflict` attachment, and install/attachment records alone never connect, discover a catalog, or grant runtime authorization.
  * @decision Instance provenance is hashes, paths, and resolved tool ids only: a successful template launch records `RealmRecord.instance` with the authored `templateVersion`, the canonical payload digest (`payloadDigest` over the attached payload, when one was attached), per-input hashes over each supplied value's canonical tagged JSON, the placement paths the launch actually wrote, `launchedAt`, the resolved extension tools (`resolvedTools`: sanitized call name → extension id) and the unresolved requested extension ids (`missingExtensions`); raw input values, package content, and credentials never reach the record
  * @decision The store is the extension composition root: it builds one install registry over a `{ load, save }` adapter backed by the sandbox snapshot (`extensions`), seeds it from the persisted field before construction, reconciles hydration through the registry's validated `reconcile` path, and exposes install/remove (global) plus attach/detach (realm) methods that validate against installed records and schedule the existing debounced save; realm attachments are realm-local `RealmRecord.extensions` entries, so realm deletion, rollback, and persistence carry them without a parallel store map
- * @decision `launchRealmFromTemplate` extension approvals mirror the Wave U authority approvals: `extensionApprovals` entries must match a declared template request exactly, absent approval is a decline, only installed-and-approved requests attach (an approval of an uninstalled request attaches nothing and stays disclosed), attachments are written only on a fully successful launch with the operator approval stamp and the realm-level `'all'` selection, and the effective extension grants are forwarded into the launched members' descriptors through the trusted unified-options channel (resolved names plus the actively connected catalogs' call names of the realm's attached, active extensions — execution then flows through the store's provider/execution ports)
+ * @decision `launchRealmFromTemplate` extension approvals mirror the Wave U authority approvals: `extensionApprovals` entries must match a declared template request exactly, absent approval is a decline, only installed-and-approved requests attach (an approval of an uninstalled request attaches nothing and stays disclosed), attachments are written only on a fully successful launch with the operator approval stamp and the realm-level `'all'` selection, and the effective extension grants are forwarded into the launched members' descriptors through the trusted unified-options channel (resolved names plus the actively connected catalogs' call names of the realm's attached, active extensions, each capped by its attachment's `toolSelection` — execution then flows through the store's provider/execution ports)
  * @invariant Safe-state extension reauthorization (extension wave, P2.4): the store owns the queue — attach/detach and per-agent `extensionTools` selector edits recompute each affected member's effective grant set and apply it through the operator-gated `reauthorizeAgent` at the next safe point: an idle member synchronously at the mutation point, a busy member queued and applied on its next `turn_complete` (never mid-turn). A queued member that terminates is dropped. Selector names that resolve to nothing are dropped fail-closed and warned, never granted.
  * @invariant Extension authority is descriptor-exact: the effective grants computed here feed `AuthorityDescriptor.extensions`; realm attachment or selector state alone never authorizes a call, the wildcard `'*'`/privilege/selectors/aliases never imply an extension entry, and the runtime's dispatcher extension branch authorizes only exact membership against the frozen synthesized descriptor it resolves from the store's provider port.
  * @invariant Extension execution composition (extension wave, P3.3): the store builds one frozen provider port (descriptor-backed `resolveTool`/`resolveDescriptor`) and one frozen execution port (`execute` → the extension's live session `callTool`) over the in-memory connection catalogs, passes both into the store-owned runtime's construction, rebuilds the descriptor registry on every connect/disconnect/reconnect/conflict/drift re-arbitration, and clears it with the connection teardown. A catalog-less, conflicted, or refused-projection call name resolves no descriptor and no binding (`TOOL_NOT_FOUND` at the dispatcher); per-call context can never substitute either port.
@@ -1955,10 +1955,13 @@ const GENERIC_REALM_NAME = 'Generic';
  * cannot disagree:
  *
  * - the **realm universe** is the Realm record's `resolvedTools` keys (the
- *   declared extension references resolved at launch), filtered to extensions
- *   the Realm still attaches with an `active` status — P2 has no catalogs, so
- *   nothing expands beyond declared liveness; attaching a new extension adds
- *   nothing until it resolves tools (P3), while detaching removes its tools;
+ *   declared extension references resolved at launch, whose resolution already
+ *   honored the attachment selection) filtered to extensions the Realm still
+ *   attaches with an `active` status, plus the call names of every attached,
+ *   active extension's live conflict-free catalog **capped by that
+ *   attachment's `toolSelection`** (`'all'` keeps the whole catalog; an
+ *   explicit list keeps only the listed names) — attaching a new extension
+ *   adds its selected tools once connected, while detaching removes its tools;
  * - the **selector** is the per-agent `config.extensionTools` value: `'all'`
  *   (the default) selects the whole universe, an explicit list intersects it;
  * - unknown selector entries are dropped, never granted (fail closed), and
@@ -2010,12 +2013,43 @@ function resolveActiveExtensionIds(realm: RealmRecord | null): Set<string> {
 }
 
 /**
+ * Resolves the tool selection of every extension a Realm currently attaches
+ * with `active` status: `'all'` (the whole catalog) or the frozen selection
+ * list. Used by the catalog-driven grant universe so a realm-level attachment
+ * selection caps what a connected catalog can contribute.
+ *
+ * @param realm - Realm record (null-safe).
+ * @returns Active attachment extension id → normalized selection.
+ */
+function resolveActiveExtensionSelections(realm: RealmRecord | null): Map<string, 'all' | readonly string[]> {
+  const selections = new Map<string, 'all' | readonly string[]>();
+  const attachments = realm && Array.isArray(realm.extensions) ? realm.extensions : [];
+  for (const attachment of attachments) {
+    if (
+      attachment
+      && attachment.status === 'active'
+      && typeof attachment.extensionId === 'string'
+      && attachment.extensionId
+    ) {
+      selections.set(
+        attachment.extensionId,
+        Array.isArray(attachment.toolSelection) ? attachment.toolSelection : 'all'
+      );
+    }
+  }
+  return selections;
+}
+
+/**
  * Computes a Realm's extension tool universe: the sanitized `resolvedTools` keys
  * whose extension the Realm still attaches as `active`, in declared record
  * order, plus the call names of every attached, active extension's live
  * (conflict-free, sequence-ordered) catalog — so connecting an attached
- * extension lights up its whole catalog before any declared reference exists.
- * A detached (or non-active) extension contributes no tool; a record without
+ * extension lights up its catalog before any declared reference exists. The
+ * catalog contribution is capped by the attachment's own `toolSelection`
+ * (`'all'` keeps the whole catalog; an explicit list keeps only the listed
+ * names), so a realm-level selection can never be widened by a connect. A
+ * detached (or non-active) extension contributes no tool; a record without
  * provenance contributes none.
  *
  * @param realm - Realm record (null-safe).
@@ -2029,6 +2063,7 @@ function resolveRealmExtensionToolUniverse(
 ): string[] {
   const resolved = realm && realm.instance ? realm.instance.resolvedTools : undefined;
   const activeIds = resolveActiveExtensionIds(realm);
+  const selections = resolveActiveExtensionSelections(realm);
   const names: string[] = [];
   const seen = new Set<string>();
   const push = (name: string): void => {
@@ -2045,8 +2080,12 @@ function resolveRealmExtensionToolUniverse(
     }
   }
   for (const catalog of liveCatalogs) {
-    if (!catalog || typeof catalog.extensionId !== 'string' || !activeIds.has(catalog.extensionId)) continue;
-    for (const callName of catalog.callNames) push(callName);
+    if (!catalog || typeof catalog.extensionId !== 'string') continue;
+    const selection = selections.get(catalog.extensionId);
+    if (selection === undefined) continue;
+    for (const callName of catalog.callNames) {
+      if (selection === 'all' || selection.includes(callName)) push(callName);
+    }
   }
   return names;
 }
@@ -4583,11 +4622,12 @@ export class SandboxStore {
       const launchConfig = sanitizeLaunchConfig(config);
       // Extension wave: the effective extension grant set is computed
       // store-side from the member's Realm universe (declared resolved tools
-      // plus the attached extensions' live conflict-free catalogs, in sequence
-      // order) and its selector, then forwarded through the runtime's trusted
-      // unified-options channel. The template-launch loop passes the set it
-      // already resolved (the realm record's provenance is not written until
-      // that launch completes).
+      // plus the attached extensions' live conflict-free catalogs capped by
+      // each attachment's `toolSelection`, in sequence order) and its
+      // selector, then forwarded through the runtime's trusted unified-options
+      // channel. The template-launch loop passes the set it already resolved
+      // (the realm record's provenance is not written until that launch
+      // completes).
       const effectiveExtensionGrants: readonly string[] = extensionGrants !== null
         ? Object.freeze([...extensionGrants])
         : computeEffectiveExtensionGrants(
@@ -8189,8 +8229,10 @@ export class SandboxStore {
   /**
    * Recomputes one agent's effective extension grant set from live store state:
    * the Realm's resolved-and-attached tool universe (the Realm record's
-   * `resolvedTools` keys whose extension still carries an `active` attachment)
-   * intersected with the agent's normalized `config.extensionTools` selector.
+   * `resolvedTools` keys whose extension still carries an `active` attachment,
+   * plus each attached-active extension's live conflict-free catalog call
+   * names capped by that attachment's `toolSelection`) intersected with the
+   * agent's normalized `config.extensionTools` selector.
    *
    * The realm scope of a member resolves through the same trim semantics as
    * realm grouping; an explicit `realmIdOverride` is used for the launch-time
