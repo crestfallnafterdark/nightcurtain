@@ -8891,6 +8891,12 @@ export class VirtualFS {
     // other member); otherwise the prefix is a plain in-workspace filter.
     let scanPrefix = normPathPrefix;
 
+    // Strict boolean consumption (ticket b52705d): only a literal `true`
+    // enables case-insensitive matching. Truthy non-boolean values (for
+    // example the string 'true') must never flip the mode away from the
+    // case-sensitive default.
+    const caseInsensitive = options.caseInsensitive === true;
+
     let targetPattern = pattern;
     if (typeof pattern === 'string') {
       if (pattern.length > 500) {
@@ -8898,11 +8904,11 @@ export class VirtualFS {
       }
       if (options.isRegex) {
         try {
-          targetPattern = new RegExp(pattern, options.caseInsensitive ? 'i' : '');
+          targetPattern = new RegExp(pattern, caseInsensitive ? 'i' : '');
         } catch (e) {
           throw new Error(`Invalid regular expression pattern '${pattern}': ${errorMessage(e)}`);
         }
-      } else if (options.caseInsensitive) {
+      } else if (caseInsensitive) {
         targetPattern = pattern.toLowerCase();
       }
     }
@@ -8975,7 +8981,7 @@ export class VirtualFS {
               isMatch = true;
               matchedStr = regexRes[0];
             }
-          } else if (options.caseInsensitive) {
+          } else if (caseInsensitive) {
             isMatch = line.toLowerCase().includes(targetPattern);
             matchedStr = pattern as string;
           } else {

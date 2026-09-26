@@ -759,19 +759,43 @@ const grepParamAliasMap = Object.freeze({
   path: 'path_prefix',
   isRegex: 'is_regex',
   is_regex: 'is_regex',
-  caseSensitive: 'case_insensitive',
-  case_sensitive: 'case_insensitive',
   caseInsensitive: 'case_insensitive',
   case_insensitive: 'case_insensitive'
 });
+
+/**
+ * `grep` sanitizer: the natural `caseSensitive`/`case_sensitive` spellings
+ * name the *inverse* of the canonical `case_insensitive` parameter, so they
+ * are resolved here with the value negated instead of through a plain rename
+ * in the alias map (ticket b52705d: `caseSensitive: true` used to enable
+ * case-insensitive matching). Only literal booleans are honored; any other
+ * value leaves the canonical flag unset, so the substrate default
+ * (case-sensitive) applies. An explicit `case_insensitive`/`caseInsensitive`
+ * spelling always wins over the alias.
+ * @returns A sanitizer that maps the case-sensitivity spellings onto the canonical flag
+ */
+function createGrepParamSanitizer(): (rawArgs?: unknown) => Record<string, unknown> {
+  const sanitize = createVfsParamSanitizer(grepParamAliasMap);
+  return (rawArgs?: unknown): Record<string, unknown> => {
+    const sanitized = sanitize(rawArgs);
+    if (!Object.prototype.hasOwnProperty.call(sanitized, 'case_sensitive')) return sanitized;
+    const sensitive = sanitized.case_sensitive;
+    delete sanitized.case_sensitive;
+    if (sanitized.case_insensitive === undefined && typeof sensitive === 'boolean') {
+      sanitized.case_insensitive = !sensitive;
+    }
+    return sanitized;
+  };
+}
 
 /**
  * `grep` descriptor — search workspace files for text or regular expression
  * matches.
  *
  * Args: `pattern` (required), optional `path_prefix`, `is_regex`,
- * `case_insensitive`. Delegates to `context.virtualFs.grep()` and throws when
- * that service is missing.
+ * `case_insensitive` (the `caseSensitive`/`case_sensitive` spellings are
+ * accepted and negated onto the canonical flag). Delegates to
+ * `context.virtualFs.grep()` and throws when that service is missing.
  */
 export const grepDescriptor = Object.freeze({
   name: SANDBOX_TOOLS.GREP,
@@ -800,7 +824,7 @@ export const grepDescriptor = Object.freeze({
     additionalProperties: false
   }),
   paramAliasMap: grepParamAliasMap,
-  sanitize: createVfsParamSanitizer(grepParamAliasMap),
+  sanitize: createGrepParamSanitizer(),
   handler: async (params: ToolParams, context: ExecutionContext) => {
     const vfs = context?.virtualFs as VirtualFsView | undefined;
     if (!vfs || typeof vfs.grep !== 'function') {
