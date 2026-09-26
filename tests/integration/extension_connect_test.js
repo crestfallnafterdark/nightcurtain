@@ -660,6 +660,7 @@ test('9. a conflicted resolved extension loses and regains the member grants thr
     const identityPort = runtime.createAgentIdentityPort();
     const grantsOf = () => [...identityPort.getAgentIdentity('p31-member', { realmId }).authority.extensions];
     assert.deepStrictEqual(grantsOf(), ['shared_tool'], 'the launch grants the resolved extension call name');
+    assert.strictEqual(store.resolveExtensionCallName('beta_only')?.extensionId, undefined, 'no catalog is live before connect');
 
     // Winner connects first, then the realm's own extension conflicts.
     await store.connectExtension('ext-a');
@@ -672,13 +673,19 @@ test('9. a conflicted resolved extension loses and regains the member grants thr
     assert.deepStrictEqual(grantsOf(), [], 'the idle member is swept to fail-closed grants');
 
     // Winner disconnects: the resolved extension re-arbitrates active and the
-    // sweep restores the grant.
+    // sweep restores the restricted member's grant. The member's explicit
+    // selector intersects the (now catalog-expanded) universe, so it keeps
+    // exactly the declared name — the live catalog does not widen it.
     await store.disconnectExtension('ext-a');
     assert.deepStrictEqual(
       store.getRealm(realmId).extensions.map((entry) => [entry.extensionId, entry.status]),
       [['ext-b', 'active']]
     );
-    assert.deepStrictEqual(grantsOf(), ['shared_tool'], 'the grant returns at the safe state');
+    assert.deepStrictEqual(
+      grantsOf(),
+      ['shared_tool'],
+      'the restricted selector never expands beyond its declared names'
+    );
   } finally {
     unsubscribe();
     store.destroy();

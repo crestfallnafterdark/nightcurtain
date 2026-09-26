@@ -16,6 +16,7 @@
  * @mayImport ../domain/directorAgent/index.ts
  * @mayImport type-only ../credentialVault/index.ts
  * @mayImport type-only ../presetCatalog/index.ts
+ * @mayImport type-only ../tools/extensionTools/index.ts
  * @invariant Facade-only access: `#agents`, `#recycleBin`, `#messageSubscriptions`, `#listeners`, and the subsystem engines are `#`-private; external consumers interact exclusively through validated `AgentRuntime` facade methods.
  * @invariant Realm-local identity: the active registry, recycle bin, per-agent message subscriptions, and telemetry are keyed by the canonical `(realmId, agentId)` identity key (`createAgentIdentityKey`), so the same literal id registers independently per Realm (system scope = its own namespace). Bare-id lookups (`getAgent`/`hasAgent`/lifecycle/`getAgentIdentity` without a scope) resolve the unique match across Realms and fail closed (`null`/not-found) when the id is ambiguous — never a wrong-Realm pick; `getAgentIdentity(agentId, scope)`/`listAgentIdentities(scope)` resolve and enumerate realm-exactly. Hydration computes each record's key from `config.realmId` and rejects a duplicate `(realmId, agentId)` with `ERR_SNAPSHOT_INVALID` before any state mutation. Wiring: the facade hands canonical keys to the bus lifecycle calls, the mail subscription, the trigger-queue enqueue paths (user turns, mail wakes, schedule expiry, invocation dispatch), and the scheduler/invocation teardown (`resolveAgentIdentityKey`), forwards a trusted `callerKey` through the scheduler and invocation caller contexts, and the turn engine binds `callerKey` plus the VFS-resolved private workspace on the tool execution context — so bus mailboxes, trigger partitions, scheduler owners, invocation records, VFS workspaces, and tool-boundary resolution all address the exact registration. Kill/purge pass the canonical key to `teardownForAgent`/`cancelPendingInvocationsForAgent`, and the runtime-constructed substrates receive the identity port at construction.
  * @invariant Realm-vocabulary agent ids: `launchAgent`/`spawnAgent` refuse any id carrying internal realm vocabulary (`realm:`/`system:` canonical-key segments, the seeded `realm_generic` registry id) with a uniform generic `PERMISSION_DENIED` for every caller — the denial never repeats the claim (no realm-existence oracle) — and the lifecycle descriptor projection omits the `workspace` label when the only value available would echo that vocabulary.
@@ -70,7 +71,8 @@ import { ensureDirectorAgent } from '../domain/directorAgent/index.ts';
 
 import type { CredentialResolverPort } from '../credentialVault/index.ts';
 import type { ModelPresetSourcePort, PresetChangeEvent } from '../presetCatalog/index.ts';
-import type { RealmPublishingPort } from '../toolDefinitions/index.ts';
+import type { ExtensionToolProviderPort, RealmPublishingPort } from '../toolDefinitions/index.ts';
+import type { ExtensionExecutionPort } from '../tools/extensionTools/index.ts';
 import type { MessageEnvelope, WaitForMailOptions, WaitForMailResult } from '../messagingBus/index.ts';
 import type {
   InvocationCallerContext,
@@ -654,6 +656,25 @@ export interface AgentRuntimeOptions {
    * context.
    */
   realmPublishingPort?: RealmPublishingPort | null;
+  /**
+   * Optional extension provider-registry port (extension wave) handed to the
+   * turn execution engine and seeded into every tool dispatcher context: a call
+   * name the port resolves is authorized only by exact membership on the
+   * caller's frozen `AuthorityDescriptor.extensions` set and executed through
+   * the synthesized descriptor. The composition root (sandbox store) implements
+   * it over the live connection catalogs. Trusted bound construction; never
+   * replaceable from per-call context.
+   */
+  extensionToolProvider?: ExtensionToolProviderPort | null;
+  /**
+   * Optional extension execution port (extension wave) handed to the turn
+   * execution engine and seeded into every tool dispatcher context under the
+   * pinned `extensionExecutionPort` key; synthesized extension tool handlers
+   * delegate the live server call to it. The composition root (sandbox store)
+   * implements it over the live MCP sessions. Trusted bound construction; never
+   * replaceable from per-call context.
+   */
+  extensionExecutionPort?: ExtensionExecutionPort | null;
 }
 
 /**
@@ -1357,6 +1378,8 @@ export class AgentRuntime {
    * descriptor handlers read it from the trusted dispatcher context.
    */
   #realmPublishingPort: RealmPublishingPort | null = null;
+  #extensionToolProvider: ExtensionToolProviderPort | null = null;
+  #extensionExecutionPort: ExtensionExecutionPort | null = null;
 
   /** Optional read-only credential resolver forwarded to agent provisioning. */
   #credentialResolver: CredentialResolverPort | null = null;
@@ -1444,7 +1467,9 @@ export class AgentRuntime {
     autoBootstrapDirector = false,
     credentialResolver = null,
     presetSource = null,
-    realmPublishingPort = null
+    realmPublishingPort = null,
+    extensionToolProvider = null,
+    extensionExecutionPort = null
   }: AgentRuntimeOptions = {}) {
     this.#status = RUNTIME_STATUS.INITIALIZING;
     this.#startTime = Date.now();
@@ -1497,6 +1522,8 @@ export class AgentRuntime {
     this.#credentialResolver = credentialResolver || null;
     this.#presetSource = presetSource || null;
     this.#realmPublishingPort = realmPublishingPort || null;
+    this.#extensionToolProvider = extensionToolProvider || null;
+    this.#extensionExecutionPort = extensionExecutionPort || null;
 
     this.#agents = new Map();
     this.#recycleBin = new Map();
@@ -1684,6 +1711,8 @@ export class AgentRuntime {
       triggerQueue: this.#triggerQueue,
       customTools: this.#customTools,
       realmPublishingPort: this.#realmPublishingPort,
+      extensionToolProvider: this.#extensionToolProvider,
+      extensionExecutionPort: this.#extensionExecutionPort,
       mailboxAutonomy: this.#mailboxAutonomy,
       telemetryTracker: this.#telemetryTracker,
       historyManager: this.#historyManager

@@ -15,6 +15,7 @@
   - `../domain/directorAgent/index.ts`
   - `type-only ../credentialVault/index.ts`
   - `type-only ../presetCatalog/index.ts`
+  - `type-only ../tools/extensionTools/index.ts`
 - **Must not import (`@mustNotImport`):**
   - _(none tagged)_
 
@@ -303,6 +304,10 @@ export interface AgentRuntimeOptions {
     // Warning: (ae-forgotten-export) The symbol "CredentialResolverPort" needs to be exported by the entry point index.d.ts
     credentialResolver?: CredentialResolverPort | null;
     customTools?: Record<string, unknown> | null;
+    // Warning: (ae-forgotten-export) The symbol "ExtensionExecutionPort" needs to be exported by the entry point index.d.ts
+    extensionExecutionPort?: ExtensionExecutionPort | null;
+    // Warning: (ae-forgotten-export) The symbol "ExtensionToolProviderPort" needs to be exported by the entry point index.d.ts
+    extensionToolProvider?: ExtensionToolProviderPort | null;
     invocationEngine?: InvocationEngine | null;
     mailboxAutonomy?: boolean | null;
     messagingBus?: MessagingBus | null;
@@ -1107,6 +1112,8 @@ const runtime = createAgentRuntime({
 - **`autoBootstrapDirector`** — If true, automatically provisions the Director meta-agent during initialization
 - **`credentialResolver`** — Optional read-only credential resolver (MOD-16) handed to every agent this runtime provisions. When absent, provider construction proceeds with no credentials — there is no singleton vault fallback.
 - **`customTools`** — Optional registry of operator/host-registered custom tool handlers, forwarded unchanged to the turn execution engine. Host-only contract (A0-5, ticket 0443865): custom tools are operator/host-registered, never model-registered — provider function/JSON input cannot add entries, and Realms never register custom tools (the registry is operator-global, shared by every agent this runtime provisions). Each custom-handler invocation is authorized by the turn execution engine against the caller's frozen `AuthorityDescriptor` (wildcard `'*'` or `'@lifecycle:authority'`, or an engine-internal principal); a matching `allowedTools` entry does not authorize custom execution. See `TurnExecutionEngineOptions.customTools` in `runtime/turnExecutionEngine/index.ts`.
+- **`extensionExecutionPort`** — Optional extension execution port (extension wave) handed to the turn execution engine and seeded into every tool dispatcher context under the pinned `extensionExecutionPort` key; synthesized extension tool handlers delegate the live server call to it. The composition root (sandbox store) implements it over the live MCP sessions. Trusted bound construction; never replaceable from per-call context.
+- **`extensionToolProvider`** — Optional extension provider-registry port (extension wave) handed to the turn execution engine and seeded into every tool dispatcher context: a call name the port resolves is authorized only by exact membership on the caller's frozen `AuthorityDescriptor.extensions` set and executed through the synthesized descriptor. The composition root (sandbox store) implements it over the live connection catalogs. Trusted bound construction; never replaceable from per-call context.
 - **`invocationEngine`** — Standalone invocation engine instance (defaults to new InvocationEngine())
 - **`mailboxAutonomy`** — Flag controlling autonomous mailbox dequeue on agent idle (null to inherit default)
 - **`messagingBus`** — Shared messaging bus instance (defaults to new MessagingBus())
@@ -2044,9 +2051,9 @@ Narrow on `success` to obtain the fully-populated delivery projection; the failu
 ## Doc coverage
 
 - Top-level exports: 54
-- Declarations (exports + members): 422
-- Documented declarations: 422 / 422 (100%)
+- Declarations (exports + members): 424
+- Documented declarations: 424 / 424 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
-- Referenced but not exported (`ae-forgotten-export`): `Agent`, `AGENT_STATES`, `AgentModelConfig`, `AgentSecurityContext`, `AgentTelemetry_2`, `CancelScheduleSuccessReceipt`, `CredentialResolverPort`, `EngineModel`, `EngineStreamChunk`, `ExecutionErrorCode`, `ExecutionStatus`, `HistoryToolCall`, `InterruptedTurn`, `InvocationEngine`, `InvocationReceipt`, `InvocationSingleResult`, `LaunchAgentOptions`, `MessagingBus`, `ModelPresetSourcePort`, `OrchestratorActionMode`, `RealmPublishingPort`, `ScheduledTaskProjection`, `ScheduleErrorReceipt`, `SchedulerStatus`, `ScheduleSuccessReceipt`, `TimerCondition`, `ToolCallRecord`, `TriggerPolicy`, `TriggerQueue`, `TurnInputObject`, `UndoTurnSelectionFailure`, `VirtualFS`, `WaitForMailFailureResult`, `WaitForMailSuccessResult`, `WorldClock`
+- Referenced but not exported (`ae-forgotten-export`): `Agent`, `AGENT_STATES`, `AgentModelConfig`, `AgentSecurityContext`, `AgentTelemetry_2`, `CancelScheduleSuccessReceipt`, `CredentialResolverPort`, `EngineModel`, `EngineStreamChunk`, `ExecutionErrorCode`, `ExecutionStatus`, `ExtensionExecutionPort`, `ExtensionToolProviderPort`, `HistoryToolCall`, `InterruptedTurn`, `InvocationEngine`, `InvocationReceipt`, `InvocationSingleResult`, `LaunchAgentOptions`, `MessagingBus`, `ModelPresetSourcePort`, `OrchestratorActionMode`, `RealmPublishingPort`, `ScheduledTaskProjection`, `ScheduleErrorReceipt`, `SchedulerStatus`, `ScheduleSuccessReceipt`, `TimerCondition`, `ToolCallRecord`, `TriggerPolicy`, `TriggerQueue`, `TurnInputObject`, `UndoTurnSelectionFailure`, `VirtualFS`, `WaitForMailFailureResult`, `WaitForMailSuccessResult`, `WorldClock`
 - Unresolved `{@link}` targets (`ae-unresolved-link`): 17 (policy `none`; see `scripts/api_reports.mjs`)

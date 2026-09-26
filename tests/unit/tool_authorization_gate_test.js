@@ -21,6 +21,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createSandboxToolDispatcher } from '../../src/lib/sandbox/toolDefinitions/index.ts';
+import {
+  EXTENSION_EXECUTION_PORT_KEY,
+  synthesizeExtensionToolDescriptor
+} from '../../src/lib/sandbox/tools/extensionTools/index.ts';
 import { TOOL_SYSTEM_ERROR_CODES } from '../../src/lib/sandbox/tools/constants/index.ts';
 import { createAgentRuntime } from '../../src/lib/sandbox/runtime/index.ts';
 
@@ -556,34 +560,83 @@ test('21. an engine-internal descriptor remains authorized and a throwing allow 
 });
 
 // ============================================================================
-// 22-28. Extension wave P2.4: exact-membership extension authorization branch
+// 22-30 + 31-36. Extension wave: exact-membership extension authorization and
+// the bound execution channel
 //
-// The branch is gated on the optional provider-registry port (unbound in P2
-// production, so it stays inert). These tests bind a real frozen port object
-// (the sanctioned DI seam) and exercise the matrix through the real
-// dispatcher: exact grant allows, wildcard/privileged/selector/alias/legacy
-// deny, anonymous/descriptor-less deny, engine-internal denies, per-call
-// substitution is stripped, and descriptor-probe throws fail closed.
+// The branch is gated on the optional provider-registry port. These tests bind
+// a real frozen port object (the sanctioned DI seam) with a real P3.2
+// descriptor and a real frozen execution port and exercise the matrix through
+// the real dispatcher: exact grant executes, wildcard/privileged/selector/
+// alias/legacy deny, anonymous/descriptor-less deny, engine-internal denies,
+// ungranted denies, a name absent from the provider stays TOOL_NOT_FOUND,
+// missing descriptor/port fails EXECUTION_FAILED, per-call substitution is
+// stripped, and descriptor-probe throws fail closed.
 // ============================================================================
 
 const EXTENSION_TOOL = 'similarity';
+const EXTENSION_ID = 'acme-scoring';
+const EXTENSION_SERVER_TOOL = 'text.similarity';
 
 /**
  * Builds a real frozen provider-registry port object (the dispatcher's
- * extension DI seam). The binding carries the sanitized call name and the
- * extension id only — P2 has no descriptor synthesis or execution.
+ * extension DI seam). The binding carries the sanitized call name, the
+ * extension id, and the wire tool name; an optional descriptor factory adds
+ * the `resolveDescriptor` member.
  *
  * @param {Record<string, string>} [tools] - Call name → extension id map.
+ * @param {(callName: string) => object|null} [descriptorFor] - Optional descriptor resolver.
  * @returns {object} Frozen port object.
  */
-function createExtensionProviderPort(tools = { similarity: 'acme-scoring' }) {
+function createExtensionProviderPort(tools = { [EXTENSION_TOOL]: EXTENSION_ID }, descriptorFor = null) {
   return Object.freeze({
     resolveTool: (callName) => {
       const extensionId = tools[callName];
       if (typeof extensionId !== 'string' || !extensionId) return null;
-      return Object.freeze({ callName, extensionId });
+      return Object.freeze({ callName, extensionId, serverToolName: `text.${callName}` });
+    },
+    ...(descriptorFor ? { resolveDescriptor: (callName) => descriptorFor(callName) } : {})
+  });
+}
+
+/**
+ * Builds a real frozen P3.2 descriptor for the extension tool.
+ *
+ * @param {string} [callName] - Sanitized call name.
+ * @returns {object} Frozen descriptor.
+ */
+function createExtensionDescriptor(callName = EXTENSION_TOOL) {
+  const { descriptor } = synthesizeExtensionToolDescriptor({
+    extensionId: EXTENSION_ID,
+    callName,
+    serverToolName: EXTENSION_SERVER_TOOL,
+    description: 'Scores text similarity.',
+    inputSchema: {
+      type: 'object',
+      properties: { topK: { type: 'number', description: 'How many matches.' } }
     }
   });
+  return descriptor;
+}
+
+/**
+ * Builds a frozen execution port recording every request it receives.
+ *
+ * @param {(request: object) => Promise<object>|object} [impl] - Call implementation.
+ * @returns {{ port: object, calls: object[] }} The port and its call log.
+ */
+function createExtensionExecutor(impl = null) {
+  const calls = [];
+  const port = Object.freeze({
+    execute: async (request) => {
+      calls.push(request);
+      if (impl) return impl(request);
+      return {
+        content: [{ type: 'text', text: JSON.stringify(request.args) }],
+        isError: false
+      };
+    }
+  });
+  return { port, calls };
 }
 
 /**
@@ -604,7 +657,7 @@ function createExtensionAuthority(extensions, overrides = {}) {
   });
 }
 
-test('22. an exact extensions entry authorizes the extension call (P2: gate passes, execution unavailable)', async () => {
+test('22. an exact extensions entry passes the gate; without a bound execution channel the call fails closed', async () => {
   const dispatcher = createDispatcher(
     createIdentity({ authority: createExtensionAuthority([EXTENSION_TOOL]) }),
     { extensionToolProvider: createExtensionProviderPort() }
@@ -614,7 +667,7 @@ test('22. an exact extensions entry authorizes the extension call (P2: gate pass
   assert.equal(
     receipt.code,
     TOOL_SYSTEM_ERROR_CODES.EXECUTION_FAILED,
-    'the exact grant passes the authorization gate (P2 has no execution channel)'
+    'the exact grant passes the authorization gate but no descriptor/execution channel is bound'
   );
 });
 
@@ -776,7 +829,7 @@ test('28. the extension branch fails closed on descriptor-probe throws and malfo
   }
 });
 
-test('29. the branch stays inert when no provider registry is bound (P2 production)', async () => {
+test('29. the branch stays inert when no provider registry is bound', async () => {
   const dispatcher = createDispatcher(
     createIdentity({ authority: createExtensionAuthority([EXTENSION_TOOL]) })
   );
@@ -797,4 +850,178 @@ test('30. [P2.4-O1] a throwing identity port yields a typed denial instead of an
   const receipt = await throwingIdentity.executeTool('read_file', { file_path: '/gate.txt' });
   assert.equal(receipt.success, false, 'the dispatcher must shield the identity-port throw');
   assert.equal(receipt.code, TOOL_SYSTEM_ERROR_CODES.PERMISSION_DENIED, 'identity-resolution failure fails closed');
+});
+
+// ============================================================================
+// 31-36. P3.3: bound execution channel (descriptor + execution port)
+// ============================================================================
+
+test('31. an exact grant executes through the real synthesized descriptor and pinned execution port', async () => {
+  const { port: executor, calls } = createExtensionExecutor();
+  const dispatcher = createDispatcher(
+    createIdentity({ authority: createExtensionAuthority([EXTENSION_TOOL]) }),
+    {
+      extensionToolProvider: createExtensionProviderPort(
+        { [EXTENSION_TOOL]: EXTENSION_ID },
+        () => createExtensionDescriptor()
+      ),
+      extensionExecutionPort: executor
+    }
+  );
+
+  const receipt = await dispatcher.executeTool(EXTENSION_TOOL, { topK: 3, extra: 'kept' });
+  assert.equal(receipt.success, true, 'the authorized call must execute through the bound ports');
+  assert.equal(receipt.content, JSON.stringify({ topK: 3, extra: 'kept' }), 'the mapped result is the standard receipt');
+  assert.deepEqual(calls, [{
+    extensionId: EXTENSION_ID,
+    serverToolName: EXTENSION_SERVER_TOOL,
+    args: { topK: 3, extra: 'kept' }
+  }], 'the pass-through sanitizer preserves declared wire keys and forwards unknown keys verbatim');
+});
+
+test('32. a missing descriptor or execution port fails closed with EXECUTION_FAILED', async () => {
+  const authority = createIdentity({ authority: createExtensionAuthority([EXTENSION_TOOL]) });
+
+  // (a) Binding present, no `resolveDescriptor` member, executor bound.
+  const { port: executorA } = createExtensionExecutor();
+  const noResolver = createDispatcher(authority, {
+    extensionToolProvider: createExtensionProviderPort(),
+    extensionExecutionPort: executorA
+  });
+  assert.equal((await noResolver.executeTool(EXTENSION_TOOL, {})).code, TOOL_SYSTEM_ERROR_CODES.EXECUTION_FAILED);
+
+  // (b) `resolveDescriptor` resolves null (refused/disconnected), executor bound.
+  const { port: executorB } = createExtensionExecutor();
+  const nullDescriptor = createDispatcher(authority, {
+    extensionToolProvider: createExtensionProviderPort({ [EXTENSION_TOOL]: EXTENSION_ID }, () => null),
+    extensionExecutionPort: executorB
+  });
+  assert.equal((await nullDescriptor.executeTool(EXTENSION_TOOL, {})).code, TOOL_SYSTEM_ERROR_CODES.EXECUTION_FAILED);
+
+  // (c) `resolveDescriptor` throws, executor bound.
+  const { port: executorC } = createExtensionExecutor();
+  const throwingDescriptor = createDispatcher(authority, {
+    extensionToolProvider: createExtensionProviderPort(
+      { [EXTENSION_TOOL]: EXTENSION_ID },
+      () => { throw new Error('descriptor probe exploded'); }
+    ),
+    extensionExecutionPort: executorC
+  });
+  assert.equal((await throwingDescriptor.executeTool(EXTENSION_TOOL, {})).code, TOOL_SYSTEM_ERROR_CODES.EXECUTION_FAILED);
+
+  // (d) Descriptor present, no execution port bound.
+  const noExecutor = createDispatcher(authority, {
+    extensionToolProvider: createExtensionProviderPort(
+      { [EXTENSION_TOOL]: EXTENSION_ID },
+      () => createExtensionDescriptor()
+    )
+  });
+  const receipt = await noExecutor.executeTool(EXTENSION_TOOL, {});
+  assert.equal(receipt.code, TOOL_SYSTEM_ERROR_CODES.EXECUTION_FAILED, 'a descriptor without a pinned executor never executes');
+  assert.ok(!String(receipt.error).includes('descriptor probe exploded'), 'no raw probe text may surface');
+});
+
+test('33. an ungranted resolved name denies, an unresolvable name stays TOOL_NOT_FOUND', async () => {
+  const { port: executor, calls } = createExtensionExecutor();
+  const provider = createExtensionProviderPort(
+    { [EXTENSION_TOOL]: EXTENSION_ID },
+    () => createExtensionDescriptor()
+  );
+
+  // Resolved + live, but the caller's extensions axis does not hold it.
+  const ungranted = createDispatcher(
+    createIdentity({ authority: createExtensionAuthority(['some_other_tool']) }),
+    { extensionToolProvider: provider, extensionExecutionPort: executor }
+  );
+  const denied = await ungranted.executeTool(EXTENSION_TOOL, {});
+  assert.equal(denied.code, TOOL_SYSTEM_ERROR_CODES.PERMISSION_DENIED, 'exact membership decides authorization');
+  assert.equal(calls.length, 0, 'a denied call must never reach the third-party server');
+
+  // The grant is present but the provider resolves nothing (no live catalog).
+  const missing = createDispatcher(
+    createIdentity({ authority: createExtensionAuthority([EXTENSION_TOOL]) }),
+    { extensionToolProvider: provider, extensionExecutionPort: executor }
+  );
+  const missingReceipt = await missing.executeTool('not_a_live_tool', {});
+  assert.equal(missingReceipt.code, TOOL_SYSTEM_ERROR_CODES.TOOL_NOT_FOUND, 'a catalog-less name is unknown, never an execution attempt');
+  assert.equal(calls.length, 0);
+});
+
+test('34. per-call context can never substitute the extension provider or execution port', async () => {
+  const { port: boundExecutor, calls } = createExtensionExecutor();
+  const dispatcher = createDispatcher(
+    createIdentity({ authority: createExtensionAuthority([EXTENSION_TOOL]) }),
+    {
+      extensionToolProvider: createExtensionProviderPort(
+        { [EXTENSION_TOOL]: EXTENSION_ID },
+        () => createExtensionDescriptor()
+      ),
+      extensionExecutionPort: boundExecutor
+    }
+  );
+  let perCallExecutions = 0;
+  const receipt = await dispatcher.executeTool(EXTENSION_TOOL, { topK: 1 }, {
+    extensionToolProvider: createExtensionProviderPort({ other: 'evil' }, () => null),
+    [EXTENSION_EXECUTION_PORT_KEY]: Object.freeze({
+      execute: async () => {
+        perCallExecutions += 1;
+        return { content: [{ type: 'text', text: 'evil' }], isError: false };
+      }
+    }),
+    extensionTools: [EXTENSION_TOOL]
+  });
+  assert.equal(receipt.success, true);
+  assert.equal(perCallExecutions, 0, 'a per-call execution port is stripped');
+  assert.equal(calls.length, 1, 'the trusted bound executor serves the call');
+  assert.deepEqual(calls[0].args, { topK: 1 }, 'the bound pipeline still sanitizes the call');
+});
+
+test('35. bounded port results reuse the P3.2 mapper: failure receipts and no base64 channels', async () => {
+  const failureExecutor = createExtensionExecutor(() => ({
+    content: [{ type: 'text', text: 'tool reported failure' }],
+    isError: true
+  }));
+  const failure = createDispatcher(
+    createIdentity({ authority: createExtensionAuthority([EXTENSION_TOOL]) }),
+    {
+      extensionToolProvider: createExtensionProviderPort({ [EXTENSION_TOOL]: EXTENSION_ID }, () => createExtensionDescriptor()),
+      extensionExecutionPort: failureExecutor.port
+    }
+  );
+  const failureReceipt = await failure.executeTool(EXTENSION_TOOL, {});
+  assert.equal(failureReceipt.success, false);
+  assert.equal(failureReceipt.code, TOOL_SYSTEM_ERROR_CODES.EXECUTION_FAILED);
+
+  const imageExecutor = createExtensionExecutor(() => ({
+    content: [{ type: 'image', mimeType: 'image/png', data: 'aGVsbG8=' }],
+    isError: false
+  }));
+  const image = createDispatcher(
+    createIdentity({ authority: createExtensionAuthority([EXTENSION_TOOL]) }),
+    {
+      extensionToolProvider: createExtensionProviderPort({ [EXTENSION_TOOL]: EXTENSION_ID }, () => createExtensionDescriptor()),
+      extensionExecutionPort: imageExecutor.port
+    }
+  );
+  const imageReceipt = await image.executeTool(EXTENSION_TOOL, {});
+  assert.equal(imageReceipt.success, true);
+  assert.equal(imageReceipt.content, '[image image/png 5B]', 'binary content is a compact marker');
+  assert.ok(!String(imageReceipt.content).includes('aGVsbG8'), 'base64 data must never reach the receipt');
+});
+
+test('36. a rejecting execution port surfaces as a redacted EXECUTION_FAILED receipt', async () => {
+  const rejecting = createExtensionExecutor(() => {
+    throw new Error('MCP request exceeded its timeout budget');
+  });
+  const dispatcher = createDispatcher(
+    createIdentity({ authority: createExtensionAuthority([EXTENSION_TOOL]) }),
+    {
+      extensionToolProvider: createExtensionProviderPort({ [EXTENSION_TOOL]: EXTENSION_ID }, () => createExtensionDescriptor()),
+      extensionExecutionPort: rejecting.port
+    }
+  );
+  const receipt = await dispatcher.executeTool(EXTENSION_TOOL, { topK: 2 });
+  assert.equal(receipt.success, false, 'a port rejection is shielded, never thrown out of the dispatcher');
+  assert.equal(receipt.code, TOOL_SYSTEM_ERROR_CODES.EXECUTION_FAILED, 'out-of-dictionary port codes normalize to EXECUTION_FAILED');
+  assert.equal(receipt.error, 'MCP request exceeded its timeout budget', 'the canonical typed message is preserved');
 });

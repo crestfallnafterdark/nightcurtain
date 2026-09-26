@@ -11,6 +11,7 @@
  * 
  * @module sandboxStore
  * @mayImport ../runtime/agentLifecycle/index.ts
+ * @mayImport ../tools/extensionTools/index.ts
  * @invariant Total engine encapsulation: `#runtime`, `#virtualFs`, `#messagingBus`, `#worldClock`, `#credentialVault`, and every ticker/subscription handle are `#`-private; no engine instance is exposed as a public property.
  * @invariant Unidirectional reactive data flow: UI state is exposed exclusively through Svelte 5 `$state` fields and derived getters; engine changes enter only through the runtime/bus subscriptions and private `#sync*` helpers.
  * @invariant Automated synchronization: there are no public manual sync methods — runtime events (`#handleRuntimeEvent`) and bus messages (`#handleBusMessage`) automatically propagate state changes into the reactive projections.
@@ -57,9 +58,10 @@
  * @invariant Extension surface: the store is the extension composition root — global install records live in one injected registry persisted additively as `extensions`, realm attachments ride the realm records, install/remove/attach/detach validate and emit `extension_installed`/`extension_removed`/`extension_attached`/`extension_detached` audit events on the runtime stream, `removeExtension` refuses an extension any Realm still attaches (and drops its live session), an `active` attachment for an unknown extension degrades to `unavailable` and returns to `active` once the extension is installed again while the install-only heal never rewrites a `conflict` attachment, and install/attachment records alone never connect, discover a catalog, or grant runtime authorization.
  * @decision Instance provenance is hashes, paths, and resolved tool ids only: a successful template launch records `RealmRecord.instance` with the authored `templateVersion`, the canonical payload digest (`payloadDigest` over the attached payload, when one was attached), per-input hashes over each supplied value's canonical tagged JSON, the placement paths the launch actually wrote, `launchedAt`, the resolved extension tools (`resolvedTools`: sanitized call name → extension id) and the unresolved requested extension ids (`missingExtensions`); raw input values, package content, and credentials never reach the record
  * @decision The store is the extension composition root: it builds one install registry over a `{ load, save }` adapter backed by the sandbox snapshot (`extensions`), seeds it from the persisted field before construction, reconciles hydration through the registry's validated `reconcile` path, and exposes install/remove (global) plus attach/detach (realm) methods that validate against installed records and schedule the existing debounced save; realm attachments are realm-local `RealmRecord.extensions` entries, so realm deletion, rollback, and persistence carry them without a parallel store map
- * @decision `launchRealmFromTemplate` extension approvals mirror the Wave U authority approvals: `extensionApprovals` entries must match a declared template request exactly, absent approval is a decline, only installed-and-approved requests attach (an approval of an uninstalled request attaches nothing and stays disclosed), attachments are written only on a fully successful launch with the operator approval stamp and the realm-level `'all'` selection, and the effective extension grants are forwarded into the launched members' descriptors through the trusted unified-options channel (resolved names only — nothing connects and no third-party execution exists before P3)
+ * @decision `launchRealmFromTemplate` extension approvals mirror the Wave U authority approvals: `extensionApprovals` entries must match a declared template request exactly, absent approval is a decline, only installed-and-approved requests attach (an approval of an uninstalled request attaches nothing and stays disclosed), attachments are written only on a fully successful launch with the operator approval stamp and the realm-level `'all'` selection, and the effective extension grants are forwarded into the launched members' descriptors through the trusted unified-options channel (resolved names plus the actively connected catalogs' call names of the realm's attached, active extensions — execution then flows through the store's provider/execution ports)
  * @invariant Safe-state extension reauthorization (extension wave, P2.4): the store owns the queue — attach/detach and per-agent `extensionTools` selector edits recompute each affected member's effective grant set and apply it through the operator-gated `reauthorizeAgent` at the next safe point: an idle member synchronously at the mutation point, a busy member queued and applied on its next `turn_complete` (never mid-turn). A queued member that terminates is dropped. Selector names that resolve to nothing are dropped fail-closed and warned, never granted.
- * @invariant Extension authority is descriptor-exact: the effective grants computed here feed `AuthorityDescriptor.extensions`; realm attachment or selector state alone never authorizes a call, the wildcard `'*'`/privilege/selectors/aliases never imply an extension entry, and the runtime's dispatcher branch (unbound until P3) authorizes only exact membership.
+ * @invariant Extension authority is descriptor-exact: the effective grants computed here feed `AuthorityDescriptor.extensions`; realm attachment or selector state alone never authorizes a call, the wildcard `'*'`/privilege/selectors/aliases never imply an extension entry, and the runtime's dispatcher extension branch authorizes only exact membership against the frozen synthesized descriptor it resolves from the store's provider port.
+ * @invariant Extension execution composition (extension wave, P3.3): the store builds one frozen provider port (descriptor-backed `resolveTool`/`resolveDescriptor`) and one frozen execution port (`execute` → the extension's live session `callTool`) over the in-memory connection catalogs, passes both into the store-owned runtime's construction, rebuilds the descriptor registry on every connect/disconnect/reconnect/conflict/drift re-arbitration, and clears it with the connection teardown. A catalog-less, conflicted, or refused-projection call name resolves no descriptor and no binding (`TOOL_NOT_FOUND` at the dispatcher); per-call context can never substitute either port.
  * @invariant Extension connections are session-only and operator-initiated: live sessions, discovered catalogs, and arbitration state live in-memory (`#extensionConnections` plus the reactive `extensionConnections` projection), are never persisted (not in install records, not in realm records, not in the snapshot), are dropped at hydration/reset/destroy, and are only ever created by an explicit `connectExtension`/`reconnectExtension` call — never at load, hydration, or launch.
  * @invariant Extension connection approval boundary: when an install record carries an explicit `approvedUrl`, it must parse as an absolute URL and be URL-equal (`href`) to the transport URL; a stale or inconsistent approval is refused with `ERR_STORE_EXTENSION_INVALID_ENDPOINT` before the plaintext gate, any vault read, and any network activity, and a connection only ever dials `transportHint.url`.
  * @invariant Extension connection credential gate: a `credentialId` on a non-`https:` endpoint is refused with `ERR_STORE_EXTENSION_PLAINTEXT_CREDENTIAL` before any vault read or network activity, a bound credential the vault cannot resolve fails closed with `ERR_STORE_EXTENSION_CREDENTIAL_UNRESOLVED` before any network activity, plaintext local servers with no `credentialId` connect unauthenticated, and connection projections/audits/errors carry no credential material.
@@ -154,7 +156,13 @@ import type {
   RealmTemplateInput
 } from '../realmCatalog/index.ts';
 import { resolveToolPreset } from '../toolDefinitions/index.ts';
-import type { RealmPublishingPort } from '../toolDefinitions/index.ts';
+import type { ExtensionToolProviderPort, RealmPublishingPort } from '../toolDefinitions/index.ts';
+import { synthesizeExtensionToolDescriptor } from '../tools/extensionTools/index.ts';
+import type {
+  ExtensionExecutionPort,
+  ExtensionToolDescriptor,
+  ExtensionToolExecutionRequest
+} from '../tools/extensionTools/index.ts';
 import { createDebouncedSave, saveSandboxState, loadSandboxState, clearSandboxState, hasPersistedState, serializeRuntimeEnvironment, restoreRuntimeEnvironment } from '../sandboxPersistence/index.ts';
 import type { DebouncedSaveCoordinator, PersistedImportedRealmTemplate, SandboxPersistedState } from '../sandboxPersistence/index.ts';
 import { downloadSingleFile, downloadFilesSeparately, downloadFolderAsArchive, processUploadedFiles } from '../fsDownloadUtils/index.ts';
@@ -2004,21 +2012,41 @@ function resolveActiveExtensionIds(realm: RealmRecord | null): Set<string> {
 /**
  * Computes a Realm's extension tool universe: the sanitized `resolvedTools` keys
  * whose extension the Realm still attaches as `active`, in declared record
- * order. A detached (or non-active) extension contributes no tool; a record
- * without provenance contributes none.
+ * order, plus the call names of every attached, active extension's live
+ * (conflict-free, sequence-ordered) catalog — so connecting an attached
+ * extension lights up its whole catalog before any declared reference exists.
+ * A detached (or non-active) extension contributes no tool; a record without
+ * provenance contributes none.
  *
  * @param realm - Realm record (null-safe).
+ * @param liveCatalogs - Live catalogs in connection-completion sequence order
+ *   (`{ extensionId, callNames }`), conflict-free only.
  * @returns The resolved-and-attached call names.
  */
-function resolveRealmExtensionToolUniverse(realm: RealmRecord | null): string[] {
+function resolveRealmExtensionToolUniverse(
+  realm: RealmRecord | null,
+  liveCatalogs: readonly { readonly extensionId: string; readonly callNames: readonly string[] }[] = []
+): string[] {
   const resolved = realm && realm.instance ? realm.instance.resolvedTools : undefined;
-  if (!resolved || typeof resolved !== 'object') return [];
   const activeIds = resolveActiveExtensionIds(realm);
   const names: string[] = [];
-  for (const callName of Object.keys(resolved)) {
-    const extensionId = resolved[callName];
-    if (typeof extensionId !== 'string' || !activeIds.has(extensionId)) continue;
-    if (!names.includes(callName)) names.push(callName);
+  const seen = new Set<string>();
+  const push = (name: string): void => {
+    if (name && !seen.has(name)) {
+      seen.add(name);
+      names.push(name);
+    }
+  };
+  if (resolved && typeof resolved === 'object') {
+    for (const callName of Object.keys(resolved)) {
+      const extensionId = resolved[callName];
+      if (typeof extensionId !== 'string' || !activeIds.has(extensionId)) continue;
+      push(callName);
+    }
+  }
+  for (const catalog of liveCatalogs) {
+    if (!catalog || typeof catalog.extensionId !== 'string' || !activeIds.has(catalog.extensionId)) continue;
+    for (const callName of catalog.callNames) push(callName);
   }
   return names;
 }
@@ -3643,10 +3671,64 @@ export class SandboxStore {
   #extensionConnectionSequence = 0;
   /**
    * Active call-name → `{ extensionId, serverToolName }` resolver map
-   * (P3.3 execution seam): rebuilt by every re-arbitration from the
-   * arbitration-active catalogs in sequence order.
+   * (P3.1 resolution projection): rebuilt by every re-arbitration from the
+   * arbitration-active catalogs in sequence order. The P3.3 execution seam is
+   * the descriptor-backed provider port below; this map remains the public
+   * catalog-resolution projection.
    */
   #extensionCallNameResolver: Map<string, { extensionId: string; serverToolName: string }> = new Map();
+  /**
+   * Frozen synthesized descriptor registry (extension wave, P3.3): the active
+   * catalogs' call names → {@link ExtensionToolDescriptor}, rebuilt by every
+   * re-arbitration and cleared with the connection teardown. A refused schema
+   * projection contributes no descriptor, so the tool is unavailable
+   * (`TOOL_NOT_FOUND`) and disclosed by the fidelity summary. Null-prototype
+   * and frozen: lookups can never read through the prototype chain.
+   */
+  #extensionDescriptors: Readonly<Record<string, ExtensionToolDescriptor>> = Object.freeze(Object.create(null));
+  /**
+   * Frozen provider-registry port handed to the store-owned runtime (extension
+   * wave, P3.3): resolves a sanitized call name to its binding (descriptor-
+   * backed, so a catalog-less or refused name resolves nothing) and to the
+   * frozen synthesized descriptor. Trusted bound construction; never exposed
+   * through agent-facing state.
+   */
+  #extensionToolProvider: ExtensionToolProviderPort = Object.freeze({
+    resolveTool: (callName: string) => {
+      const descriptor = this.#lookupExtensionDescriptor(callName);
+      if (!descriptor) return null;
+      return Object.freeze({
+        callName: descriptor.name,
+        extensionId: descriptor.source.extensionId,
+        serverToolName: descriptor.source.serverToolName
+      });
+    },
+    resolveDescriptor: (callName: string) => this.#lookupExtensionDescriptor(callName)
+  });
+  /**
+   * Frozen execution port handed to the store-owned runtime (extension wave,
+   * P3.3): performs one live `tools/call` against the extension's current
+   * session. A missing/disconnected session throws a typed secret-free
+   * `McpClientError` (the dispatcher maps it to a redacted
+   * `EXECUTION_FAILED` receipt); credential handling and transport concerns
+   * stay inside the session, so no secret ever crosses this interface.
+   */
+  #extensionExecutionPort: ExtensionExecutionPort = Object.freeze({
+    execute: async (request: ExtensionToolExecutionRequest) => {
+      const extensionId = request && typeof request.extensionId === 'string' ? request.extensionId : '';
+      const serverToolName = request && typeof request.serverToolName === 'string' ? request.serverToolName : '';
+      const args = request && request.args && typeof request.args === 'object' ? request.args : {};
+      const entry = this.#extensionConnections.get(extensionId);
+      const session = entry && entry.status === 'connected' && entry.session ? entry.session : null;
+      if (!session) {
+        throw new McpClientError(
+          'Extension tool execution is unavailable: the extension session is not connected.',
+          MCP_CLIENT_ERROR_CODES.CANCELLED
+        );
+      }
+      return session.callTool(serverToolName, args);
+    }
+  });
   /**
    * In-memory explicit-disconnect markers (extension wave, P3.1/F1): extension
    * ids whose realm attachment must not be healed back to `active` by the
@@ -3886,12 +3968,19 @@ export class SandboxStore {
     // caller-injected runtime is caller-owned (and constructor-immutable), so
     // no injection is attempted; its agents resolve presets only if the caller
     // wired a source itself.
+    // Extension execution ports (extension wave, P3.3): the store is the
+    // composition root over its live connection catalogs/sessions. Built as
+    // frozen fields before the runtime so the store-owned runtime seeds them
+    // into every tool dispatcher; a caller-injected runtime is caller-owned
+    // and keeps its own wiring.
     this.#runtime = runtime || new AgentRuntime({
       virtualFs: this.#virtualFs,
       messagingBus: this.#messagingBus,
       credentialResolver: this.#credentialResolver,
       presetSource: this.#presetSource,
-      realmPublishingPort: this.#realmPublishingPort
+      realmPublishingPort: this.#realmPublishingPort,
+      extensionToolProvider: this.#extensionToolProvider,
+      extensionExecutionPort: this.#extensionExecutionPort
     });
     this.#identityPort = typeof this.#runtime.createAgentIdentityPort === 'function'
       ? this.#runtime.createAgentIdentityPort()
@@ -4492,19 +4581,24 @@ export class SandboxStore {
       // `grantRealmBypass` operator action can mint it) and drops an explicit
       // `realmId: null` so composition falls through to the Generic default.
       const launchConfig = sanitizeLaunchConfig(config);
-      // Extension wave (P2.4): the effective extension grant set is computed
-      // store-side from the member's Realm universe and its selector, then
-      // forwarded through the runtime's trusted unified-options channel. The
-      // template-launch loop passes the set it already resolved (the realm
-      // record's provenance is not written until that launch completes).
+      // Extension wave: the effective extension grant set is computed
+      // store-side from the member's Realm universe (declared resolved tools
+      // plus the attached extensions' live conflict-free catalogs, in sequence
+      // order) and its selector, then forwarded through the runtime's trusted
+      // unified-options channel. The template-launch loop passes the set it
+      // already resolved (the realm record's provenance is not written until
+      // that launch completes).
       const effectiveExtensionGrants: readonly string[] = extensionGrants !== null
         ? Object.freeze([...extensionGrants])
         : computeEffectiveExtensionGrants(
-            resolveRealmExtensionToolUniverse(this.#realmRegistry.getRealm(
-              typeof launchConfig.realmId === 'string' && launchConfig.realmId.trim()
-                ? launchConfig.realmId.trim()
-                : GENERIC_REALM_ID
-            )),
+            resolveRealmExtensionToolUniverse(
+              this.#realmRegistry.getRealm(
+                typeof launchConfig.realmId === 'string' && launchConfig.realmId.trim()
+                  ? launchConfig.realmId.trim()
+                  : GENERIC_REALM_ID
+              ),
+              this.#listLiveExtensionCatalogCallNames()
+            ),
             normalizeExtensionSelector(launchConfig.extensionTools)
           ).grants;
       const injectedModel: ModelInterface | null = configWithRuntimeBindings.model
@@ -7387,8 +7481,11 @@ export class SandboxStore {
 
   /**
    * Resolves one arbitration-active call name to its owning extension and wire
-   * tool name — the execution seam later phases consume. Call names of
-   * conflicted, errored, or disconnected extensions resolve to `null`.
+   * tool name — the P3.1 catalog-resolution projection consumed by surfaces
+   * that need the live mapping. Execution does not read this map: the
+   * dispatcher consumes the descriptor-backed provider port, so a name whose
+   * descriptor was refused contributes no binding. Call names of conflicted,
+   * errored, or disconnected extensions resolve to `null`.
    *
    * @param callName - Sanitized model-facing call name.
    * @returns Frozen `{ extensionId, serverToolName }`, or `null` when unresolved.
@@ -7766,9 +7863,15 @@ export class SandboxStore {
       }
     }
     this.#rebuildExtensionCallNameResolver();
+    this.#rebuildExtensionDescriptors();
     const affected = new Set<string>(affectedExtensionIds);
     for (const entry of this.#extensionConnections.values()) affected.add(entry.extensionId);
-    this.#syncExtensionAttachmentStatuses(affected);
+    const statusSwept = this.#syncExtensionAttachmentStatuses(affected);
+    // Catalog changes can alter the grant universe without a status
+    // transition (reconnect drift, a fresh connect of an attached extension):
+    // sweep every remaining realm that attaches an affected extension so
+    // members reauthorize at the next safe state.
+    this.#sweepRealmsForExtensionCatalogChange(affected, statusSwept);
     this.#syncExtensionConnections();
   }
 
@@ -7780,15 +7883,7 @@ export class SandboxStore {
    */
   #rebuildExtensionCallNameResolver(): void {
     const resolver = new Map<string, { extensionId: string; serverToolName: string }>();
-    const active = [...this.#extensionConnections.values()]
-      .filter((entry) => entry.status === 'connected' && entry.conflicts.length === 0 && entry.catalog !== null)
-      .sort((a, b) => (
-        a.sequence - b.sequence
-        || (a.extensionId < b.extensionId ? -1 : a.extensionId > b.extensionId ? 1 : 0)
-      ));
-    for (const entry of active) {
-      const catalog = entry.catalog;
-      if (!catalog) continue;
+    for (const { entry, catalog } of this.#listActiveCatalogEntries()) {
       for (const tool of catalog.tools) {
         if (!resolver.has(tool.callName)) {
           resolver.set(tool.callName, Object.freeze({
@@ -7802,6 +7897,119 @@ export class SandboxStore {
   }
 
   /**
+   * Lists the arbitration-active catalogs in connection-completion sequence
+   * order (ties by extension id): `connected`, conflict-free entries only.
+   * The single ordering authority shared by the call-name resolver, the
+   * synthesized descriptor registry, and the catalog-driven grant-universe
+   * expansion.
+   *
+   * @returns Active catalog entries in deterministic order.
+   */
+  #listActiveCatalogEntries(): Array<{ entry: LiveExtensionConnection; catalog: ExtensionCatalog }> {
+    const entries: Array<{ entry: LiveExtensionConnection; catalog: ExtensionCatalog }> = [];
+    for (const entry of this.#extensionConnections.values()) {
+      if (entry.status === 'connected' && entry.conflicts.length === 0 && entry.catalog) {
+        entries.push({ entry, catalog: entry.catalog });
+      }
+    }
+    entries.sort((a, b) => (
+      a.entry.sequence - b.entry.sequence
+      || (a.entry.extensionId < b.entry.extensionId ? -1 : a.entry.extensionId > b.entry.extensionId ? 1 : 0)
+    ));
+    return entries;
+  }
+
+  /**
+   * Projects the active catalogs' call names for the catalog-driven grant
+   * universe (extension wave, P3.3): `{ extensionId, callNames }` in
+   * connection-completion sequence order, server order within a catalog.
+   *
+   * @returns Live catalog call names by extension.
+   */
+  #listLiveExtensionCatalogCallNames(): Array<{ extensionId: string; callNames: readonly string[] }> {
+    return this.#listActiveCatalogEntries().map(({ entry, catalog }) => ({
+      extensionId: entry.extensionId,
+      callNames: catalog.tools.map((tool) => tool.callName)
+    }));
+  }
+
+  /**
+   * Rebuilds the frozen synthesized descriptor registry from the active
+   * catalogs (extension wave, P3.3). One descriptor per call name via
+   * `synthesizeExtensionToolDescriptor`; a refused schema projection yields no
+   * descriptor (the tool stays unavailable and is disclosed by the fidelity
+   * summary), a malformed catalog entry is skipped without poisoning the rest,
+   * and the resulting null-prototype record is frozen.
+   */
+  #rebuildExtensionDescriptors(): void {
+    const registry: Record<string, ExtensionToolDescriptor> = Object.create(null);
+    for (const { entry, catalog } of this.#listActiveCatalogEntries()) {
+      for (const tool of catalog.tools) {
+        if (Object.prototype.hasOwnProperty.call(registry, tool.callName)) continue;
+        try {
+          const { descriptor } = synthesizeExtensionToolDescriptor({
+            extensionId: entry.extensionId,
+            callName: tool.callName,
+            serverToolName: tool.serverToolName,
+            ...(tool.description !== undefined ? { description: tool.description } : {}),
+            ...(tool.inputSchema !== undefined ? { inputSchema: tool.inputSchema } : {})
+          });
+          if (descriptor) registry[tool.callName] = descriptor;
+        } catch {
+          // A malformed/reserved catalog entry contributes no descriptor; the
+          // tool stays unavailable instead of poisoning the registry.
+        }
+      }
+    }
+    this.#extensionDescriptors = Object.freeze(registry);
+  }
+
+  /**
+   * Own-property descriptor lookup over the frozen null-prototype registry.
+   *
+   * @param callName - Sanitized model-facing call name.
+   * @returns The frozen descriptor, or `null` when the name is not executable.
+   */
+  #lookupExtensionDescriptor(callName: string): ExtensionToolDescriptor | null {
+    if (typeof callName !== 'string' || callName === '') return null;
+    if (!Object.prototype.hasOwnProperty.call(this.#extensionDescriptors, callName)) return null;
+    const descriptor = this.#extensionDescriptors[callName];
+    return descriptor || null;
+  }
+
+  /**
+   * Sweeps every realm that attaches any affected extension after a catalog
+   * change (extension wave, P3.3): the catalog-driven grant universe can
+   * change without an attachment-status transition (a reconnect that adds or
+   * removes tools, a fresh connect of an already-attached extension), so the
+   * P2.4 safe-state reauthorize runs for those realms too — idle members
+   * immediately, busy members at their next `turn_complete`.
+   *
+   * @param extensionIds - Extension ids whose catalog state changed.
+   * @param alreadySwept - Realms the attachment-status sync already swept.
+   */
+  #sweepRealmsForExtensionCatalogChange(
+    extensionIds: ReadonlySet<string>,
+    alreadySwept: ReadonlySet<string>
+  ): void {
+    const impacted = new Set<string>();
+    for (const realm of this.#realmRegistry.listRealms()) {
+      if (alreadySwept.has(realm.id)) continue;
+      const attachments = realm.extensions;
+      if (!attachments || attachments.length === 0) continue;
+      for (const attachment of attachments) {
+        if (extensionIds.has(attachment.extensionId)) {
+          impacted.add(realm.id);
+          break;
+        }
+      }
+    }
+    for (const realmId of impacted) {
+      this.#sweepRealmExtensionAuthorizations(realmId);
+    }
+  }
+
+  /**
    * Syncs the realm attachment status of every affected extension to its live
    * connection state — `connected` → `active`, `conflict` → `conflict`,
    * `error`/`disconnected` → `unavailable` — and invokes the P2.4 safe-state
@@ -7809,9 +8017,12 @@ export class SandboxStore {
    * entry never churns attachment state.
    *
    * @param extensionIds - Extension ids whose connection state changed.
+   * @returns The ids of the realms whose attachment status was rewritten (and
+   *   therefore swept) — empty when no attachment changed.
    */
-  #syncExtensionAttachmentStatuses(extensionIds: ReadonlySet<string>): void {
-    if (extensionIds.size === 0) return;
+  #syncExtensionAttachmentStatuses(extensionIds: ReadonlySet<string>): ReadonlySet<string> {
+    const impactedRealms = new Set<string>();
+    if (extensionIds.size === 0) return impactedRealms;
     const desired = new Map<string, 'active' | 'conflict' | 'unavailable'>();
     for (const extensionId of extensionIds) {
       const entry = this.#extensionConnections.get(extensionId);
@@ -7824,9 +8035,8 @@ export class SandboxStore {
         desired.set(extensionId, 'unavailable');
       }
     }
-    if (desired.size === 0) return;
+    if (desired.size === 0) return impactedRealms;
 
-    const impactedRealms = new Set<string>();
     for (const realm of this.#realmRegistry.listRealms()) {
       const attachments = realm.extensions;
       if (!attachments || attachments.length === 0) continue;
@@ -7848,6 +8058,7 @@ export class SandboxStore {
     for (const realmId of impactedRealms) {
       this.#sweepRealmExtensionAuthorizations(realmId);
     }
+    return impactedRealms;
   }
 
   /**
@@ -7955,6 +8166,7 @@ export class SandboxStore {
     const entries = [...this.#extensionConnections.values()];
     this.#extensionConnections.clear();
     this.#extensionCallNameResolver.clear();
+    this.#extensionDescriptors = Object.freeze(Object.create(null));
     this.#extensionDisconnected.clear();
     this.extensionConnections = Object.freeze([]);
     for (const entry of entries) {
@@ -8000,7 +8212,7 @@ export class SandboxStore {
     if (!live) return null;
     const realmId = realmIdOverride ?? resolveMemberRealmId(live) ?? GENERIC_REALM_ID;
     const realm = this.#realmRegistry.getRealm(realmId);
-    const universe = resolveRealmExtensionToolUniverse(realm);
+    const universe = resolveRealmExtensionToolUniverse(realm, this.#listLiveExtensionCatalogCallNames());
     // Selector resolution (fail closed): a *launched* agent carries the
     // selector as an own config property (`'all'` when no explicit list was
     // composed). A hydrated agent whose selector was withheld and could not be

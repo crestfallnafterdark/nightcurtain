@@ -10,6 +10,7 @@
  * @mayImport type-only ../index.ts
  * @mayImport ../../toolDefinitions/index.ts
  * @mayImport ../../tools/descriptors/index.ts
+ * @mayImport type-only ../../tools/extensionTools/index.ts
  * @mayImport ../../realmCatalog/index.ts
  * @mayImport ../../virtualFs/index.ts
  * @mayImport ../agent/index.ts
@@ -20,6 +21,7 @@
  * @invariant Precalls are fail-closed: a raw or canonical name absent from the frozen `PRECALL_ALLOWLIST` yields an `isError` tool receipt coded `FORBIDDEN_PRECALL` and is never executed; terminal-batch queued calls are re-validated through the same gate.
  * @invariant Host-registered custom tool handlers execute only for callers whose frozen `AuthorityDescriptor` grants the wildcard `'*'` or `'@lifecycle:authority'` (or an engine-internal principal projection); a matching `allowedTools` entry never authorizes custom execution, anonymous callers are denied, and custom schemas are hidden from ungranted callers.
  * @invariant Publishing meta-tool schemas (`import_realm_template`/`submit_hydration_package`) are appended to the model-facing schema list only when the agent's frozen `AuthorityDescriptor` explicitly holds the matching `@template:authority`/`@hydration:authority` id; the wildcard `'*'` and `privileged` never expose them, and a descriptor-less or anonymous caller sees no publishing surface.
+ * @invariant Extension-tool exposure mirrors descriptor-exact authorization: the model-facing schema list and the merged `describe_tool` registry gain exactly the extension tools the agent's frozen `AuthorityDescriptor.extensions` axis grants and the bound provider registry currently resolves — never the whole catalog, never an ungranted name, and a missing provider exposes nothing; a granted name whose descriptor has gone (disconnected/conflicted/refused projection) carries no schema and resolves `TOOL_NOT_FOUND` at call time.
  * @invariant Precall execution exceptions are converted to `isError` tool receipts (`PRECALL_EXECUTION_ERROR`) and never halt the turn.
  * @invariant The multi-turn tool loop is bounded by a positive numeric `agent.config.maxTurns`; absent or non-positive values leave it open-ended by design (accepted QUIRK-001, no hard cap). When the budget is exhausted while the model is still dispatching tool calls, the turn throws an `Error` coded `MAX_TURNS_EXCEEDED` instead of resolving `completed`.
  * @invariant `EXECUTION_STATUS` and `EXECUTION_ERROR_CODES` (including `MAX_TURNS_EXCEEDED`) are frozen dictionaries and back every `status` and receipt `code` the engine returns. The concurrency chain always awaits `agent.currentTurnPromise`, so no `AGENT_BUSY` code exists.
@@ -56,15 +58,18 @@ import {
   getSandboxToolsSchema,
   createSandboxToolDispatcher
 } from '../../toolDefinitions/index.ts';
-import { getPublishingToolSchemas } from '../../tools/descriptors/index.ts';
+import { getPublishingToolSchemas, TOOL_REGISTRY } from '../../tools/descriptors/index.ts';
 import { AGENT_AUTHORITIES } from '../../realmCatalog/index.ts';
 import { AGENT_WORKSPACE_VIEW_TOKEN, resolveAgentPrivateWorkspaceKey } from '../../virtualFs/index.ts';
 import type {
   ExecutionContext,
+  ExtensionToolProviderPort,
+  JsonSchemaDraft07,
   OpenAIToolDefinition,
   RealmPublishingPort,
   SandboxToolDispatcher
 } from '../../toolDefinitions/index.ts';
+import type { ExtensionExecutionPort, ExtensionToolDescriptor } from '../../tools/extensionTools/index.ts';
 
 /**
  * Narrow structural views of the runtime, agent, provider, and substrate
@@ -1197,6 +1202,27 @@ export interface TurnExecutionEngineOptions {
   realmPublishingPort?: RealmPublishingPort | null;
 
   /**
+   * Optional extension provider-registry port (extension wave) seeded into
+   * every tool dispatcher context and consulted per turn to append the
+   * caller's **granted** extension tool schemas and merge their descriptors
+   * into the turn's `toolRegistry` for `describe_tool`. The store composition
+   * root implements it over the live connection catalogs; when absent, no
+   * extension schema is exposed and extension calls stay `TOOL_NOT_FOUND`.
+   * Trusted bound construction; never replaceable from per-call context.
+   */
+  extensionToolProvider?: ExtensionToolProviderPort | null;
+
+  /**
+   * Optional extension execution port (extension wave) seeded into every tool
+   * dispatcher context under the pinned `extensionExecutionPort` key;
+   * synthesized extension tool handlers delegate the live server call to it.
+   * The store composition root implements it over the live MCP sessions;
+   * absent, an authorized extension call fails closed with `EXECUTION_FAILED`.
+   * Trusted bound construction; never replaceable from per-call context.
+   */
+  extensionExecutionPort?: ExtensionExecutionPort | null;
+
+  /**
    * Global mailbox autonomy flag controlling identity header injection.
    */
   mailboxAutonomy?: boolean | null;
@@ -1280,6 +1306,8 @@ export class TurnExecutionEngine {
   #triggerQueue: EngineTriggerQueue | null = null;
   #customTools: Record<string, unknown> | null = null;
   #realmPublishingPort: RealmPublishingPort | null = null;
+  #extensionToolProvider: ExtensionToolProviderPort | null = null;
+  #extensionExecutionPort: ExtensionExecutionPort | null = null;
   #mailboxAutonomy: boolean | null = null;
   #telemetryTracker: EngineTelemetryPort | null = null;
 
@@ -1313,6 +1341,8 @@ export class TurnExecutionEngine {
     triggerQueue = null,
     customTools = null,
     realmPublishingPort = null,
+    extensionToolProvider = null,
+    extensionExecutionPort = null,
     mailboxAutonomy = null,
     telemetryTracker = null
   }: TurnExecutionEngineOptions = {}) {
@@ -1323,6 +1353,8 @@ export class TurnExecutionEngine {
     this.#triggerQueue = triggerQueue;
     this.#customTools = customTools;
     this.#realmPublishingPort = realmPublishingPort || null;
+    this.#extensionToolProvider = extensionToolProvider || null;
+    this.#extensionExecutionPort = extensionExecutionPort || null;
     this.#mailboxAutonomy = mailboxAutonomy !== null && mailboxAutonomy !== undefined ? Boolean(mailboxAutonomy) : null;
     this.#emitPort = (emit && typeof emit.emit === 'function')
       ? emit
@@ -1515,6 +1547,81 @@ export class TurnExecutionEngine {
       // the publishing surface.
       return [];
     }
+  }
+
+  /**
+   * Resolves the frozen extension tool descriptors the agent's
+   * `AuthorityDescriptor.extensions` axis grants **and** the bound provider
+   * registry can currently resolve (extension wave).
+   *
+   * Exposure mirrors authorization: the descriptor is the sole source of the
+   * granted names, the resolver is the sole source of live descriptors, and a
+   * name that resolves to nothing (missing provider, refused projection,
+   * disconnected/conflicted catalog, malformed descriptor) yields no schema
+   * and stays `TOOL_NOT_FOUND` at call time. The wildcard `'*'`, `privileged`,
+   * engine-internal principals, and descriptor-less callers expose nothing;
+   * any throw from the descriptor read, the extensions membership probe, or
+   * the provider resolver denies that name (fail closed) without aborting the
+   * turn.
+   *
+   * @param agent - Agent whose extension tool surface is being prepared.
+   * @returns Granted, resolvable extension descriptors (empty when none).
+   * @internal
+   */
+  #grantedExtensionDescriptorsFor(agent: EngineAgent): ExtensionToolDescriptor[] {
+    const provider = this.#extensionToolProvider;
+    if (!provider || typeof provider !== 'object') return [];
+    const resolveDescriptor = provider.resolveDescriptor;
+    if (typeof resolveDescriptor !== 'function') return [];
+    const identity = this.#resolveAgentIdentity(agent);
+    if (!identity || typeof identity !== 'object') return [];
+    try {
+      const authority = readProperty(identity, 'authority');
+      if (!authority || typeof authority !== 'object') return [];
+      if (readProperty(authority, 'kind') !== 'agent') return [];
+      const extensions = readProperty(authority, 'extensions');
+      if (!extensions || typeof (extensions as { has?: unknown }).has !== 'function') return [];
+      const granted = extensions as { has(name: string): unknown };
+      const descriptors: ExtensionToolDescriptor[] = [];
+      const seen = new Set<string>();
+      for (const candidate of extensions as Iterable<unknown>) {
+        if (typeof candidate !== 'string' || !candidate || seen.has(candidate)) continue;
+        seen.add(candidate);
+        if (granted.has(candidate) !== true) continue;
+        try {
+          const descriptor = resolveDescriptor.call(provider, candidate);
+          if (!descriptor || typeof descriptor !== 'object') continue;
+          if (readProperty(descriptor, 'name') !== candidate) continue;
+          descriptors.push(descriptor as ExtensionToolDescriptor);
+        } catch {
+          // Fail closed per name: one unreadable descriptor never hides the rest.
+        }
+      }
+      return descriptors;
+    } catch {
+      // Fail closed: a throwing descriptor accessor or membership probe hides
+      // the whole extension surface for this turn.
+      return [];
+    }
+  }
+
+  /**
+   * Builds the turn's merged tool registry: the frozen baked `TOOL_REGISTRY`
+   * plus the granted extension descriptors under their sanitized call names,
+   * so `describe_tool` documents exactly the extension tools this caller may
+   * invoke. The merged view is a fresh null-prototype frozen record; an
+   * ungranted call name has no entry and stays `TOOL_NOT_FOUND`.
+   *
+   * @param extensionDescriptors - Granted, resolvable extension descriptors.
+   * @returns The frozen merged registry.
+   * @internal
+   */
+  #mergedToolRegistryFor(extensionDescriptors: readonly ExtensionToolDescriptor[]): Readonly<Record<string, unknown>> {
+    const merged: Record<string, unknown> = Object.assign(Object.create(null), TOOL_REGISTRY);
+    for (const descriptor of extensionDescriptors) {
+      merged[descriptor.name] = descriptor;
+    }
+    return Object.freeze(merged);
   }
 
   /**
@@ -2108,6 +2215,25 @@ export class TurnExecutionEngine {
         ? [...getSandboxToolsSchema(agent.config.allowedTools)]
         : [...getSandboxToolsSchema(isPrivileged ? undefined : (agent.config.allowedTools || INNATE_TOOLS))];
 
+      // Extension tools (extension wave): the caller sees the model-facing
+      // schemas of exactly the extension tools its frozen
+      // `AuthorityDescriptor.extensions` axis grants *and* the bound provider
+      // registry can currently resolve. The descriptor schema is the P3.2
+      // synthesized sibling type; the structural cast is deliberate and never
+      // widens `JsonSchemaDraft07`. Nothing else about the baked schema list
+      // changes.
+      const grantedExtensionDescriptors = this.#grantedExtensionDescriptorsFor(agent);
+      for (const extensionDescriptor of grantedExtensionDescriptors) {
+        toolsSchema.push({
+          type: 'function',
+          function: {
+            name: extensionDescriptor.name,
+            description: extensionDescriptor.description,
+            parameters: extensionDescriptor.schema as unknown as JsonSchemaDraft07
+          }
+        } as OpenAIToolDefinition);
+      }
+
       // Host-only custom tool surface (A0-5, ticket 0443865): custom handlers
       // execute before the dispatcher gate, so both their schemas and their
       // invocation are gated on the caller's frozen authority descriptor.
@@ -2185,6 +2311,13 @@ export class TurnExecutionEngine {
         // construction; the dispatcher strips per-call claims for this pinned
         // key, so a tool call can never substitute the host port.
         ...(this.#realmPublishingPort ? { realmPublishingPort: this.#realmPublishingPort } : {}),
+        // Extension wave: the merged registry view (baked descriptors plus the
+        // caller's granted extension descriptors) feeds `describe_tool`; the
+        // provider/execution ports are trusted bound construction (pinned keys)
+        // and route an authorized extension call to the live server.
+        toolRegistry: this.#mergedToolRegistryFor(grantedExtensionDescriptors),
+        ...(this.#extensionToolProvider ? { extensionToolProvider: this.#extensionToolProvider } : {}),
+        ...(this.#extensionExecutionPort ? { extensionExecutionPort: this.#extensionExecutionPort } : {}),
         worldClock: this.#worldClock,
         currentDepth,
         executeTool: (name: string, args: Record<string, unknown>, ctx?: ExecutionContext): Promise<unknown> =>

@@ -15,6 +15,7 @@
   - `type-only ../index.ts`
   - `../../toolDefinitions/index.ts`
   - `../../tools/descriptors/index.ts`
+  - `type-only ../../tools/extensionTools/index.ts`
   - `../../realmCatalog/index.ts`
   - `../../virtualFs/index.ts`
   - `../agent/index.ts`
@@ -32,6 +33,7 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 - Precalls are fail-closed: a raw or canonical name absent from the frozen `PRECALL_ALLOWLIST` yields an `isError` tool receipt coded `FORBIDDEN_PRECALL` and is never executed; terminal-batch queued calls are re-validated through the same gate.
 - Host-registered custom tool handlers execute only for callers whose frozen `AuthorityDescriptor` grants the wildcard `'*'` or `'@lifecycle:authority'` (or an engine-internal principal projection); a matching `allowedTools` entry never authorizes custom execution, anonymous callers are denied, and custom schemas are hidden from ungranted callers.
 - Publishing meta-tool schemas (`import_realm_template`/`submit_hydration_package`) are appended to the model-facing schema list only when the agent's frozen `AuthorityDescriptor` explicitly holds the matching `@template:authority`/`@hydration:authority` id; the wildcard `'*'` and `privileged` never expose them, and a descriptor-less or anonymous caller sees no publishing surface.
+- Extension-tool exposure mirrors descriptor-exact authorization: the model-facing schema list and the merged `describe_tool` registry gain exactly the extension tools the agent's frozen `AuthorityDescriptor.extensions` axis grants and the bound provider registry currently resolves — never the whole catalog, never an ungranted name, and a missing provider exposes nothing; a granted name whose descriptor has gone (disconnected/conflicted/refused projection) carries no schema and resolves `TOOL_NOT_FOUND` at call time.
 - Precall execution exceptions are converted to `isError` tool receipts (`PRECALL_EXECUTION_ERROR`) and never halt the turn.
 - The multi-turn tool loop is bounded by a positive numeric `agent.config.maxTurns`; absent or non-positive values leave it open-ended by design (accepted QUIRK-001, no hard cap). When the budget is exhausted while the model is still dispatching tool calls, the turn throws an `Error` coded `MAX_TURNS_EXCEEDED` instead of resolving `completed`.
 - `EXECUTION_STATUS` and `EXECUTION_ERROR_CODES` (including `MAX_TURNS_EXCEEDED`) are frozen dictionaries and back every `status` and receipt `code` the engine returns. The concurrency chain always awaits `agent.currentTurnPromise`, so no `AGENT_BUSY` code exists.
@@ -124,6 +126,10 @@ export interface TurnExecutionEngineOptions {
     customTools?: Record<string, unknown> | null;
     // Warning: (ae-forgotten-export) The symbol "SubsystemEmitPort" needs to be exported by the entry point index.d.ts
     emit?: SubsystemEmitPort | null;
+    // Warning: (ae-forgotten-export) The symbol "ExtensionExecutionPort" needs to be exported by the entry point index.d.ts
+    extensionExecutionPort?: ExtensionExecutionPort | null;
+    // Warning: (ae-forgotten-export) The symbol "ExtensionToolProviderPort" needs to be exported by the entry point index.d.ts
+    extensionToolProvider?: ExtensionToolProviderPort | null;
     // Warning: (ae-forgotten-export) The symbol "HistoryManager" needs to be exported by the entry point index.d.ts
     historyManager?: HistoryManager | null;
     mailboxAutonomy?: boolean | null;
@@ -427,6 +433,8 @@ const engine = new TurnExecutionEngine({
 
 - **`customTools`** — Optional registry of runtime-level, host-registered custom tools. Host-only contract (A0-5, ticket 0443865): custom tools are operator/host-registered, never model-registered — provider function/JSON input cannot add entries (the spawn sanitizer renames agent-supplied `custom_tools` to an inert alias the composition ignores), and Realms never register custom tools (the registry is operator-global). Handlers receive raw substrate handles and execute before the dispatcher gate, so each invocation is authorized against the caller's frozen `AuthorityDescriptor`: the wildcard `'*'` or `'@lifecycle:authority'` sentinel (or an engine-internal principal) is required, a matching `allowedTools` entry is not sufficient, and anonymous callers are denied. Denied handlers fall through to the normal dispatcher gate.
 - **`emit`** — Injected canonical `SubsystemEmitPort` (declared by the runtime module) for subsystem event broadcasting. Falls back to `runtime.createSubsystemEmitPort()` when omitted or malformed.
+- **`extensionExecutionPort`** — Optional extension execution port (extension wave) seeded into every tool dispatcher context under the pinned `extensionExecutionPort` key; synthesized extension tool handlers delegate the live server call to it. The store composition root implements it over the live MCP sessions; absent, an authorized extension call fails closed with `EXECUTION_FAILED`. Trusted bound construction; never replaceable from per-call context.
+- **`extensionToolProvider`** — Optional extension provider-registry port (extension wave) seeded into every tool dispatcher context and consulted per turn to append the caller's **granted** extension tool schemas and merge their descriptors into the turn's `toolRegistry` for `describe_tool`. The store composition root implements it over the live connection catalogs; when absent, no extension schema is exposed and extension calls stay `TOOL_NOT_FOUND`. Trusted bound construction; never replaceable from per-call context.
 - **`historyManager`** — History manager instance retained from injection. The engine currently performs history hygiene through `formatMessagesWithToolHygiene` and message-ID generation through the imported `generateMessageId`, so this instance is stored but not read.
 - **`mailboxAutonomy`** — Global mailbox autonomy flag controlling identity header injection.
 - **`messagingBus`** — Shared MessagingBus instance for mail intake and inter-agent communication.
@@ -578,9 +586,9 @@ const inputEnvelope: TurnInputObject = {
 ## Doc coverage
 
 - Top-level exports: 14
-- Declarations (exports + members): 71
-- Documented declarations: 71 / 71 (100%)
+- Declarations (exports + members): 73
+- Documented declarations: 73 / 73 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
-- Referenced but not exported (`ae-forgotten-export`): `EngineAgent`, `EngineMessagingBus`, `EngineModel`, `EngineRuntimePort`, `EngineStreamChunk`, `EngineTelemetryPort`, `EngineTriggerQueue`, `HistoryManager`, `RealmPublishingPort`, `SubsystemEmitPort`
+- Referenced but not exported (`ae-forgotten-export`): `EngineAgent`, `EngineMessagingBus`, `EngineModel`, `EngineRuntimePort`, `EngineStreamChunk`, `EngineTelemetryPort`, `EngineTriggerQueue`, `ExtensionExecutionPort`, `ExtensionToolProviderPort`, `HistoryManager`, `RealmPublishingPort`, `SubsystemEmitPort`
 - Unresolved `{@link}` targets (`ae-unresolved-link`): 0 (policy `none`; see `scripts/api_reports.mjs`)

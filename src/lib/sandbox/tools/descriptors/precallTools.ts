@@ -186,7 +186,21 @@ export const describeToolDescriptor = Object.freeze({
     }
 
     const canon = getCanonToolName(params.tool_name);
-    const descriptor = canon ? registry[canon] : null;
+    let descriptor = canon ? registry[canon] : null;
+    // Extension wave (P3.3): sanitized extension call names are deliberately
+    // non-resolvable through the alias map, so the turn's merged registry view
+    // seeds each granted extension descriptor under its exact call name. Fall
+    // back to an own-property lookup so `describe_tool` documents granted
+    // extension tools, while prototype-chain keys and canonical alias lookups
+    // stay out of reach.
+    if (
+      !descriptor
+      && typeof params.tool_name === 'string'
+      && params.tool_name
+      && Object.prototype.hasOwnProperty.call(registry, params.tool_name)
+    ) {
+      descriptor = registry[params.tool_name];
+    }
     if (descriptor && typeof descriptor === 'object') {
       return {
         success: true,

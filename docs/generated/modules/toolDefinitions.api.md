@@ -15,6 +15,7 @@
   - `../tools/constants/index.ts`
   - `../tools/normalizers/index.ts`
   - `../tools/descriptors/index.ts`
+  - `type-only ../tools/extensionTools/index.ts`
   - `type-only ../runtime/index.ts`
 - **Must not import (`@mustNotImport`):**
   - _(none tagged)_
@@ -39,7 +40,7 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 - Per-call `callerContext` is caller data, never authority: the dispatcher strips its `isAdmin`/`isPrivileged`/`privileged` flags, authority-bearing `callerRole`/`role` aliases, `principal`/`authority` objects, and `allowedTools`, deriving privilege and capability only from trusted bound construction options and the injected identity port
 - Descriptor-authoritative capability: when the projection's frozen `AuthorityDescriptor` is present, capability derives from the descriptor alone — a wildcard/explicit/selector grant authorizes, any other outcome denies — and the deprecated legacy channels above apply only to descriptor-less callers
 - Publishing meta tools (`import_realm_template`/`submit_hydration_package`) are explicit-grant-only: they resolve through the separate `PUBLISHING_TOOL_REGISTRY` (never members of `TOOL_REGISTRY` or `ALL_TOOL_DESCRIPTORS`, never emitted by `getSandboxToolsSchema`), and authorization is the exact `@template:authority`/`@hydration:authority` entry on the caller's frozen descriptor — the wildcard `'*'`, `privileged`, and every legacy channel are deliberately insufficient, an engine-internal descriptor stays authorized, and descriptor-less callers deny (INV-9 refinement)
-- Extension tools are exact-membership-only on the separate frozen `AuthorityDescriptor.extensions` axis: the dispatcher's extension branch is gated on an optional provider-registry port (unbound until P3, so the branch is inert in P2), authorize iff `authority.extensions.has(callName)`, with no wildcard/`privileged`/selector/alias/legacy fallback, engine-internal and anonymous/descriptor-less callers denying, and descriptor-probe throws failing closed; the axis is never populated from `allow` and an extension call never falls through to a baked handler or schema
+- Extension tools are exact-membership-only on the separate frozen `AuthorityDescriptor.extensions` axis: the dispatcher's extension branch is gated on an optional provider-registry port (bound at composition), authorize iff `authority.extensions.has(callName)`, with no wildcard/`privileged`/selector/alias/legacy fallback, engine-internal and anonymous/descriptor-less callers denying, and descriptor-probe throws failing closed; the axis is never populated from `allow` and an extension call never falls through to a baked handler or schema. After authorization, the branch resolves the frozen synthesized descriptor through the provider port's optional `resolveDescriptor` and executes it against the pinned `extensionExecutionPort` context key: a missing descriptor or execution port fails closed with `EXECUTION_FAILED`, an unresolved/catalog-less name stays `TOOL_NOT_FOUND`, and a port rejection propagates to the universal error shield as a redacted `EXECUTION_FAILED` receipt
 - Realm/workspace/tenant scope is never caller-supplied: the scope vocabulary (`workspaceId`/`workspace_id`, `realmId`/`realm_id`, `tenantId`/`tenant_id`, `scope`) is pinned at dispatcher construction and stripped from per-call `callerContext`; a scope claim may only ride trusted bound construction (and, once Realm lands, the trusted identity projection), never a tool call
 - Realm-exact caller resolution and canonical key binding: a construction-bound `realmId` resolves the caller projection for exactly that `(realmId, agentId)` registration and binds its canonical identity `key` as the execution context's `callerKey` (a pinned key — per-call `callerKey`/`caller_key` claims are stripped), so substrate contexts disambiguate the same literal id across Realms; an omitted Realm keeps the unique-match resolution and the bare-id channel
 - The identity subject is pinned to construction: `callerAgentId`/`agentId`/nested `callerContext` on a per-call context never select whose `AgentIdentityProjection`/`AuthorityDescriptor` is consulted. The bound `agentId`/`callerAgentId` is the only subject source, and an anonymous dispatcher has no subject and fails closed; a throwing identity port is shielded as a uniform `PERMISSION_DENIED` denial before any dispatch (never an unshielded throw, never a fallback to legacy channels)
@@ -66,6 +67,8 @@ export interface ExecutionContext {
     readonly callerRole?: string;
     readonly currentDepth?: number;
     readonly executeTool?: (name: string, args: Record<string, unknown>, callerContext?: ExecutionContext) => Promise<unknown>;
+    // Warning: (ae-forgotten-export) The symbol "ExtensionExecutionPort" needs to be exported by the entry point index.d.ts
+    readonly extensionExecutionPort?: ExtensionExecutionPort;
     readonly extensionToolProvider?: ExtensionToolProviderPort;
     readonly historyManager?: unknown;
     // Warning: (ae-forgotten-export) The symbol "AgentIdentityPort" needs to be exported by the entry point index.d.ts
@@ -96,10 +99,13 @@ export interface ExecutionContext {
 export interface ExtensionToolBinding {
     readonly callName: string;
     readonly extensionId: string;
+    readonly serverToolName: string;
 }
 
 // @public
 export interface ExtensionToolProviderPort {
+    // Warning: (ae-forgotten-export) The symbol "ExtensionToolDescriptor" needs to be exported by the entry point index.d.ts
+    resolveDescriptor?(callName: string): ExtensionToolDescriptor | null;
     resolveTool(callName: string): ExtensionToolBinding | null;
 }
 
@@ -389,7 +395,8 @@ const context: ExecutionContext = {
 - **`callerRole`** — Caller role classification (e.g. 'admin', 'director', 'collaborator', 'critic').
 - **`currentDepth`** — Trusted bound turn-recursion depth capability, seeded by the turn execution engine from the invocation options at dispatcher construction and consumed by `invoke_agent` to feed the invocation engine's recursion guard. Trust boundary: pinned from bound construction. A per-call `depth` (or `currentDepth`) value is stripped before dispatch and never reaches a handler (MOD-21 A2, ticket 63026f5).
 - **`executeTool`** — Trusted executor seeded into every descriptor context by the dispatcher factory: the construction-bound `executeTool` when one was injected, otherwise the dispatcher's own re-entrant closure. A per-call `executeTool` value is stripped and never consumed.
-- **`extensionToolProvider`** — Optional extension provider-registry port (extension wave): when a live provider registry is bound (P3), a call name it resolves routes through the extension authorization branch — exact membership on the caller's frozen `AuthorityDescriptor.extensions` set, no wildcard/privileged/ selector/alias/legacy fallback. In P2 no production composition supplies it, so the branch is inert. Trust boundary: pinned from bound construction; a per-call value is stripped and can never substitute the host port.
+- **`extensionExecutionPort`** — Optional extension execution port (extension wave) seeded into every descriptor context under the pinned `extensionExecutionPort` key. The synthesized extension tool handlers read it from their context and delegate the actual server call to it; the dispatcher's extension branch checks it is bound before dispatching. Trust boundary: pinned from bound construction; a per-call value is stripped and can never substitute the host port.
+- **`extensionToolProvider`** — Optional extension provider-registry port (extension wave): when a live provider registry is bound, a call name it resolves routes through the extension authorization branch — exact membership on the caller's frozen `AuthorityDescriptor.extensions` set, no wildcard/privileged/ selector/alias/legacy fallback. Trust boundary: pinned from bound construction; a per-call value is stripped and can never substitute the host port.
 - **`historyManager`** — Injected Layer 0 History & Turn Rollback Manager instance. Opaque to this contract: descriptor handlers narrow the capability they are configured to consume.
 - **`identityPort`** — Narrow agent identity resolver seeded into descriptor contexts and consumed by the dispatcher's privilege gate through its `getAgentIdentity` member. Replaces full `Agent` instance handoffs.
 - **`invocationEngine`** — Injected Layer 0 Synchronous Invocation Engine instance. Opaque to this contract: descriptor handlers narrow the capability they are configured to consume.
@@ -412,23 +419,25 @@ const context: ExecutionContext = {
 
 One resolved provider-tool binding returned by ExtensionToolProviderPort.resolveTool.
 
-P2 scope: the binding is deliberately minimal — the sanitized model-facing call name and the extension id that provides it — because catalogs stay `null` and no descriptor synthesis or execution exists before P3. The dispatcher only needs the binding to route a call into the extension authorization branch; a P2-authorized call fails closed with `EXECUTION_FAILED` (no execution channel is bound), never a silent success.
+The binding carries the sanitized model-facing call name, the extension id that provides the tool, and the wire tool name exactly as the server advertised it. The store's live implementation always supplies the wire name; a malformed binding is refused fail-closed by the dispatcher, so a catalog-less or disconnected name stays `TOOL_NOT_FOUND` and never routes into the extension branch.
 
 #### Members
 
 - **`callName`** — Sanitized model-facing call name; equals the requested canonical name.
 - **`extensionId`** — Extension id that provides the tool (secret-free).
+- **`serverToolName`** — Wire tool name exactly as the server advertised it.
 
 ### `ExtensionToolProviderPort` — interface
 
-Optional provider-registry port consumed by the dispatcher's extension authorization branch (extension wave; P2 lands the branch inert).
+Optional provider-registry port consumed by the dispatcher's extension authorization branch (extension wave).
 
-The port is the sanctioned DI seam for the live provider registry: the composition root supplies it once connections/catalogs exist (P3), and P2 production wires none — so an extension call name is simply unknown and fails `TOOL_NOT_FOUND` exactly as before. When present, a name the port resolves is authorized **only** by exact membership on the caller's frozen `AuthorityDescriptor.extensions` set: the wildcard `'*'`, `privileged`, subagent-management selectors, alias-written entries, and the legacy allowlist channels never authorize an extension call, anonymous and descriptor-less callers deny, engine-internal principals deny, and any throw while probing the descriptor fails closed.
+The port is the sanctioned DI seam for the live provider registry: the composition root supplies it once connections/catalogs exist, so a call name the port resolves routes through the extension execution branch. When absent, an extension call name is simply unknown and fails `TOOL_NOT_FOUND` exactly as before. When present, a name the port resolves is authorized **only** by exact membership on the caller's frozen `AuthorityDescriptor.extensions` set: the wildcard `'*'`, `privileged`, subagent-management selectors, alias-written entries, and the legacy allowlist channels never authorize an extension call, anonymous and descriptor-less callers deny, engine-internal principals deny, and any throw while probing the descriptor fails closed.
 
 The port is pinned construction input: a per-call value is stripped.
 
 #### Members
 
+- **`resolveDescriptor`** — Resolves the frozen synthesized descriptor for one sanitized call name (optional; a missing or non-function member keeps the fail-closed `EXECUTION_FAILED` outcome for an authorized call).
 - **`resolveTool`** — Resolves one sanitized call name against the live provider registry.
 
 ### `getSandboxToolsSchema` — function
@@ -901,9 +910,9 @@ function handleToolError(code: ToolSystemErrorCode, message: string) {
 ## Doc coverage
 
 - Top-level exports: 31
-- Declarations (exports + members): 107
-- Documented declarations: 107 / 107 (100%)
+- Declarations (exports + members): 110
+- Documented declarations: 110 / 110 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
-- Referenced but not exported (`ae-forgotten-export`): `AgentIdentityPort`, `AgentIdentityProjection`, `AgentIdentityScope`, `AgentRuntime`, `BundleFiles`, `LifecyclePort`, `PendingInstancePayload`, `RealmTemplate`
+- Referenced but not exported (`ae-forgotten-export`): `AgentIdentityPort`, `AgentIdentityProjection`, `AgentIdentityScope`, `AgentRuntime`, `BundleFiles`, `ExtensionExecutionPort`, `ExtensionToolDescriptor`, `LifecyclePort`, `PendingInstancePayload`, `RealmTemplate`
 - Unresolved `{@link}` targets (`ae-unresolved-link`): 0 (policy `none`; see `scripts/api_reports.mjs`)
