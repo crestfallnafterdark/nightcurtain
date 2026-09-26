@@ -716,6 +716,7 @@ export const spawnAgentDescriptor = Object.freeze({
   }),
   paramAliasMap: spawnAgentParamAliasMap,
   sanitize: createParamSanitizer(spawnAgentParamAliasMap, {}, { preserveUnknownKeys: true }),
+  denialHint: 'The spawn_agent tool requires the spawn_agent capability; the manager preset grants it (or an explicit authority grant).',
   handler: async (params: ToolParams, context: ExecutionContext) => {
     const lifecyclePort: LifecyclePortView | undefined = context?.lifecyclePort;
     if (!lifecyclePort || typeof lifecyclePort.launchAgent !== 'function') {

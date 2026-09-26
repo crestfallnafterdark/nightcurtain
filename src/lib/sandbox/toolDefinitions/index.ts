@@ -898,6 +898,13 @@ export interface ToolDescriptor {
   readonly sanitize: ParamSanitizerFn;
   /** Delegation handler that routes to the injected capability and returns its receipt. */
   readonly handler: ToolHandlerFn;
+  /**
+   * Optional model-facing remedy appended to this tool's authorization denial
+   * (e.g. which preset/authority grants it). The remedy restates the published
+   * description — it never reveals registry state — so a denied caller learns
+   * the requirement without an existence/authority oracle.
+   */
+  readonly denialHint?: string;
 }
 
 // ============================================================================
@@ -1392,9 +1399,15 @@ export function createSandboxToolDispatcher(options: SandboxDispatcherOptions = 
     }
 
     if (!isAuthorized(authorizationName, executionContext, agentIdentity, publishingDescriptor ? publishingDescriptor.authority : null)) {
+      // A descriptor may publish a remedy restating its description (e.g. the
+      // capability requirement); it never reads registry state, so the denial
+      // gives no existence/authority oracle.
+      const denialHint = typeof (descriptor as { denialHint?: unknown }).denialHint === 'string'
+        ? (descriptor as { denialHint?: string }).denialHint
+        : '';
       return {
         success: false,
-        error: `Agent '${agentId || 'anonymous'}' is not authorized to invoke tool '${authorizationName}'.`,
+        error: `Agent '${agentId || 'anonymous'}' is not authorized to invoke tool '${authorizationName}'.${denialHint ? ` ${denialHint}` : ''}`,
         code: TOOL_SYSTEM_ERROR_CODES.PERMISSION_DENIED
       };
     }

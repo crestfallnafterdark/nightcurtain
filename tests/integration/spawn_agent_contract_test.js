@@ -343,6 +343,25 @@ test('R4b: a duplicate id keeps its own distinguishable code', async () => {
   }
 });
 
+test('R4c: an authorization denial names the capability requirement', async () => {
+  const runtime = new AgentRuntime({ autoBootstrapDirector: false });
+  try {
+    await runtime.ensureDirector();
+    await runtime.launchAgent({ id: 'collab_r4c', realmId: REALM, allowedTools: ['read_file'] });
+    const dispatcher = createSandboxToolDispatcher({ runtime, agentId: 'collab_r4c' });
+    const receipt = await dispatcher.executeTool('spawn_agent', { id: 'denied_child' });
+    assert.equal(receipt.success, false, 'a caller without the capability is denied');
+    assert.equal(receipt.code, 'PERMISSION_DENIED');
+    assert.match(
+      String(receipt.error),
+      /manager preset/i,
+      `the denial names the requirement (no authority oracle): ${receipt.error}`
+    );
+  } finally {
+    runtime.destroy();
+  }
+});
+
 // ============================================================================
 // Prompt policy: non-blocking default, blocking opt-in, child survives
 // ============================================================================
