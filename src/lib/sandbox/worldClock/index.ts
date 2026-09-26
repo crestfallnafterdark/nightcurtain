@@ -1778,6 +1778,28 @@ interface ResolvedCallerScope {
 }
 
 /**
+ * Validates a nominal engine `InternalPrincipal` candidate (I1-V F3, ticket
+ * befbb40): a frozen object carrying the engine brand fields — `kind:
+ * 'internal'` and a non-empty diagnostic `subject`. The minter's private brand
+ * symbol is intentionally not importable here (the runtime composition root
+ * owns it and imports this module), so the gate validates the frozen nominal
+ * shape: plain objects, JSON-shaped copies, arrays, thawed candidates, and
+ * partial shapes are rejected. Only the composition-root reference should
+ * ever satisfy it.
+ *
+ * @param candidate - Candidate reference passed to `bindInternalPrincipal`.
+ * @returns True when the candidate carries the nominal engine-principal shape.
+ */
+function isInternalPrincipalCandidate(candidate: unknown): boolean {
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return false;
+  const branded = candidate as { kind?: unknown; subject?: unknown };
+  return branded.kind === 'internal'
+    && typeof branded.subject === 'string'
+    && branded.subject.length > 0
+    && Object.isFrozen(candidate);
+}
+
+/**
  * Layer 0 Foundation Primitive: WorldClock simulation engine.
  *
  * Manages partitioned in-universe simulation narrative time, event scheduling,
@@ -1927,12 +1949,15 @@ export class WorldClock {
    * `WorldClockOptions.internalPrincipal`. The composition root binds that
    * exact reference here immediately after accepting the injection, mirroring
    * {@link VirtualFS.bindInternalPrincipal}. First bind wins: an instance
-   * constructed with `internalPrincipal` (or already bound) is never rebound,
-   * and a non-object candidate is rejected. The bind validates no further
-   * shape or branding — any accepted object reference becomes the trusted
-   * principal — so only the exact composition-root reference should ever be
-   * passed. Only the exact bound reference authorizes the tenant-administration
-   * snapshot pair; the binding method itself confers no other authority.
+   * constructed with `internalPrincipal` (or already bound) is never rebound.
+   * The candidate must carry the nominal frozen engine-principal brand shape
+   * (`kind: 'internal'` plus a non-empty diagnostic `subject`): plain objects,
+   * JSON-shaped copies, arrays, thawed candidates, and partial shapes are
+   * rejected without consuming the one-time binding (I1-V F3 hardening,
+   * ticket befbb40) — so only the exact composition-root reference should ever
+   * be passed. Only the exact bound reference authorizes the
+   * tenant-administration snapshot pair; the binding method itself confers no
+   * other authority.
    *
    * @param principal - The exact `InternalPrincipal` reference minted by the composition root.
    * @returns True when this call performed the one-time binding.
@@ -1946,7 +1971,7 @@ export class WorldClock {
    */
   bindInternalPrincipal(principal: object): boolean {
     if (this.#internalPrincipal) return false;
-    if (!principal || typeof principal !== 'object') return false;
+    if (!isInternalPrincipalCandidate(principal)) return false;
     this.#internalPrincipal = principal;
     return true;
   }
