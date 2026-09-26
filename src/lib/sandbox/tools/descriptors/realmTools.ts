@@ -1229,6 +1229,13 @@ export function getPublishingToolSchemas(authorities: readonly string[]): Array<
           type: descriptor.schema.type,
           properties: { ...descriptor.schema.properties },
           required: Array.isArray(descriptor.schema.required) ? [...descriptor.schema.required] : [],
+          // Root-level exactly-one-of projection (ticket d872723 F7): the
+          // handlers require exactly one of `manifest`/`manifest_file`, so the
+          // exposed call schema must keep the declared constraint instead of
+          // advertising `required: []` with no alternative form.
+          ...(Array.isArray(descriptor.schema.oneOf)
+            ? { oneOf: descriptor.schema.oneOf.map((clause) => ({ required: [...clause.required] })) }
+            : {}),
           additionalProperties: Boolean(descriptor.schema.additionalProperties) as false
         }
       }

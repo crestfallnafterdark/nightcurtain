@@ -773,6 +773,15 @@ export interface JsonSchemaDraft07 {
   /** Must always be 'object'. */
   readonly type: 'object';
 
+  /**
+   * Optional Draft-07 root-level exactly-one-of constraint over `required`
+   * alternatives (for example `write_file`'s inline-content vs `source_file`
+   * form, or the publishing tools' `manifest` vs `manifest_file` form).
+   * Preserved by every model-facing schema projection so the emitted call
+   * schema agrees with `describe_tool` (ticket d872723 F7).
+   */
+  readonly oneOf?: readonly JsonSchemaOneOfAlternative[];
+
   /** Parameter definitions key-value map. */
   readonly properties: Record<string, {
     /** JSON Schema data type ('string', 'integer', 'number', 'boolean', 'array', 'object', 'null') or a union array of types. */
@@ -798,6 +807,15 @@ export interface JsonSchemaDraft07 {
    * matches the runtime behavior.
    */
   readonly additionalProperties: boolean;
+}
+
+/**
+ * One root-level `oneOf` alternative of a {@link JsonSchemaDraft07} object
+ * schema: the property names this alternative requires.
+ */
+export interface JsonSchemaOneOfAlternative {
+  /** Property names required by this alternative. */
+  readonly required: readonly string[];
 }
 
 /**
@@ -994,6 +1012,30 @@ const PINNED_CONTEXT_KEYS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Projects one frozen descriptor schema onto the model-facing wire schema.
+ *
+ * Root keywords are projected explicitly so every declared constraint reaches
+ * the provider: `type`, a fresh `properties` copy (the zero-LLM-schema-
+ * pollution boundary), a fresh `required` array, the declared root-level
+ * `oneOf` alternatives when present (ticket d872723 F7), and the
+ * `additionalProperties` policy. The input schema is never mutated.
+ *
+ * @param schema - Frozen descriptor schema
+ * @returns A fresh wire-schema object carrying the declared root constraints
+ */
+function projectParameterSchema(schema: JsonSchemaDraft07): JsonSchemaDraft07 {
+  return {
+    type: schema.type,
+    properties: { ...schema.properties },
+    required: Array.isArray(schema.required) ? [...schema.required] : [],
+    ...(Array.isArray(schema.oneOf)
+      ? { oneOf: schema.oneOf.map((clause) => ({ required: [...clause.required] })) }
+      : {}),
+    additionalProperties: Boolean(schema.additionalProperties)
+  };
+}
+
+/**
  * Generates an array of OpenAI/DeepSeek function calling schemas dynamically filtered by
  * an agent's capability preset or allowed tools list.
  *
@@ -1052,12 +1094,7 @@ export function getSandboxToolsSchema(
     function: {
       name: descriptor.name,
       description: descriptor.description,
-      parameters: {
-        type: descriptor.schema.type,
-        properties: { ...descriptor.schema.properties },
-        required: Array.isArray(descriptor.schema.required) ? [...descriptor.schema.required] : [],
-        additionalProperties: Boolean(descriptor.schema.additionalProperties)
-      }
+      parameters: projectParameterSchema(descriptor.schema)
     }
   }));
 }
