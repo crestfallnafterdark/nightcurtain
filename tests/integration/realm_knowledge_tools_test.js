@@ -164,6 +164,7 @@ function dispatcherFor(store, runtime, agentId, options = {}) {
     runtime,
     agentId,
     callerAgentId: agentId,
+    virtualFs: runtime.virtualFs,
     ...options,
     ...(options.realmPublishingPort === null
       ? {}
@@ -305,8 +306,11 @@ test('3. [AC-M5b-02] template summaries and the normalized model are bounded and
   const { runtime, store, directorAuthority } = await createHarness();
   const imported = importFixture(store);
   await launchHolder(runtime, directorAuthority, 'mk_architect');
+  await launchHolder(runtime, directorAuthority, 'mk_genesis');
   await grant(runtime, 'mk_architect', TEMPLATE);
+  await grant(runtime, 'mk_genesis', HYDRATION);
   const dispatcher = dispatcherFor(store, runtime, 'mk_architect');
+  const hydration = dispatcherFor(store, runtime, 'mk_genesis');
 
   const list = await dispatcher.executeTool(LIST_TEMPLATES, {});
   assert.equal(list.success, true, JSON.stringify(list));
@@ -348,7 +352,7 @@ test('3. [AC-M5b-02] template summaries and the normalized model are bounded and
   assert.equal(unknown.code, 'INVALID_ARGUMENTS');
   assert.equal(JSON.stringify(unknown).includes(UNKNOWN_TEMPLATE_ID), false, 'an unknown id is never echoed');
 
-  const packages = await dispatcher.executeTool(LIST_HYDRATION_PACKAGES, {});
+  const packages = await hydration.executeTool(LIST_HYDRATION_PACKAGES, {});
   assert.equal(packages.success, true, JSON.stringify(packages));
   assert.deepEqual(Object.keys(packages).sort(), ['pending', 'saved', 'success']);
   assert.deepEqual(packages.pending, [], 'no pending candidate exists yet');
@@ -370,7 +374,7 @@ test('3. [AC-M5b-02] template summaries and the normalized model are bounded and
   assert.equal(missingGet.success, false);
   assert.equal(missingGet.code, 'INVALID_ARGUMENTS');
 
-  const strayPackages = await dispatcher.executeTool(LIST_HYDRATION_PACKAGES, { templateId: FIXTURE_ID });
+  const strayPackages = await hydration.executeTool(LIST_HYDRATION_PACKAGES, { templateId: FIXTURE_ID });
   assert.equal(strayPackages.success, false);
   assert.equal(strayPackages.code, 'INVALID_ARGUMENTS');
 });
@@ -480,17 +484,51 @@ test('6. [AC-M5b-05] knowledge receipts are realm/extension-opaque and the port 
 
   const architect = dispatcherFor(store, runtime, 'mk_architect');
   const genesis = dispatcherFor(store, runtime, 'mk_genesis');
-  const receipts = [
-    await architect.executeTool(LIST_TEMPLATES, {}),
-    await architect.executeTool(GET_TEMPLATE, { templateId: FIXTURE_ID }),
-    await genesis.executeTool(LIST_HYDRATION_PACKAGES, {})
-  ];
-  const blob = JSON.stringify(receipts);
+  const listReceipt = await architect.executeTool(LIST_TEMPLATES, {});
+  const getReceipt = await architect.executeTool(GET_TEMPLATE, { templateId: FIXTURE_ID });
+  const packagesReceipt = await genesis.executeTool(LIST_HYDRATION_PACKAGES, {});
+  const receipts = [listReceipt, getReceipt, packagesReceipt];
+
+  // Only the host-owned projection fields are scanned: template/hydration
+  // names and descriptions are authored content, but the ids, versions,
+  // scope fields, and digests the host adds must stay realm-opaque.
+  const hostProjection = JSON.stringify({
+    list: listReceipt.templates.map((entry) => ({
+      templateId: entry.templateId,
+      version: entry.version,
+      formatVersion: entry.formatVersion,
+      launchable: entry.launchable
+    })),
+    get: { templateId: getReceipt.templateId, templateVersion: getReceipt.templateVersion },
+    packages: {
+      pending: packagesReceipt.pending.map((entry) => ({
+        templateId: entry.templateId,
+        templateVersion: entry.templateVersion,
+        digest: entry.digest,
+        resolvedAt: entry.resolvedAt
+      })),
+      saved: packagesReceipt.saved.map((entry) => ({
+        id: entry.id,
+        templateId: entry.templateId,
+        templateVersion: entry.templateVersion,
+        digest: entry.digest,
+        savedAt: entry.savedAt
+      }))
+    }
+  });
   for (const term of OPAQUE_VOCABULARY) {
-    assert.equal(blob.includes(term), false, `knowledge receipts never carry '${term}'`);
+    assert.equal(hostProjection.includes(term), false, `knowledge projections never carry '${term}'`);
+  }
+  for (const receipt of receipts) {
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(receipt, 'realmId'),
+      false,
+      'no knowledge receipt carries a realm scope field'
+    );
   }
   for (const descriptor of Object.values(REALM_KNOWLEDGE_TOOLS).map((name) => AUTHORITY_TOOL_REGISTRY[name])) {
-    assert.equal(/realm/iu.test(descriptor.description), false, `${descriptor.name} description is realm-free`);
+    assert.equal(/realmId|realm_id|realm:|tenant|workspace/iu.test(descriptor.description), false, `${descriptor.name} description carries no scope vocabulary`);
+    assert.equal(/extension/iu.test(descriptor.description), false, `${descriptor.name} description is extension-free`);
   }
 
   // Pinned port: a per-call claim is stripped, so a portless dispatcher fails

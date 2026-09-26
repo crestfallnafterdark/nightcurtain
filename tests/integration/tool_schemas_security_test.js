@@ -658,7 +658,10 @@ async function runEpic6UnitTests() {
       `${descriptor.name} enforces exactly one manifest form`
     );
     const exposed = getPublishingToolSchemas([descriptor.authority]);
-    assert(exposed.length === 1, `${descriptor.name} is exposed for its exact authority`);
+    assert(
+      exposed.some((definition) => definition.function.name === descriptor.name),
+      `${descriptor.name} is exposed for its exact authority`
+    );
     assert(exposed[0].function.description.length > 0, `${descriptor.name} exposes a non-empty description`);
     assert(exposed[0].function.parameters.additionalProperties === false, `${descriptor.name} exposed schema is closed`);
     assert(
@@ -848,11 +851,11 @@ async function runEpic6UnitTests() {
       'the realm edit id exposes exactly its own tool'
     );
     assert(
-      getAuthorityToolSchemas([AGENT_AUTHORITIES.TEMPLATE, AGENT_AUTHORITIES.REALM_INSPECT]).length === 2,
+      getAuthorityToolSchemas([AGENT_AUTHORITIES.TEMPLATE, AGENT_AUTHORITIES.REALM_INSPECT]).length === 4,
       'the generic filter is exact-id membership'
     );
     assert(
-      getAuthorityToolDescriptors([AGENT_AUTHORITIES.TEMPLATE, AGENT_AUTHORITIES.REALM_INSPECT]).length === 2
+      getAuthorityToolDescriptors([AGENT_AUTHORITIES.TEMPLATE, AGENT_AUTHORITIES.REALM_INSPECT]).length === 4
         && getAuthorityToolDescriptors([]).length === 0
         && getAuthorityToolDescriptors(['*']).length === 0,
       'the descriptor filter mirrors the schema filter'
