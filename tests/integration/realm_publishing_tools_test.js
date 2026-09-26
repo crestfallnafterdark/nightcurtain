@@ -1859,6 +1859,7 @@ test('27. [M1] generic tool-schema exposure filters by exact id membership only'
 
 test('28. [M1] the store serves every known authority id through the generic grant API', async () => {
   const { runtime, store } = createFixtureStore();
+  importFixture(store, createFixtureTemplate());
   const launched = await launchFixture(store);
   const architect = launched.agents.find((agent) => agent.id === `${FIXTURE_ID}-architect`);
   const identityPort = runtime.createAgentIdentityPort();

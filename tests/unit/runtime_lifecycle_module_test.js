@@ -2992,9 +2992,11 @@ test('25. [M1] launch composes grants only on the engine path; caller claims sta
     },
     principal: TEST_PRINCIPAL
   });
-  assert.ok(engineChild.authority.allow.has(AGENT_AUTHORITIES.AGENT_INSPECT));
-  assert.ok(engineChild.authority.allow.has(AGENT_AUTHORITIES.TEMPLATE), 'legacy aliases map to the same records');
-  assert.ok(engineChild.authority.allow.has(AGENT_AUTHORITIES.HYDRATION));
+  const engineDescriptor = lifecycle.getAuthorityDescriptor('auth_engine');
+  assert.ok(engineDescriptor.allow.has(AGENT_AUTHORITIES.AGENT_INSPECT));
+  assert.ok(engineDescriptor.allow.has(AGENT_AUTHORITIES.TEMPLATE), 'legacy aliases map to the same records');
+  assert.ok(engineDescriptor.allow.has(AGENT_AUTHORITIES.HYDRATION));
+  assert.ok(engineChild, 'the launch resolves the agent');
   assert.deepStrictEqual(
     lifecycle.getAuthorityGrants('auth_engine').map((record) => record.id).sort(),
     [AGENT_AUTHORITIES.TEMPLATE, AGENT_AUTHORITIES.HYDRATION, AGENT_AUTHORITIES.AGENT_INSPECT].sort(),
@@ -3015,6 +3017,6 @@ test('25. [M1] launch composes grants only on the engine path; caller claims sta
     principal: spawner.authority
   });
   assert.deepStrictEqual(lifecycle.getAuthorityGrants('auth_claim'), [], 'non-engine claims compose nothing');
-  assert.strictEqual(claimed.authority.allow.has(AGENT_AUTHORITIES.AGENT_EDIT), false);
+  assert.strictEqual(lifecycle.getAuthorityDescriptor('auth_claim').allow.has(AGENT_AUTHORITIES.AGENT_EDIT), false);
   assert.strictEqual(claimed.config.authorities, undefined, 'the claim never lands on the entity config');
 });

@@ -6574,8 +6574,8 @@ test('29. [M1] generic authority grants: wrappers, snapshot partitions, and hydr
     // Generic wins per id on a tampered mixed snapshot: the same id in both
     // fields restores only the generic list, and malformed refs fail closed.
     const merged = JSON.parse(JSON.stringify(snapshot));
-    merged.authorityGrants[AGENT_AUTHORITIES.TEMPLATE] = ['realm_generic:m1-alpha'];
-    merged.authorityGrants[AGENT_AUTHORITIES.AGENT_INSPECT] = ['realm:ghost:ghost', 42, ''];
+    merged.authorityGrants[AGENT_AUTHORITIES.TEMPLATE] = [alphaKey];
+    merged.authorityGrants[AGENT_AUTHORITIES.AGENT_INSPECT] = ['realm:ghost:ghost', 'realm:other:missing'];
     sharedLocalStorage.setItem('ai_storyteller_sandbox_state_v1', JSON.stringify(merged));
 
     const mergeVfs = new VirtualFS();
@@ -6597,7 +6597,7 @@ test('29. [M1] generic authority grants: wrappers, snapshot partitions, and hydr
         mergedStore.listAuthorityGrants(),
         {
           [AGENT_AUTHORITIES.AGENT_EDIT]: [alphaKey],
-          [AGENT_AUTHORITIES.TEMPLATE]: ['realm_generic:m1-alpha']
+          [AGENT_AUTHORITIES.TEMPLATE]: [alphaKey]
         },
         'the generic field wins per id and unresolvable refs mint nothing'
       );
