@@ -192,9 +192,15 @@ export class AgentRuntime {
     getAgent(agentId: string): Agent | null;
     getAgentCount(): number;
     getAgentTelemetry(agentId: string): AgentTelemetry | null;
+    // Warning: (ae-forgotten-export) The symbol "AuthorityGrantRecord" needs to be exported by the entry point index.d.ts
+    getAuthorityGrants(ref: string): readonly AuthorityGrantRecord[];
     getOperatorPrincipal(): InternalPrincipal;
     getRecycledAgent(agentId: string): Agent | null;
     getRuntimeMetrics(): RuntimeAggregateMetrics;
+    // Warning: (ae-forgotten-export) The symbol "AuthorityScopeRecord" needs to be exported by the entry point index.d.ts
+    grantAuthority(agentId: string, authorityId: string, scope?: AuthorityScopeRecord | null, callerContext?: {
+        principal?: InternalPrincipal | AuthorityDescriptor;
+    } | null): AuthorityDescriptor | null;
     grantHydrationAuthority(agentId: string, callerContext?: {
         principal?: InternalPrincipal | AuthorityDescriptor;
     } | null): AuthorityDescriptor | null;
@@ -223,6 +229,7 @@ export class AgentRuntime {
         principal?: InternalPrincipal | AuthorityDescriptor;
     }) | AgentConfig, arg2?: unknown, arg3?: unknown, arg4?: unknown): Promise<Agent>;
     listAgents(options?: AgentFilterOptions): Agent[];
+    listAuthorityGrants(): Record<string, string[]>;
     listMetaAuthorityGrants(): {
         template: string[];
         hydration: string[];
@@ -240,6 +247,7 @@ export class AgentRuntime {
         privileged?: boolean;
         allowedTools?: string[] | '*' | null;
         extensionTools?: readonly string[] | null;
+        authorities?: unknown;
     }, callerContext?: (CallerContext & {
         principal?: InternalPrincipal | AuthorityDescriptor;
     }) | null): AuthorityDescriptor | null;
@@ -248,6 +256,9 @@ export class AgentRuntime {
     restoreAgent(agentId: string, callerContext?: (CallerContext & {
         principal?: InternalPrincipal | AuthorityDescriptor;
     }) | null): Agent;
+    restoreAuthorityGrants(grants: Record<string, readonly string[]> | null | undefined, callerContext?: {
+        principal?: InternalPrincipal | AuthorityDescriptor;
+    } | null): Record<string, string[]>;
     restoreMetaAuthorityGrants(grants: {
         template?: readonly string[];
         hydration?: readonly string[];
@@ -261,6 +272,9 @@ export class AgentRuntime {
         principal?: InternalPrincipal | AuthorityDescriptor;
     } | null): string[];
     retryAgentTurn(agentId: string): Promise<TurnExecutionResult>;
+    revokeAuthority(agentId: string, authorityId: string, callerContext?: {
+        principal?: InternalPrincipal | AuthorityDescriptor;
+    } | null): AuthorityDescriptor | null;
     revokeHydrationAuthority(agentId: string, callerContext?: {
         principal?: InternalPrincipal | AuthorityDescriptor;
     } | null): AuthorityDescriptor | null;
@@ -1062,12 +1076,14 @@ const snapshot = runtime.exportSnapshot();
 - **`getAgent`** — Retrieves an active agent by its identifier. Returns null if not found. Bare-id resolution is unique-match (Wave I, ticket d57cbc1): the same literal id registered in two Realms is ambiguous and resolves `null` (fail closed — never a wrong-Realm pick). Scoped consumers resolve through the identity port with an explicit scope.
 - **`getAgentCount`** — Returns the total count of active agents currently registered.
 - **`getAgentTelemetry`** — Retrieves token consumption and profiling telemetry for a specific agent. Metrics are created on first read, so an unknown (unambiguous) id yields a zeroed snapshot rather than null; `null` is returned only for a missing/blank id or a Realm-ambiguous bare id. Bare-id resolution is unique-match (Wave I, ticket d57cbc1; fix lane G2): a uniquely registered agent's metrics are read under its canonical identity key (where the turn engine records them), and a bare id registered in two Realms resolves `null` — never the other Realm's counters and never a zeroed snapshot that masks the ambiguity.
+- **`getAuthorityGrants`** — Returns the frozen authority grant records registered for an active agent (M1 pass-through to the lifecycle registry). Host-only surface: registry-side scopes never reach an identity projection, a model-facing schema, a receipt, or an audit payload. Unknown, recycled, purged, or ambiguous refs resolve the empty list.
 - **`getOperatorPrincipal`** — Returns the composition-root operator principal (the opaque `InternalPrincipal` reference owned by this runtime). The host operator acts without any agent: the store/composition root passes this exact reference as `{ principal }` to lifecycle, scheduler, and substrate calls, and their reference-validated gates accept it. The accessor exposes no other capability — a plain object with the same shape is still rejected, and the reference confers only what the receiving subsystem already grants to the engine path (Wave I, ticket c02d0b9).
 - **`getRecycledAgent`** — Retrieves a soft-killed / recycled agent from the recycle bin.
 - **`getRuntimeMetrics`** — Retrieves aggregate system-wide performance and token metrics across all agents. Pending timers are counted through an internal privileged scheduler query; the public `listSchedules()` default-deny for anonymous callers is unaffected.
+- **`grantAuthority`** — Grants one explicit authority id (with an optional registry-side scope) to an active agent (M1 generic grant API). Authority-bearing: only the exact injected `InternalPrincipal` reference (the composition-root operator, also returned by getOperatorPrincipal) may grant; agent principals, caller-asserted flags, and plain lookalike objects are denied with `PERMISSION_DENIED` before any mutation. The id is validated against `AUTHORITY_IDS` and the scope against the id-class vocabulary (`INVALID_CONFIG` otherwise); the grant is recorded in the frozen registry authority inputs as one frozen `{id, scope?}` record and rebuilt into the descriptor's allow set as the exact id. The wildcard `'*'` and `privileged` never imply it, and the scope/selector/extension axes are untouched.
 - **`grantHydrationAuthority`** — Grants the explicit `@hydration:authority` publishing capability to an active agent (Wave U, ticket 2518510). Same authority gate and semantics as grantTemplateAuthority.
 - **`grantRealmBypass`** — Grants the `realmBypass` authority to an active agent (operator action). Authority-bearing: only the exact injected `InternalPrincipal` reference (the composition-root operator, also returned by getOperatorPrincipal) may grant; agent principals, caller-asserted flags, and plain lookalike objects are denied with `PERMISSION_DENIED` before any mutation. The grant is recorded in the frozen registry authority inputs and the rebuilt descriptor, never derived from an id; it spans Realm scoping and descriptor visibility but never moves Realm membership and never widens the capability (`allow`) axis.
-- **`grantTemplateAuthority`** — Grants the explicit `@template:authority` publishing capability to an active agent (Wave U, ticket 2518510). Authority-bearing: only the exact injected `InternalPrincipal` reference (the composition-root operator, also returned by getOperatorPrincipal) may grant; agent principals, caller-asserted flags, and plain lookalike objects are denied with `PERMISSION_DENIED` before any mutation. The grant is recorded in the frozen registry authority inputs and rebuilt into the descriptor's allow set as the exact authority id; the wildcard `'*'` and `privileged` never imply it, and the scope/selector axes are untouched.
+- **`grantTemplateAuthority`** — Grants the explicit `@template:authority` publishing capability to an active agent (Wave U, ticket 2518510; delegates to grantAuthority). Authority-bearing: only the exact injected `InternalPrincipal` reference (the composition-root operator, also returned by getOperatorPrincipal) may grant; agent principals, caller-asserted flags, and plain lookalike objects are denied with `PERMISSION_DENIED` before any mutation. The grant is recorded in the frozen registry authority inputs and rebuilt into the descriptor's allow set as the exact authority id; the wildcard `'*'` and `privileged` never imply it, and the scope/selector axes are untouched.
 - **`hasAgent`** — Returns true if exactly one active agent carries the given identifier (an id registered in two Realms resolves `false` — fail closed); a canonical identity key resolves its exact registration (Wave I, ticket d57cbc1).
 - **`hasRecycledAgent`** — Returns true if exactly one recycled agent carries the given identifier (an id recycled in two Realms resolves `false` — fail closed); a canonical identity key resolves its exact registration (Wave I, ticket d57cbc1).
 - **`importSchedules`** — Hydrates scheduled timers from a persisted snapshot.
@@ -1080,6 +1096,7 @@ const snapshot = runtime.exportSnapshot();
 - **`killAgent`** — Soft-kills an active agent, moving it to the recycle bin and cancelling in-flight work. Authorization runs first: the lifecycle manager validates the caller before any state mutation, so a denied kill leaves the victim's timers, messages, and mailbox untouched. Scheduled-timer teardown runs only after the kill succeeds.
 - **`launchAgent`** — Launches and registers a new agent instance in the runtime. Enforces universal AgentModelConfig resolution and security gating. The unified options object may declare a trusted baked prologue (`history`): the lifecycle composes `[system message, ...declared entries]` with launch-generated ids (INV-7) and no model call — only `initialPrompt` triggers a turn. Legacy positional launches carry no declared history.
 - **`listAgents`** — Returns a defensive list of currently active registered agents. Optionally filtered by criteria. Realm wave A, ticket 3487c56: the additive `realmId` filter is applied verbatim (`null`/empty selects ungrouped agents); the operator/store path passes no scope and stays unscoped.
+- **`listAuthorityGrants`** — Lists the canonical `(realmId, agentId)` identity keys of the active agents currently holding explicit authority grants (M1), grouped per authority id. The listing is registry state, not authority: it lets the composition root persist and restore grants across a snapshot cycle. Canonical keys make the persisted lists realm-exact; they are internal-only and never appear on an agent-facing surface. Ids with no holder are omitted.
 - **`listMetaAuthorityGrants`** — Lists the canonical `(realmId, agentId)` identity keys of the active agents currently holding the Wave U publishing-authority grants (ticket 2518510). The listing is registry state, not authority: it lets the composition root persist and restore grants across a snapshot cycle. Canonical keys make the persisted lists realm-exact; they are internal-only and never appear on an agent-facing surface.
 - **`listRealmBypassGrants`** — Lists the canonical `(realmId, agentId)` identity keys of the active agents currently holding the `realmBypass` grant (Wave I, ticket d57cbc1; fix lane G2). The listing is registry state, not authority: it lets the composition root persist and restore grants across a snapshot cycle. Canonical keys make the persisted list realm-exact, so a scoped grant on a same-id pair survives the round-trip; the key is internal-only and never appears on an agent-facing surface. Unknown and recycled ids never appear (a recycled record carries no grant).
 - **`listRecycledAgents`** — Returns a defensive list of all agents currently residing in the recycle bin.
@@ -1091,9 +1108,11 @@ const snapshot = runtime.exportSnapshot();
 - **`redoAgentTurn`** — Redoes the most recently undone turn bundle for an agent from the redo stack.
 - **`reset`** — Flushes active runtime state: cancels in-flight turns, clears agent registries, unbinds bus subscriptions, and resets underlying primitives.
 - **`restoreAgent`** — Restores an agent from the recycle bin back to active idle status. Authority gate (MOD-21 W8, default-deny): a principal is mandatory; a record whose live-construction descriptor would regain authority (`privileged` or wildcard tools) requires lifecycle authority.
+- **`restoreAuthorityGrants`** — Restores persisted authority grants after snapshot hydration (M1). Engine-only path: the caller must present the exact injected `InternalPrincipal` reference. Each ref is granted through the generic grant core under the operator principal; unknown authority ids are skipped, and ids that are unknown, recycled, or ambiguous resolve no registration and are skipped (fail-closed), so a tampered snapshot id can never mint a grant. Entries are canonical `(realmId, agentId)` identity keys as emitted by listAuthorityGrants, resolving each key to its exact registration. Legacy snapshots that persisted bare ids still hydrate through the unique-match rule; an ambiguous bare id resolves no registration and is skipped, so a legacy grant is never duplicated across two Realms.
 - **`restoreMetaAuthorityGrants`** — Restores persisted Wave U publishing-authority grants after snapshot hydration (ticket 2518510). Engine-only path: the caller must present the exact injected `InternalPrincipal` reference. Each entry is granted through the lifecycle gate; ids that are unknown or not active are skipped (fail-closed), so a tampered snapshot id can never mint a grant. Entries are canonical `(realmId, agentId)` identity keys as emitted by listMetaAuthorityGrants; legacy bare ids still hydrate through the unique-match rule, and an ambiguous bare id is skipped rather than duplicated across Realms.
 - **`restoreRealmBypassGrants`** — Restores persisted `realmBypass` grants after snapshot hydration. Engine-only path: the caller must present the exact injected `InternalPrincipal` reference. Each entry is granted through the lifecycle gate; ids that are unknown or not active are skipped (fail-closed), so a tampered snapshot id can never mint a grant. Entries are canonical `(realmId, agentId)` identity keys as emitted by listRealmBypassGrants, resolving their exact registration. Legacy snapshots that persisted bare ids still hydrate through the unique-match rule; an ambiguous bare id resolves no registration and is skipped, so a legacy grant is never duplicated across two Realms.
 - **`retryAgentTurn`** — Retries the most recent user turn for an agent, re-running execution.
+- **`revokeAuthority`** — Revokes one explicit authority id from an active agent (M1 generic grant API). Revocation removes the whole grant record; the scope is ignored.
 - **`revokeHydrationAuthority`** — Revokes the `@hydration:authority` publishing capability from an active agent (operator action, Wave U ticket 2518510). Same authority gate as grantHydrationAuthority: the exact injected `InternalPrincipal` only.
 - **`revokeRealmBypass`** — Revokes the `realmBypass` authority from an active agent (operator action). Same authority gate as grantRealmBypass: the exact injected `InternalPrincipal` only. Revocation clears the grant in the frozen authority inputs and the rebuilt descriptor; membership and capability are untouched.
 - **`revokeTemplateAuthority`** — Revokes the `@template:authority` publishing capability from an active agent (operator action, Wave U ticket 2518510). Same authority gate as grantTemplateAuthority: the exact injected `InternalPrincipal` only.
@@ -2109,9 +2128,9 @@ Narrow on `success` to obtain the fully-populated delivery projection; the failu
 ## Doc coverage
 
 - Top-level exports: 56
-- Declarations (exports + members): 443
-- Documented declarations: 443 / 443 (100%)
+- Declarations (exports + members): 448
+- Documented declarations: 448 / 448 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
-- Referenced but not exported (`ae-forgotten-export`): `Agent`, `AGENT_STATES`, `AgentModelConfig`, `AgentSecurityContext`, `AgentTelemetry_2`, `CancelScheduleSuccessReceipt`, `CredentialResolverPort`, `EngineModel`, `EngineStreamChunk`, `ExecutionErrorCode`, `ExecutionStatus`, `ExtensionExecutionPort`, `ExtensionToolProviderPort`, `HistoryToolCall`, `InterruptedTurn`, `InvocationEngine`, `InvocationReceipt`, `InvocationSingleResult`, `LaunchAgentOptions`, `MessagingBus`, `ModelPresetSourcePort`, `OrchestratorActionMode`, `RealmPublishingPort`, `ScheduledTaskProjection`, `ScheduleErrorReceipt`, `SchedulerStatus`, `ScheduleSuccessReceipt`, `TimerCondition`, `ToolCallRecord`, `TriggerPolicy`, `TriggerQueue`, `TurnInputObject`, `UndoTurnSelectionFailure`, `VirtualFS`, `WaitForMailFailureResult`, `WaitForMailSuccessResult`, `WorldClock`
-- Unresolved `{@link}` targets (`ae-unresolved-link`): 17 (policy `none`; see `scripts/api_reports.mjs`)
+- Referenced but not exported (`ae-forgotten-export`): `Agent`, `AGENT_STATES`, `AgentModelConfig`, `AgentSecurityContext`, `AgentTelemetry_2`, `AuthorityGrantRecord`, `AuthorityScopeRecord`, `CancelScheduleSuccessReceipt`, `CredentialResolverPort`, `EngineModel`, `EngineStreamChunk`, `ExecutionErrorCode`, `ExecutionStatus`, `ExtensionExecutionPort`, `ExtensionToolProviderPort`, `HistoryToolCall`, `InterruptedTurn`, `InvocationEngine`, `InvocationReceipt`, `InvocationSingleResult`, `LaunchAgentOptions`, `MessagingBus`, `ModelPresetSourcePort`, `OrchestratorActionMode`, `RealmPublishingPort`, `ScheduledTaskProjection`, `ScheduleErrorReceipt`, `SchedulerStatus`, `ScheduleSuccessReceipt`, `TimerCondition`, `ToolCallRecord`, `TriggerPolicy`, `TriggerQueue`, `TurnInputObject`, `UndoTurnSelectionFailure`, `VirtualFS`, `WaitForMailFailureResult`, `WaitForMailSuccessResult`, `WorldClock`
+- Unresolved `{@link}` targets (`ae-unresolved-link`): 20 (policy `none`; see `scripts/api_reports.mjs`)

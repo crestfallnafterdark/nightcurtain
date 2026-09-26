@@ -40,7 +40,7 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 - Legacy snapshots that omit `recycleBin` are accepted and normalized to `[]` during hydration
 - Additive MOD-20 topology fields `activePresetId`/`customPresets` round-trip as plain data: serialization emits them from session metadata, validation drops structurally invalid values instead of failing the snapshot, and legacy snapshots without the fields load byte-compatibly
 - Additive realm-registry field `realms` round-trips as plain data: serialization emits only the canonical record fields from session metadata, validation drops structurally invalid entries instead of failing the snapshot, and legacy snapshots without the field load byte-compatibly with an empty registry
-- Additive authority fields `metaAuthorityGrants`/`templateAuthorityTrust` round-trip as plain data emitted from session metadata only when non-empty (legacy snapshots stay byte-identical) and are strictly validated fail-closed: malformed shapes reject the snapshot, proto-pollution keys are rejected by the recursive scan, and hydration never derives authority from either field — grants are re-applied through the composition root's lifecycle-gated restore (unknown/recycled refs skipped) and trust only auto-approves exact declared matches at a later launch
+- Additive authority fields `metaAuthorityGrants`/`authorityGrants`/`templateAuthorityTrust` round-trip as plain data emitted from session metadata only when non-empty (legacy snapshots stay byte-identical) and are strictly validated fail-closed: malformed shapes reject the snapshot, proto-pollution keys are rejected by the recursive scan, and hydration never derives authority from any field — grants are re-applied through the composition root's lifecycle-gated restore (unknown authority ids and unknown/recycled refs skipped) and trust only auto-approves exact declared matches at a later launch
 - Additive saved hydration-payload library field `savedInstancePayloads` round-trips as plain data emitted from session metadata only when non-empty (legacy snapshots stay byte-identical): malformed, duplicate-id, and oversize entries are dropped individually, the entry list is capped, payloads are never validated as launch contracts at load (only at attach), and hydration replaces the in-memory library with the persisted set (absent field → empty)
 - Persistence does not re-wire runtime timer listeners on restore; the `MessagingBus` timer-listener lifecycle is owned by `AgentRuntime`
 
@@ -105,6 +105,9 @@ export interface HistoryMessageSnapshot {
 
 // @public
 export function loadSandboxState(options?: StorageOptions): SandboxPersistedState | null;
+
+// @public
+export type PersistedAuthorityGrants = Readonly<Record<string, readonly string[]>>;
 
 // @public
 export interface PersistedExtensionInstallRecord {
@@ -271,6 +274,7 @@ export interface SandboxPersistedState {
     readonly activeTab: string;
     readonly agentDraftInputs: Record<string, string>;
     readonly agents: SerializedAgent[];
+    readonly authorityGrants?: PersistedAuthorityGrants;
     readonly customPresets?: PersistedModelPreset[];
     readonly extensions?: PersistedExtensionInstallRecord[];
     readonly importedRealmTemplates?: PersistedImportedRealmTemplate[];
@@ -694,6 +698,10 @@ if (state) {
 }
 ```
 
+### `PersistedAuthorityGrants` — type alias
+
+Structural shape of the additive generic authority-grant field (M1): authority id → canonical `(realmId, agentId)` identity keys. Persistence never imports the runtime vocabulary — ids are validated as non-empty strings and unknown ids are skipped fail-closed by the composition-root restore. The field carries only non-publishing ids (the Wave U pair keeps the legacy `metaAuthorityGrants` field byte-identically) and is emitted only when at least one generic grant is active, so grant-free and legacy sessions keep their persisted bytes unchanged. Hydration re-applies grants exclusively through the composition-root restore; the lists are never derived from template/config content.
+
 ### `PersistedExtensionInstallRecord` — interface
 
 Structural shape of one globally installed extension record carried by the persisted snapshot (extension wave). Deliberately type-local: persistence never imports the `extensionRegistry` module (the registry owns install semantics), so the shape is declared here as plain data. Additive optional snapshot data: absent while nothing is installed (legacy snapshots load byte-compatibly), structurally invalid entries are dropped individually, and hydration reconciles them through the registry's validated load path without ever connecting anything. Records carry ids and hints only, never credentials or secrets.
@@ -1001,6 +1009,7 @@ if (validateSandboxState(state).valid) {
 - **`activeTab`** — Active UI navigation tab identifier.
 - **`agentDraftInputs`** — Uncommitted user draft inputs per agent ID.
 - **`agents`** — Active agent instances serialized through the entity snapshot contract; restore normalizes them to state IDLE.
+- **`authorityGrants`** — Persisted generic authority grant lists (additive optional field, M1): authority id → canonical identity keys, for every non-publishing id. Absent while no generic grant exists (legacy and publishing-only sessions stay byte-identical); malformed values fail validation closed, and hydration never derives authority from this field — it re-applies grants through the composition-root restore only (unknown/recycled refs skipped, unknown ids skipped fail-closed).
 - **`customPresets`** — User-authored MOD-20 custom preset entries (additive optional field). Official seed presets are never stored here; absent or invalid entries are dropped during validation so legacy snapshots load byte-compatibly.
 - **`extensions`** — Globally installed extension records (additive optional field, extension wave). Absent while nothing is installed so legacy snapshots stay byte-identical; invalid entries are dropped during validation so an otherwise valid snapshot still loads. Hydration reconciles the field through the extension registry's validated load path and never connects anything.
 - **`importedRealmTemplates`** — Runtime-imported Realm-template bundles (additive optional field, Wave T ticket 0df20ae). Absent while no import exists so legacy snapshots stay byte-identical; invalid entries are dropped during validation.
@@ -1312,7 +1321,7 @@ Validates the schema and structural integrity of a SandboxPersistedState object.
 
 Validates that a raw object conforms to the `SandboxPersistedState` schema and verifies prototype pollution immunity.
 
-Validation checks: 1. Root shape is a non-null, non-array object. 2. Deep prototype pollution scan of every own key (`__proto__`, `constructor`, `prototype`); the optional Wave U authority fields (`metaAuthorityGrants`, `templateAuthorityTrust`) must additionally arrive as own properties, so a prototype-carried record rejects as pollution (defect cc2b4e8). 3. Required fields: non-empty string `version` whose major component matches `SANDBOX_PERSISTENCE_VERSION`, positive number `timestamp`, and an `agents` array whose entries each carry a non-empty string `id`, an object `config`, an array `history`, and an array-or-null `redoStack`. 4. Optional sections when present: `recycleBin` (same per-entry checks as `agents`), `virtualFs` (workspace-ID and file-map shape), `messagingBus`, `scheduledTimers`, `worldClock`, and `agentDraftInputs`. 5. Additive optional fields when present: MOD-20 presets, realm records, extension install records, imported templates, and the saved hydration-payload library are normalized — invalid entries are dropped individually and the saved-payload list is capped — while the Wave U authority fields (`metaAuthorityGrants`/`templateAuthorityTrust`) fail closed on any malformed shape.
+Validation checks: 1. Root shape is a non-null, non-array object. 2. Deep prototype pollution scan of every own key (`__proto__`, `constructor`, `prototype`); the optional authority fields (`metaAuthorityGrants`, `authorityGrants`, `templateAuthorityTrust`) must additionally arrive as own properties, so a prototype-carried record rejects as pollution (defect cc2b4e8). 3. Required fields: non-empty string `version` whose major component matches `SANDBOX_PERSISTENCE_VERSION`, positive number `timestamp`, and an `agents` array whose entries each carry a non-empty string `id`, an object `config`, an array `history`, and an array-or-null `redoStack`. 4. Optional sections when present: `recycleBin` (same per-entry checks as `agents`), `virtualFs` (workspace-ID and file-map shape), `messagingBus`, `scheduledTimers`, `worldClock`, and `agentDraftInputs`. 5. Additive optional fields when present: MOD-20 presets, realm records, extension install records, imported templates, and the saved hydration-payload library are normalized — invalid entries are dropped individually and the saved-payload list is capped — while the authority fields (`metaAuthorityGrants`/`authorityGrants`/`templateAuthorityTrust`) fail closed on any malformed shape.
 
 Purity: Pure inspection function. Never throws; returns `{ valid: false, error, code }` on invalid input.
 
@@ -1369,9 +1378,9 @@ Serialized file record within a virtual filesystem workspace partition. Mirrors 
 
 ## Doc coverage
 
-- Top-level exports: 49
-- Declarations (exports + members): 260
-- Documented declarations: 260 / 260 (100%)
+- Top-level exports: 50
+- Declarations (exports + members): 262
+- Documented declarations: 262 / 262 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): `AgentRuntime`, `AgentState`, `InterruptedTurn`, `MessageEnvelope`, `MessagingBus`, `PartitionClockSnapshot`, `SchedulerStatus`, `TimerCondition`, `VirtualFS`, `WorldClock`, `WorldEvent`

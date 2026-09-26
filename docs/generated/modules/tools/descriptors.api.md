@@ -21,7 +21,7 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 ## Invariants
 
 - Frozen catalog: every descriptor, schema, alias map, and descriptor array is `Object.freeze`d; `TOOL_REGISTRY` is built once from `ALL_TOOL_DESCRIPTORS` as a null-prototype lookup table and frozen, with no registration or mutation path.
-- Publishing meta tools: `PUBLISHING_TOOL_REGISTRY` carries exactly the two publishing tools (`import_realm_template`, `submit_hydration_package`), each declaring the explicit authority id (`@template:authority`/`@hydration:authority`) its invocation requires; they are not members of `ALL_TOOL_DESCRIPTORS`/`TOOL_REGISTRY`, their schemas are exposed only through `getPublishingToolSchemas()` for callers holding the matching authority, and the wildcard `'*'`/`privileged` never satisfy them.
+- Authority meta tools: `AUTHORITY_TOOL_REGISTRY` carries every explicit-grant-only authority tool (the Wave U publishing pair today; the meta-plane phases append theirs), each declaring the exact authority id (`@template:authority`/`@hydration:authority`/…) its invocation requires; they are not members of `ALL_TOOL_DESCRIPTORS`/`TOOL_REGISTRY`, their schemas are exposed only through `getAuthorityToolSchemas()` for callers holding the matching exact id (with `getAuthorityToolDescriptors()` as the describe-merge source), and the wildcard `'*'`/`privileged` never satisfy them.
 - Fail-closed precalls: `batch_precall` denies any call whose name does not canonically resolve to a `PRECALL_ALLOWLIST` member, so unresolved or non-allowlisted names never reach the executor.
 
 ## Decisions
@@ -29,7 +29,7 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 - Identity-only caller scope: invocation, lifecycle, and scheduler handlers forward only the dispatcher-bound subject id plus the identity-port principal; per-call caller identity, privilege flags, and role aliases are never read
 - `invoke_agent` pins recursion depth from the trusted bound `currentDepth`, never from a per-call `depth` key
 - VFS and messaging sanitizers strip caller-supplied identity and mailbox-routing keys from the fresh sanitized parameter copy
-- Realm publishing meta tools stay outside the canonical taxonomy (36 names) so no wildcard, preset, or `toolProfile` selector can expose or authorize them; descriptors resolve exclusively through `PUBLISHING_TOOL_REGISTRY`, and the dispatcher consults the caller's frozen authority descriptor for the exact explicit authority
+- Realm/authority meta tools stay outside the canonical taxonomy (36 names) so no wildcard, preset, or `toolProfile` selector can expose or authorize them; descriptors resolve exclusively through `AUTHORITY_TOOL_REGISTRY`, and the dispatcher consults the caller's frozen authority descriptor for the exact explicit authority
 
 ## Surface
 
@@ -38,6 +38,26 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 //
 // @public
 export const ALL_TOOL_DESCRIPTORS: readonly ToolDescriptor[];
+
+// @public
+export const AUTHORITY_TOOL_REGISTRY: Readonly<Record<string, AuthorityToolDescriptor>>;
+
+// @public
+export interface AuthorityToolDescriptor {
+    readonly authority: string;
+    readonly description: string;
+    // Warning: (ae-forgotten-export) The symbol "ToolParams_8" needs to be exported by the entry point index.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ExecutionContext" needs to be exported by the entry point index.d.ts
+    readonly handler: (params: ToolParams_8, context: ExecutionContext) => unknown;
+    readonly name: string;
+    readonly paramAliasMap: Readonly<Record<string, string>>;
+    readonly sanitize: (rawArgs?: unknown) => Record<string, unknown>;
+    // Warning: (ae-forgotten-export) The symbol "JsonSchemaDraft07" needs to be exported by the entry point index.d.ts
+    readonly schema: JsonSchemaDraft07;
+}
+
+// @public
+export const authorityToolDescriptors: readonly AuthorityToolDescriptor[];
 
 // @public
 export const batch_precall: Readonly<{
@@ -1147,6 +1167,19 @@ export const getArchiveDescriptor: Readonly<{
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
     handler: (params: ToolParams_2, context: ExecutionContext) => Promise<unknown>;
+}>;
+
+// @public
+export function getAuthorityToolDescriptors(authorities: readonly string[]): readonly AuthorityToolDescriptor[];
+
+// @public
+export function getAuthorityToolSchemas(authorities: readonly string[]): Array<{
+    type: 'function';
+    function: {
+        name: string;
+        description: string;
+        parameters: JsonSchemaDraft07;
+    };
 }>;
 
 // @public
@@ -3082,15 +3115,7 @@ export const precallToolDescriptors: readonly (Readonly<{
 export const PUBLISHING_TOOL_REGISTRY: Readonly<Record<string, PublishingToolDescriptor>>;
 
 // @public
-export interface PublishingToolDescriptor {
-    readonly authority: string;
-    readonly description: string;
-    readonly handler: (params: ToolParams_8, context: ExecutionContext) => unknown;
-    readonly name: string;
-    readonly paramAliasMap: Readonly<Record<string, string>>;
-    readonly sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    readonly schema: JsonSchemaDraft07;
-}
+export type PublishingToolDescriptor = AuthorityToolDescriptor;
 
 // @public
 export const publishingToolDescriptors: readonly PublishingToolDescriptor[];
@@ -6126,10 +6151,7 @@ export const writeJsonDescriptor: Readonly<{
 // <declarations>/tools/descriptors/lifecycleTools.d.ts:925:5 - (ae-forgotten-export) The symbol "UndoTurnPortResult" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/messagingTools.d.ts:823:5 - (ae-forgotten-export) The symbol "ToolParams_2" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/precallTools.d.ts:187:5 - (ae-forgotten-export) The symbol "ToolParams_7" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/precallTools.d.ts:187:5 - (ae-forgotten-export) The symbol "ExecutionContext" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/realmTools.d.ts:278:5 - (ae-forgotten-export) The symbol "ToolParams_8" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/realmTools.d.ts:278:5 - (ae-forgotten-export) The symbol "PublishingFailure" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/realmTools.d.ts:539:9 - (ae-forgotten-export) The symbol "JsonSchemaDraft07" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/realmTools.d.ts:290:5 - (ae-forgotten-export) The symbol "PublishingFailure" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/schedulerTools.d.ts:220:5 - (ae-forgotten-export) The symbol "ToolParams_5" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/vfsTools.d.ts:713:5 - (ae-forgotten-export) The symbol "ToolParams" needs to be exported by the entry point index.d.ts
 ```
@@ -6139,6 +6161,32 @@ export const writeJsonDescriptor: Readonly<{
 ### `ALL_TOOL_DESCRIPTORS` — variable
 
 Array of all 36 Canonical Tool Descriptors
+
+### `AUTHORITY_TOOL_REGISTRY` — variable
+
+Frozen registry of every authority meta tool keyed by canonical name (M1).
+
+The authority registry is deliberately separate from the canonical `TOOL_REGISTRY`: `getSandboxToolsSchema()` never exposes these schemas by wildcard, and the dispatcher resolves them only for a caller whose frozen authority descriptor carries the matching explicit authority id.
+
+### `AuthorityToolDescriptor` — interface
+
+One authority meta-tool descriptor (M1 generalization of the Wave U publishing descriptor): the canonical tool name, the explicit authority id required to invoke it, and the standard descriptor contract.
+
+The `authority` member is the single capability declaration the dispatcher consults; it is never derived from caller data. Every descriptor in `authorityToolDescriptors` is explicit-grant-only: schemas are exposed only to callers whose frozen descriptor holds the exact id (`*`/`privileged` never satisfy it), and the ids stay outside the canonical taxonomy.
+
+#### Members
+
+- **`authority`** — Explicit authority id required to invoke this tool (never wildcard-implied).
+- **`description`** — Full human-readable tool description provided to the LLM.
+- **`handler`** — Delegation handler bound to the injected host publishing port.
+- **`name`** — Canonical tool name (`PUBLISHING_TOOLS` / future authority tool names).
+- **`paramAliasMap`** — Mapping of parameter aliases/hallucinations to canonical parameter names.
+- **`sanitize`** — Table-driven parameter sanitizer instance.
+- **`schema`** — Draft-07 parameter schema definition (closed shape).
+
+### `authorityToolDescriptors` — variable
+
+Every authority meta-tool descriptor (M1): the Wave U publishing pair is the complete set today; the meta-plane phases (M2–M5b) append their descriptors here (`metaTools.ts` or the same file), and every filter below derives its membership from this one array plus each descriptor's `authority` id.
 
 ### `batch_precall` — variable
 
@@ -6264,6 +6312,32 @@ camelCase alias of `getArchiveDescriptor`.
 
 Args: optional `limit` and `offset`. Delegates to `context.messagingBus.getArchive()` and throws when that service is missing.
 
+### `getAuthorityToolDescriptors` — function
+
+Returns the authority tool descriptors whose exact authority id is present in `authorities` (M1): the `describe_tool` merge source, so an exact authority holder can describe exactly the authority tools it may invoke and every other caller never learns they exist.
+
+#### Parameters
+
+- `authorities` — Explicit authority ids the caller holds.
+
+#### Returns
+
+Granted descriptors (empty when none match).
+
+### `getAuthorityToolSchemas` — function
+
+Builds OpenAI function schemas for every authority tool whose exact authority id is present in `authorities` (M1 generic exposure filter).
+
+The exposure discipline mirrors the host-only custom-tool surface: schemas are only ever appended for a caller whose frozen authority descriptor holds the exact authority — the wildcard `'*'` and `privileged` never satisfy it.
+
+#### Parameters
+
+- `authorities` — Explicit authority ids the caller holds.
+
+#### Returns
+
+Fresh OpenAI tool definitions (empty when no authority matches).
+
 ### `getCurrentTime` — variable
 
 camelCase alias of `getCurrentTimeDescriptor`.
@@ -6286,9 +6360,7 @@ Args: optional `mark_as_read`. Prefers `context.messagingBus.getInbox()` and oth
 
 ### `getPublishingToolSchemas` — function
 
-Builds OpenAI function schemas for the publishing tools whose explicit authority id is present in `authorities`.
-
-The exposure discipline mirrors the host-only custom-tool surface: schemas are only ever appended for a caller whose frozen authority descriptor holds the exact authority — the wildcard `'*'` and `privileged` never satisfy it.
+Source-compatible Wave U alias of getAuthorityToolSchemas.
 
 #### Parameters
 
@@ -6466,29 +6538,15 @@ Array of all Precall & Reflection Tool Descriptors
 
 ### `PUBLISHING_TOOL_REGISTRY` — variable
 
-Frozen registry of the publishing meta tools keyed by canonical name.
+Frozen registry of the publishing meta tools keyed by canonical name, retained as the publishing-pair projection of AUTHORITY_TOOL_REGISTRY for source compatibility (Wave U). These tools are deliberately outside `TOOL_REGISTRY`; they route through the same dispatcher pipeline but authorize only against the caller's explicit authority descriptor.
 
-The publishing registry is deliberately separate from the canonical `TOOL_REGISTRY`: `getSandboxToolsSchema()` never exposes these schemas by wildcard, and the dispatcher resolves them only for a caller whose frozen authority descriptor carries the matching explicit authority id.
+### `PublishingToolDescriptor` — type alias
 
-### `PublishingToolDescriptor` — interface
-
-One publishing meta-tool descriptor: the canonical tool name, the explicit authority id required to invoke it, and the standard descriptor contract.
-
-The `authority` member is the single capability declaration the dispatcher consults; it is never derived from caller data.
-
-#### Members
-
-- **`authority`** — Explicit authority id required to invoke this tool (never wildcard-implied).
-- **`description`** — Full human-readable tool description provided to the LLM.
-- **`handler`** — Delegation handler bound to the injected host publishing port.
-- **`name`** — Canonical publishing tool name (`PUBLISHING_TOOLS`).
-- **`paramAliasMap`** — Mapping of parameter aliases/hallucinations to canonical parameter names.
-- **`sanitize`** — Table-driven parameter sanitizer instance.
-- **`schema`** — Draft-07 parameter schema definition (closed shape).
+Backward-compatible alias of AuthorityToolDescriptor (Wave U name). The publishing descriptors are ordinary members of the authority registry.
 
 ### `publishingToolDescriptors` — variable
 
-Array of the two Wave U publishing meta-tool descriptors.
+Array of the two Wave U publishing meta-tool descriptors: the publishing slice of authorityToolDescriptors (derived, never hand-maintained).
 
 ### `query_json` — variable
 
@@ -6778,9 +6836,9 @@ Args: `file_path` (required), exactly one of inline `data` or file-sourced `data
 
 ## Doc coverage
 
-- Top-level exports: 124
-- Declarations (exports + members): 131
-- Documented declarations: 131 / 131 (100%)
+- Top-level exports: 129
+- Declarations (exports + members): 136
+- Documented declarations: 136 / 136 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): `ExecutionContext`, `JsonSchemaDraft07`, `PublicAgentDescriptor`, `PublishingFailure`, `ToolDescriptor`, `ToolParams`, `ToolParams_2`, `ToolParams_3`, `ToolParams_4`, `ToolParams_5`, `ToolParams_6`, `ToolParams_7`, `ToolParams_8`, `UndoTurnPortResult`

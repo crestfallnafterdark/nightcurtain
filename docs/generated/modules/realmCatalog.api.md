@@ -36,6 +36,7 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 - `INV-RESOLVED-GRANTS` — Plans and capability summaries carry tool grants resolved through the canonical tool-constants resolver; classification uses the canonical mutation vocabulary, the aggregate subagent-management selector expands to its canonical tools, and declared legacy requirement ids and extension tool references (`providerId::serverToolName`) resolve to their derived model-facing call names (`deriveToolCallName`: every character outside `[A-Za-z0-9_]` becomes `_`, per character, with no collapsing, case folding, or trimming) in `grants` without a mutation classification, while the declared requirement id or reference remains the authoring identity (and the future `resolvedTools` key); derived call names are unique per template and never collide with a reserved baked/publishing name, and provider resolution and connection belong to the extension wave.
 - `INV-PRIVILEGE-HONEST` — A privileged spec reports effective wildcard capability in its summary, matching the runtime authority derivation, so previews never understate what a launched agent can do.
 - `INV-DECLARED-AUTHORITIES` — `AgentSpec.authorities` declares publishing-grant requests as non-empty unique strings and is inert data — validation accepts identifiers unknown to the host (`KNOWN_AGENT_AUTHORITIES` lists the known set), `templateUnsupportedAuthorities()` reports declared-but-unknown ids for the launch gate to fail closed on, and materialization copies the declarations verbatim onto `RealmLaunchAgentPlan.authorities` (empty when none declared) without ever granting anything: approval and grant application belong exclusively to the launch seam.
+- `INV-AUTHORITY-VOCABULARY` — the runtime vocabulary is the frozen `AUTHORITY_IDS` array (publishing pair + meta-plane ids, declaration order) and the template-declarable set stays exactly the publishing pair `KNOWN_AGENT_AUTHORITIES` (decision A15) — meta ids are operator-minted runtime capabilities, never template-declarable; `AUTHORITY_SCOPE_FIELDS` is the frozen per-id editable field-token vocabulary of a grant scope, and neither scopes nor meta ids ever reach a model-facing surface.
 - `INV-NO-MODEL-LITERALS` — The catalog contains no model identifiers, endpoints, credentials, or provider implementations; model-preset ids pass through verbatim, tool selectors resolve through the canonical preset resolver, and `providers` entries are concrete extension requests with the legacy `toolContract` accepted on the compatibility path — both shape-validated but never resolved or connected.
 
 ## Decisions
@@ -63,6 +64,11 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 export const AGENT_AUTHORITIES: Readonly<{
     readonly TEMPLATE: '@template:authority';
     readonly HYDRATION: '@hydration:authority';
+    readonly AGENT_INSPECT: '@agent:inspect';
+    readonly AGENT_EDIT: '@agent:edit';
+    readonly REALM_INSPECT: '@realm:inspect';
+    readonly REALM_EDIT: '@realm:edit';
+    readonly EXTENSIONS: '@extensions:authority';
 }>;
 
 // @public
@@ -81,6 +87,27 @@ export interface AgentCapabilitySummary {
     unrecognized: readonly string[];
     wildcard: boolean;
     wildcardSource: CapabilityWildcardSource;
+}
+
+// @public
+export const AUTHORITY_IDS: readonly string[];
+
+// @public
+export const AUTHORITY_SCOPE_FIELDS: Readonly<Record<string, readonly string[]>>;
+
+// @public
+export interface AuthorityGrantRecord {
+    readonly id: string;
+    readonly scope?: AuthorityScopeRecord;
+}
+
+// @public
+export interface AuthorityScopeRecord {
+    readonly fields?: readonly string[];
+    readonly ownSpawns?: boolean;
+    readonly realmMembers?: boolean;
+    readonly realms?: readonly string[];
+    readonly targets?: readonly string[];
 }
 
 // @public
@@ -493,7 +520,11 @@ export function validateTemplate(candidate: unknown): RealmTemplate;
 
 ### `AGENT_AUTHORITIES` — variable
 
-Publishing-authority ids a template agent spec may declare (Wave U, lane U-P). `authorities` declares grant *requests*; the mandatory launch review is the approval act, and approval applies ordinary revocable operator grants. The ids are explicit-grant-only capabilities: the wildcard `'*'` and `privileged` never imply them.
+Authority ids the runtime understands (M1 authority-set generalization).
+
+The publishing pair (`@template:authority`/`@hydration:authority`) keeps its original semantics: explicit-grant-only capabilities that the wildcard `'*'` and `privileged` never imply, declarable by templates and approved at launch. The meta-plane ids (`@agent:inspect`, `@agent:edit`, `@realm:inspect`, `@realm:edit`, `@extensions:authority`) join the same runtime vocabulary but are **not** template-declarable in v1 (decision A15): `KNOWN_AGENT_AUTHORITIES` stays exactly the publishing pair, and a template declaring any other id still fails launch closed (`ERR_TEMPLATE_AUTHORITY_UNSUPPORTED`).
+
+`AUTHORITY_IDS` is the single data-driven source for every strip/deny/ validation table, so a future id cannot be forgotten by a hand-maintained list.
 
 ### `AgentCapabilitySummary` — interface
 
@@ -516,6 +547,39 @@ Honest per-agent capability preview produced by `summarizeAgentCapabilitiesV1()`
 - **`unrecognized`** — Declared grants that map to no canonical tool; empty under wildcard.
 - **`wildcard`** — Whether the effective grants include the wildcard `'*'`.
 - **`wildcardSource`** — Origin of wildcard capability when present.
+
+### `AUTHORITY_IDS` — variable
+
+Frozen runtime vocabulary of every known authority id, in declaration order (M1). The publishing pair keeps its `KNOWN_AGENT_AUTHORITIES` template declarability; the meta-plane ids are operator-minted runtime capabilities only (A15). Every strip/deny/validation path iterates this array.
+
+### `AUTHORITY_SCOPE_FIELDS` — variable
+
+Per-id editable field-token vocabulary of a grant scope (M1; spec §1.1).
+
+Only ids whose declared default scope carries a field subset appear here: `@agent:edit` uses the A18 parental set and `@realm:edit` the realm metadata and attachment set. An id absent from this table declares no field tokens, so a `fields` array on its scope rejects fail-closed. The table is registry-side vocabulary; it never reaches a model-facing schema, receipt, or descriptor.
+
+### `AuthorityGrantRecord` — interface
+
+One frozen authority grant recorded in the registry authority inputs (M1): the exact id plus its optional registry-side scope. The grant record is the trusted source for *how far* a capability reaches; the frozen descriptor remains the only source for *whether* it is held (INV-9).
+
+#### Members
+
+- **`id`** — Exact member of `AUTHORITY_IDS`.
+- **`scope`** — Optional narrowed bounds; absent = the id's default scope.
+
+### `AuthorityScopeRecord` — interface
+
+Optional bounds narrowing one authority grant (M1; spec §1.2).
+
+A scope is registry-side data: it never appears on the frozen `AuthorityDescriptor`, the identity projection, or any model-facing surface. Semantics are a narrowing of the grant — the exact id is still required (dispatcher), then the scope must match the concrete target. Absent fields mean "the id's default scope" (unscoped for the publishing pair, own-spawns for `@agent:*`, own realm for `@realm:*`/`@extensions:authority`).
+
+#### Members
+
+- **`fields`** — Editable field tokens, restricted to the id's declared vocabulary (`AUTHORITY_SCOPE_FIELDS`).
+- **`ownSpawns`** — `@agent:*` only: all agents the grant holder spawned (direct spawns).
+- **`realmMembers`** — `@agent:*` only: every active member of the `realms` bound (or the holder's own realm).
+- **`realms`** — Agent-scope realm bound; absent = the caller's own realm.
+- **`targets`** — Target bounds: `@agent:*` ids take bare realm-local agent ids, `@realm:*`/`@extensions:*` take realm ids.
 
 ### `BAKED_TEMPLATE_BUNDLES` — variable
 
@@ -689,7 +753,7 @@ hashText('abc');
 
 Frozen vocabulary of the known publishing-authority ids (`@template:authority` and `@hydration:authority`).
 
-Validation accepts any non-empty unique identifier in `AgentSpec.authorities`; identifiers outside this set are declared-but-unknown and fail launch closed (`ERR_TEMPLATE_AUTHORITY_UNSUPPORTED`) while import, parse, and review stay valid — the providers precedent.
+Validation accepts any non-empty unique identifier in `AgentSpec.authorities`; identifiers outside this set are declared-but-unknown and fail launch closed (`ERR_TEMPLATE_AUTHORITY_UNSUPPORTED`) while import, parse, and review stay valid — the providers precedent. This set stays the publishing pair only: the remaining `AUTHORITY_IDS` members are operator-minted runtime capabilities and are never template-declarable (A15).
 
 ### `materializeTemplate` — function
 
@@ -1479,9 +1543,9 @@ The validated template reference
 
 ## Doc coverage
 
-- Top-level exports: 66
-- Declarations (exports + members): 212
-- Documented declarations: 212 / 212 (100%)
+- Top-level exports: 70
+- Declarations (exports + members): 223
+- Documented declarations: 223 / 223 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): `ToolPresetName`, `TriggerPolicy`
