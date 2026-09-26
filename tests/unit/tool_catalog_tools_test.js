@@ -163,6 +163,25 @@ test('2. [AC-M5a-01] list_tools enumerates only ALL_TOOL_DESCRIPTORS and never a
       : `${descriptor.description.slice(0, CATALOG_TOOL_DESCRIPTION_MAX_CHARS - 1)}\u2026`;
     assert.equal(entry.description, expected, `'${entry.name}' description projects its descriptor`);
   }
+
+  // A dispatcher bound to a merged registry carrying foreign descriptors (a
+  // granted extension call name plus an authority meta tool) still lists the
+  // canonical enumeration only: the merged per-turn registry can never widen
+  // the ordinary listing.
+  const mergedDispatcher = createSandboxToolDispatcher({
+    toolRegistry: {
+      ...TOOL_REGISTRY,
+      ext_echo: { name: 'ext_echo', description: 'Extension tool' },
+      list_extensions: AUTHORITY_TOOL_REGISTRY.list_extensions
+    }
+  });
+  const mergedReceipt = await mergedDispatcher.executeTool(SANDBOX_TOOLS.LIST_TOOLS, {});
+  assert.deepEqual(
+    mergedReceipt.tools.map((entry) => entry.name),
+    CANONICAL_NAMES,
+    'the merged registry leaks no foreign descriptor into list_tools'
+  );
+  assert.equal(mergedReceipt.count, CANONICAL_NAMES.length);
 });
 
 // ============================================================================
