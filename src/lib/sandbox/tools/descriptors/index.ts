@@ -13,7 +13,7 @@
  *
  * @module tools/descriptors
  * @invariant Frozen catalog: every descriptor, schema, alias map, and descriptor array is `Object.freeze`d; `TOOL_REGISTRY` is built once from `ALL_TOOL_DESCRIPTORS` as a null-prototype lookup table and frozen, with no registration or mutation path.
- * @invariant Authority meta tools: `AUTHORITY_TOOL_REGISTRY` carries every explicit-grant-only authority tool (the Wave U publishing pair today; the meta-plane phases append theirs), each declaring the exact authority id (`@template:authority`/`@hydration:authority`/…) its invocation requires; they are not members of `ALL_TOOL_DESCRIPTORS`/`TOOL_REGISTRY`, their schemas are exposed only through `getAuthorityToolSchemas()` for callers holding the matching exact id (with `getAuthorityToolDescriptors()` as the describe-merge source), and the wildcard `'*'`/`privileged` never satisfy them. The M2 `inspect_agent`/`update_agent` surfaces are the deliberate exception: they are **canonical** ordinary tools (manager preset) whose parental tier is inherent and whose meta tier is enforced registry-side by the lifecycle manager, so no `requiredAuthority` gate applies.
+ * @invariant Authority meta tools: `AUTHORITY_TOOL_REGISTRY` carries every explicit-grant-only authority tool (the Wave U publishing pair and the M3 realm-admin pair `inspect_realm`/`update_realm`; the remaining meta-plane phases append theirs), each declaring the exact authority id (`@template:authority`/`@hydration:authority`/`@realm:inspect`/`@realm:edit`/…) its invocation requires; they are not members of `ALL_TOOL_DESCRIPTORS`/`TOOL_REGISTRY`, their schemas are exposed only through `getAuthorityToolSchemas()` for callers holding the matching exact id (with `getAuthorityToolDescriptors()` as the describe-merge source), and the wildcard `'*'`/`privileged` never satisfy them. The M2 `inspect_agent`/`update_agent` surfaces are the deliberate exception: they are **canonical** ordinary tools (manager preset) whose parental tier is inherent and whose meta tier is enforced registry-side by the lifecycle manager, so no `requiredAuthority` gate applies.
  * @invariant Fail-closed precalls: `batch_precall` denies any call whose name does not canonically resolve to a `PRECALL_ALLOWLIST` member, so unresolved or non-allowlisted names never reach the executor.
  * @decision Identity-only caller scope: invocation, lifecycle, and scheduler handlers forward only the dispatcher-bound subject id plus the identity-port principal; per-call caller identity, privilege flags, and role aliases are never read
  * @decision `invoke_agent` pins recursion depth from the trusted bound `currentDepth`, never from a per-call `depth` key
@@ -120,7 +120,14 @@ export {
   inspect_agent,
   updateAgentDescriptor,
   updateAgent,
-  update_agent
+  update_agent,
+  realmAdminToolDescriptors,
+  inspectRealmDescriptor,
+  inspectRealm,
+  inspect_realm,
+  updateRealmDescriptor,
+  updateRealm,
+  update_realm
 } from './metaTools.ts';
 
 export {

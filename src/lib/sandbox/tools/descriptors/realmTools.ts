@@ -60,6 +60,7 @@ import type {
 } from '../../realmCatalog/index.ts';
 import { FILE_PLUMBING_MAX_FILE_BYTES } from '../../virtualFs/index.ts';
 import type { ExecutionContext, JsonSchemaDraft07, RealmPublishingPort } from '../../toolDefinitions/index.ts';
+import { realmAdminToolDescriptors } from './metaTools.ts';
 
 /** Sanitized canonical parameter record handed to a publishing descriptor handler. */
 type ToolParams = Record<string, unknown>;
@@ -1259,15 +1260,17 @@ const PUBLISHING_AUTHORITY_ID_SET: ReadonlySet<string> = new Set<string>([
 ]);
 
 /**
- * Every authority meta-tool descriptor (M1): the Wave U publishing pair is the
- * complete set today; the meta-plane phases (M2–M5b) append their descriptors
- * here (`metaTools.ts` or the same file), and every filter below derives its
- * membership from this one array plus each descriptor's `authority` id.
+ * Every authority meta-tool descriptor (M1): the Wave U publishing pair plus
+ * the M3 realm-admin pair; the remaining meta-plane phases (M4–M5b) append
+ * their descriptors here (`metaTools.ts` or the same file), and every filter
+ * below derives its membership from this one array plus each descriptor's
+ * `authority` id.
  */
 export const authorityToolDescriptors: readonly AuthorityToolDescriptor[] = Object.freeze([
   importRealmTemplateDescriptor,
-  submitHydrationPackageDescriptor
-]);
+  submitHydrationPackageDescriptor,
+  ...realmAdminToolDescriptors
+] as AuthorityToolDescriptor[]);
 
 /**
  * Array of the two Wave U publishing meta-tool descriptors: the publishing

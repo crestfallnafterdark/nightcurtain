@@ -1,13 +1,22 @@
 /**
- * Meta-plane agent descriptors (M2): `inspect_agent` and `update_agent`, the
- * first agent-facing edit surface (meta-plane spec §3, decision `c8a748f`).
+ * Meta-plane descriptors: the M2 agent pair (`inspect_agent`/`update_agent`,
+ * meta-plane spec §3, decision `c8a748f`) and the M3 realm-admin pair
+ * (`inspect_realm`/`update_realm`, spec §4, ticket `094de1b`).
  *
- * These are **canonical** tools with ordinary preset authorization — parental
+ * The M2 pair is **canonical** with ordinary preset authorization — parental
  * authority is inherent to the registered parent and needs no grant, so no
  * `requiredAuthority` gate applies and the manager preset (the family that owns
  * `spawn_agent`) is the only tier that carries them. The meta tier reuses the
  * same canonical tool under an exact scoped `@agent:inspect`/`@agent:edit`
  * grant enforced registry-side; schemas never mention authority vocabulary.
+ *
+ * The M3 pair is **authority-registry** tooling (outside the canonical
+ * taxonomy): each descriptor declares its exact authority id
+ * (`@realm:inspect`/`@realm:edit`), so its schema is exposed only through the
+ * M1 generic exact-id filter and the dispatcher gate admits only the exact
+ * holder. The handler forwards the dispatcher-pinned actor reference and the
+ * closed patch to the pinned `realmAdminPort`; the store-side port resolves
+ * the registry grant scope and fails closed without an actor record (R6).
  *
  * Tool-boundary honesty (§3.4): `update_agent` is a closed schema whose
  * property set is exactly the editable keys the handler honors; the sanitizer
@@ -19,10 +28,15 @@
  * workspace label and the parent reference exactly like `whoami`.
  */
 
-import { SANDBOX_TOOLS, TOOL_SYSTEM_ERROR_CODES } from '../constants/index.ts';
+import { REALM_ADMIN_TOOLS, SANDBOX_TOOLS, TOOL_SYSTEM_ERROR_CODES } from '../constants/index.ts';
 import { toSnakeCase } from '../normalizers/index.ts';
-import { AUTHORITY_IDS } from '../../realmCatalog/index.ts';
-import type { ExecutionContext } from '../../toolDefinitions/index.ts';
+import {
+  AGENT_AUTHORITIES,
+  AUTHORITY_IDS,
+  REALM_ADMIN_DENIED_PATCH_KEYS,
+  REALM_ADMIN_PATCH_FIELD_TOKENS
+} from '../../realmCatalog/index.ts';
+import type { ExecutionContext, RealmAdminPort, RealmAdminPatch } from '../../toolDefinitions/index.ts';
 import { toAgentVisibleAgentReference, toAgentVisibleWorkspaceKey } from './lifecycleTools.ts';
 
 /** Sanitized canonical parameter record handed to a meta descriptor handler. */
@@ -451,4 +465,365 @@ export const update_agent = updateAgentDescriptor;
 export const metaToolDescriptors = Object.freeze([
   inspectAgentDescriptor,
   updateAgentDescriptor
+]);
+
+// ============================================================================
+// M3 realm-admin meta tools (`inspect_realm` / `update_realm`, ticket 094de1b)
+// ============================================================================
+
+/**
+ * Operator-only / escalation-adjacent realm patch keys plus every exact
+ * authority id (exact or snake_case spelling): presence fails the whole call
+ * with the uniform permission denial before any port call, even for
+ * `false`/`null` values. The registry-side port independently re-validates
+ * against the same shared vocabulary (`REALM_ADMIN_DENIED_PATCH_KEYS`).
+ * @internal
+ */
+function isDeniedRealmAdminPatchKey(key: string): boolean {
+  if (REALM_ADMIN_DENIED_PATCH_KEYS.includes(key)) return true;
+  if (META_AUTHORITY_ID_SET.has(key)) return true;
+  const snake = toSnakeCase(key);
+  if (snake && snake !== key) {
+    if (REALM_ADMIN_DENIED_PATCH_KEYS.includes(snake)) return true;
+    if (META_AUTHORITY_ID_SET.has(snake)) return true;
+  }
+  return false;
+}
+
+/** Sanitized realm patch keys the update handler forwards (the field-token vocabulary). @internal */
+const REALM_ADMIN_ALLOWED_PATCH_KEYS: ReadonlySet<string> = new Set<string>(
+  Object.keys(REALM_ADMIN_PATCH_FIELD_TOKENS)
+);
+
+/** `inspect_realm` parameter alias map (realm label addressing only). @internal */
+const realmInspectParamAliasMap: Readonly<Record<string, string>> = Object.freeze({
+  realm: 'realm',
+  realm_label: 'realm',
+  realmLabel: 'realm',
+  label: 'realm',
+  realm_name: 'realm',
+  realmName: 'realm'
+});
+
+/**
+ * Update parameter alias map: realm addressing and the `patch` container
+ * normalize to their canonical keys; every other key passes through verbatim
+ * so the deny/unknown scan sees the caller's own spelling.
+ * @internal
+ */
+const realmUpdateParamAliasMap: Readonly<Record<string, string>> = Object.freeze({
+  realm: 'realm',
+  realm_label: 'realm',
+  realmLabel: 'realm',
+  label: 'realm',
+  realm_name: 'realm',
+  realmName: 'realm',
+  patch: 'patch',
+  changes: 'patch',
+  update: 'patch'
+});
+
+/**
+ * Custom `update_realm` sanitizer: normalizes the realm/patch container aliases
+ * while preserving unknown keys and `null` values so the handler can classify
+ * them explicitly (a nested denied key must fail the whole call, never be
+ * silently dropped). Total and prototype-pollution-safe.
+ *
+ * @param rawArgs - Raw tool arguments (object, JSON string, or arbitrary value).
+ * @returns A fresh sanitized parameter record.
+ * @internal
+ */
+function sanitizeRealmAdminUpdateParams(rawArgs?: unknown): Record<string, unknown> {
+  let parsedArgs: unknown = rawArgs;
+  if (typeof rawArgs === 'string') {
+    const trimmed = rawArgs.trim();
+    if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+      try {
+        parsedArgs = JSON.parse(trimmed);
+      } catch {
+        parsedArgs = null;
+      }
+    } else {
+      parsedArgs = null;
+    }
+  }
+  if (!parsedArgs || typeof parsedArgs !== 'object' || Array.isArray(parsedArgs)) return {};
+  const result: Record<string, unknown> = {};
+  try {
+    for (const [key, value] of Object.entries(parsedArgs)) {
+      if (PROTOTYPE_POLLUTION_KEYS.has(key)) continue;
+      if (value === undefined) continue;
+      const snakeKey = toSnakeCase(key);
+      const alias = Object.prototype.hasOwnProperty.call(realmUpdateParamAliasMap, key)
+        ? realmUpdateParamAliasMap[key]
+        : (snakeKey && Object.prototype.hasOwnProperty.call(realmUpdateParamAliasMap, snakeKey)
+          ? realmUpdateParamAliasMap[snakeKey]
+          : key);
+      if (!alias || PROTOTYPE_POLLUTION_KEYS.has(alias)) continue;
+      result[alias] = value;
+    }
+  } catch {
+    // A hostile accessor or proxy trap must never escape the sanitizer.
+    return {};
+  }
+  return result;
+}
+
+/**
+ * Resolves the trusted pinned realm-admin port from the execution context.
+ *
+ * @param context - Trusted execution context.
+ * @returns The host port.
+ * @throws `Error` - When no trusted port is bound.
+ * @internal
+ */
+function realmAdminPortOf(context: ExecutionContext): RealmAdminPort {
+  const port = context?.realmAdminPort;
+  if (!port || typeof port.inspectRealm !== 'function' || typeof port.updateRealm !== 'function') {
+    throw new Error('realmAdminPort service is not available in execution context');
+  }
+  return port;
+}
+
+/**
+ * Resolves the dispatcher-pinned actor reference (canonical key first, then
+ * the bare id) forwarded to the host port for registry-side scope resolution
+ * and audit attribution. Never a per-call claim.
+ *
+ * @param context - Trusted execution context.
+ * @returns The actor reference, or `null`.
+ * @internal
+ */
+function resolveRealmAdminActorRef(context: ExecutionContext): string | null {
+  const key = typeof context?.callerKey === 'string' && context.callerKey ? context.callerKey : null;
+  if (key) return key;
+  const raw = context?.callerAgentId || context?.agentId || null;
+  return typeof raw === 'string' && raw ? raw : null;
+}
+
+/**
+ * Normalizes the optional realm label argument: absent/blank means the caller's
+ * own realm; a non-string value fails the call as malformed.
+ *
+ * @param value - Sanitized `realm` parameter.
+ * @returns The trimmed label, or `null` for the own-realm form.
+ * @throws `Error` - Code `'INVALID_ARGUMENTS'` for non-string values.
+ * @internal
+ */
+function normalizeRealmLabel(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'string') {
+    const err: Error & { code?: string } = new Error("The 'realm' parameter must be a string when present.");
+    err.code = TOOL_SYSTEM_ERROR_CODES.INVALID_ARGUMENTS;
+    throw err;
+  }
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+/**
+ * `inspect_realm` descriptor — exact-grant-only (`@realm:inspect`) bounded read
+ * of one realm the caller's grant scope reaches: member roster with effective
+ * capability, attachments with tool ceiling and live connection state, launch
+ * provenance, and missing-extension disclosure. Realm ids, transport URLs, and
+ * credential material never appear. Every resolution failure shares one
+ * uniform, realm-opaque denial.
+ */
+export const inspectRealmDescriptor = Object.freeze({
+  name: REALM_ADMIN_TOOLS.INSPECT_REALM,
+  authority: AGENT_AUTHORITIES.REALM_INSPECT,
+  description:
+    'Inspect one realm you are authorized to observe (your own realm by default, or one realm by its display label when your grant reaches it) '
+    + 'and return a bounded view: display metadata, the member roster with each member\'s state, privilege, and effective tool policy '
+    + '(baked tools and granted extension tool names), the realm attachments with their tool ceiling and live connection state, '
+    + 'launch provenance, and any unresolved extension disclosures. Requires the inspect_realm capability; unauthorized realms fail closed '
+    + 'without disclosing whether they exist.',
+  schema: Object.freeze({
+    type: 'object',
+    properties: {
+      realm: {
+        type: 'string',
+        description: 'Display label of the realm to inspect; omitted for your own realm.'
+      }
+    },
+    required: [] as string[],
+    additionalProperties: false
+  }),
+  paramAliasMap: realmInspectParamAliasMap,
+  sanitize: (rawArgs?: unknown): ToolParams => {
+    const result: ToolParams = {};
+    if (!rawArgs || typeof rawArgs !== 'object' || Array.isArray(rawArgs)) return result;
+    try {
+      for (const [key, value] of Object.entries(rawArgs)) {
+        if (PROTOTYPE_POLLUTION_KEYS.has(key) || value === undefined) continue;
+        const snakeKey = toSnakeCase(key);
+        const alias = Object.prototype.hasOwnProperty.call(realmInspectParamAliasMap, key)
+          ? realmInspectParamAliasMap[key]
+          : (snakeKey && Object.prototype.hasOwnProperty.call(realmInspectParamAliasMap, snakeKey)
+            ? realmInspectParamAliasMap[snakeKey]
+            : key);
+        if (!alias || PROTOTYPE_POLLUTION_KEYS.has(alias)) continue;
+        result[alias] = value;
+      }
+    } catch {
+      return {};
+    }
+    return result;
+  },
+  handler: async (params: ToolParams, context: ExecutionContext) => {
+    const port = realmAdminPortOf(context);
+    const keys = Object.keys(params || {});
+    for (let i = 0; i < keys.length; i++) {
+      if (keys[i] !== 'realm') {
+        // Static message: an unknown parameter never echoes its key.
+        return invalidArguments('inspect_realm does not accept unknown parameters.');
+      }
+    }
+    const realmLabel = normalizeRealmLabel(params?.realm);
+    return port.inspectRealm({ actorRef: resolveRealmAdminActorRef(context), realmLabel });
+  }
+});
+/** camelCase alias of `inspectRealmDescriptor`. */
+export const inspectRealm = inspectRealmDescriptor;
+/** snake_case alias of `inspectRealmDescriptor`. */
+export const inspect_realm = inspectRealmDescriptor;
+
+/**
+ * `update_realm` descriptor — exact-grant-only (`@realm:edit`) bounded edit of
+ * one realm the caller's grant scope reaches: display metadata
+ * (`name`/`description`/`color`), one attach of an installed+connected
+ * extension, or one attachment tool-ceiling change. Membership, provenance,
+ * creation/deletion, detach/removal, raw attachment arrays, and every
+ * authority id are operator-only and fail the whole call uniformly; the host
+ * port applies the edit through the existing attach/ceiling paths and the
+ * safe-state member sweep.
+ */
+export const updateRealmDescriptor = Object.freeze({
+  name: REALM_ADMIN_TOOLS.UPDATE_REALM,
+  authority: AGENT_AUTHORITIES.REALM_EDIT,
+  description:
+    'Update one realm you are authorized to edit (your own realm by default, or one realm by its display label when your grant reaches it): '
+    + 'its display metadata (name, description, color), attach one installed and currently connected extension with an optional tool ceiling, '
+    + 'or change one existing attachment\'s tool ceiling. The patch is validated as a whole (unknown or operator-only fields fail with no partial '
+    + 'change; explicit tool selections must come from the extension\'s live tool catalog), attached capability changes reauthorize the realm '
+    + 'members at their next safe state, and membership, provenance, creation/deletion, and detach/removal stay operator-only. '
+    + 'Requires the update_realm capability.',
+  schema: Object.freeze({
+    type: 'object',
+    properties: {
+      realm: {
+        type: 'string',
+        description: 'Display label of the realm to update; omitted for your own realm.'
+      },
+      patch: {
+        type: 'object',
+        properties: {
+          name: {
+            type: 'string',
+            description: 'Replacement realm display name.'
+          },
+          description: {
+            type: ['string', 'null'],
+            description: 'Replacement description; null clears it.'
+          },
+          color: {
+            type: ['string', 'null'],
+            description: 'Replacement accent color; null clears it.'
+          },
+          attach: {
+            type: 'object',
+            properties: {
+              extensionId: {
+                type: 'string',
+                description: 'Id of one installed extension to attach to the realm.'
+              },
+              toolSelection: {
+                type: ['string', 'array'],
+                items: { type: 'string' },
+                description: "Realm tool ceiling: 'all' or an explicit non-empty list of live call names."
+              }
+            },
+            required: ['extensionId'],
+            additionalProperties: false
+          },
+          toolSelection: {
+            type: 'object',
+            properties: {
+              extensionId: {
+                type: 'string',
+                description: 'Id of an already attached extension.'
+              },
+              selection: {
+                type: ['string', 'array'],
+                items: { type: 'string' },
+                description: "Replacement ceiling: 'all' or an explicit non-empty list of live call names."
+              }
+            },
+            required: ['extensionId', 'selection'],
+            additionalProperties: false
+          }
+        },
+        additionalProperties: false
+      }
+    },
+    required: ['patch'],
+    additionalProperties: false
+  }),
+  paramAliasMap: realmUpdateParamAliasMap,
+  sanitize: sanitizeRealmAdminUpdateParams,
+  handler: async (params: ToolParams, context: ExecutionContext) => {
+    const port = realmAdminPortOf(context);
+    const sanitized = params && typeof params === 'object' && !Array.isArray(params) ? params : {};
+    const keys = Object.keys(sanitized);
+    for (let i = 0; i < keys.length; i++) {
+      if (keys[i] !== 'realm' && keys[i] !== 'patch') {
+        // Static message: an unknown parameter never echoes its key.
+        return invalidArguments('update_realm does not accept unknown parameters.');
+      }
+    }
+    const rawPatch = sanitized.patch;
+    if (!rawPatch || typeof rawPatch !== 'object' || Array.isArray(rawPatch)) {
+      return invalidArguments('update_realm requires a patch object with at least one editable field.');
+    }
+    const patchKeys = Object.keys(rawPatch);
+    if (patchKeys.length === 0) {
+      return invalidArguments('update_realm requires a patch object with at least one editable field.');
+    }
+    // Denied-key presence fails the whole call first (even `false`/`null`);
+    // unknown keys are malformed params. Nothing is silently dropped.
+    for (let i = 0; i < patchKeys.length; i++) {
+      if (isDeniedRealmAdminPatchKey(patchKeys[i])) {
+        return {
+          success: false,
+          error: 'update_realm does not permit operator-only fields.',
+          code: TOOL_SYSTEM_ERROR_CODES.PERMISSION_DENIED
+        };
+      }
+    }
+    for (let i = 0; i < patchKeys.length; i++) {
+      if (!REALM_ADMIN_ALLOWED_PATCH_KEYS.has(patchKeys[i])) {
+        return invalidArguments('update_realm does not accept unknown fields.');
+      }
+    }
+    const realmLabel = normalizeRealmLabel(sanitized.realm);
+    return port.updateRealm({
+      actorRef: resolveRealmAdminActorRef(context),
+      realmLabel,
+      patch: rawPatch as RealmAdminPatch
+    });
+  }
+});
+/** camelCase alias of `updateRealmDescriptor`. */
+export const updateRealm = updateRealmDescriptor;
+/** snake_case alias of `updateRealmDescriptor`. */
+export const update_realm = updateRealmDescriptor;
+
+/**
+ * Array of the M3 realm-admin authority descriptors: appended to
+ * `authorityToolDescriptors` by `realmTools.ts`, so their schemas are exposed
+ * through the generic exact-id filter and never through the canonical taxonomy.
+ */
+export const realmAdminToolDescriptors = Object.freeze([
+  inspectRealmDescriptor,
+  updateRealmDescriptor
 ]);

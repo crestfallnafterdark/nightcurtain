@@ -3,7 +3,7 @@
  * Private implementation detail of the `tools/normalizers` module; the public surface is `index.ts`.
  */
 
-import { PUBLISHING_TOOLS, SANDBOX_TOOLS } from '../constants/index.ts';
+import { PUBLISHING_TOOLS, REALM_ADMIN_TOOLS, SANDBOX_TOOLS } from '../constants/index.ts';
 
 /**
  * Master Tool Alias Map
@@ -668,7 +668,13 @@ export const TOOL_ALIAS_MAP: Readonly<Record<string, string>> = Object.freeze({
   'submit_hydration_package': PUBLISHING_TOOLS.SUBMIT_HYDRATION_PACKAGE,
   'submitHydrationPackage': PUBLISHING_TOOLS.SUBMIT_HYDRATION_PACKAGE,
   'submit_hydration': PUBLISHING_TOOLS.SUBMIT_HYDRATION_PACKAGE,
-  'submitHydration': PUBLISHING_TOOLS.SUBMIT_HYDRATION_PACKAGE
+  'submitHydration': PUBLISHING_TOOLS.SUBMIT_HYDRATION_PACKAGE,
+
+  // --- M3 Realm-Admin Meta Tools (explicit-grant-only; never wildcard-exposed) ---
+  'inspect_realm': REALM_ADMIN_TOOLS.INSPECT_REALM,
+  'inspectRealm': REALM_ADMIN_TOOLS.INSPECT_REALM,
+  'update_realm': REALM_ADMIN_TOOLS.UPDATE_REALM,
+  'updateRealm': REALM_ADMIN_TOOLS.UPDATE_REALM
 });
 
 const LOWER_TOOL_ALIAS_MAP = Object.create(null);

@@ -109,7 +109,14 @@ export {
   validateTemplate
 } from './validation.ts';
 export { deriveToolCallName } from '../tools/normalizers/index.ts';
-export { AGENT_AUTHORITIES, AUTHORITY_IDS, AUTHORITY_SCOPE_FIELDS, KNOWN_AGENT_AUTHORITIES } from './types.ts';
+export {
+  AGENT_AUTHORITIES,
+  AUTHORITY_IDS,
+  AUTHORITY_SCOPE_FIELDS,
+  KNOWN_AGENT_AUTHORITIES,
+  REALM_ADMIN_DENIED_PATCH_KEYS,
+  REALM_ADMIN_PATCH_FIELD_TOKENS
+} from './types.ts';
 export { REALM_CATALOG_ERROR_CODES, RealmCatalogError } from './errors.ts';
 export type { RealmCatalogErrorCode } from './errors.ts';
 

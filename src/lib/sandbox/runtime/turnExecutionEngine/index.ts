@@ -72,6 +72,7 @@ import type {
   ExtensionToolProviderPort,
   JsonSchemaDraft07,
   OpenAIToolDefinition,
+  RealmAdminPort,
   RealmPublishingPort,
   SandboxToolDispatcher
 } from '../../toolDefinitions/index.ts';
@@ -1273,6 +1274,15 @@ export interface TurnExecutionEngineOptions {
   realmPublishingPort?: RealmPublishingPort | null;
 
   /**
+   * Optional M3 realm-admin host port seeded into every tool dispatcher
+   * context. The store composition root implements it over the realm registry,
+   * extension live state, and runtime rosters; when absent the realm-admin
+   * meta tools fail closed with a missing-service error. Trusted bound
+   * construction; never replaceable from per-call context.
+   */
+  realmAdminPort?: RealmAdminPort | null;
+
+  /**
    * Optional extension provider-registry port (extension wave) seeded into
    * every tool dispatcher context and consulted per turn to append the
    * caller's **granted** extension tool schemas and merge their descriptors
@@ -1379,6 +1389,7 @@ export class TurnExecutionEngine {
   #triggerQueue: EngineTriggerQueue | null = null;
   #customTools: Record<string, unknown> | null = null;
   #realmPublishingPort: RealmPublishingPort | null = null;
+  #realmAdminPort: RealmAdminPort | null = null;
   #extensionToolProvider: ExtensionToolProviderPort | null = null;
   #extensionExecutionPort: ExtensionExecutionPort | null = null;
   #mailboxAutonomy: boolean | null = null;
@@ -1414,6 +1425,7 @@ export class TurnExecutionEngine {
     triggerQueue = null,
     customTools = null,
     realmPublishingPort = null,
+    realmAdminPort = null,
     extensionToolProvider = null,
     extensionExecutionPort = null,
     mailboxAutonomy = null,
@@ -1426,6 +1438,7 @@ export class TurnExecutionEngine {
     this.#triggerQueue = triggerQueue;
     this.#customTools = customTools;
     this.#realmPublishingPort = realmPublishingPort || null;
+    this.#realmAdminPort = realmAdminPort || null;
     this.#extensionToolProvider = extensionToolProvider || null;
     this.#extensionExecutionPort = extensionExecutionPort || null;
     this.#mailboxAutonomy = mailboxAutonomy !== null && mailboxAutonomy !== undefined ? Boolean(mailboxAutonomy) : null;
@@ -2413,6 +2426,10 @@ export class TurnExecutionEngine {
         // construction; the dispatcher strips per-call claims for this pinned
         // key, so a tool call can never substitute the host port.
         ...(this.#realmPublishingPort ? { realmPublishingPort: this.#realmPublishingPort } : {}),
+        // M3 realm-admin host port: trusted bound construction; the dispatcher
+        // strips per-call claims for this pinned key, so a tool call can never
+        // substitute the host port.
+        ...(this.#realmAdminPort ? { realmAdminPort: this.#realmAdminPort } : {}),
         // Extension wave: the merged registry view (baked descriptors plus the
         // caller's granted extension descriptors) feeds `describe_tool`; the
         // provider/execution ports are trusted bound construction (pinned keys)
