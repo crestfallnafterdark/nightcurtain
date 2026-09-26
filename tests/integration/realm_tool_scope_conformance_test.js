@@ -4,7 +4,7 @@
  *   conformance sweep (WAVE_R §7). Guard rail for the whole wave and for every
  *   future canonical tool:
  *
- *   1. Classification table over all 35 canonical tools
+ *   1. Classification table over all 36 canonical tools
  *      (`realm-scope-denied` / `self-only` / `static`), derived mechanically
  *      from `ALL_TOOL_DESCRIPTORS` and cross-checked against the
  *      `SANDBOX_TOOLS` enumeration. A tool without a classification — or a
