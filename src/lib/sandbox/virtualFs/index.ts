@@ -4723,13 +4723,13 @@ interface ResolvedFileTarget {
 
 /**
  * Validates a nominal engine `InternalPrincipal` candidate (I1-V F3, ticket
- * befbb40): a frozen object carrying the engine brand fields — `kind:
- * 'internal'` and a non-empty diagnostic `subject`. The minter's private brand
- * symbol is intentionally not importable here (the runtime composition root
- * owns it and imports this module), so the gate validates the frozen nominal
- * shape: plain objects, JSON-shaped copies, arrays, thawed candidates, and
- * partial shapes are rejected. Only the composition-root reference should
- * ever satisfy it.
+ * befbb40): a frozen object that carries the engine brand fields
+ * (`kind: 'internal'` plus a non-empty diagnostic `subject`). The minter's
+ * private brand symbol is intentionally not importable here (the runtime
+ * composition root owns it and imports this module), so the gate validates the
+ * frozen nominal shape: plain objects, JSON-shaped copies, arrays, thawed
+ * candidates, and partial shapes are rejected. Only the composition-root
+ * reference should ever satisfy it.
  *
  * @param candidate - Candidate reference passed to `bindInternalPrincipal`.
  * @returns True when the candidate carries the nominal engine-principal shape.
