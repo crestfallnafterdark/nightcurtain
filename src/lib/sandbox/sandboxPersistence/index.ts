@@ -972,13 +972,17 @@ export interface SandboxPersistedState {
    */
   readonly metaAuthorityGrants?: PersistedMetaAuthorityGrants;
   /**
-   * Persisted generic authority grant lists (additive optional field, M1):
-   * authority id → canonical identity keys, for every non-publishing id.
-   * Absent while no generic grant exists (legacy and publishing-only sessions
-   * stay byte-identical); malformed values fail validation closed, and
-   * hydration never derives authority from this field — it re-applies grants
-   * through the composition-root restore only (unknown/recycled refs skipped,
-   * unknown ids skipped fail-closed).
+   * Persisted generic authority grant lists (additive optional field, M1;
+   * scoped entries M2): authority id → canonical identity keys, for every
+   * non-publishing id. An entry is either the legacy keys-only identity-key
+   * string (restored unscoped) or a `{ ref, scope }` record carrying the
+   * registry-side narrowing, so a narrowed grant survives save/hydrate instead
+   * of silently widening (M1 finding F3). Absent while no generic grant exists
+   * (legacy and publishing-only sessions stay byte-identical); malformed values
+   * fail validation closed, and hydration never derives authority from this
+   * field — it re-applies grants through the composition-root restore only
+   * (unknown/recycled refs and unknown ids skipped fail-closed, malformed
+   * scopes skipped per entry and never widened unscoped).
    */
   readonly authorityGrants?: PersistedAuthorityGrants;
   /**

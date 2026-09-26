@@ -11907,18 +11907,21 @@ export class SandboxStore {
           entries.push(trimmed);
           continue;
         }
-        // M2 scoped entry: `{ ref, scope? }`. A malformed record or scope is
-        // dropped here; the runtime grant core re-validates the scope per id
-        // and skips a malformed entry fail-closed (never unscoped).
+        // M2 scoped entry: `{ ref, scope? }`. A malformed record or a present
+        // non-object scope is dropped here (absent/null keeps the legacy
+        // unscoped meaning); the runtime grant core re-validates the scope per
+        // id and skips a malformed entry fail-closed (never unscoped).
         if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
         const record = raw as { ref?: unknown; scope?: unknown };
         if (typeof record.ref !== 'string') continue;
         const trimmed = record.ref.trim();
         if (!trimmed || seen.includes(trimmed)) continue;
         seen.push(trimmed);
-        const scope = record.scope && typeof record.scope === 'object' && !Array.isArray(record.scope)
-          ? (record.scope as AuthorityScopeRecord)
-          : undefined;
+        let scope: AuthorityScopeRecord | undefined;
+        if (record.scope !== undefined && record.scope !== null) {
+          if (typeof record.scope !== 'object' || Array.isArray(record.scope)) continue;
+          scope = record.scope as AuthorityScopeRecord;
+        }
         entries.push(scope === undefined ? trimmed : { ref: trimmed, scope });
       }
       return entries;

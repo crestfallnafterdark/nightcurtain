@@ -7174,7 +7174,7 @@ camelCase alias of `waitForAgentDescriptor`.
 
 ### `waitForAgentDescriptor` — variable
 
-`wait_for_agent` descriptor — agent-addressed completion wait / one-shot completion wake (ticket 17b5c47; the 36th canonical tool).
+`wait_for_agent` descriptor — agent-addressed completion wait / one-shot completion wake (ticket 17b5c47).
 
 Args: `agent_id` (required), optional `notify` (default false) and `timeout_ms` (default 10000; wait mode only, 0 = immediate status probe). Delegates to `context.lifecyclePort.waitForAgent()` and throws when that service is missing.
 

@@ -895,7 +895,7 @@ export type ToolHandlerFn = (
 ) => unknown;
 
 /**
- * Canonical tool descriptor contract implemented by all 36 tools in the sandbox.
+ * Canonical tool descriptor contract implemented by every sandbox tool.
  *
  * @example
  * ```typescript
