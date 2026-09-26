@@ -22,6 +22,8 @@ import * as PersistenceModule from '../../src/lib/sandbox/sandboxPersistence/ind
 import {
   SANDBOX_PERSISTENCE_VERSION,
   SANDBOX_STATE_STORAGE_KEY,
+  SAVED_INSTANCE_PAYLOAD_MAX_BYTES,
+  SAVED_INSTANCE_PAYLOAD_MAX_ENTRIES,
   PERSISTENCE_ERROR_CODES,
   validateSandboxState,
   serializeRuntimeEnvironment,
@@ -55,6 +57,8 @@ test('1. Strict Export Whitelist & Constants', () => {
     'PERSISTENCE_ERROR_CODES',
     'SANDBOX_PERSISTENCE_VERSION',
     'SANDBOX_STATE_STORAGE_KEY',
+    'SAVED_INSTANCE_PAYLOAD_MAX_BYTES',
+    'SAVED_INSTANCE_PAYLOAD_MAX_ENTRIES',
     'clearSandboxState',
     'createDebouncedSave',
     'hasPersistedState',
@@ -69,6 +73,16 @@ test('1. Strict Export Whitelist & Constants', () => {
 
   assert.deepStrictEqual(exportedKeys, expectedKeys, 'Exported symbols must strictly match contract');
   assert.strictEqual(SANDBOX_PERSISTENCE_VERSION, '1.0.0');
+  assert.strictEqual(
+    SAVED_INSTANCE_PAYLOAD_MAX_ENTRIES,
+    50,
+    'the saved hydration-payload library entry cap is 50'
+  );
+  assert.strictEqual(
+    SAVED_INSTANCE_PAYLOAD_MAX_BYTES,
+    2 * 1024 * 1024,
+    'one saved hydration payload may serialize to at most 2 MiB'
+  );
   assert.strictEqual(typeof SANDBOX_STATE_STORAGE_KEY, 'string');
   assert.ok(SANDBOX_STATE_STORAGE_KEY.length > 0);
   assert.strictEqual(
@@ -2342,6 +2356,168 @@ test('26. realm attachments and provenance missingExtensions round-trip and drop
     'a malformed missingExtensions block drops the provenance block, not the realm'
   );
   assert.strictEqual(malformedValidated.state.realms[0].id, 'realm_ext_persist');
+
+  sharedLocalStorage.clear();
+});
+
+// ============================================================================
+// 27. Saved hydration-payload library (ticket 81d8267)
+// ============================================================================
+
+/** Builds one authored hydration payload for the saved-payload tests. */
+function savedPayloadFixture(overrides = {}) {
+  return {
+    formatVersion: 2,
+    templateId: 'session_zero',
+    templateVersion: 'sha256:abc',
+    inputs: { assignment: { text: 'Draft the realm.' } },
+    ...overrides
+  };
+}
+
+/** Builds one persisted saved-payload entry. */
+function savedInstancePayloadFixture(overrides = {}) {
+  return {
+    id: 'saved_payload_1',
+    name: 'Act 1',
+    templateId: 'session_zero',
+    templateVersion: 'sha256:abc',
+    savedAt: '2026-09-26T10:00:00.000Z',
+    payload: savedPayloadFixture(),
+    ...overrides
+  };
+}
+
+test('27. saved instance payloads round-trip through serialization, validation, and storage', () => {
+  sharedLocalStorage.clear();
+
+  const runtimeStub = {
+    listAgents: () => [],
+    listRecycledAgents: () => [],
+    exportSchedules: () => []
+  };
+
+  const entry = savedInstancePayloadFixture();
+  const snapshot = serializeRuntimeEnvironment({ runtime: runtimeStub }, { savedInstancePayloads: [entry] });
+  assert.deepStrictEqual(snapshot.savedInstancePayloads, [entry]);
+  assert.notStrictEqual(snapshot.savedInstancePayloads[0], entry, 'entries are copied, never aliased');
+  assert.notStrictEqual(
+    snapshot.savedInstancePayloads[0].payload,
+    entry.payload,
+    'the authored payload is copied, never aliased'
+  );
+
+  // An empty library omits the field so legacy wire bytes are unchanged.
+  const bare = serializeRuntimeEnvironment({ runtime: runtimeStub });
+  assert.ok(!('savedInstancePayloads' in bare), 'an empty saved-payload library must omit the field');
+
+  const validated = validateSandboxState(snapshot);
+  assert.strictEqual(validated.valid, true);
+  assert.strictEqual(validated.state, snapshot, 'valid entries must not force a snapshot copy');
+  assert.strictEqual(saveSandboxState(snapshot), true);
+  const loaded = loadSandboxState();
+  assert.deepStrictEqual(loaded.savedInstancePayloads, [entry]);
+
+  sharedLocalStorage.clear();
+});
+
+test('28. saved instance payloads: malformed entries, duplicates, caps, and oversize values drop fail-closed', () => {
+  sharedLocalStorage.clear();
+
+  const runtimeStub = {
+    listAgents: () => [],
+    listRecycledAgents: () => [],
+    exportSchedules: () => []
+  };
+
+  const entry = savedInstancePayloadFixture();
+  const snapshot = serializeRuntimeEnvironment({ runtime: runtimeStub }, { savedInstancePayloads: [entry] });
+
+  // Invalid entries are dropped individually; duplicate ids keep the first.
+  const invalid = {
+    ...snapshot,
+    savedInstancePayloads: [
+      entry,
+      { ...entry, id: '' },
+      { ...entry, id: 'saved_payload_2', name: '   ' },
+      { ...entry, id: 'saved_payload_3', templateId: '' },
+      { ...entry, id: 'saved_payload_4', templateVersion: '  ' },
+      { ...entry, id: 'saved_payload_5', savedAt: '' },
+      { ...entry, id: 'saved_payload_6', payload: null },
+      { ...entry, id: 'saved_payload_7', payload: ['not-a-record'] },
+      savedInstancePayloadFixture({ id: entry.id }),
+      'garbage',
+      null
+    ]
+  };
+  const invalidValidated = validateSandboxState(invalid);
+  assert.strictEqual(invalidValidated.valid, true, 'invalid optional payload entries must not fail validation');
+  assert.deepStrictEqual(
+    invalidValidated.state.savedInstancePayloads.map((candidate) => candidate.id),
+    ['saved_payload_1'],
+    'malformed entries and duplicate ids drop while the valid entry survives'
+  );
+  assert.strictEqual(invalid.savedInstancePayloads.length, 11, 'validation never mutates the input');
+
+  // The entry cap truncates the overflow deterministically (earliest entries win).
+  const capped = {
+    ...snapshot,
+    savedInstancePayloads: Array.from(
+      { length: SAVED_INSTANCE_PAYLOAD_MAX_ENTRIES + 3 },
+      (_, index) => savedInstancePayloadFixture({ id: `saved_payload_${index + 1}`, name: `Act ${index + 1}` })
+    )
+  };
+  const cappedValidated = validateSandboxState(capped);
+  assert.strictEqual(cappedValidated.valid, true);
+  assert.strictEqual(
+    cappedValidated.state.savedInstancePayloads.length,
+    SAVED_INSTANCE_PAYLOAD_MAX_ENTRIES,
+    'entries beyond the cap are dropped'
+  );
+  assert.strictEqual(
+    cappedValidated.state.savedInstancePayloads[0].id,
+    'saved_payload_1',
+    'the earliest entries survive truncation'
+  );
+  assert.strictEqual(
+    cappedValidated.state.savedInstancePayloads[cappedValidated.state.savedInstancePayloads.length - 1].id,
+    `saved_payload_${SAVED_INSTANCE_PAYLOAD_MAX_ENTRIES}`,
+    'truncation keeps the first cap entries in order'
+  );
+
+  // An oversize authored payload is dropped fail-closed, not loaded.
+  const oversized = {
+    ...snapshot,
+    savedInstancePayloads: [
+      savedInstancePayloadFixture({
+        payload: savedPayloadFixture({
+          inputs: { bloat: { text: 'x'.repeat(SAVED_INSTANCE_PAYLOAD_MAX_BYTES + 1024) } }
+        })
+      })
+    ]
+  };
+  const oversizedValidated = validateSandboxState(oversized);
+  assert.strictEqual(oversizedValidated.valid, true);
+  assert.strictEqual(
+    oversizedValidated.state.savedInstancePayloads.length,
+    0,
+    'an oversize entry drops without failing the snapshot'
+  );
+
+  // A non-array value drops the field entirely and legacy snapshots keep identity.
+  const nonArray = { ...snapshot, savedInstancePayloads: 'not-an-array' };
+  const nonArrayValidated = validateSandboxState(nonArray);
+  assert.strictEqual(nonArrayValidated.valid, true);
+  assert.strictEqual(nonArrayValidated.state.savedInstancePayloads, undefined, 'non-array values drop the field');
+
+  const legacy = { ...snapshot };
+  delete legacy.savedInstancePayloads;
+  const legacyValidated = validateSandboxState(legacy);
+  assert.strictEqual(legacyValidated.valid, true);
+  assert.strictEqual(legacyValidated.state, legacy, 'legacy snapshots without the field keep their identity');
+  assert.strictEqual(legacyValidated.state.savedInstancePayloads, undefined);
+  assert.strictEqual(saveSandboxState(legacy), true);
+  assert.strictEqual(loadSandboxState().savedInstancePayloads, undefined);
 
   sharedLocalStorage.clear();
 });

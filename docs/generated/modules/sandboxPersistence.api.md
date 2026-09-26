@@ -41,6 +41,7 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 - Additive MOD-20 topology fields `activePresetId`/`customPresets` round-trip as plain data: serialization emits them from session metadata, validation drops structurally invalid values instead of failing the snapshot, and legacy snapshots without the fields load byte-compatibly
 - Additive realm-registry field `realms` round-trips as plain data: serialization emits only the canonical record fields from session metadata, validation drops structurally invalid entries instead of failing the snapshot, and legacy snapshots without the field load byte-compatibly with an empty registry
 - Additive authority fields `metaAuthorityGrants`/`templateAuthorityTrust` round-trip as plain data emitted from session metadata only when non-empty (legacy snapshots stay byte-identical) and are strictly validated fail-closed: malformed shapes reject the snapshot, proto-pollution keys are rejected by the recursive scan, and hydration never derives authority from either field — grants are re-applied through the composition root's lifecycle-gated restore (unknown/recycled refs skipped) and trust only auto-approves exact declared matches at a later launch
+- Additive saved hydration-payload library field `savedInstancePayloads` round-trips as plain data emitted from session metadata only when non-empty (legacy snapshots stay byte-identical): malformed, duplicate-id, and oversize entries are dropped individually, the entry list is capped, payloads are never validated as launch contracts at load (only at attach), and hydration replaces the in-memory library with the persisted set (absent field → empty)
 - Persistence does not re-wire runtime timer listeners on restore; the `MessagingBus` timer-listener lifecycle is owned by `AgentRuntime`
 
 ## Surface
@@ -186,6 +187,16 @@ export interface PersistedRealmRecord {
 }
 
 // @public
+export interface PersistedSavedInstancePayload {
+    readonly id: string;
+    readonly name: string;
+    readonly payload: Readonly<Record<string, unknown>>;
+    readonly savedAt: string;
+    readonly templateId: string;
+    readonly templateVersion: string;
+}
+
+// @public
 export type PersistedTemplateAuthorityTrust = Readonly<Record<string, Readonly<Record<string, readonly string[]>>>>;
 
 // @public
@@ -267,6 +278,7 @@ export interface SandboxPersistedState {
     readonly metaAuthorityGrants?: PersistedMetaAuthorityGrants;
     readonly realms?: PersistedRealmRecord[];
     readonly recycleBin: SerializedRecycledAgent[];
+    readonly savedInstancePayloads?: readonly PersistedSavedInstancePayload[];
     readonly scheduledTimers: SerializedScheduledTimer[];
     readonly templateAuthorityTrust?: PersistedTemplateAuthorityTrust;
     readonly timestamp: number;
@@ -307,6 +319,12 @@ export interface SanitizedModelConfig {
     readonly reasoningEffort?: string;
     readonly temperature?: number;
 }
+
+// @public
+export const SAVED_INSTANCE_PAYLOAD_MAX_BYTES: number;
+
+// @public
+export const SAVED_INSTANCE_PAYLOAD_MAX_ENTRIES: number;
 
 // @public
 export function saveSandboxState(state: SandboxPersistedState, options?: StorageOptions): boolean;
@@ -409,6 +427,7 @@ export interface SessionMetadata {
     readonly extensions?: readonly PersistedExtensionInstallRecord[];
     readonly importedRealmTemplates?: readonly PersistedImportedRealmTemplate[];
     readonly realms?: readonly PersistedRealmRecord[];
+    readonly savedInstancePayloads?: readonly PersistedSavedInstancePayload[];
 }
 
 // @public
@@ -767,6 +786,19 @@ Structural shape of one Realm-record entry carried by the persisted snapshot. De
 - **`name`** — User-visible display name.
 - **`templateId`** — Optional template id the Realm was launched from.
 
+### `PersistedSavedInstancePayload` — interface
+
+Structural shape of one saved hydration payload carried by the persisted snapshot (ticket 81d8267). Deliberately type-local: persistence never imports the `sandboxStore` module (the store owns library semantics), so the shape is declared here as plain data. The payload is the operator-authored format-v2 package value; it is descriptive data only — payloads are re-validated against the effective template contract at attach time, never at load. Additive optional snapshot data: absent while the library is empty (legacy snapshots load byte-compatibly), and structurally invalid, duplicate-id, or oversize entries are dropped during validation.
+
+#### Members
+
+- **`id`** — Stable library id under which the payload is listed.
+- **`name`** — Operator-chosen display name.
+- **`payload`** — Authored format-v2 payload value (plain JSON data, bounded by the byte cap).
+- **`savedAt`** — ISO-8601 save timestamp.
+- **`templateId`** — Template id the payload targets.
+- **`templateVersion`** — Effective template version the payload validated against (`sha256:<hex>`).
+
 ### `PersistedTemplateAuthorityTrust` — type alias
 
 Structural shape of the additive Wave U per-template authority-trust record (ticket 2518510): template id → template agent key → previously approved authority ids. Trust is operator intent, never authority by itself — it only lets a later launch auto-approve the exact previously approved set; newly declared authorities re-prompt, and grants are still applied (and persisted) through the ordinary operator grant registry. Secret-free by construction.
@@ -976,6 +1008,7 @@ if (validateSandboxState(state).valid) {
 - **`metaAuthorityGrants`** — Persisted Wave U publishing-authority grant lists (additive optional field, ticket 2518510): canonical identity keys per explicit authority. Absent while no grant exists (legacy snapshots stay byte-identical); malformed values fail validation closed, and hydration never derives authority from this field — it re-applies grants through the composition-root restore only (unknown/recycled refs skipped).
 - **`realms`** — Realm registry records (additive optional field). Absent on legacy snapshots; invalid entries are dropped during validation so an otherwise valid snapshot still loads with the remaining records.
 - **`recycleBin`** — Terminated / recycled agents serialized in state RECYCLED.
+- **`savedInstancePayloads`** — Saved hydration-payload library (additive optional field, ticket 81d8267): operator-named authored payloads persisted from the store's library. Absent while the library is empty, so legacy snapshots stay byte-identical; malformed, duplicate-id, and oversize entries are dropped and the list is capped during validation, and payloads are re-validated only at attach, never at load.
 - **`scheduledTimers`** — Scheduled one-shot timers.
 - **`templateAuthorityTrust`** — Persisted Wave U per-template authority trust (additive optional field, ticket 2518510): template id → agent key → previously approved authority ids. Absent while no trust is recorded; malformed values fail validation closed; trust never grants anything directly (it only auto-approves exact matches at a later launch).
 - **`timestamp`** — Epoch ms timestamp when snapshot was captured.
@@ -1023,6 +1056,14 @@ Sanitized model configuration stripped of credentials and secrets, including the
 - **`providerId`** — Model provider identifier (e.g., 'nano-gpt', 'deepseek', 'runware').
 - **`reasoningEffort`** — Reasoning effort tier ('low' | 'medium' | 'high').
 - **`temperature`** — Sampling temperature (0.0 - 2.0).
+
+### `SAVED_INSTANCE_PAYLOAD_MAX_BYTES` — variable
+
+Serialized byte cap for one saved hydration payload (ticket 81d8267): the UTF-8 length of the payload's JSON text may not exceed 2 MiB, so a saved library cannot crowd the shared localStorage snapshot quota. Oversize payloads are refused at save time and dropped individually on load.
+
+### `SAVED_INSTANCE_PAYLOAD_MAX_ENTRIES` — variable
+
+Maximum number of saved hydration payloads one snapshot may carry (ticket 81d8267). The store refuses a save at the cap (`ERR_STORE_PAYLOAD_LIBRARY_FULL`) so operator work is never silently evicted, and snapshot validation truncates a hostile or corrupt list to its first cap entries.
 
 ### `saveSandboxState` — function
 
@@ -1196,7 +1237,7 @@ Serializes live runtime, virtualFs, messagingBus, worldClock, and UI metadata in
 
 Agent bodies are serialized through the entity-owned snapshot contract (`Agent.toSnapshot()`, `runtime/agent`); persistence only layers credential stripping, deterministic history message ids, diagnostic redaction, and recycle-bin defaults on top instead of rebuilding the agent field map.
 
-Execution steps: 1. Serializes each active agent through the entity-owned snapshot contract (`Agent.toSnapshot()`). 2. Strips all API keys, KEKs, and the retired legacy provider-URL channels from each copied config. 3. Backfills deterministic message IDs across the copied histories and redacts persisted `lastError` diagnostics. 4. Serializes recycled agents through the same contract with recycle-bin timestamp/reason defaults. 5. Exports VirtualFS workspace file trees via the runtime persistence port (`runtime.createPersistencePort().virtualFs.exportSnapshot()`), whose VFS members carry the composition-root `InternalPrincipal` binding (MOD-21 W8-D/W8-F); the direct `virtualFs.exportSnapshot()` fallback applies only to runtimes without a persistence port. 6. Exports MessagingBus audit logs and inboxes via `messagingBus.exportSnapshot()`. 7. Exports active one-shot scheduled timers via `runtime.exportSchedules()`. 8. Exports WorldClock simulation seconds and events via `worldClock.exportSnapshot()`. 9. Attaches UI session metadata (`activeAgentId`, `activeFsWorkspace`, `activeTab`, `agentDraftInputs`), plus the additive MOD-20 preset topology (`activePresetId` and credential-stripped `customPresets`), the additive realm-registry topology (`realms`), and the additive imported-template topology (`importedRealmTemplates`) when supplied.
+Execution steps: 1. Serializes each active agent through the entity-owned snapshot contract (`Agent.toSnapshot()`). 2. Strips all API keys, KEKs, and the retired legacy provider-URL channels from each copied config. 3. Backfills deterministic message IDs across the copied histories and redacts persisted `lastError` diagnostics. 4. Serializes recycled agents through the same contract with recycle-bin timestamp/reason defaults. 5. Exports VirtualFS workspace file trees via the runtime persistence port (`runtime.createPersistencePort().virtualFs.exportSnapshot()`), whose VFS members carry the composition-root `InternalPrincipal` binding (MOD-21 W8-D/W8-F); the direct `virtualFs.exportSnapshot()` fallback applies only to runtimes without a persistence port. 6. Exports MessagingBus audit logs and inboxes via `messagingBus.exportSnapshot()`. 7. Exports active one-shot scheduled timers via `runtime.exportSchedules()`. 8. Exports WorldClock simulation seconds and events via `worldClock.exportSnapshot()`. 9. Attaches UI session metadata (`activeAgentId`, `activeFsWorkspace`, `activeTab`, `agentDraftInputs`), plus the additive MOD-20 preset topology (`activePresetId` and credential-stripped `customPresets`), the additive realm-registry topology (`realms`), the additive imported-template topology (`importedRealmTemplates`), and the additive saved hydration-payload library (`savedInstancePayloads`, capped and omitted when empty) when supplied.
 
 #### Parameters
 
@@ -1242,6 +1283,7 @@ Transient UI and session metadata preserved across persistence boundaries.
 - **`extensions`** — Globally installed extension records captured from the composition root's extension registry (extension wave). Additive optional field: absent while nothing is installed (legacy snapshots load byte-compatibly), absent/invalid entries are dropped on validation, and hydration reconciles the remaining records through the registry's validated load path without connecting anything.
 - **`importedRealmTemplates`** — Runtime-imported Realm-template bundles captured from the composition root's template registry (Wave T, ticket 0df20ae). Additive optional field: absent while no import exists (legacy snapshots load byte- compatibly), absent/invalid entries are dropped on validation, and the store re-parses each payload and re-applies its own size caps on hydration.
 - **`realms`** — Realm registry records captured from the composition root's realm registry. Additive optional field: absent on legacy snapshots, absent/invalid entries are dropped on validation, and old snapshots load unchanged with an empty registry.
+- **`savedInstancePayloads`** — Saved hydration-payload library captured from the composition root's store library (ticket 81d8267). Additive optional field: absent while the library is empty (legacy snapshots load byte-compatibly), invalid entries are dropped on validation, and hydration replaces the in-memory library with the persisted set (an absent field hydrates empty).
 
 ### `StorageOptions` — interface
 
@@ -1270,7 +1312,7 @@ Validates the schema and structural integrity of a SandboxPersistedState object.
 
 Validates that a raw object conforms to the `SandboxPersistedState` schema and verifies prototype pollution immunity.
 
-Validation checks: 1. Root shape is a non-null, non-array object. 2. Deep prototype pollution scan of every own key (`__proto__`, `constructor`, `prototype`); the optional Wave U authority fields (`metaAuthorityGrants`, `templateAuthorityTrust`) must additionally arrive as own properties, so a prototype-carried record rejects as pollution (defect cc2b4e8). 3. Required fields: non-empty string `version` whose major component matches `SANDBOX_PERSISTENCE_VERSION`, positive number `timestamp`, and an `agents` array whose entries each carry a non-empty string `id`, an object `config`, an array `history`, and an array-or-null `redoStack`. 4. Optional sections when present: `recycleBin` (same per-entry checks as `agents`), `virtualFs` (workspace-ID and file-map shape), `messagingBus`, `scheduledTimers`, `worldClock`, and `agentDraftInputs`.
+Validation checks: 1. Root shape is a non-null, non-array object. 2. Deep prototype pollution scan of every own key (`__proto__`, `constructor`, `prototype`); the optional Wave U authority fields (`metaAuthorityGrants`, `templateAuthorityTrust`) must additionally arrive as own properties, so a prototype-carried record rejects as pollution (defect cc2b4e8). 3. Required fields: non-empty string `version` whose major component matches `SANDBOX_PERSISTENCE_VERSION`, positive number `timestamp`, and an `agents` array whose entries each carry a non-empty string `id`, an object `config`, an array `history`, and an array-or-null `redoStack`. 4. Optional sections when present: `recycleBin` (same per-entry checks as `agents`), `virtualFs` (workspace-ID and file-map shape), `messagingBus`, `scheduledTimers`, `worldClock`, and `agentDraftInputs`. 5. Additive optional fields when present: MOD-20 presets, realm records, extension install records, imported templates, and the saved hydration-payload library are normalized — invalid entries are dropped individually and the saved-payload list is capped — while the Wave U authority fields (`metaAuthorityGrants`/`templateAuthorityTrust`) fail closed on any malformed shape.
 
 Purity: Pure inspection function. Never throws; returns `{ valid: false, error, code }` on invalid input.
 
@@ -1327,9 +1369,9 @@ Serialized file record within a virtual filesystem workspace partition. Mirrors 
 
 ## Doc coverage
 
-- Top-level exports: 46
-- Declarations (exports + members): 249
-- Documented declarations: 249 / 249 (100%)
+- Top-level exports: 49
+- Declarations (exports + members): 260
+- Documented declarations: 260 / 260 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): `AgentRuntime`, `AgentState`, `InterruptedTurn`, `MessageEnvelope`, `MessagingBus`, `PartitionClockSnapshot`, `SchedulerStatus`, `TimerCondition`, `VirtualFS`, `WorldClock`, `WorldEvent`
