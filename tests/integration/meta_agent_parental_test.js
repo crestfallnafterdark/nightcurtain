@@ -154,12 +154,12 @@ function describedSchema(receipt) {
 // AC-M2-01 / AC-M2-11 — surface + parental inspect
 // ============================================================================
 
-test('1. inspect_agent/update_agent are canonical manager-family tools (36->38 pins)', () => {
+test('1. inspect_agent/update_agent are canonical manager-family tools (post-M5a count pins)', () => {
   assert.equal(SANDBOX_TOOLS.INSPECT_AGENT, 'inspect_agent');
   assert.equal(SANDBOX_TOOLS.UPDATE_AGENT, 'update_agent');
-  assert.equal(Object.keys(SANDBOX_TOOLS).length, 38, 'the canonical taxonomy is 38 tools');
-  assert.equal(ALL_TOOL_DESCRIPTORS.length, 38, 'the descriptor catalog carries all 38 tools');
-  assert.equal(Object.keys(TOOL_REGISTRY).length, 38, 'the canonical registry carries all 38 tools');
+  assert.equal(Object.keys(SANDBOX_TOOLS).length, 41, 'the canonical taxonomy is 41 tools');
+  assert.equal(ALL_TOOL_DESCRIPTORS.length, 41, 'the descriptor catalog carries all 41 tools');
+  assert.equal(Object.keys(TOOL_REGISTRY).length, 41, 'the canonical registry carries all 41 tools');
   assert.equal(TOOL_FAMILIES.inspect_agent, 'lifecycle');
   assert.equal(TOOL_FAMILIES.update_agent, 'lifecycle');
   assert.ok(READ_ONLY_TOOLS.includes('inspect_agent'), 'inspect_agent is read-only');
@@ -178,7 +178,7 @@ test('1. inspect_agent/update_agent are canonical manager-family tools (36->38 p
   const managerSchemaNames = getSandboxToolsSchema('manager').map((def) => def.function.name);
   assert.ok(managerSchemaNames.includes('inspect_agent'), 'the manager schema exposes inspect_agent');
   assert.ok(managerSchemaNames.includes('update_agent'), 'the manager schema exposes update_agent');
-  assert.equal(getSandboxToolsSchema('all').length, 38, 'the wildcard surface exposes 38 schemas');
+  assert.equal(getSandboxToolsSchema('all').length, 41, 'the wildcard surface exposes 41 schemas');
 
   assert.equal(getCanonToolName('inspectAgent'), 'inspect_agent', 'the camelCase alias resolves');
   assert.equal(getCanonToolName('updateAgent'), 'update_agent', 'the camelCase alias resolves');

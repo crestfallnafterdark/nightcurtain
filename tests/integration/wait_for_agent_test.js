@@ -154,8 +154,8 @@ function completionWakeCount(runtime, agentId) {
 
 test('1. wait_for_agent is a canonical invocation tool, manager-only', () => {
   assert.equal(SANDBOX_TOOLS.WAIT_FOR_AGENT, 'wait_for_agent');
-  assert.equal(Object.keys(SANDBOX_TOOLS).length, 38, 'the canonical taxonomy is 38 tools');
-  assert.equal(ALL_TOOL_DESCRIPTORS.length, 38, 'the descriptor catalog carries all 38 tools');
+  assert.equal(Object.keys(SANDBOX_TOOLS).length, 41, 'the canonical taxonomy is 41 tools');
+  assert.equal(ALL_TOOL_DESCRIPTORS.length, 41, 'the descriptor catalog carries all 41 tools');
   assert.ok(TOOL_REGISTRY.wait_for_agent, 'the frozen registry resolves wait_for_agent');
   assert.equal(TOOL_FAMILIES.wait_for_agent, 'invocation', 'wait_for_agent is an invocation tool');
   assert.ok(READ_ONLY_TOOLS.includes('wait_for_agent'), 'wait_for_agent is read-only');
@@ -178,7 +178,7 @@ test('1. wait_for_agent is a canonical invocation tool, manager-only', () => {
   for (const name of ['list_agents', 'wait_for_invocation', 'wait_for_agent']) {
     assert.ok(managerSchemaNames.includes(name), `the manager schema exposes '${name}'`);
   }
-  assert.equal(getSandboxToolsSchema('all').length, 38, 'the wildcard surface exposes 38 schemas');
+  assert.equal(getSandboxToolsSchema('all').length, 41, 'the wildcard surface exposes 41 schemas');
 });
 
 test('2. invoke_agent stops advertising an await and points at the wait primitive', () => {

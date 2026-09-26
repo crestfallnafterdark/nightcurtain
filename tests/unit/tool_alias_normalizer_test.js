@@ -60,11 +60,11 @@ test('1. SANDBOX_TOOLS Master Enum & Immutability', () => {
     'schedule', 'list_schedules', 'cancel_schedule',
     // Clock & Events (3)
     'world_clock', 'event_list', 'get_current_time',
-    // Precall & Describe (2)
-    'batch_precall', 'describe_tool'
+    // Precall & Reflection (5)
+    'batch_precall', 'describe_tool', 'list_tools', 'list_tool_presets', 'describe_preset'
   ];
 
-  assert.strictEqual(expectedCanonicalTools.length, 38, 'Must have exactly 38 canonical tools');
+  assert.strictEqual(expectedCanonicalTools.length, 41, 'Must have exactly 41 canonical tools');
 
   for (const toolName of expectedCanonicalTools) {
     const matchingKey = Object.keys(SANDBOX_TOOLS).find(k => SANDBOX_TOOLS[k] === toolName);
@@ -79,7 +79,10 @@ test('2. INNATE_TOOLS Group & Membership', () => {
   assert.ok(Array.isArray(INNATE_TOOLS), 'INNATE_TOOLS must be an array');
   assert.strictEqual(typeof INNATE_TOOLS.has, 'function', 'INNATE_TOOLS must have a .has method');
 
-  const expectedInnate = ['whoami', 'get_current_time', 'describe_tool', 'batch_precall'];
+  const expectedInnate = [
+    'whoami', 'get_current_time', 'describe_tool', 'batch_precall',
+    'list_tools', 'list_tool_presets', 'describe_preset'
+  ];
   for (const tool of expectedInnate) {
     assert.ok(INNATE_TOOLS.includes(tool), `INNATE_TOOLS must include '${tool}'`);
     assert.ok(INNATE_TOOLS.has(tool), `INNATE_TOOLS.has('${tool}') must be true`);
@@ -118,13 +121,13 @@ test('3. TOOL_PRESETS and resolveToolPreset Resolution', () => {
   assert.deepStrictEqual(resolveToolPreset(new Set(['read_file', 'send_message'])), ['read_file', 'send_message']);
 });
 
-test('4. Master TOOL_ALIAS_MAP and getCanonToolName across all 38 tools', () => {
+test('4. Master TOOL_ALIAS_MAP and getCanonToolName across all 41 tools', () => {
   assert.ok(TOOL_ALIAS_MAP, 'TOOL_ALIAS_MAP must be exported');
   assert.ok(Object.isFrozen(TOOL_ALIAS_MAP), 'TOOL_ALIAS_MAP must be frozen');
   assert.strictEqual(normalizeToolName, getCanonToolName, 'normalizeToolName must alias getCanonToolName');
 
-  // Test all 38 canonical names and camelCase variants
-  const all36Tools = [
+  // Test all 41 canonical names and camelCase variants
+  const all41Tools = [
     { canon: 'read_file', camel: 'readFile', aliases: ['virtualFs_readFile', 'fs_readFile', 'fs.readFile', 'virtualFs.readFile', 'fs_read_file', 'vfs_read_file', 'file_read', 'read'] },
     { canon: 'write_file', camel: 'writeFile', aliases: ['virtualFs_writeFile', 'fs_writeFile', 'fs.writeFile', 'virtualFs.writeFile', 'fs_write_file', 'vfs_write_file', 'save_file', 'write'] },
     { canon: 'replace_file_content', camel: 'replaceFileContent', aliases: ['virtualFs_replaceFileContent', 'fs_replaceFileContent', 'fs.replaceFileContent', 'replace_content', 'edit_file'] },
@@ -162,12 +165,15 @@ test('4. Master TOOL_ALIAS_MAP and getCanonToolName across all 38 tools', () => 
     { canon: 'event_list', camel: 'eventList', aliases: ['events', 'world_events', 'list_events', 'register_event', 'resolve_event', 'active_events', 'query_events', 'cancel_event'] },
     { canon: 'get_current_time', camel: 'getCurrentTime', aliases: ['system_getCurrentTime', 'system.getCurrentTime', 'worldClock_getTime', 'get_time', 'time', 'now'] },
     { canon: 'batch_precall', camel: 'batchPrecall', aliases: ['runtime_batchPrecall', 'runtime.batchPrecall', 'batch_call', 'precall', 'batch_precalls'] },
-    { canon: 'describe_tool', camel: 'describeTool', aliases: ['system_describeTool', 'system.describeTool', 'tool_info', 'help', 'describe', 'inspect_tool'] }
+    { canon: 'describe_tool', camel: 'describeTool', aliases: ['system_describeTool', 'system.describeTool', 'tool_info', 'help', 'describe', 'inspect_tool'] },
+    { canon: 'list_tools', camel: 'listTools', aliases: [] },
+    { canon: 'list_tool_presets', camel: 'listToolPresets', aliases: [] },
+    { canon: 'describe_preset', camel: 'describePreset', aliases: [] }
   ];
 
-  assert.strictEqual(all36Tools.length, 38, 'Must verify all 38 tools');
+  assert.strictEqual(all41Tools.length, 41, 'Must verify all 41 tools');
 
-  for (const item of all36Tools) {
+  for (const item of all41Tools) {
     // Canonical name resolution
     assert.strictEqual(
       getCanonToolName(item.canon),

@@ -107,28 +107,30 @@ const LEGACY_EFFECTIVE_SORTED = Object.freeze({
 
 /**
  * Canonical-order generated tier literals for the final Wave-1 state plus the
- * M2 delta: the pre-C parity literals plus the ratified deltas (every innate
- * tool is schema-visible per tier; manager gains `list_agents`/
- * `wait_for_invocation` in Wave 2 and `inspect_agent`/`update_agent` in M2).
+ * M2/M5a deltas: the pre-C parity literals plus the ratified deltas (every
+ * innate tool — including `describe_tool` and the M5a catalog reflection tools
+ * — is schema-visible per tier; manager gains `list_agents`/
+ * `wait_for_invocation` in Wave 2, `wait_for_agent` in W2, and
+ * `inspect_agent`/`update_agent` in M2).
  */
 const GENERATED_TIER_LITERALS = Object.freeze({
   all: Object.freeze(['*']),
   readonly: Object.freeze([
     'read_file', 'list_files', 'query_json', 'grep', 'wait_for_mail', 'list_inbox',
     'read_message', 'get_archive', 'get_inbox', 'whoami', 'get_current_time', 'batch_precall',
-    'describe_tool'
+    'describe_tool', 'list_tools', 'list_tool_presets', 'describe_preset'
   ]),
   readonly_collaborator: Object.freeze([
     'read_file', 'list_files', 'query_json', 'grep', 'send_message', 'wait_for_mail',
     'list_inbox', 'read_message', 'get_archive', 'get_inbox', 'whoami', 'get_current_time',
-    'batch_precall', 'describe_tool'
+    'batch_precall', 'describe_tool', 'list_tools', 'list_tool_presets', 'describe_preset'
   ]),
   collaborator: Object.freeze([
     'read_file', 'write_file', 'replace_file_content', 'copy_file', 'delete_file', 'list_files',
     'write_json', 'query_json', 'json_patch', 'grep', 'set_permissions', 'send_message',
     'wait_for_mail', 'list_inbox', 'read_message', 'get_archive', 'inline_file_in_message',
     'get_inbox', 'whoami', 'schedule', 'list_schedules', 'cancel_schedule', 'get_current_time',
-    'batch_precall', 'describe_tool'
+    'batch_precall', 'describe_tool', 'list_tools', 'list_tool_presets', 'describe_preset'
   ]),
   manager: Object.freeze([
     'read_file', 'write_file', 'replace_file_content', 'copy_file', 'delete_file', 'list_files',
@@ -137,13 +139,14 @@ const GENERATED_TIER_LITERALS = Object.freeze({
     'get_inbox', 'spawn_agent', 'kill_agent', 'list_agents', 'whoami', 'undo_turn',
     'inspect_agent', 'update_agent',
     'invoke_agent', 'wait_for_invocation', 'wait_for_agent', 'schedule', 'list_schedules',
-    'cancel_schedule', 'get_current_time', 'batch_precall', 'describe_tool'
+    'cancel_schedule', 'get_current_time', 'batch_precall', 'describe_tool', 'list_tools',
+    'list_tool_presets', 'describe_preset'
   ])
 });
 
-/** Ratified deltas applied on top of the parity fixtures (Wave 2 + M2). */
+/** Ratified deltas applied on top of the parity fixtures (Wave 2 + M2 + M5a). */
 const RATIFIED_DELTAS = Object.freeze({
-  innate: Object.freeze(['describe_tool']),
+  innate: Object.freeze(['describe_tool', 'list_tools', 'list_tool_presets', 'describe_preset']),
   manager: Object.freeze(['list_agents', 'wait_for_invocation', 'wait_for_agent']),
   m2Manager: Object.freeze(['inspect_agent', 'update_agent'])
 });
@@ -292,7 +295,7 @@ test('T6 per-tier schema names match the frozen literals', () => {
   }
   const allNames = getSandboxToolsSchema('all').map((def) => def.function.name);
   assert.deepStrictEqual(allNames, CANONICAL_NAMES);
-  assert.strictEqual(allNames.length, 38);
+  assert.strictEqual(allNames.length, 41);
   const allNoReflection = getSandboxToolsSchema('all', { includeReflection: false }).map((def) => def.function.name);
   assert.deepStrictEqual(allNoReflection, CANONICAL_NAMES.filter((name) => name !== 'describe_tool'));
 });

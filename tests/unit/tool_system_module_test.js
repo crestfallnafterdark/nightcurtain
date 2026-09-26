@@ -3,7 +3,7 @@
  * @description Comprehensive unit and integration test suite for Module 8: tool_system.
  * Validates strict ICD compliance, immutable .ts contracts, Draft-07 schema generation,
  * preset resolution, O(1) table dispatch, parameter sanitization, universal error shielding,
- * and pure 1-line delegations across all 38 tool descriptors and 7 substrate domains.
+ * and pure 1-line delegations across all 41 tool descriptors and 7 substrate domains.
  */
 
 import test from 'node:test';
@@ -74,17 +74,20 @@ test('1. Strict Export Whitelist & Constants Immutability', () => {
 
   // Master tools enum
   assert.ok(Object.isFrozen(SANDBOX_TOOLS));
-  assert.strictEqual(Object.keys(SANDBOX_TOOLS).length, 38);
+  assert.strictEqual(Object.keys(SANDBOX_TOOLS).length, 41);
 
   // Innate tools list
   assert.ok(Object.isFrozen(INNATE_TOOLS));
   assert.ok(Array.isArray(INNATE_TOOLS));
   assert.strictEqual(typeof INNATE_TOOLS.has, 'function');
-  assert.strictEqual(INNATE_TOOLS.length, 4);
+  assert.strictEqual(INNATE_TOOLS.length, 7);
   assert.ok(INNATE_TOOLS.has('whoami'));
   assert.ok(INNATE_TOOLS.has('get_current_time'));
   assert.ok(INNATE_TOOLS.has('describe_tool'));
   assert.ok(INNATE_TOOLS.has('batch_precall'));
+  assert.ok(INNATE_TOOLS.has('list_tools'));
+  assert.ok(INNATE_TOOLS.has('list_tool_presets'));
+  assert.ok(INNATE_TOOLS.has('describe_preset'));
   assert.strictEqual(INNATE_TOOLS.has('read_file'), false);
   assert.strictEqual(INNATE_TOOLS.has('write_file'), false);
 
@@ -98,10 +101,10 @@ test('1. Strict Export Whitelist & Constants Immutability', () => {
 });
 
 // ============================================================================
-// 2. Canonical Tool Taxonomy (All 38 Tools)
+// 2. Canonical Tool Taxonomy (All 41 Tools)
 // ============================================================================
 
-test('2. Canonical Tool Taxonomy Enumeration (38 Tools across 7 Domains)', () => {
+test('2. Canonical Tool Taxonomy Enumeration (41 Tools across 7 Domains)', () => {
   const expectedTools = [
     // VFS (12)
     'read_file', 'write_file', 'replace_file_content', 'copy_file', 'delete_file',
@@ -119,18 +122,18 @@ test('2. Canonical Tool Taxonomy Enumeration (38 Tools across 7 Domains)', () =>
     'schedule', 'list_schedules', 'cancel_schedule',
     // Clock & Events (3)
     'world_clock', 'event_list', 'get_current_time',
-    // Precall & Reflection (2)
-    'batch_precall', 'describe_tool'
+    // Precall & Reflection (5)
+    'batch_precall', 'describe_tool', 'list_tools', 'list_tool_presets', 'describe_preset'
   ];
 
-  assert.strictEqual(expectedTools.length, 38);
+  assert.strictEqual(expectedTools.length, 41);
   for (const name of expectedTools) {
     const found = Object.values(SANDBOX_TOOLS).includes(name);
     assert.ok(found, `Tool '${name}' must exist in SANDBOX_TOOLS enum`);
     assert.ok(TOOL_REGISTRY[name], `Tool '${name}' must be registered in frozen TOOL_REGISTRY`);
   }
 
-  assert.strictEqual(ALL_TOOL_DESCRIPTORS.length, 38);
+  assert.strictEqual(ALL_TOOL_DESCRIPTORS.length, 41);
 });
 
 // ============================================================================
@@ -192,25 +195,25 @@ test('3. Capability Preset Resolution Engine (resolveToolPreset)', () => {
 test('4. Draft-07 JSON Schema Generation & Invariant 4 Zero Schema Pollution', () => {
   // 1. Full schema generation (all tools)
   const allSchemas = getSandboxToolsSchema('all');
-  assert.strictEqual(allSchemas.length, 38);
+  assert.strictEqual(allSchemas.length, 41);
 
   // 2. Preset-filtered schema generation (generated family tiers; every tier
   // carries the innate baseline, so `describe_tool` is schema-visible too)
   const managerSchemas = getSandboxToolsSchema('manager');
-  assert.strictEqual(managerSchemas.length, 34);
+  assert.strictEqual(managerSchemas.length, 37);
 
   const collabSchemas = getSandboxToolsSchema('collaborator');
-  assert.strictEqual(collabSchemas.length, 25);
+  assert.strictEqual(collabSchemas.length, 28);
 
   const readonlyCollabSchemas = getSandboxToolsSchema('readonly_collaborator');
-  assert.strictEqual(readonlyCollabSchemas.length, 14);
+  assert.strictEqual(readonlyCollabSchemas.length, 17);
 
   const readonlySchemas = getSandboxToolsSchema('readonly');
-  assert.strictEqual(readonlySchemas.length, 13);
+  assert.strictEqual(readonlySchemas.length, 16);
 
   // 3. Option: includeReflection: false
   const noReflectionSchemas = getSandboxToolsSchema('all', { includeReflection: false });
-  assert.strictEqual(noReflectionSchemas.length, 37);
+  assert.strictEqual(noReflectionSchemas.length, 40);
   assert.ok(!noReflectionSchemas.some(s => s.function.name === 'describe_tool'));
 
   // 4. Structural validation of Draft-07 schemas

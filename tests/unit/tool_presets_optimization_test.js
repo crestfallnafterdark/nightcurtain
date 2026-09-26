@@ -63,10 +63,10 @@ test('2. resolveToolPreset Resolution', () => {
 
 test('3. getSandboxToolsSchema Integration', () => {
   const allSchemas = getSandboxToolsSchema('all');
-  assert.strictEqual(allSchemas.length, 38);
+  assert.strictEqual(allSchemas.length, 41);
 
   const managerSchemas = getSandboxToolsSchema('manager');
-  assert.strictEqual(managerSchemas.length, 34);
+  assert.strictEqual(managerSchemas.length, 37);
   assert.ok(managerSchemas.some(t => t.function.name === SANDBOX_TOOLS.SPAWN_AGENT));
   assert.ok(managerSchemas.some(t => t.function.name === SANDBOX_TOOLS.GET_ARCHIVE));
   assert.ok(managerSchemas.some(t => t.function.name === SANDBOX_TOOLS.LIST_AGENTS));
@@ -74,25 +74,25 @@ test('3. getSandboxToolsSchema Integration', () => {
   assert.ok(managerSchemas.some(t => t.function.name === SANDBOX_TOOLS.WAIT_FOR_AGENT));
 
   const collabSchemas = getSandboxToolsSchema('collaborator');
-  assert.strictEqual(collabSchemas.length, 25);
+  assert.strictEqual(collabSchemas.length, 28);
   assert.ok(!collabSchemas.some(t => t.function.name === SANDBOX_TOOLS.SPAWN_AGENT));
   assert.ok(!collabSchemas.some(t => t.function.name === SANDBOX_TOOLS.LIST_AGENTS));
   assert.ok(collabSchemas.some(t => t.function.name === SANDBOX_TOOLS.SEND_MESSAGE));
 
   const readonlyCollabSchemas = getSandboxToolsSchema('readonly_collaborator');
-  assert.strictEqual(readonlyCollabSchemas.length, 14);
+  assert.strictEqual(readonlyCollabSchemas.length, 17);
   assert.ok(readonlyCollabSchemas.some(t => t.function.name === SANDBOX_TOOLS.SEND_MESSAGE));
   assert.ok(!readonlyCollabSchemas.some(t => t.function.name === SANDBOX_TOOLS.WRITE_FILE));
 
   const readonlySchemas = getSandboxToolsSchema('readonly');
-  assert.strictEqual(readonlySchemas.length, 13);
+  assert.strictEqual(readonlySchemas.length, 16);
   assert.ok(!readonlySchemas.some(t => t.function.name === SANDBOX_TOOLS.SEND_MESSAGE));
   assert.ok(readonlySchemas.some(t => t.function.name === SANDBOX_TOOLS.READ_FILE));
 });
 
 test('4. Schema Draft-07 Conformance', () => {
   const allSchemas = getSandboxToolsSchema();
-  assert.strictEqual(allSchemas.length, 38);
+  assert.strictEqual(allSchemas.length, 41);
 
   const spawnDef = allSchemas.find(t => t.function.name === SANDBOX_TOOLS.SPAWN_AGENT);
   assert.ok(spawnDef, 'spawn_agent schema definition must exist');

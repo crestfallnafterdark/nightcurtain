@@ -4,7 +4,7 @@
  *   conformance sweep (WAVE_R §7). Guard rail for the whole wave and for every
  *   future canonical tool:
  *
- *   1. Classification table over all 38 canonical tools
+ *   1. Classification table over all 41 canonical tools
  *      (`realm-scope-denied` / `self-only` / `static`), derived mechanically
  *      from `ALL_TOOL_DESCRIPTORS` and cross-checked against the
  *      `SANDBOX_TOOLS` enumeration. A tool without a classification — or a
@@ -53,7 +53,7 @@ import { DEMO_TEMPLATE, materializeTemplate } from '../../src/lib/sandbox/realmC
 import { sharedLocalStorage } from '../test_env.js';
 
 // ============================================================================
-// Classification table (all 38 canonical tools)
+// Classification table (all 41 canonical tools)
 // ============================================================================
 
 /** Category: the tool has a cross-scope target surface; exact-id cross-scope attempts are denied. */
@@ -133,8 +133,13 @@ const TOOL_CLASSIFICATION = Object.freeze({
   whoami: CATEGORY_SELF_ONLY,
   undo_turn: CATEGORY_SELF_ONLY,
   get_current_time: CATEGORY_SELF_ONLY,
-  // --- static (1) ---
-  describe_tool: CATEGORY_STATIC
+  // --- static (4) ---
+  describe_tool: CATEGORY_STATIC,
+  // M5a catalog reflection: the canonical tool/preset listings are
+  // caller-invariant reads with no identity or scope dimension.
+  list_tools: CATEGORY_STATIC,
+  list_tool_presets: CATEGORY_STATIC,
+  describe_preset: CATEGORY_STATIC
 });
 
 /**
