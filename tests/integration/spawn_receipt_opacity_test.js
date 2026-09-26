@@ -335,6 +335,72 @@ test('eab4e51/d57cbc1: a withheld workspace label is omitted from listings, neve
   }
 });
 
+test('1829afd: whoami projects the workspace label and parent reference realm-opaquely', async () => {
+  const runtime = new AgentRuntime({ autoBootstrapDirector: false });
+  try {
+    await runtime.ensureDirector();
+    const operator = runtime.createAgentIdentityPort().getAgentIdentity('director').authority;
+    const canonicalParent = createAgentIdentityKey(REALM_ID, 'opaque_parent');
+    // Host/authority pins are the documented reachability path for a canonical
+    // workspace key and an explicit canonical parent reference.
+    await runtime.launchAgent({
+      config: {
+        id: 'whoami_global',
+        realmId: REALM_ID,
+        workspace: `realm:${REALM_ID}:global`,
+        spawnedBy: canonicalParent,
+        allowedTools: ['whoami']
+      },
+      principal: operator
+    });
+    await runtime.launchAgent({
+      config: {
+        id: 'whoami_private',
+        realmId: REALM_ID,
+        workspace: 'realm:beta:private',
+        allowedTools: ['whoami']
+      },
+      principal: operator
+    });
+
+    const globalDispatcher = createSandboxToolDispatcher({
+      runtime,
+      agentId: 'whoami_global',
+      realmId: REALM_ID
+    });
+    const globalWho = await globalDispatcher.executeTool('whoami', {});
+    assert.equal(globalWho.success, true, `whoami must succeed: ${globalWho.error}`);
+    assert.equal(globalWho.id, 'whoami_global', 'whoami keeps the bare registered id');
+    assert.equal(
+      globalWho.workspaceId,
+      'global',
+      'the realm-global workspace is labeled global, never the raw canonical key'
+    );
+    assert.equal(
+      globalWho.spawnedBy,
+      'opaque_parent',
+      'a canonical parent reference projects to its bare registered id'
+    );
+    assertRealmOpaque(JSON.stringify(globalWho), 'the whoami receipt');
+
+    const privateDispatcher = createSandboxToolDispatcher({
+      runtime,
+      agentId: 'whoami_private',
+      realmId: REALM_ID
+    });
+    const privateWho = await privateDispatcher.executeTool('whoami', {});
+    assert.equal(privateWho.success, true, `whoami must succeed: ${privateWho.error}`);
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(privateWho, 'workspaceId'),
+      false,
+      'a withheld workspace key is omitted from whoami, never echoed raw'
+    );
+    assertRealmOpaque(JSON.stringify(privateWho), 'the withheld-workspace whoami receipt');
+  } finally {
+    runtime.destroy();
+  }
+});
+
 test('d57cbc1: the dispatcher binds the callerKey so same-id realm callers resolve exactly', async () => {
   const runtime = new AgentRuntime({ autoBootstrapDirector: false });
   try {

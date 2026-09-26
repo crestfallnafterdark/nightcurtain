@@ -1078,12 +1078,17 @@ test('9. every canonical tool receipt is realm-free for two realm scopes', async
     assert.equal(runtime.hasAgent('sweep_child_alpha'), false, 'the alpha sweep child was terminated');
     assert.equal(runtime.hasAgent('sweep_child_generic'), false, 'the generic sweep child was terminated');
 
-    // Static tool caller-invariance: `describe_tool` reads only the registry.
+    // Static tool viewer: `describe_tool` reads only the caller-authorized
+    // registry view, so equally capable realm callers see the identical
+    // descriptor (realm-invariant) while a caller that cannot invoke the tool
+    // is never advertised it (ec397bf).
     const registryView = await dispatcherFor(runtime, 'alpha_root').executeTool('describe_tool', { tool_name: 'spawn_agent' });
-    const foreignView = await dispatcherFor(runtime, 'beta_worker').executeTool('describe_tool', { tool_name: 'spawn_agent' });
-    const genericView = await dispatcherFor(runtime, 'generic_root').executeTool('describe_tool', { tool_name: 'spawn_agent' });
-    assert.equal(JSON.stringify(registryView), JSON.stringify(foreignView), 'describe_tool is caller-invariant across realms');
-    assert.equal(JSON.stringify(registryView), JSON.stringify(genericView), 'describe_tool is caller-invariant for Generic callers');
+    const foreignView = await dispatcherFor(runtime, 'generic_root').executeTool('describe_tool', { tool_name: 'spawn_agent' });
+    assert.equal(JSON.stringify(registryView), JSON.stringify(foreignView), 'describe_tool is caller-invariant across realms for equal capability');
+    const ordinaryView = await dispatcherFor(runtime, 'beta_worker').executeTool('describe_tool', { tool_name: 'spawn_agent' });
+    assert.equal(ordinaryView.success, false, 'an ordinary caller is not advertised a tool it cannot invoke');
+    assert.equal(ordinaryView.code, 'TOOL_NOT_FOUND', 'the withheld descriptor uses the uniform not-found receipt');
+    assertRealmOpaque(JSON.stringify(ordinaryView), 'the withheld describe_tool receipt');
 
     // --- Caller-input echo exclusion (blocking since Wave I, d57cbc1) ------
     // The model-facing tool boundary never forwards a caller-supplied

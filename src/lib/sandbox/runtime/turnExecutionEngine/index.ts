@@ -20,7 +20,7 @@
  * @invariant Cancellation is cooperative: an external `AbortSignal` aborts the agent's internal controller, stream/tool/loop boundaries re-check abort state, the turn settles `cancelled` with `TURN_ABORTED`, and abort listeners are removed in `finally`.
  * @invariant Precalls are fail-closed: a raw or canonical name absent from the frozen `PRECALL_ALLOWLIST` yields an `isError` tool receipt coded `FORBIDDEN_PRECALL` and is never executed; terminal-batch queued calls are re-validated through the same gate.
  * @invariant Host-registered custom tool handlers execute only for callers whose frozen `AuthorityDescriptor` grants the wildcard `'*'` or `'@lifecycle:authority'` (or an engine-internal principal projection); a matching `allowedTools` entry never authorizes custom execution, anonymous callers are denied, and custom schemas are hidden from ungranted callers.
- * @invariant Publishing meta-tool schemas (`import_realm_template`/`submit_hydration_package`) are appended to the model-facing schema list only when the agent's frozen `AuthorityDescriptor` explicitly holds the matching `@template:authority`/`@hydration:authority` id; the wildcard `'*'` and `privileged` never expose them, and a descriptor-less or anonymous caller sees no publishing surface.
+ * @invariant Publishing meta-tool schemas (`import_realm_template`/`submit_hydration_package`) are appended to the model-facing schema list only when the agent's frozen `AuthorityDescriptor` explicitly holds the matching `@template:authority`/`@hydration:authority` id; the wildcard `'*'` and `privileged` never expose them, and a descriptor-less or anonymous caller sees no publishing surface. The same explicit-holder rule governs the merged `describe_tool` registry: an exact holder gains the authority descriptors, every other caller never learns they exist (ticket ec397bf; d872723 F10).
  * @invariant Extension-tool exposure mirrors descriptor-exact authorization: the model-facing schema list and the merged `describe_tool` registry gain exactly the extension tools the agent's frozen `AuthorityDescriptor.extensions` axis grants and the bound provider registry currently resolves — never the whole catalog, never an ungranted name, and a missing provider exposes nothing; a granted name whose descriptor has gone (disconnected/conflicted/refused projection) carries no schema and resolves `TOOL_NOT_FOUND` at call time.
  * @invariant Precall execution exceptions are converted to `isError` tool receipts (`PRECALL_EXECUTION_ERROR`) and never halt the turn.
  * @invariant The multi-turn tool loop is bounded by a positive numeric `agent.config.maxTurns`; absent or non-positive values leave it open-ended by design (accepted QUIRK-001, no hard cap). When the budget is exhausted while the model is still dispatching tool calls, the turn throws an `Error` coded `MAX_TURNS_EXCEEDED` instead of resolving `completed`.
@@ -58,7 +58,7 @@ import {
   getSandboxToolsSchema,
   createSandboxToolDispatcher
 } from '../../toolDefinitions/index.ts';
-import { getPublishingToolSchemas, TOOL_REGISTRY } from '../../tools/descriptors/index.ts';
+import { getPublishingToolSchemas, PUBLISHING_TOOL_REGISTRY, TOOL_REGISTRY } from '../../tools/descriptors/index.ts';
 import { AGENT_AUTHORITIES } from '../../realmCatalog/index.ts';
 import { AGENT_WORKSPACE_VIEW_TOKEN, resolveAgentPrivateWorkspaceKey } from '../../virtualFs/index.ts';
 import type {
@@ -1607,17 +1607,32 @@ export class TurnExecutionEngine {
 
   /**
    * Builds the turn's merged tool registry: the frozen baked `TOOL_REGISTRY`
-   * plus the granted extension descriptors under their sanitized call names,
-   * so `describe_tool` documents exactly the extension tools this caller may
-   * invoke. The merged view is a fresh null-prototype frozen record; an
+   * plus the publishing descriptors the caller's frozen `AuthorityDescriptor`
+   * explicitly holds (ticket ec397bf; d872723 F10 — an exact authority holder
+   * can `describe_tool` its authority tool) plus the granted extension
+   * descriptors under their sanitized call names, so `describe_tool` documents
+   * exactly the tools this caller may invoke. The wildcard `'*'`, `privileged`,
+   * and descriptor-less callers hold no authority ids and gain no authority
+   * entry. The merged view is a fresh null-prototype frozen record; an
    * ungranted call name has no entry and stays `TOOL_NOT_FOUND`.
    *
    * @param extensionDescriptors - Granted, resolvable extension descriptors.
+   * @param authorityIds - Explicit publishing-authority ids the caller holds.
    * @returns The frozen merged registry.
    * @internal
    */
-  #mergedToolRegistryFor(extensionDescriptors: readonly ExtensionToolDescriptor[]): Readonly<Record<string, unknown>> {
+  #mergedToolRegistryFor(
+    extensionDescriptors: readonly ExtensionToolDescriptor[],
+    authorityIds: readonly string[] = []
+  ): Readonly<Record<string, unknown>> {
     const merged: Record<string, unknown> = Object.assign(Object.create(null), TOOL_REGISTRY);
+    if (authorityIds.length > 0) {
+      for (const descriptor of Object.values(PUBLISHING_TOOL_REGISTRY)) {
+        if (authorityIds.includes(descriptor.authority)) {
+          merged[descriptor.name] = descriptor;
+        }
+      }
+    }
     for (const descriptor of extensionDescriptors) {
       merged[descriptor.name] = descriptor;
     }
@@ -2211,8 +2226,13 @@ export class TurnExecutionEngine {
       // Prepare tool schemas
       const isPrivileged = Boolean(agent.config?.privileged);
       const isUniversalTools = Array.isArray(agent.config.allowedTools) && agent.config.allowedTools.includes('*');
+      // Visibility mirrors authorization (ticket ec397bf): an explicit tool
+      // list is a capability narrowing, never a disclosure narrowing — the
+      // universally authorized innate baseline (`whoami`, `get_current_time`,
+      // `describe_tool`, `batch_precall`) is emitted alongside it, exactly as
+      // the null/preset branches already do. Unauthorized names are never added.
       const toolsSchema = (!isUniversalTools && Array.isArray(agent.config.allowedTools))
-        ? [...getSandboxToolsSchema(agent.config.allowedTools)]
+        ? [...getSandboxToolsSchema([...agent.config.allowedTools, ...INNATE_TOOLS])]
         : [...getSandboxToolsSchema(isPrivileged ? undefined : (agent.config.allowedTools || INNATE_TOOLS))];
 
       // Extension tools (extension wave): the caller sees the model-facing
@@ -2315,7 +2335,7 @@ export class TurnExecutionEngine {
         // caller's granted extension descriptors) feeds `describe_tool`; the
         // provider/execution ports are trusted bound construction (pinned keys)
         // and route an authorized extension call to the live server.
-        toolRegistry: this.#mergedToolRegistryFor(grantedExtensionDescriptors),
+        toolRegistry: this.#mergedToolRegistryFor(grantedExtensionDescriptors, publishingAuthorities),
         ...(this.#extensionToolProvider ? { extensionToolProvider: this.#extensionToolProvider } : {}),
         ...(this.#extensionExecutionPort ? { extensionExecutionPort: this.#extensionExecutionPort } : {}),
         worldClock: this.#worldClock,

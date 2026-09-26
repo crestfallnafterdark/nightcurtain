@@ -18,7 +18,7 @@ import {
   PUBLISHING_TOOL_REGISTRY,
   getPublishingToolSchemas
 } from '../../src/lib/sandbox/tools/descriptors/index.ts';
-import { PUBLISHING_TOOLS, TOOL_PRESETS } from '../../src/lib/sandbox/tools/constants/index.ts';
+import { PUBLISHING_TOOLS, TOOL_PRESETS, INNATE_TOOLS } from '../../src/lib/sandbox/tools/constants/index.ts';
 import { AGENT_AUTHORITIES } from '../../src/lib/sandbox/realmCatalog/index.ts';
 import { VirtualFS, PermissionDeniedError, FileNotFoundError } from '../../src/lib/sandbox/virtualFs/index.ts';
 import { MessagingBus } from '../../src/lib/sandbox/messagingBus/index.ts';
@@ -37,6 +37,49 @@ function assert(condition, message) {
   console.log(`  [PASS] ${message}`);
   passed++;
   return true;
+}
+
+/**
+ * Builds a scripted model that calls one tool on its first turn and then
+ * completes, capturing the tool names of the first emitted schema surface.
+ * @param {string} toolName - Tool the scripted model calls first.
+ * @returns {{model: object, captured: {toolNames: string[], streamOptions: object[]}}} Probe handles.
+ */
+function createSingleToolCallModel(toolName) {
+  const captured = { toolNames: [], streamOptions: [] };
+  let step = 0;
+  const model = {
+    id: 'ec397bf-scripted-model',
+    config: {},
+    provider: {
+      id: 'ec397bf-scripted-provider',
+      createModel: () => model,
+      getEndpointUrl: () => 'http://localhost/scripted',
+      checkBalance: async () => ({ balance: 1 }),
+      listModels: async () => [{ id: 'ec397bf-scripted-model', name: 'ec397bf-scripted-model' }]
+    },
+    async *stream(options = {}) {
+      captured.streamOptions.push(options);
+      if (captured.toolNames.length === 0) {
+        captured.toolNames = (Array.isArray(options.tools) ? options.tools : [])
+          .map((entry) => entry?.function?.name || entry?.name || '');
+      }
+      step += 1;
+      if (step === 1) {
+        const toolCall = {
+          id: 'ec397bf_call',
+          type: 'function',
+          function: { name: 'describe_tool', arguments: JSON.stringify({ tool_name: toolName }) }
+        };
+        yield { type: 'tool_call', toolCalls: [toolCall] };
+        yield { type: 'finish', finishReason: 'tool_calls', content: '', toolCalls: [toolCall] };
+        return;
+      }
+      yield { type: 'finish', finishReason: 'stop', content: 'done', toolCalls: [] };
+    },
+    async complete() { return { content: 'done' }; }
+  };
+  return { model, captured };
 }
 
 async function runEpic6UnitTests() {
@@ -653,6 +696,94 @@ async function runEpic6UnitTests() {
     }
   } finally {
     presetRuntime.destroy();
+  }
+
+  // --- SECTION 11: describe_tool exposure mirrors authorization (ec397bf) ---
+  console.log('\n--- 11. describe_tool exposure mirrors authorization (ec397bf) ---');
+  const exposureRuntime = new AgentRuntime({ autoBootstrapDirector: false });
+  await exposureRuntime.ensureDirector();
+  const exposureOperator = exposureRuntime.createAgentIdentityPort().getAgentIdentity('director').authority;
+  try {
+    await exposureRuntime.launchAgent({ config: { id: 'exposure_restricted', allowedTools: null }, principal: exposureOperator });
+    await exposureRuntime.launchAgent({ config: { id: 'exposure_listed', allowedTools: ['read_file'] }, principal: exposureOperator });
+    await exposureRuntime.launchAgent({ config: { id: 'exposure_wild', privileged: true, allowedTools: ['*'] }, principal: exposureOperator });
+
+    const restrictedDispatcher = createSandboxToolDispatcher({ runtime: exposureRuntime, agentId: 'exposure_restricted' });
+    const listedDispatcher = createSandboxToolDispatcher({ runtime: exposureRuntime, agentId: 'exposure_listed' });
+    const wildDispatcher = createSandboxToolDispatcher({ runtime: exposureRuntime, agentId: 'exposure_wild' });
+
+    const restrictedInnate = await restrictedDispatcher.executeTool('describe_tool', { tool_name: 'whoami' });
+    assert(restrictedInnate.success === true, 'a restricted caller can describe the universally authorized innate primitives');
+
+    const restrictedBaked = await restrictedDispatcher.executeTool('describe_tool', { tool_name: 'read_file' });
+    assert(
+      restrictedBaked.success === false && restrictedBaked.code === 'TOOL_NOT_FOUND',
+      'a restricted caller is not advertised a baked tool it cannot invoke (uniform TOOL_NOT_FOUND)'
+    );
+
+    const listedAllowed = await listedDispatcher.executeTool('describe_tool', { tool_name: 'read_file' });
+    assert(listedAllowed.success === true, 'an explicit-list caller can describe an authorized tool');
+    assert(listedAllowed.schema?.type === 'object', 'the advertised descriptor carries its schema');
+
+    const listedDenied = await listedDispatcher.executeTool('describe_tool', { tool_name: 'write_file' });
+    assert(
+      listedDenied.success === false && listedDenied.code === 'TOOL_NOT_FOUND',
+      'an explicit-list caller is not advertised a tool outside its list'
+    );
+
+    const listedInnate = await listedDispatcher.executeTool('describe_tool', { tool_name: 'batch_precall' });
+    assert(listedInnate.success === true, 'innate primitives stay describable for explicit-list callers');
+
+    const wildAllowed = await wildDispatcher.executeTool('describe_tool', { tool_name: 'write_file' });
+    assert(wildAllowed.success === true, 'a wildcard caller can describe any baked tool');
+
+    assert(
+      /realm:/.test(JSON.stringify([restrictedInnate, restrictedBaked, listedAllowed, listedDenied, listedInnate, wildAllowed])) === false,
+      'describe_tool receipts never carry realm vocabulary'
+    );
+
+    // Engine assembly: an explicit tool list emits the list plus the
+    // universally callable innate baseline (visibility mirrors authorization).
+    const schemaProbe = createSingleToolCallModel('whoami');
+    await exposureRuntime.launchAgent({
+      config: { id: 'exposure_schema_list', allowedTools: ['read_file'] },
+      principal: exposureOperator,
+      model: schemaProbe.model
+    });
+    await exposureRuntime.executeAgentTurn('exposure_schema_list', 'check the emitted schema');
+    for (const innateName of INNATE_TOOLS) {
+      assert(
+        schemaProbe.captured.toolNames.includes(innateName),
+        `the explicit-list schema emits the universally callable innate '${innateName}'`
+      );
+    }
+    assert(schemaProbe.captured.toolNames.includes('read_file'), 'the explicit-list schema emits the authorized tool');
+    assert(
+      schemaProbe.captured.toolNames.includes('write_file') === false,
+      'the explicit-list schema hides unauthorized tools'
+    );
+
+    // Exact authority holders can describe their authority tool (d872723 F10).
+    const authorityProbe = createSingleToolCallModel('import_realm_template');
+    await exposureRuntime.launchAgent({
+      config: { id: 'exposure_architect', allowedTools: ['describe_tool'] },
+      principal: exposureOperator,
+      model: authorityProbe.model
+    });
+    exposureRuntime.grantTemplateAuthority('exposure_architect', {
+      principal: exposureRuntime.getOperatorPrincipal()
+    });
+    await exposureRuntime.executeAgentTurn('exposure_architect', 'describe the authority tool');
+    const architectToolReceipts = exposureRuntime.getAgent('exposure_architect').history
+      .filter((message) => message.role === 'tool');
+    const authorityDescribe = JSON.parse(String(architectToolReceipts[architectToolReceipts.length - 1]?.content || '{}'));
+    assert(
+      authorityDescribe.success === true && authorityDescribe.tool_name === PUBLISHING_TOOLS.IMPORT_REALM_TEMPLATE,
+      'an exact authority holder can describe its publishing tool'
+    );
+    assert(authorityDescribe.schema?.type === 'object', 'the authority descriptor is describable with its schema');
+  } finally {
+    exposureRuntime.destroy();
   }
 
   console.log('\n======================================================================');

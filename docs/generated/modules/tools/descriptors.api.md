@@ -6122,8 +6122,8 @@ export const writeJsonDescriptor: Readonly<{
 // <declarations>/tools/descriptors/clockTools.d.ts:439:5 - (ae-forgotten-export) The symbol "ToolParams_6" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/invocationTools.d.ts:465:5 - (ae-forgotten-export) The symbol "ToolParams_4" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/lifecycleTools.d.ts:451:5 - (ae-forgotten-export) The symbol "ToolParams_3" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/lifecycleTools.d.ts:885:5 - (ae-forgotten-export) The symbol "PublicAgentDescriptor" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/lifecycleTools.d.ts:919:5 - (ae-forgotten-export) The symbol "UndoTurnPortResult" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/lifecycleTools.d.ts:891:5 - (ae-forgotten-export) The symbol "PublicAgentDescriptor" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/lifecycleTools.d.ts:925:5 - (ae-forgotten-export) The symbol "UndoTurnPortResult" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/messagingTools.d.ts:823:5 - (ae-forgotten-export) The symbol "ToolParams_2" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/precallTools.d.ts:187:5 - (ae-forgotten-export) The symbol "ToolParams_7" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/precallTools.d.ts:187:5 - (ae-forgotten-export) The symbol "ExecutionContext" needs to be exported by the entry point index.d.ts
@@ -6731,6 +6731,8 @@ Alias of `whoamiDescriptor` (single-word canonical name).
 `whoami` descriptor — retrieve identity, permissions, role, and allowed tools for the bound caller.
 
 Delegates to `context.lifecyclePort.whoami()` and throws when that service is missing. The reference is the dispatcher-pinned canonical `callerKey` when the caller resolved realm-exactly, else the bound bare subject (Wave I, ticket d57cbc1; I2-V F1), so a same-literal-id caller resolves its own registration instead of the ambiguous-bare-id not-found path.
+
+The returned receipt is projected realm-opaque (ticket 1829afd): `workspaceId` is the agent-visible workspace label (`global` for a `realm:<realmId>:global` pin, omitted when the raw key must be withheld) and `spawnedBy` is the bare parent id (a canonical/systems reference is withheld as `null`), so no raw workspace key or realm vocabulary ever reaches the tool result.
 
 ### `world_clock` — variable
 

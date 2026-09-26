@@ -324,6 +324,61 @@ function toAgentVisibleWorkspaceKey(value: string | null): string | null {
 }
 
 /**
+ * Projects an internal agent reference onto its realm-opaque agent-visible
+ * bare id (ticket 1829afd): a canonical identity key (`realm:<realmId>:<id>`,
+ * segments percent-encoded like `createAgentIdentityKey`) resolves to its
+ * decoded `agentId`; a `system:<id>` key and every other value carrying
+ * internal realm vocabulary (including the seeded Generic realm id) are
+ * withheld (`null`) because the system scope stays unaddressable. Plain ids
+ * pass through unchanged.
+ *
+ * @param value - Raw agent reference, or `null`.
+ * @returns The bare registered id, or `null` when the reference is withheld.
+ */
+function toAgentVisibleAgentReference(value: unknown): string | null {
+  if (typeof value !== 'string' || !value) return null;
+  if (value.startsWith('realm:')) {
+    const rest = value.slice('realm:'.length);
+    const separator = rest.indexOf(':');
+    if (separator <= 0) return null;
+    try {
+      const agentId = decodeURIComponent(rest.slice(separator + 1));
+      return agentId && !carriesInternalRealmVocabulary(agentId) ? agentId : null;
+    } catch {
+      return null;
+    }
+  }
+  if (value.startsWith('system:')) return null;
+  return carriesInternalRealmVocabulary(value) ? null : value;
+}
+
+/**
+ * Projects a `whoami` port receipt onto the realm-opaque agent-visible shape
+ * (ticket 1829afd): `workspaceId` runs through the same agent-visible workspace
+ * key helper as `spawn_agent`/`list_agents` (realm-global → `global`; any other
+ * internal partition key is omitted rather than echoed raw), and `spawnedBy`
+ * runs through the agent-reference projection (canonical key → bare parent id;
+ * system/vocabulary references → `null`). Every other field passes through
+ * unchanged; a non-object port result is returned verbatim.
+ *
+ * @param record - Raw `lifecyclePort.whoami()` return value.
+ * @returns The projected receipt carrying no realm vocabulary.
+ */
+function toAgentVisibleWhoamiReceipt(record: unknown): unknown {
+  if (!record || typeof record !== 'object' || Array.isArray(record)) return record;
+  const projected: Record<string, unknown> = { ...(record as Record<string, unknown>) };
+  const workspace = toAgentVisibleWorkspaceKey(
+    typeof projected.workspaceId === 'string' ? projected.workspaceId : null
+  );
+  if (workspace) projected.workspaceId = workspace;
+  else delete projected.workspaceId;
+  if ('spawnedBy' in projected) {
+    projected.spawnedBy = toAgentVisibleAgentReference(projected.spawnedBy);
+  }
+  return projected;
+}
+
+/**
  * Projects a lifecycle-port failure onto a realm-opaque error: a message that
  * repeats a caller-supplied realm-vocabulary claim (for example a launch gate
  * echoing a reserved workspace key) is replaced by the uniform refusal, while
@@ -1094,6 +1149,12 @@ export const list_agents = listAgentsDescriptor;
  * the caller resolved realm-exactly, else the bound bare subject (Wave I,
  * ticket d57cbc1; I2-V F1), so a same-literal-id caller resolves its own
  * registration instead of the ambiguous-bare-id not-found path.
+ *
+ * The returned receipt is projected realm-opaque (ticket 1829afd): `workspaceId`
+ * is the agent-visible workspace label (`global` for a `realm:<realmId>:global`
+ * pin, omitted when the raw key must be withheld) and `spawnedBy` is the bare
+ * parent id (a canonical/systems reference is withheld as `null`), so no raw
+ * workspace key or realm vocabulary ever reaches the tool result.
  */
 export const whoamiDescriptor = Object.freeze({
   name: SANDBOX_TOOLS.WHOAMI,
@@ -1112,7 +1173,10 @@ export const whoamiDescriptor = Object.freeze({
       throw new Error('lifecyclePort service is not available in execution context');
     }
     const agentId = resolveCallerReference(context);
-    return await lifecyclePort.whoami(agentId);
+    // Realm-opaque projection (ticket 1829afd): the raw lifecycle descriptor
+    // pins a canonical workspace key / parent reference; the agent-visible
+    // receipt exposes the labeled workspace and the bare parent id only.
+    return toAgentVisibleWhoamiReceipt(await lifecyclePort.whoami(agentId));
   }
 });
 /** Alias of `whoamiDescriptor` (single-word canonical name). */

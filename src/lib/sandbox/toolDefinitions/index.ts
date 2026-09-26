@@ -1346,8 +1346,32 @@ export function createSandboxToolDispatcher(options: SandboxDispatcherOptions = 
         ? boundOptions.executeTool
         : (name, args, callerCtx) => dispatch({ name, arguments: args }, callerCtx);
 
+    // Reflection surface (ticket ec397bf): `describe_tool` is seeded with a
+    // registry view narrowed to exactly the tools this caller can invoke, so
+    // the advertised surface never exceeds the authorization surface. The
+    // candidate view is the bound registry (engine-merged baked + granted
+    // extension descriptors) plus the explicit-grant-only authority registry;
+    // the same gate admits or withholds each entry, so authority tools are
+    // described only to exact holders (d872723 F10) and ungranted callers
+    // never see an invocable-looking entry.
+    const reflectionRegistry = canonName === SANDBOX_TOOLS.DESCRIBE_TOOL
+      ? buildAuthorizedRegistryView(
+          {
+            ...(mergedContext.toolRegistry && typeof mergedContext.toolRegistry === 'object'
+              && !Array.isArray(mergedContext.toolRegistry)
+              ? mergedContext.toolRegistry as Record<string, unknown>
+              : TOOL_REGISTRY),
+            ...PUBLISHING_TOOL_REGISTRY
+          },
+          { isAdmin: isPrivileged, isPrivileged, allowedTools },
+          agentIdentity,
+          boundOptions.extensionToolProvider
+        )
+      : mergedContext.toolRegistry;
+
     const executionContext: ExecutionContext = {
       ...mergedContext,
+      toolRegistry: reflectionRegistry,
       agentId,
       callerAgentId: agentId,
       ...(callerKey ? { callerKey } : {}),
@@ -1838,4 +1862,52 @@ function isExtensionToolAuthorized(
     // Fail closed: a throwing descriptor accessor or membership probe denies.
     return false;
   }
+}
+
+/**
+ * Builds the registry view a caller may reflect over — exactly the entries the
+ * same authorization gate admits for invocation (ticket ec397bf; closes the
+ * `describe_tool` visibility/authorization asymmetry and d872723 F10).
+ *
+ * Each candidate entry is classified the same way dispatch classifies a call:
+ * an entry resolvable as a live extension call name is admitted only on exact
+ * `AuthorityDescriptor.extensions` membership; every other entry runs through
+ * {@link isAuthorized}, using a descriptor-declared `authority` id as the
+ * `requiredAuthority` when present so explicit-grant-only tools are advertised
+ * only to their exact holders (the wildcard `'*'` and `privileged` never imply
+ * them). Innate tools are admitted by `isAuthorized` as usual. The returned
+ * view is a fresh null-prototype frozen record; an entry the caller cannot
+ * invoke is never added, so it resolves `TOOL_NOT_FOUND` from the handler
+ * (uniform with an unknown name — no existence oracle).
+ *
+ * @param registry - Candidate registry (bound merged registry + authority registry).
+ * @param authorizationContext - Dispatcher execution context carrying the trusted legacy channels.
+ * @param agentIdentity - Identity projection for the bound subject, or `null`.
+ * @param extensionToolProvider - Bound extension provider-registry port (`undefined` without one).
+ * @returns The frozen caller-authorized registry view.
+ * @internal
+ */
+function buildAuthorizedRegistryView(
+  registry: Record<string, unknown>,
+  authorizationContext: ExecutionContext,
+  agentIdentity: AgentIdentityProjection | null,
+  extensionToolProvider: unknown
+): Record<string, unknown> {
+  const view: Record<string, unknown> = Object.create(null);
+  for (const name of Object.keys(registry)) {
+    const binding = resolveExtensionToolBinding(extensionToolProvider, name);
+    if (binding) {
+      if (isExtensionToolAuthorized(name, agentIdentity)) view[name] = registry[name];
+      continue;
+    }
+    const entry = registry[name];
+    const requiredAuthority = entry && typeof entry === 'object'
+      && typeof (entry as { authority?: unknown }).authority === 'string'
+      ? (entry as { authority: string }).authority
+      : null;
+    if (isAuthorized(name, authorizationContext, agentIdentity, requiredAuthority)) {
+      view[name] = registry[name];
+    }
+  }
+  return Object.freeze(view);
 }

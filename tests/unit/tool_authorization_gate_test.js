@@ -307,8 +307,12 @@ test('11. innate tools stay allowed for a descriptor with an empty allow (76fb53
   const time = await dispatcher.executeTool('get_current_time', {});
   assert.equal(time.success, true, 'get_current_time is innate');
 
-  const describe = await dispatcher.executeTool('describe_tool', { tool_name: 'read_file' });
-  assert.equal(describe.success, true, 'describe_tool is innate');
+  const describe = await dispatcher.executeTool('describe_tool', { tool_name: 'whoami' });
+  assert.equal(describe.success, true, 'describe_tool is innate and documents the innate baseline');
+
+  const withheld = await dispatcher.executeTool('describe_tool', { tool_name: 'read_file' });
+  assert.equal(withheld.success, false, 'describe_tool never advertises a tool the caller cannot invoke (ec397bf)');
+  assert.equal(withheld.code, TOOL_SYSTEM_ERROR_CODES.TOOL_NOT_FOUND, 'the withheld descriptor fails uniformly');
 
   const precall = await dispatcher.executeTool('batch_precall', { calls: [] });
   assert.equal(precall.success, true, 'batch_precall is innate');
