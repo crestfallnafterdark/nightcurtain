@@ -33,8 +33,10 @@ _(none tagged)_
 ## Surface
 
 ```ts
+// Warning: (ae-forgotten-export) The symbol "ParamSanitizerOptions" needs to be exported by the entry point index.d.ts
+//
 // @public
-export function createParamSanitizer(paramAliasMap?: Record<string, string>, defaults?: Record<string, unknown>): (rawArgs?: unknown) => Record<string, unknown>;
+export function createParamSanitizer(paramAliasMap?: Record<string, string>, defaults?: Record<string, unknown>, options?: ParamSanitizerOptions): (rawArgs?: unknown) => Record<string, unknown>;
 
 // @public
 export function createPassThroughSanitizer(): (rawArgs?: unknown) => Record<string, unknown>;
@@ -74,6 +76,7 @@ Factory creating a parameter sanitizer function with pre-configured alias mappin
 
 - `paramAliasMap` — Mapping from incoming param names/aliases to canonical property names; defaults to an empty map.
 - `defaults` — Default property values applied when the sanitized input omits them; the object is never mutated.
+- `options` — Optional behavior flags (ParamSanitizerOptions); defaults preserve the legacy shape.
 
 #### Returns
 
@@ -201,5 +204,5 @@ The snake_case form of the input, or an empty string for non-string/empty input.
 - Documented declarations: 10 / 10 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
-- Referenced but not exported (`ae-forgotten-export`): none
-- Unresolved `{@link}` targets (`ae-unresolved-link`): 0 (policy `none`; see `scripts/api_reports.mjs`)
+- Referenced but not exported (`ae-forgotten-export`): `ParamSanitizerOptions`
+- Unresolved `{@link}` targets (`ae-unresolved-link`): 1 (policy `none`; see `scripts/api_reports.mjs`)

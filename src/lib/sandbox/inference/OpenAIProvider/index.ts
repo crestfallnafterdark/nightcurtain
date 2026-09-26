@@ -16,8 +16,13 @@
  *
  * Error taxonomy: every non-OK HTTP response path throws the contract's
  * `InferenceError` (status-derived `code`, `status`, endpoint `details`, and
- * `retryable` classified by the shared retry policy). Because `InferenceError`
- * extends `Error`, callers catching `Error` remain compatible.
+ * `retryable` classified by the shared retry policy). An in-band `error`
+ * payload — a streamed frame or a non-streaming response body carrying a
+ * non-null `error` field — follows the same taxonomy (status-derived code when
+ * the payload carries a valid status, `ERR_UNKNOWN` otherwise) with the
+ * provider `message`/`code`/`type` surfaced bounded and redacted. Because
+ * `InferenceError` extends `Error`, callers catching `Error` remain
+ * compatible.
  *
  * @module inference/OpenAIProvider
  * @mayImport ../ProviderInterface/index.ts
@@ -29,6 +34,7 @@
  * @invariant `getEffectiveApiKey()` precedence: a `credentialId` that resolves through the injected `vault` to a non-empty `apiKey` wins over the explicit `apiKey`; otherwise the explicit `apiKey` applies, with `vault.getActiveCredential(providerId)` as the final fallback; it resolves to `''` when no step yields a non-empty key, and no credential singleton is imported.
  * @invariant `getEffectiveApiUrl()` trims trailing slashes and throws a plain `Error` when the provider id is `custom` (case-insensitive) with no URL configured; `getEndpointUrl()` swaps a trailing `/chat/completions` base suffix.
  * @invariant Non-OK HTTP responses from `stream`, `complete`, and `listModels` throw `InferenceError` with `status`, code `ERR_HTTP_<status>`, endpoint `details`, and `retryable` from the shared retry classifier; it extends `Error`, so `catch (Error)` consumers stay compatible.
+ * @invariant A streamed frame or non-streaming response body carrying a non-null in-band `error` payload throws `InferenceError` before any terminal chunk is emitted (a failed `stream` never yields `finish`): a valid upstream status maps to code `ERR_HTTP_<status>` plus that `status`, a missing/invalid status maps to `ERR_UNKNOWN`/`0`, the provider `message`/`code`/`type` are surfaced in `message`/`details` bounded (320/120 chars) and redacted (exact resolved key plus credential-shaped patterns), and `retryable` comes from the shared classifier; partial content is never returned as a completed turn.
  * @invariant `OpenAIModel.config` is frozen at construction.
  * @invariant `stream` is an `AsyncGenerator<StreamChunk, CompletionResult, void>` that yields incremental usage/text/reasoning/tool_call chunks plus a terminal `finish` chunk, then returns the consolidated `CompletionResult`; `onChunk` mirrors every yield.
  * @invariant `complete` extracts reasoning from `reasoning_content ?? reasoning ?? thought`, defaulting to `''`.
@@ -143,6 +149,21 @@ interface WireChoice {
 }
 
 /**
+ * Wire shape of a provider-reported in-band error payload (stream frame or
+ * non-streaming response body).
+ */
+interface WireErrorPayload {
+  /** Human-readable provider failure description. */
+  message?: string;
+  /** Provider error class (e.g. `invalid_response_error`). */
+  type?: string;
+  /** Provider error code (e.g. `malformed_tool_call`). */
+  code?: string;
+  /** Upstream HTTP-like status associated with the failure. */
+  status?: number | string;
+}
+
+/**
  * Wire shape of one decoded SSE frame.
  */
 interface WireStreamFrame {
@@ -150,6 +171,8 @@ interface WireStreamFrame {
   usage?: WireUsage;
   /** Completion choices. */
   choices?: WireChoice[];
+  /** In-band provider error; non-null means the frame reports a failure. */
+  error?: WireErrorPayload | string | null;
 }
 
 /**
@@ -160,6 +183,8 @@ interface WireCompletionResponse {
   choices?: WireChoice[];
   /** Aggregate token accounting. */
   usage?: WireUsage;
+  /** In-band provider error; non-null means the response reports a failure. */
+  error?: WireErrorPayload | string | null;
 }
 
 /**
@@ -196,6 +221,153 @@ interface WireModelEntry {
 }
 
 // ============================================================================
+// In-band provider error normalization (module-private)
+// ============================================================================
+
+/** Replacement marker for redacted credential material in error text. */
+const REDACTED_MARKER = '[redacted]';
+
+/** Maximum retained characters for provider-supplied error text. */
+const MAX_ERROR_TEXT_LENGTH = 320;
+
+/** Maximum retained characters for provider-supplied error code/type fields. */
+const MAX_ERROR_CODE_LENGTH = 120;
+
+/**
+ * Flattens, redacts, and bounds provider-supplied error text.
+ *
+ * Redaction is defense in depth: the resolved API key is removed exactly
+ * (mirroring the P3 echoed-credential scrub), then the shared
+ * credential-shaped patterns (bearer headers, `key=value` assignments, `sk-`
+ * style tokens, Google API keys) are replaced with `[redacted]`; the result is
+ * capped at `maxLength` characters so a hostile provider cannot inflate the
+ * error surface.
+ *
+ * @param value - Candidate error text (strings pass through; other values are stringified).
+ * @param secret - Resolved credential to remove exactly; `''` skips the exact pass.
+ * @param maxLength - Maximum retained characters (defaults to {@link MAX_ERROR_TEXT_LENGTH}).
+ * @returns Single-line redacted diagnostic text ('' when empty).
+ */
+function sanitizeInferenceErrorText(value: unknown, secret: string, maxLength: number = MAX_ERROR_TEXT_LENGTH): string {
+  if (value === null || value === undefined) return '';
+  let text = typeof value === 'string' ? value : String(value);
+  text = text.replace(/[\r\n\t]+/g, ' ').trim();
+  if (secret) {
+    text = text.split(secret).join(REDACTED_MARKER);
+  }
+  text = text.replace(/(bearer\s+)[a-z0-9._~+/=-]{8,}/gi, `$1${REDACTED_MARKER}`);
+  text = text.replace(/(authorization|api[_-]?key|access[_-]?key|secret[_-]?key|client[_-]?secret|password|token|bearer|kek)\s*[:=]\s*["']?[^\s"',;}\]]+/gi, `$1=${REDACTED_MARKER}`);
+  text = text.replace(/\b(sk|gsk|xai|pk|api|key)[-_][A-Za-z0-9_-]{12,}\b/g, REDACTED_MARKER);
+  text = text.replace(/\bAIza[0-9A-Za-z_-]{20,}\b/g, REDACTED_MARKER);
+  if (text.length > maxLength) {
+    text = `${text.slice(0, maxLength).trimEnd()}…`;
+  }
+  return text;
+}
+
+/**
+ * Bounded, redacted view of a provider-reported in-band error payload.
+ */
+interface NormalizedProviderError {
+  /** Redacted provider failure description. */
+  message: string;
+  /** Redacted provider error code ('' when absent). */
+  code: string;
+  /** Redacted provider error class ('' when absent). */
+  type: string;
+  /** Validated upstream status (`100`–`599`), or `0` when absent/invalid. */
+  status: number;
+}
+
+/**
+ * Extracts bounded, redacted fields from an in-band provider error payload.
+ *
+ * Accepts the object form (`message`/`code`/`type`/`status`) and the primitive
+ * form (a bare string or other value becomes the message); a valid integer
+ * status in `100`–`599` is retained, anything else normalizes to `0`.
+ *
+ * @param raw - Raw `error` field from a stream frame or response body.
+ * @param secret - Resolved credential to remove exactly from the text.
+ * @returns Normalized message/code/type/status.
+ */
+function normalizeProviderError(raw: unknown, secret: string): NormalizedProviderError {
+  let messageValue: unknown = raw;
+  let codeValue: unknown;
+  let typeValue: unknown;
+  let statusValue: unknown;
+
+  if (raw !== null && typeof raw === 'object') {
+    const payload = raw as WireErrorPayload;
+    messageValue = payload.message;
+    codeValue = payload.code;
+    typeValue = payload.type;
+    statusValue = payload.status;
+  }
+
+  const message = sanitizeInferenceErrorText(messageValue, secret) || 'Provider reported an unspecified error';
+  const code = sanitizeInferenceErrorText(codeValue, secret, MAX_ERROR_CODE_LENGTH);
+  const type = sanitizeInferenceErrorText(typeValue, secret, MAX_ERROR_CODE_LENGTH);
+
+  const numericStatus = Number(statusValue);
+  const status = Number.isInteger(numericStatus) && numericStatus >= 100 && numericStatus <= 599 ? numericStatus : 0;
+
+  return { message, code, type, status };
+}
+
+/**
+ * True when a decoded frame or response body carries a non-null in-band
+ * `error` payload (the failure signal the adapter must not swallow).
+ *
+ * @param payload - Decoded frame or non-streaming response body.
+ * @returns Whether the payload reports a provider-side failure.
+ */
+function hasProviderError(payload: { error?: unknown }): boolean {
+  return payload.error !== undefined && payload.error !== null;
+}
+
+/**
+ * Builds the typed transport failure for an in-band provider error payload.
+ *
+ * Mapping reuses the module's existing status-derived taxonomy: a valid
+ * upstream status yields `ERR_HTTP_<status>` plus the `status` field, a
+ * missing/invalid status yields `ERR_UNKNOWN`/`0`; the provider
+ * `message`/`code`/`type` are surfaced (bounded, redacted) in the message and
+ * `details`, and `retryable` comes from the shared retry classifier.
+ *
+ * @param raw - Raw `error` field from a stream frame or response body.
+ * @param context - Call context carrying the provider instance id, the request URL, the observing path (`stream`/`complete`), and the resolved credential to remove exactly from the text.
+ * @returns The typed `InferenceError` to throw.
+ */
+function inferenceErrorFromProviderError(
+  raw: unknown,
+  context: { providerId: string; endpoint: string; source: 'stream' | 'complete'; secret: string }
+): InferenceError {
+  const { message, code, type, status } = normalizeProviderError(raw, context.secret);
+
+  const descriptors: string[] = [];
+  if (status) descriptors.push(`status ${status}`);
+  if (code) descriptors.push(`code ${code}`);
+  if (type) descriptors.push(`type ${type}`);
+  const descriptorText = descriptors.length > 0 ? ` (${descriptors.join(', ')})` : '';
+
+  const errorMessage = `OpenAI API in-band error${descriptorText}: ${message}`;
+
+  return new InferenceError(errorMessage, {
+    code: status ? `ERR_HTTP_${status}` : 'ERR_UNKNOWN',
+    status,
+    details: {
+      providerId: context.providerId,
+      endpoint: context.endpoint,
+      source: context.source,
+      providerCode: code || null,
+      providerType: type || null,
+      providerStatus: status || null
+    },
+    retryable: defaultIsRetryable({ status, message: errorMessage })
+  });
+}
+
+// ============================================================================
 // SSE Decoding (module-private)
 // ============================================================================
 
@@ -207,8 +379,9 @@ interface WireModelEntry {
  *
  * Frame handling: blank lines and `:` comment lines are skipped,
  * `data: [DONE]` terminates the stream, JSON after `data: ` is decoded and
- * yielded, malformed JSON is ignored, and any buffered trailing frame is
- * decoded after the reader ends.
+ * yielded as-is (a frame-level `error` payload is preserved so the stream
+ * consumer can convert it into a typed failure), malformed JSON is ignored,
+ * and any buffered trailing frame is decoded after the reader ends.
  *
  * @param response - Fetch response whose body carries the SSE frames.
  * @returns Async generator of the decoded JSON object from each `data:` frame.
@@ -386,7 +559,7 @@ export class OpenAIModel implements ModelInterface {
    *
    * @param options - Streaming request options (messages, tools, abort signal, chunk mirror).
    * @returns The consolidated result: accumulated `content`/`reasoning` strings, parsed `toolCalls`, the last reported `usage`, and the last observed `finishReason`.
-   * @throws An `InferenceError` (`status`, `ERR_HTTP_<status>`, `details`, `retryable`) when the HTTP status is not OK, with message `OpenAI API error (<status>): <body or statusText>`; fetch/abort failures propagate unchanged.
+   * @throws An `InferenceError` (`status`, `ERR_HTTP_<status>`, `details`, `retryable`) when the HTTP status is not OK, with message `OpenAI API error (<status>): <body or statusText>`, or when a streamed frame carries a non-null in-band `error` payload (valid upstream status maps to `ERR_HTTP_<status>`, otherwise `ERR_UNKNOWN`; the provider `message`/`code`/`type` are surfaced redacted and bounded); a failed stream never emits the terminal `finish` chunk. Fetch/abort failures propagate unchanged.
    */
   async *stream(options: StreamOptions): AsyncGenerator<StreamChunk, CompletionResult, void> {
     const url = this.provider.getEndpointUrl('/chat/completions');
@@ -417,6 +590,15 @@ export class OpenAIModel implements ModelInterface {
     let finishReason: string | undefined = undefined;
 
     for await (const chunk of parseSseStream(response)) {
+      if (hasProviderError(chunk)) {
+        throw inferenceErrorFromProviderError(chunk.error, {
+          providerId: this.provider.id,
+          endpoint: url,
+          source: 'stream',
+          secret: this.provider.getEffectiveApiKey()
+        });
+      }
+
       if (chunk.usage) {
         usageResult = chunk.usage;
         const uChunk: StreamChunk = { type: 'usage', usage: chunk.usage };
@@ -517,7 +699,7 @@ export class OpenAIModel implements ModelInterface {
    *
    * @param options - Completion request options (messages, tools, abort signal).
    * @returns Result with `content`/`reasoning` defaulting to `''`, tool calls parsed from `message.tool_calls` (unparseable argument JSON falls back to `{ raw: <arguments> }`), and provider-reported `usage`/`finishReason`.
-   * @throws An `InferenceError` (`status`, `ERR_HTTP_<status>`, `details`, `retryable`) when the HTTP status is not OK, with message `OpenAI API error (<status>): <body or statusText>`; fetch/abort failures propagate unchanged.
+   * @throws An `InferenceError` (`status`, `ERR_HTTP_<status>`, `details`, `retryable`) when the HTTP status is not OK, with message `OpenAI API error (<status>): <body or statusText>`, or when an OK response body carries a non-null in-band `error` payload (same status-derived mapping as `stream`); fetch/abort failures propagate unchanged.
    */
   async complete(options: CompletionOptions): Promise<CompletionResult> {
     const url = this.provider.getEndpointUrl('/chat/completions');
@@ -542,6 +724,16 @@ export class OpenAIModel implements ModelInterface {
     }
 
     const data = (await response.json()) as WireCompletionResponse;
+
+    if (hasProviderError(data)) {
+      throw inferenceErrorFromProviderError(data.error, {
+        providerId: this.provider.id,
+        endpoint: url,
+        source: 'complete',
+        secret: this.provider.getEffectiveApiKey()
+      });
+    }
+
     const choice: WireChoice = data.choices?.[0] || {};
     const message = choice.message || {};
 

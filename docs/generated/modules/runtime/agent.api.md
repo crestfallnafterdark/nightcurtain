@@ -334,6 +334,7 @@ export interface LaunchAgentOptions {
     readonly extensionTools?: readonly string[] | null;
     readonly history?: readonly LaunchHistoryEntry[];
     readonly initialPrompt?: string | null;
+    readonly initialTurnMode?: 'await' | 'detach';
     readonly model?: ModelInterface | null;
     readonly provider?: ProviderInterface | null;
 }
@@ -928,7 +929,8 @@ const launchOptions: LaunchAgentOptions = {
 - **`config`** — Complete agent configuration
 - **`extensionTools`** — Trusted store-computed effective extension grant set (extension wave): sanitized model-facing extension call names forwarded one-way into the frozen registry descriptor's `extensions` axis. This is not a caller capability selector: the value must be computed by the composition root from the Realm's operator attachments and the agent's `config.extensionTools` selector. It is read from this unified options object only (legacy positional launches never carry it), the entity config selector never grants an entry by itself, and `'*'`, `privileged`, aliases, and every legacy channel never imply an entry.
 - **`history`** — Trusted baked prologue seeded at launch, composed as `[system message (when a system prompt exists), ...declared entries]` in declared order with launch-generated message ids (INV-7) and **no model call**. Entries are validated fail-closed (roles `user`/`assistant` only, non-empty string content, unknown fields rejected) and are only read from the unified options object — legacy positional launches never carry them.
-- **`initialPrompt`** — Optional initial prompt to trigger immediate turn execution upon launch
+- **`initialPrompt`** — Optional initial prompt to trigger turn execution upon launch
+- **`initialTurnMode`** — Trusted initial-turn execution policy for initialPrompt (ratified `spawn_agent` prompt contract, ticket 4692014). - `'await'` (default): the launch awaits the child's completed first turn and rejects with the turn error on failure — the child stays registered either way (destructive rollback covers registration-time failures only); the model-facing `spawn_agent` tool selects this mode only for its `await_completion: true` opt-in. - `'detach'`: the turn is queued and the launch resolves immediately; a later turn failure is recorded on the child (`lastError`/state detail) and never unwinds it. The model-facing `spawn_agent` tool defaults to this mode. Read from this unified options object only; legacy positional launches cannot carry it.
 - **`model`** — Optional pre-instantiated concrete ModelInterface instance
 - **`provider`** — Optional pre-instantiated concrete ProviderInterface instance
 
@@ -1123,9 +1125,9 @@ const result: UndoTurnResult = {
 ## Doc coverage
 
 - Top-level exports: 28
-- Declarations (exports + members): 227
-- Documented declarations: 227 / 227 (100%)
+- Declarations (exports + members): 228
+- Documented declarations: 228 / 228 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): `AuthorityDescriptor`, `CredentialResolverPort`, `ModelInterface`, `ModelPresetSourcePort`, `ProviderInterface`
-- Unresolved `{@link}` targets (`ae-unresolved-link`): 4 (policy `none`; see `scripts/api_reports.mjs`)
+- Unresolved `{@link}` targets (`ae-unresolved-link`): 5 (policy `none`; see `scripts/api_reports.mjs`)

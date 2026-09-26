@@ -18,7 +18,7 @@ import {
   PUBLISHING_TOOL_REGISTRY,
   getPublishingToolSchemas
 } from '../../src/lib/sandbox/tools/descriptors/index.ts';
-import { PUBLISHING_TOOLS } from '../../src/lib/sandbox/tools/constants/index.ts';
+import { PUBLISHING_TOOLS, TOOL_PRESETS } from '../../src/lib/sandbox/tools/constants/index.ts';
 import { AGENT_AUTHORITIES } from '../../src/lib/sandbox/realmCatalog/index.ts';
 import { VirtualFS, PermissionDeniedError, FileNotFoundError } from '../../src/lib/sandbox/virtualFs/index.ts';
 import { MessagingBus } from '../../src/lib/sandbox/messagingBus/index.ts';
@@ -606,6 +606,41 @@ async function runEpic6UnitTests() {
     assert(exposed.length === 1, `${descriptor.name} is exposed for its exact authority`);
     assert(exposed[0].function.description.length > 0, `${descriptor.name} exposes a non-empty description`);
     assert(exposed[0].function.parameters.additionalProperties === false, `${descriptor.name} exposed schema is closed`);
+  }
+
+  // --- SECTION 10: Schema ⊄ authorization inversion guard (F6 / ec397bf) --
+  // Every tool exposed by `getSandboxToolsSchema(preset)` must be dispatcher-
+  // authorized for that preset. The reverse does not hold by design: innate
+  // tools (`whoami`, `get_current_time`, `describe_tool`, `batch_precall`) are
+  // universally authorized but never injected into a restricted schema.
+  console.log('\n--- 10. Schema ⊆ Dispatcher-authorized (preset invariance) ---');
+  const presetRuntime = new AgentRuntime({ autoBootstrapDirector: false });
+  await presetRuntime.ensureDirector();
+  const presetOperator = presetRuntime.createAgentIdentityPort().getAgentIdentity('director').authority;
+  try {
+    for (const preset of Object.keys(TOOL_PRESETS)) {
+      const presetAgentId = `schema_auth_${preset}`;
+      await presetRuntime.launchAgent({
+        config: { id: presetAgentId, privileged: true, allowedTools: [preset] },
+        principal: presetOperator
+      });
+      const presetDispatcher = createSandboxToolDispatcher({ runtime: presetRuntime, agentId: presetAgentId });
+      const exposedNames = getSandboxToolsSchema(TOOL_PRESETS[preset]).map((def) => def.function.name);
+      let unauthorized = 0;
+      for (const toolName of exposedNames) {
+        const receipt = await presetDispatcher.executeTool(toolName, {});
+        if (receipt.success === false && receipt.code === 'PERMISSION_DENIED') {
+          unauthorized += 1;
+          assert(false, `preset '${preset}': exposed tool '${toolName}' is not dispatcher-authorized`);
+        }
+      }
+      assert(
+        unauthorized === 0,
+        `preset '${preset}': all ${exposedNames.length} exposed schema tools are dispatcher-authorized`
+      );
+    }
+  } finally {
+    presetRuntime.destroy();
   }
 
   console.log('\n======================================================================');

@@ -32,16 +32,33 @@ export function toCamelCase(str: unknown): string {
 }
 
 /**
+ * Options for {@link createParamSanitizer}.
+ */
+export interface ParamSanitizerOptions {
+  /**
+   * Keeps an unresolvable key's original spelling instead of rewriting it to
+   * snake_case. Boundary descriptors that must name the caller's exact key in
+   * a model-visible warning (for example `spawn_agent`) enable this so the
+   * warning never quotes a spelling the caller did not send. Default `false`:
+   * unknown keys are rewritten to snake_case (the historical contract).
+   */
+  preserveUnknownKeys?: boolean;
+}
+
+/**
  * Factory creating a parameter sanitizer function with pre-configured alias mappings and defaults.
  *
  * @param paramAliasMap - Mapping from incoming param names/aliases to canonical property names; defaults to an empty map.
  * @param defaults - Default property values applied when the sanitized input omits them; the object is never mutated.
+ * @param options - Optional behavior flags ({@link ParamSanitizerOptions}); defaults preserve the legacy shape.
  * @returns A sanitizer function that accepts raw arguments (object, JSON string, or arbitrary value) and returns a fresh sanitized parameters object.
  */
 export function createParamSanitizer(
   paramAliasMap: Record<string, string> = {},
-  defaults: Record<string, unknown> = {}
+  defaults: Record<string, unknown> = {},
+  options: ParamSanitizerOptions = {}
 ): (rawArgs?: unknown) => Record<string, unknown> {
+  const preserveUnknownKeys = options.preserveUnknownKeys === true;
   return function sanitizeParams(rawArgs = {}) {
     let parsedArgs = rawArgs;
 
@@ -80,7 +97,10 @@ export function createParamSanitizer(
         if (paramAliasMap && Object.prototype.hasOwnProperty.call(paramAliasMap, snakeKey)) {
           targetKey = paramAliasMap[snakeKey];
         } else {
-          targetKey = snakeKey;
+          // Boundary descriptors that report ignored keys verbatim keep the
+          // caller's exact spelling; every other descriptor keeps the legacy
+          // snake_case rewrite for unknown keys.
+          targetKey = preserveUnknownKeys ? key : snakeKey;
         }
       }
 

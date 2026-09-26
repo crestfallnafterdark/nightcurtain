@@ -12,8 +12,9 @@
  * - registry sudoer (wildcard `'*'` authority) scope: every active descriptor;
  * - anonymous caller: `[]`;
  * - reduced public shape `{id, name, state, role, triggerPolicy, unreadCount,
- *   workspace}` with no `history`/`provider`/`model`/`modelConfig`/
- *   `allowedTools` anywhere in the serialized result;
+ *   allowedTools, workspace}` with no `history`/`provider`/`model`/
+ *   `modelConfig` anywhere in the serialized result (the effective tool policy
+ *   IS exposed per ticket f541390);
  * - `state`/`role` parameters apply as post-filters on descriptors.
  */
 
@@ -33,6 +34,7 @@ const PUBLIC_DESCRIPTOR_KEYS = Object.freeze([
   'state',
   'triggerPolicy',
   'unreadCount',
+  'allowedTools',
   'workspace'
 ]);
 
@@ -41,8 +43,7 @@ const FORBIDDEN_KEYS = Object.freeze([
   'history',
   'provider',
   'model',
-  'modelConfig',
-  'allowedTools'
+  'modelConfig'
 ]);
 
 /**
@@ -162,6 +163,9 @@ test('9133495: the result exposes exactly the reduced public descriptor shape', 
       assert.equal(typeof entry.role, 'string');
       assert.equal(typeof entry.triggerPolicy, 'string');
       assert.equal(typeof entry.unreadCount, 'number');
+      assert.ok(Array.isArray(entry.allowedTools), 'the effective tool policy is an array');
+      assert.ok(entry.allowedTools.every((tool) => typeof tool === 'string'), 'tool policy entries are strings');
+      assert.equal(Object.isFrozen(entry.allowedTools), true, 'the tool policy is a frozen copy');
       assert.equal(typeof entry.workspace, 'string');
       assert.equal(Object.isFrozen(entry), true, 'descriptor entries are defensive frozen copies');
     }

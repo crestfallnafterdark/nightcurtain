@@ -189,6 +189,12 @@ interface LaunchConfigInput extends Omit<Partial<AgentConfig>, 'extensionTools'>
   model?: LaunchModel;
   provider?: LaunchProvider;
   initialPrompt?: string | null;
+  /**
+   * Trusted initial-turn policy read from the unified options object only
+   * (ticket 4692014): `'detach'` queues the prompt and resolves immediately,
+   * `'await'` (default) waits for the completed turn.
+   */
+  initialTurnMode?: 'await' | 'detach';
   callerContext?: AgentSecurityContext | null;
   principal?: LifecyclePrincipal | null;
   /**
@@ -817,6 +823,28 @@ function principalHasLifecycleAuthority(principal: { kind?: string; allow?: Read
   if (principal.kind === 'internal') return true;
   const allow = principal.allow;
   return Boolean(allow && (allow.has('*') || allow.has(LIFECYCLE_AUTHORITY_CAPABILITY)));
+}
+
+/**
+ * Resolves the default child capability set for a spawning agent caller with
+ * no explicit selector (ratified contract, ticket 1eca963): the
+ * `readonly_collaborator` preset intersected with the spawner's own effective
+ * tool set. When the intersection is empty (the spawner holds no read-only
+ * tool at all), the child inherits the spawner's exact effective set —
+ * equivalent access, never a zero-tool child while the spawner has tools. A
+ * zero-tool spawner still yields a zero-tool child (equivalence holds).
+ *
+ * @param creatorAgent - Resolved spawner entity, or `null`.
+ * @returns The default child tool list.
+ * @internal
+ */
+function resolveAgentCallerDefaultTools(creatorAgent: { config?: { allowedTools?: unknown } } | null): string[] {
+  const spawnerTools = resolveToolPreset(creatorAgent?.config?.allowedTools as string | string[] | null | undefined);
+  if (spawnerTools.includes('*')) return [...TOOL_PRESETS.readonly_collaborator];
+  const spawnerSet = new Set(spawnerTools);
+  const intersection = TOOL_PRESETS.readonly_collaborator.filter((tool) => spawnerSet.has(tool));
+  if (intersection.length > 0) return [...intersection];
+  return [...spawnerTools];
 }
 
 /**
@@ -2227,7 +2255,17 @@ export class AgentLifecycleManager {
    *    - The `realmBypass` grant is composed only when the resolved principal is
    *      the exact injected `InternalPrincipal`; a caller-supplied value is
    *      ignored for every other caller.
-   *    - Child agent `allowedTools` are clamped to a subset of the creator's allowed tools.
+   *    - Child agent `allowedTools` are clamped to a subset of the creator's
+   *      effective tools for EVERY resolved agent creator — lifecycle-authority
+   *      holders included (ratified child ⊆ spawner invariant, ticket 1eca963);
+   *      a `'*'` creator is equivalent to any requested set. Capability comes
+   *      only from `allowedTools`/`tools` or `toolPreset`/`tool_preset` —
+   *      `role` is a pure label. With neither selector and a resolved agent
+   *      caller, the default is `readonly_collaborator ∩ creator tools`, or the
+   *      creator's own effective set when that intersection is empty (never a
+   *      zero-tool child while the creator has tools). Principal-less
+   *      host/operator launches keep the legacy default (`[]`) and full
+   *      pinning.
    *    - A resolved non-authority creator may pin the child workspace only to
    *      the child's own id or to the creator's own resolved workspace key;
    *      reserved keys (`global`, `public`, `realm:<id>:global`) and peer
@@ -2270,15 +2308,23 @@ export class AgentLifecycleManager {
    * 7. Registers agent on `MessagingBus` with privilege flag.
    * 8. Sets up reactive mail subscription routing into `TriggerQueue`.
    * 9. Stores agent in internal registry and emits `'state_change'` event (`to: 'idle'`).
-   * 10. If `initialPrompt` is provided, awaits the initial conversational turn
-   *    before resolving: when the runtime exposes the queue-backed
-   *    `enqueueUserTurn` entry the launch directive is dispatched through the
-   *    centralized `TriggerQueue` (`TRIGGER_TYPES.USER`, MOD-21 W7); hosts
-   *    without a `TriggerQueue` use `runtime.executeAgentTurn` directly.
+   * 10. If `initialPrompt` is provided, dispatches the initial conversational
+   *    turn according to the trusted `initialTurnMode` option (ratified prompt
+   *    contract, ticket 4692014). `'await'` (the direct-launch default) waits
+   *    for the completed turn and rethrows a turn failure to the caller;
+   *    `'detach'` (the model-facing `spawn_agent` default) queues the prompt
+   *    and resolves the launch immediately, recording a later failure on the
+   *    child (`lastError`/state detail) without unwinding it. When the runtime
+   *    exposes the queue-backed `enqueueUserTurn` entry the launch directive is
+   *    dispatched through the centralized `TriggerQueue` (`TRIGGER_TYPES.USER`,
+   *    MOD-21 W7); hosts without a `TriggerQueue` use
+   *    `runtime.executeAgentTurn` directly.
    *
-   * If a later step fails, partial registrations (registry entry, mail
-   * subscription, bus registration) are unwound and any consumed recycled entry
-   * is restored byte-identically before the error is rethrown.
+   * If a registration-phase step fails, partial registrations (registry entry,
+   * mail subscription, bus registration) are unwound and any consumed recycled
+   * entry is restored byte-identically before the error is rethrown. The
+   * initial-prompt turn phase runs after registration and never unwinds the
+   * registered child, whatever the turn outcome.
    *
    * @param optionsOrConfig - Unified {@link LaunchAgentOptions} object (optionally carrying `principal`) or {@link AgentConfig}
    * @param legacyArg2 - Legacy model instance or initial prompt string
@@ -2289,6 +2335,7 @@ export class AgentLifecycleManager {
    * @throws `Error` - With code `'AGENT_ALREADY_EXISTS'` if a non-terminated, non-recycled agent with this ID is registered
    * @throws `Error` - With code `'PERMISSION_DENIED'` if privilege escalation invariants are violated
    * @throws `Error` - With code `'INVALID_ARGUMENTS'` if a `toolPreset` selector names no known preset
+   * @throws `Error` - The child turn error in `'await'` mode (the child stays registered)
    *
    * @example
    * ```typescript
@@ -2332,6 +2379,12 @@ export class AgentLifecycleManager {
     let initialPrompt: string | null = null;
     let callerContext: AgentSecurityContext | null = null;
     let principal: LifecyclePrincipal | null = null;
+    // Initial-turn policy (ratified prompt contract, ticket 4692014): the
+    // trusted unified-options channel chooses `'detach'` (queue the prompt and
+    // resolve the launch immediately) or `'await'` (wait for the completed
+    // first turn). Direct/legacy launches default to `'await'`; the
+    // model-facing `spawn_agent` tool selects `'detach'` by default.
+    let initialTurnMode: 'await' | 'detach' = 'await';
     // Declared baked history (Wave T, ticket 7e6edae) is read from the unified
     // options object only; legacy positional forms never carry it.
     let historyInput: unknown = null;
@@ -2351,6 +2404,7 @@ export class AgentLifecycleManager {
       principal = options.principal || null;
       historyInput = options.history ?? null;
       extensionToolsInput = options.extensionTools ?? null;
+      initialTurnMode = options.initialTurnMode === 'detach' ? 'detach' : 'await';
     } else {
       config = { ...options };
 
@@ -2722,18 +2776,36 @@ export class AgentLifecycleManager {
     // below, whose catch restores this exact record if any later step fails.
     const previousRecycledAgent = this.#recycleBin.get(identityKey) || null;
 
-    const rawTools = config.allowedTools !== undefined
+    // Capability selection (ratified contract, ticket 1eca963): the child's
+    // tools come from an explicit list (`allowedTools`/`tools`) or a preset
+    // (`toolPreset`/`tool_preset`) only — `role` stays a pure label and is
+    // never a capability fallback. With neither given, a resolved agent caller
+    // defaults to `readonly_collaborator ∩ spawner tools` (the spawner's own
+    // effective set when that intersection is empty), so a spawn never
+    // registers an inert zero-tool child while the spawner has tools;
+    // principal-less host/operator/engine launches keep the legacy
+    // `resolveToolPreset(undefined)` → `[]` behavior.
+    const requestedTools = config.allowedTools !== undefined
       ? config.allowedTools
-      : (config.tools !== undefined
-        ? config.tools
-        : (config.toolPreset !== undefined
-          ? config.toolPreset
-          : (config.tool_preset !== undefined ? config.tool_preset : config.role)));
-    let allowedTools = resolveToolPreset(rawTools);
+      : (config.tools !== undefined ? config.tools : presetSelector);
+    let allowedTools: string[];
+    if (requestedTools !== undefined) {
+      allowedTools = resolveToolPreset(requestedTools);
+    } else if (resolvedPrincipal && resolvedPrincipal.kind === 'agent') {
+      allowedTools = resolveAgentCallerDefaultTools(creatorAgent);
+    } else {
+      allowedTools = resolveToolPreset(undefined);
+    }
 
-    // If creator is unprivileged, clamp allowedTools to creator's allowedTools subset (SEC-2)
-    if (creatorAgent && !hasLifecycleAuthority && creatorAgent.config?.allowedTools) {
-      const creatorTools = resolveToolPreset(creatorAgent.config.allowedTools);
+    // Child ⊆ spawner invariant (ratified contract; the SEC-2 clamp is the
+    // documented rule, not a silent surprise): every spawning agent —
+    // lifecycle-authority holders included — can only produce a child with
+    // less-or-equivalent tool access. A `'*'` spawner is equivalent to any
+    // requested set, so a `'*'` child from a `'*'` spawner stays allowed; a
+    // restricted spawner intersects. Principal-less host/operator launches
+    // keep full pinning.
+    if (creatorAgent) {
+      const creatorTools = resolveToolPreset(creatorAgent.config?.allowedTools);
       if (Array.isArray(creatorTools) && !creatorTools.includes('*')) {
         const creatorToolSet = new Set(creatorTools);
         if (Array.isArray(allowedTools)) {
@@ -2908,24 +2980,11 @@ export class AgentLifecycleManager {
         }
       });
 
-      // If initial prompt provided, execute initial turn. The launch directive
-      // is user-initiated: prefer the queue-backed `enqueueUserTurn` entry so it
-      // enters the centralized TriggerQueue (MOD-21 W7 single dispatch point);
-      // hosts without a TriggerQueue fall back to the direct turn engine. The
-      // turn is addressed by the launched agent's canonical identity key (Wave
-      // I, ticket d57cbc1; fix lane G2): the launch path already knows the key,
-      // while a bare id is Realm-ambiguous for a lawful same-id pair and fails
-      // closed (`AGENT_NOT_FOUND`) — the second same-id launch with an initial
-      // prompt would roll back otherwise.
-      if (initialPrompt !== null && initialPrompt !== undefined && initialPrompt !== '') {
-        if (this.#runtime && typeof this.#runtime.executeAgentTurn === 'function') {
-          await (typeof this.#runtime.enqueueUserTurn === 'function'
-            ? this.#runtime.enqueueUserTurn(identityKey, initialPrompt)
-            : this.#runtime.executeAgentTurn(identityKey, initialPrompt));
-        }
-      }
-
-      return agentInstance;
+      // NOTE: the initial prompt turn phase is deliberately outside this
+      // registration try/catch (ratified prompt contract, ticket 4692014):
+      // destructive rollback covers registration-time failures only, so a
+      // failed child turn can never unwind a registered child. The turn phase
+      // runs after this block resolves.
     } catch (err) {
       // Spawn failure cleanup: unwind partial registrations
       this.#agents.delete(identityKey);
@@ -2949,6 +3008,76 @@ export class AgentLifecycleManager {
         this.#recycleBin.set(identityKey, previousRecycledAgent);
       }
       throw err;
+    }
+
+    // Initial-prompt turn phase (ratified prompt contract, ticket 4692014).
+    // The launch directive is user-initiated: prefer the queue-backed
+    // `enqueueUserTurn` entry so it enters the centralized TriggerQueue
+    // (MOD-21 W7 single dispatch point); hosts without a TriggerQueue fall back
+    // to the direct turn engine. The turn is addressed by the launched agent's
+    // canonical identity key (Wave I, ticket d57cbc1; fix lane G2): the launch
+    // path already knows the key, while a bare id is Realm-ambiguous for a
+    // lawful same-id pair and fails closed (`AGENT_NOT_FOUND`).
+    //
+    // `'detach'` (the model-facing `spawn_agent` default) queues the turn and
+    // resolves the launch immediately; a later turn failure is recorded on the
+    // child and never unwinds it — no unhandled rejection escapes. `'await'`
+    // (the blocking `await_completion` opt-in, and the legacy direct-launch
+    // default) surfaces the turn outcome to the caller; on failure the error
+    // propagates BUT the registered child stays (the destructively rolled-back
+    // registration window closed above).
+    if (initialPrompt !== null && initialPrompt !== undefined && initialPrompt !== '') {
+      const runInitialTurn = (): Promise<unknown> => {
+        if (!this.#runtime || typeof this.#runtime.executeAgentTurn !== 'function') {
+          return Promise.resolve(null);
+        }
+        return typeof this.#runtime.enqueueUserTurn === 'function'
+          ? Promise.resolve(this.#runtime.enqueueUserTurn(identityKey, initialPrompt) as Promise<unknown>)
+          : Promise.resolve(this.#runtime.executeAgentTurn(identityKey, initialPrompt) as Promise<unknown>);
+      };
+      if (initialTurnMode === 'detach') {
+        try {
+          void runInitialTurn().catch((err: unknown) => {
+            this.#recordInitialTurnFailure(agentInstance, err);
+          });
+        } catch (err) {
+          this.#recordInitialTurnFailure(agentInstance, err);
+        }
+      } else {
+        try {
+          await runInitialTurn();
+        } catch (err) {
+          this.#recordInitialTurnFailure(agentInstance, err);
+          throw err;
+        }
+      }
+    }
+
+    return agentInstance;
+  }
+
+  /**
+   * Records a detached/blocking initial-turn failure observably on the child
+   * (ratified prompt contract, ticket 4692014): the diagnostic `lastError`
+   * banner and the state detail are the existing observable surfaces — no mail
+   * is invented and the child is never unwound. Best-effort: a frozen or
+   * exotic entity must not mask the original failure.
+   *
+   * @param agentInstance - The registered child.
+   * @param err - The failed initial-turn error.
+   * @internal
+   */
+  #recordInitialTurnFailure(agentInstance: Agent, err: unknown): void {
+    const failure = err && typeof err === 'object' ? err as { message?: unknown } : null;
+    const message = failure && typeof failure.message === 'string' && failure.message
+      ? failure.message
+      : 'Initial prompt turn failed';
+    try {
+      agentInstance.lastError = message;
+      agentInstance.stateDetail = 'Initial prompt turn failed';
+      agentInstance.updatedAt = Date.now();
+    } catch {
+      // Best-effort observability only; the child registration is authoritative.
     }
   }
 

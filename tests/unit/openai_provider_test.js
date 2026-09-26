@@ -310,3 +310,232 @@ test('OpenAIProvider HTTP failures raise InferenceError (offline, fetch mocked)'
     );
   });
 });
+
+test('OpenAIProvider surfaces in-band provider errors (offline, fetch mocked)', async (t) => {
+  const realFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  // Synthetic short key: long enough for the bearer redactor, short enough
+  // that the repository's sensitive-content guard does not treat it as a
+  // credential fixture.
+  const TEST_KEY = 'zz-echo-key-01';
+  const provider = new OpenAIProvider({
+    apiUrl: 'https://example.invalid/v1',
+    apiKey: TEST_KEY,
+    id: 'openai'
+  });
+
+  const frame = (payload) => `data: ${JSON.stringify(payload)}\n\n`;
+
+  const sseResponse = (frames) => new Response(
+    new ReadableStream({
+      start(controller) {
+        const encoder = new TextEncoder();
+        for (const f of frames) controller.enqueue(encoder.encode(f));
+        controller.close();
+      }
+    }),
+    { status: 200, headers: { 'Content-Type': 'text/event-stream' } }
+  );
+
+  const jsonResponse = (body) => new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' }
+  });
+
+  // Error frame captured verbatim from the live QA run that motivated the fix
+  // (NanoGPT request #169): an error-only final chunk followed by [DONE].
+  const liveErrorFrame = {
+    id: 'chatcmpl-70b75b69-723b-4714-9afa-757b1f4b2136',
+    object: 'chat.completion.chunk',
+    created: 1790422845,
+    model: 'deepseek/deepseek-v4.1-flash:thinking',
+    choices: [{ index: 0, delta: {}, finish_reason: null }],
+    error: {
+      message: 'Partial response received, but the final tool call was malformed and was not executed.',
+      type: 'invalid_response_error',
+      code: 'malformed_tool_call',
+      status: 502
+    }
+  };
+
+  const collectStreamError = async (model, options) => {
+    try {
+      for await (const _chunk of model.stream(options)) {}
+    } catch (err) {
+      return err;
+    }
+    return null;
+  };
+
+  await t.test('stream() fails the turn with a typed InferenceError on the live malformed_tool_call frame', async () => {
+    globalThis.fetch = async () => sseResponse([
+      frame({ choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] }),
+      frame({ choices: [{ index: 0, delta: { content: "I'll call `read_wiki_structure`" }, finish_reason: null }] }),
+      frame({ choices: [{ index: 0, delta: { content: ' for `modelcontextprotocol/servers` right now' }, finish_reason: null }] }),
+      frame(liveErrorFrame),
+      'data: [DONE]\n\n'
+    ]);
+
+    const model = provider.createModel('test-model');
+    const chunks = [];
+    const err = await collectStreamError(model, {
+      messages: [{ role: 'user', content: 'call the tool' }],
+      onChunk: (chunk) => chunks.push(chunk)
+    });
+
+    assert.ok(err instanceof InferenceError, 'stream must fail with an InferenceError');
+    assert.ok(err instanceof Error, 'InferenceError must stay catch-compatible as Error');
+    assert.equal(err.name, 'InferenceError');
+    assert.equal(err.code, 'ERR_HTTP_502');
+    assert.equal(err.status, 502);
+    assert.equal(err.retryable, true, 'status 502 is classified retryable by the shared policy');
+    assert.match(err.message, /502/);
+    assert.match(err.message, /malformed_tool_call/);
+    assert.match(err.message, /invalid_response_error/);
+    assert.match(err.message, /malformed and was not executed/);
+    assert.equal(err.details.providerCode, 'malformed_tool_call');
+    assert.equal(err.details.providerType, 'invalid_response_error');
+    assert.equal(err.details.providerStatus, 502);
+    assert.equal(err.details.source, 'stream');
+    assert.match(String(err.details.endpoint), /\/chat\/completions$/);
+
+    // Partial content must never be presented as a completed turn.
+    assert.equal(
+      chunks.some((chunk) => chunk.type === 'finish'),
+      false,
+      'no finish chunk may be emitted after an in-band error frame'
+    );
+    assert.equal(
+      chunks.some((chunk) => chunk.type === 'text'),
+      true,
+      'text deltas observed before the error frame may still have streamed'
+    );
+  });
+
+  await t.test('stream() maps a status-less error frame to ERR_UNKNOWN and refuses to finish', async () => {
+    globalThis.fetch = async () => sseResponse([
+      frame({ choices: [{ index: 0, delta: { content: 'partial answer' }, finish_reason: null }] }),
+      frame({
+        choices: [{ index: 0, delta: {}, finish_reason: null }],
+        error: { message: 'content blocked by moderation', code: 'content_filter' }
+      }),
+      'data: [DONE]\n\n'
+    ]);
+
+    const model = provider.createModel('test-model');
+    const chunks = [];
+    const err = await collectStreamError(model, {
+      messages: [{ role: 'user', content: 'hi' }],
+      onChunk: (chunk) => chunks.push(chunk)
+    });
+
+    assert.ok(err instanceof InferenceError);
+    assert.equal(err.code, 'ERR_UNKNOWN');
+    assert.equal(err.status, 0);
+    assert.equal(err.retryable, false);
+    assert.match(err.message, /content_filter/);
+    assert.match(err.message, /content blocked by moderation/);
+    assert.equal(chunks.some((chunk) => chunk.type === 'finish'), false);
+  });
+
+  await t.test('stream() surfaces status without code/type and redacts credential-shaped text', async () => {
+    globalThis.fetch = async () => sseResponse([
+      frame({ choices: [{ index: 0, delta: { content: 'partial' }, finish_reason: null }] }),
+      frame({
+        choices: [{ index: 0, delta: {}, finish_reason: null }],
+        error: {
+          message: `upstream rejected Authorization: Bearer ${TEST_KEY}; echoed key ${TEST_KEY}`,
+          status: 503
+        }
+      }),
+      'data: [DONE]\n\n'
+    ]);
+
+    const model = provider.createModel('test-model');
+    const err = await collectStreamError(model, { messages: [{ role: 'user', content: 'hi' }] });
+
+    assert.ok(err instanceof InferenceError);
+    assert.equal(err.code, 'ERR_HTTP_503');
+    assert.equal(err.status, 503);
+    assert.equal(err.retryable, true, 'status 503 is classified retryable by the shared policy');
+    assert.match(err.message, /upstream rejected/);
+    assert.ok(!err.message.includes(TEST_KEY), 'raw API key must never appear in the error text');
+    assert.match(err.message, /\[redacted\]/);
+  });
+
+  await t.test('stream() accepts a string error payload', async () => {
+    globalThis.fetch = async () => sseResponse([
+      frame({ choices: [{ index: 0, delta: { content: 'partial' }, finish_reason: null }] }),
+      frame({ choices: [{ index: 0, delta: {}, finish_reason: null }], error: 'upstream exploded' }),
+      'data: [DONE]\n\n'
+    ]);
+
+    const model = provider.createModel('test-model');
+    const err = await collectStreamError(model, { messages: [{ role: 'user', content: 'hi' }] });
+
+    assert.ok(err instanceof InferenceError);
+    assert.equal(err.code, 'ERR_UNKNOWN');
+    assert.match(err.message, /upstream exploded/);
+  });
+
+  await t.test('stream() does not fail on a null error field', async () => {
+    globalThis.fetch = async () => sseResponse([
+      frame({ choices: [{ index: 0, delta: { content: 'hello ' }, finish_reason: null }] }),
+      frame({ choices: [{ index: 0, delta: { content: 'world' }, finish_reason: 'stop' }], error: null }),
+      'data: [DONE]\n\n'
+    ]);
+
+    const model = provider.createModel('test-model');
+    const chunks = [];
+    for await (const chunk of model.stream({
+      messages: [{ role: 'user', content: 'hi' }],
+      onChunk: (chunk) => chunks.push(chunk)
+    })) {}
+
+    const finishChunk = chunks.find((chunk) => chunk.type === 'finish');
+    assert.ok(finishChunk, 'a null error field must not fail the stream');
+    assert.equal(finishChunk.content, 'hello world');
+    assert.equal(finishChunk.finishReason, 'stop');
+  });
+
+  await t.test('complete() rejects on a 200 response carrying a top-level error instead of returning partial content', async () => {
+    globalThis.fetch = async () => jsonResponse({
+      choices: [{ index: 0, message: { role: 'assistant', content: 'partial answer' }, finish_reason: 'stop' }],
+      error: {
+        message: 'final tool call was malformed and was not executed',
+        type: 'invalid_response_error',
+        code: 'malformed_tool_call',
+        status: 502
+      }
+    });
+
+    const model = provider.createModel('test-model');
+    await assert.rejects(
+      () => model.complete({ messages: [{ role: 'user', content: 'hi' }] }),
+      (err) => {
+        assert.ok(err instanceof InferenceError, 'complete must fail with an InferenceError');
+        assert.equal(err.code, 'ERR_HTTP_502');
+        assert.equal(err.status, 502);
+        assert.equal(err.retryable, true);
+        assert.match(err.message, /malformed_tool_call/);
+        assert.equal(err.details.source, 'complete');
+        return true;
+      }
+    );
+  });
+
+  await t.test('complete() does not fail on a null error field', async () => {
+    globalThis.fetch = async () => jsonResponse({
+      choices: [{ index: 0, message: { role: 'assistant', content: 'all good' }, finish_reason: 'stop' }],
+      error: null
+    });
+
+    const model = provider.createModel('test-model');
+    const result = await model.complete({ messages: [{ role: 'user', content: 'hi' }] });
+    assert.equal(result.content, 'all good');
+    assert.equal(result.finishReason, 'stop');
+  });
+});

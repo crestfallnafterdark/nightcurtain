@@ -188,6 +188,9 @@ test('agent workspace view: private-by-default placement, mounts, hygiene, opaci
     // creator pins a child's workspace to a cross-realm agent key, then mounts
     // the child. Peer-identity resolution alone must not expose the mapped
     // realm's bytes — the resolved workspace key's scope is enforced too.
+    // The pin is an explicit lifecycle call: the model-facing `spawn_agent`
+    // boundary strips `workspace` (ratified parameter surface, f41f838), so
+    // the tool path can no longer reproduce this operator mapping.
     await runtime.launchAgent({
       id: 'agent_mapper',
       realmId: 'alpha',
@@ -198,14 +201,22 @@ test('agent workspace view: private-by-default placement, mounts, hygiene, opaci
         {
           content: '',
           toolCalls: [
-            toolCall('m1', 'spawn_agent', { id: 'mapped_child', workspace: 'agent_c' }),
-            toolCall('m2', 'read_file', { file_path: '/agents/mapped_child/same.md' }),
-            toolCall('m3', 'list_files', { dir_path: '/agents' })
+            toolCall('m1', 'read_file', { file_path: '/agents/mapped_child/same.md' }),
+            toolCall('m2', 'list_files', { dir_path: '/agents' })
           ]
         },
         { content: 'done' }
       ])
     });
+
+    // The mapper's cross-realm-pinned child (explicit authority lifecycle
+    // call; the tool boundary strips `workspace`).
+    const mappedChild = await runtime.launchAgent({
+      config: { id: 'mapped_child', workspace: 'agent_c', allowedTools: ['read_file'] },
+      callerContext: { callerAgentId: 'agent_mapper' }
+    });
+    assert.equal(mappedChild.config.workspaceId, 'agent_c', 'the authority workspace pin is honored at the lifecycle');
+    assert.equal(mappedChild.config.realmId, 'alpha', 'the mapped child inherits the mapper realm');
 
     // --- Generic root G (default realm, cross-workspace authority) ---------
     // The director's system scope is never mount-visible to a realm root
@@ -303,8 +314,10 @@ test('agent workspace view: private-by-default placement, mounts, hygiene, opaci
 
     // --- Cross-realm-mapped mount keys are denied (2185224) ----------------
     const mapperResults = toolResults(runtime, 'agent_mapper');
-    const spawnReceipt = mapperResults.find((entry) => entry.parsed && entry.parsed.id === 'mapped_child');
-    assert.ok(spawnReceipt && spawnReceipt.parsed.success === true, 'the authority spawn with a workspace pin succeeds');
+    assert.ok(
+      runtime.getAgent('mapped_child')?.config?.workspaceId === 'agent_c',
+      'the cross-realm-pinned child is registered with its mapped workspace key'
+    );
     const mappedRead = mapperResults.find(
       (entry) => entry.parsed && entry.parsed.success === false && String(entry.parsed.error || '').includes('mapped_child')
     );

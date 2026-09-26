@@ -148,7 +148,8 @@ await recordTest('AC-EPIC13-01.1', 'Mail wake places message bodies into context
 
   const agent = await runtime.launchAgent({
     id: 'recipient-agent',
-    role: 'collaborator'
+    role: 'collaborator',
+    allowedTools: 'collaborator'
   }, createMockModel(async (completionOptions) => {
     completionInvocations++;
     receivedMessagesInContext = completionOptions.messages;
@@ -196,7 +197,8 @@ await recordTest('AC-EPIC13-01.2', 'Injection mode deposits input into inbox and
   let receivedMessages = null;
   const agent = await runtime.launchAgent({
     id: 'injection-agent',
-    role: 'collaborator'
+    role: 'collaborator',
+    allowedTools: 'collaborator'
   }, createMockModel(async ({ messages }) => {
     receivedMessages = messages;
     return { role: 'assistant', content: 'Injection accepted.' };
@@ -231,7 +233,8 @@ await recordTest('AC-EPIC13-02.1', 'Every synthetic assistant message with tool 
   let passedFormattedMessages = null;
   const agent = await runtime.launchAgent({
     id: 'deepseek-agent',
-    role: 'collaborator'
+    role: 'collaborator',
+    allowedTools: 'collaborator'
   }, createMockModel(async ({ messages }) => {
     passedFormattedMessages = messages;
     return { role: 'assistant', content: 'Coherent response.' };
@@ -268,7 +271,8 @@ await recordTest('AC-EPIC13-02.2', 'Provider schema conformity: formatMessagesWi
 
   const agent = await runtime.launchAgent({
     id: 'schema-agent',
-    role: 'collaborator'
+    role: 'collaborator',
+    allowedTools: 'collaborator'
   }, createMockModel(async () => ({
     role: 'assistant',
     content: '',
@@ -316,7 +320,8 @@ await recordTest('AC-EPIC13-03.1', 'Leading user-role notification boundary cont
 
   const agent = await runtime.launchAgent({
     id: 'listener-agent',
-    role: 'collaborator'
+    role: 'collaborator',
+    allowedTools: 'collaborator'
   }, createMockModel(async () => ({ role: 'assistant', content: 'Acknowledged.' })));
 
   // Send 3 messages from 2 distinct senders
@@ -350,7 +355,8 @@ await recordTest('AC-EPIC13-03.2', 'Preservation of explicit notification bounda
 
   const agent = await runtime.launchAgent({
     id: 'boundary-agent',
-    role: 'collaborator'
+    role: 'collaborator',
+    allowedTools: 'collaborator'
   }, createMockModel(async () => ({ role: 'assistant', content: 'Boundaries respected.' })));
 
   hostSend({ from: 'system_monitor', to: 'boundary-agent', content: 'Event notice.' });
@@ -380,7 +386,8 @@ await recordTest('AC-EPIC13-04.1', 'Multiple envelopes coalesce into single turn
   let turnCalls = 0;
   const agent = await runtime.launchAgent({
     id: 'coalesce-agent',
-    role: 'collaborator'
+    role: 'collaborator',
+    allowedTools: 'collaborator'
   }, createMockModel(async () => {
     turnCalls++;
     return { role: 'assistant', content: 'Processed all messages in single turn.' };
@@ -426,7 +433,8 @@ await recordTest('AC-EPIC13-04.2', 'High-volume multi-sender coalescing and hist
   let completionInvocations = 0;
   const agent = await runtime.launchAgent({
     id: 'multi-coalesce-agent',
-    role: 'collaborator'
+    role: 'collaborator',
+    allowedTools: 'collaborator'
   }, createMockModel(async () => {
     completionInvocations++;
     return { role: 'assistant', content: 'Processed all 6 multi-sender messages.' };
@@ -716,7 +724,8 @@ await recordTest('AC-EPIC13-06.1', 'Precall error appears in context as tool err
 
   const agent = await runtime.launchAgent({
     id: 'resilient-agent',
-    role: 'collaborator'
+    role: 'collaborator',
+    allowedTools: 'collaborator'
   }, createMockModel(async ({ messages }) => {
     const errTool = messages.find(m => m.role === 'tool' && m.name === 'virtualFs_readFile');
     if (errTool) {
@@ -753,7 +762,8 @@ await recordTest('AC-EPIC13-06.2', 'Multi-precall mixed partial failure recovery
   let receivedToolResults = [];
   const agent = await runtime.launchAgent({
     id: 'partial-fail-agent',
-    role: 'collaborator'
+    role: 'collaborator',
+    allowedTools: 'collaborator'
   }, createMockModel(async ({ messages }) => {
     receivedToolResults = messages.filter(m => m.role === 'tool');
     return { role: 'assistant', content: 'Turn handled partial failures cleanly.' };
@@ -800,7 +810,8 @@ await recordTest('AC-EPIC13-07.1', 'Injected tool results and precall results co
 
   const agent = await runtime.launchAgent({
     id: 'compact-agent',
-    role: 'collaborator'
+    role: 'collaborator',
+    allowedTools: 'collaborator'
   }, createMockModel(async () => ({ role: 'assistant', content: 'Turn output.' })));
 
   // Turn 1: Injected mail delivery + precall
@@ -847,7 +858,8 @@ await recordTest('AC-EPIC13-07.2', 'Multi-turn compaction lifecycle across 3 tur
 
   const agent = await runtime.launchAgent({
     id: 'compaction-lifecycle',
-    role: 'collaborator'
+    role: 'collaborator',
+    allowedTools: 'collaborator'
   }, createMockModel(async () => ({ role: 'assistant', content: 'Done.' })));
 
   // Turn 1: Injected precall reading f1.txt
@@ -895,7 +907,8 @@ await recordTest('AC-EPIC13-08.1', 'Telemetry tracks injectedDeliveries, precall
 
   const agent = await runtime.launchAgent({
     id: 'telemetry-agent',
-    role: 'collaborator'
+    role: 'collaborator',
+    allowedTools: 'collaborator'
   }, createMockModel(async () => ({ role: 'assistant', content: 'Turn done.' })));
 
   // Verify initial counters

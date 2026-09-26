@@ -23,7 +23,7 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 - Leaf: zero imports (including type-only); all exports are deterministic with no import-time side effects, and `TOOL_SYSTEM_ERROR_CODES`, `SANDBOX_TOOLS`, `INNATE_TOOLS`, `TOOL_PRESETS`, and every nested preset array are frozen.
 - Canonical taxonomy: `SANDBOX_TOOLS` enumerates exactly 35 unique `snake_case` tool names grouped across 7 substrate domains — VFS (12), messaging/mailbox (8), agent lifecycle (5), synchronous invocation (2), runtime scheduler (3), world clock & events (3), precall & reflection (2).
 - Innate baseline primitives: `INNATE_TOOLS` is the frozen four-name list — `whoami`, `get_current_time`, `describe_tool`, `batch_precall` — augmented with a non-enumerable `has()` lookup.
-- Frozen error-code dictionary: `TOOL_SYSTEM_ERROR_CODES` freezes the six canonical machine-readable codes (`TOOL_NOT_FOUND`, `PERMISSION_DENIED`, `INVALID_ARGUMENTS`, `SERVICE_UNAVAILABLE`, `PRECALL_FORBIDDEN`, `EXECUTION_FAILED`); the dispatcher's universal error shield constrains every emitted failure receipt to this vocabulary, normalizing downstream subsystem codes outside it to `EXECUTION_FAILED`.
+- Frozen error-code dictionary: `TOOL_SYSTEM_ERROR_CODES` freezes the canonical machine-readable codes (`TOOL_NOT_FOUND`, `PERMISSION_DENIED`, `INVALID_ARGUMENTS`, `SERVICE_UNAVAILABLE`, `PRECALL_FORBIDDEN`, `EXECUTION_FAILED`, `AGENT_ALREADY_EXISTS`); the dispatcher's universal error shield constrains every emitted failure receipt to this vocabulary, normalizing downstream subsystem codes outside it to `EXECUTION_FAILED`.
 - Capability tiers: exactly five presets (`all`, `manager`, `collaborator`, `readonly_collaborator`, `readonly`), each a frozen string array; `all` is exactly `['*']`. The manager tier carries the aggregate `subagent_management` sentinel — not a canonical tool name — which the dispatcher expands to `spawn_agent`, `kill_agent`, `invoke_agent`, `undo_turn`.
 - Preset values are allowlist strings only: no execution-context or infrastructure configuration (model, provider, temperature, privilege/whitelist flags) is represented in the preset definitions.
 - Mutation-capability vocabulary: `MUTATING_TOOLS` and `READ_ONLY_TOOLS` partition every canonical `SANDBOX_TOOLS` entry exactly once (disjoint, union = the 35-name canonical set) as frozen arrays in canonical declaration order, and `isMutatingTool` is a pure membership probe over that vocabulary. The clock/event tools (`world_clock`, `event_list`) classify as mutating because they step simulation time and mutate VFS-backed event registries.
@@ -122,6 +122,7 @@ export const TOOL_SYSTEM_ERROR_CODES: {
     readonly SERVICE_UNAVAILABLE: 'SERVICE_UNAVAILABLE';
     readonly PRECALL_FORBIDDEN: 'PRECALL_FORBIDDEN';
     readonly EXECUTION_FAILED: 'EXECUTION_FAILED';
+    readonly AGENT_ALREADY_EXISTS: 'AGENT_ALREADY_EXISTS';
 };
 
 // @public

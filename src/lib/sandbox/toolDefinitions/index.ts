@@ -789,8 +789,14 @@ export interface JsonSchemaDraft07 {
   /** List of required parameter names. */
   readonly required?: readonly string[];
 
-  /** Strict schema adherence: prevents undocumented parameter hallucinations. */
-  readonly additionalProperties: false;
+  /**
+   * Extra-parameter policy keyword. `false` for the closed baked/publishing
+   * descriptors; `true` for descriptors whose handler accepts the key set on
+   * the wire and ignores undocumented keys with an explicit warning (the
+   * `spawn_agent` accept-and-warn boundary) — the emitted keyword always
+   * matches the runtime behavior.
+   */
+  readonly additionalProperties: boolean;
 }
 
 /**
@@ -892,6 +898,13 @@ export interface ToolDescriptor {
   readonly sanitize: ParamSanitizerFn;
   /** Delegation handler that routes to the injected capability and returns its receipt. */
   readonly handler: ToolHandlerFn;
+  /**
+   * Optional model-facing remedy appended to this tool's authorization denial
+   * (e.g. which preset/authority grants it). The remedy restates the published
+   * description — it never reveals registry state — so a denied caller learns
+   * the requirement without an existence/authority oracle.
+   */
+  readonly denialHint?: string;
 }
 
 // ============================================================================
@@ -1057,7 +1070,7 @@ export function getSandboxToolsSchema(
         type: descriptor.schema.type,
         properties: { ...descriptor.schema.properties },
         required: Array.isArray(descriptor.schema.required) ? [...descriptor.schema.required] : [],
-        additionalProperties: Boolean(descriptor.schema.additionalProperties) as false
+        additionalProperties: Boolean(descriptor.schema.additionalProperties)
       }
     }
   }));
@@ -1386,9 +1399,15 @@ export function createSandboxToolDispatcher(options: SandboxDispatcherOptions = 
     }
 
     if (!isAuthorized(authorizationName, executionContext, agentIdentity, publishingDescriptor ? publishingDescriptor.authority : null)) {
+      // A descriptor may publish a remedy restating its description (e.g. the
+      // capability requirement); it never reads registry state, so the denial
+      // gives no existence/authority oracle.
+      const denialHint = typeof (descriptor as { denialHint?: unknown }).denialHint === 'string'
+        ? (descriptor as { denialHint?: string }).denialHint
+        : '';
       return {
         success: false,
-        error: `Agent '${agentId || 'anonymous'}' is not authorized to invoke tool '${authorizationName}'.`,
+        error: `Agent '${agentId || 'anonymous'}' is not authorized to invoke tool '${authorizationName}'.${denialHint ? ` ${denialHint}` : ''}`,
         code: TOOL_SYSTEM_ERROR_CODES.PERMISSION_DENIED
       };
     }
