@@ -761,7 +761,7 @@ const payload: TurnUsagePayload = {
 - **`responseReasoning`** — Generated model reasoning/thinking text content; retained for payload compatibility and never contributes to token accounting.
 - **`turnCachedPromptTokens`** — Explicit cached prompt token count if known by caller. Overrides provider cache metadata.
 - **`turnCompletionTokens`** — Explicit completion token count if known by caller. Overrides provider usage.
-- **`turnPromptTokens`** — Explicit uncached prompt token count if known by caller. Overrides provider usage.
+- **`turnPromptTokens`** — Explicit prompt token total (uncached + cached) if known by caller. Overrides provider usage.
 - **`turnUsage`** — Standard provider usage metadata object if supplied by model adapter; the prompt/completion counts and the cache-usage fields below are consumed (total fields are ignored).
 
 ### `TurnUsageResult` — interface

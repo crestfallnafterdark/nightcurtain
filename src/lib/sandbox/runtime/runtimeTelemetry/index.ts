@@ -262,7 +262,7 @@ export interface RuntimeAggregateMetrics {
  * ```
  */
 export interface TurnUsagePayload {
-  /** Explicit uncached prompt token count if known by caller. Overrides provider usage. */
+  /** Explicit prompt token total (uncached + cached) if known by caller. Overrides provider usage. */
   readonly turnPromptTokens?: number | null;
   /** Explicit cached prompt token count if known by caller. Overrides provider cache metadata. */
   readonly turnCachedPromptTokens?: number | null;
