@@ -3,7 +3,7 @@
  * Private implementation detail of the `tools/normalizers` module; the public surface is `index.ts`.
  */
 
-import { PUBLISHING_TOOLS, REALM_ADMIN_TOOLS, EXTENSIONS_ADMIN_TOOLS, SANDBOX_TOOLS } from '../constants/index.ts';
+import { PUBLISHING_TOOLS, REALM_ADMIN_TOOLS, EXTENSIONS_ADMIN_TOOLS, REALM_KNOWLEDGE_TOOLS, SANDBOX_TOOLS } from '../constants/index.ts';
 
 /**
  * Master Tool Alias Map
@@ -692,7 +692,15 @@ export const TOOL_ALIAS_MAP: Readonly<Record<string, string>> = Object.freeze({
   'list_extensions': EXTENSIONS_ADMIN_TOOLS.LIST_EXTENSIONS,
   'listExtensions': EXTENSIONS_ADMIN_TOOLS.LIST_EXTENSIONS,
   'attach_extension': EXTENSIONS_ADMIN_TOOLS.ATTACH_EXTENSION,
-  'attachExtension': EXTENSIONS_ADMIN_TOOLS.ATTACH_EXTENSION
+  'attachExtension': EXTENSIONS_ADMIN_TOOLS.ATTACH_EXTENSION,
+
+  // --- M5b Realm-Knowledge Meta Tools (explicit-grant-only; never wildcard-exposed) ---
+  'list_templates': REALM_KNOWLEDGE_TOOLS.LIST_TEMPLATES,
+  'listTemplates': REALM_KNOWLEDGE_TOOLS.LIST_TEMPLATES,
+  'get_template': REALM_KNOWLEDGE_TOOLS.GET_TEMPLATE,
+  'getTemplate': REALM_KNOWLEDGE_TOOLS.GET_TEMPLATE,
+  'list_hydration_packages': REALM_KNOWLEDGE_TOOLS.LIST_HYDRATION_PACKAGES,
+  'listHydrationPackages': REALM_KNOWLEDGE_TOOLS.LIST_HYDRATION_PACKAGES
 });
 
 const LOWER_TOOL_ALIAS_MAP = Object.create(null);

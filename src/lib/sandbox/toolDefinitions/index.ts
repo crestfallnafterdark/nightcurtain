@@ -208,7 +208,64 @@ export interface RealmEffectiveTemplateView {
 }
 
 /**
- * Narrow host port consumed by the Wave U publishing meta tools.
+ * Bounded summary of one effective catalog template (M5b). Carries exactly
+ * the launch-relevant metadata — never bundle bodies, realm vocabulary, or
+ * host paths.
+ */
+export interface RealmEffectiveTemplateSummary {
+  /** Effective catalog template id. */
+  readonly templateId: string;
+  /** Human-readable display name. */
+  readonly name: string;
+  /** Effective authored-form content version (`sha256:<hex>`), or `null` when the entry cannot be versioned. */
+  readonly version: string | null;
+  /** Operator-facing description. */
+  readonly description: string;
+  /** Schema format version of the exposed (normalized) template. */
+  readonly formatVersion: number;
+  /** Whether the entry resolves as a launchable template (version + non-empty agent set). */
+  readonly launchable: boolean;
+}
+
+/**
+ * Bounded projection of one session-only pending instance payload (M5b): the
+ * template binding, the canonical payload digest, and the resolution
+ * timestamp — never the raw payload body.
+ */
+export interface PendingInstancePayloadSummary {
+  /** Template id the candidate targets. */
+  readonly templateId: string;
+  /** Effective template version the candidate was validated against (`sha256:<hex>`). */
+  readonly templateVersion: string;
+  /** Canonical `payloadDigest` of the stored authored payload. */
+  readonly digest: string;
+  /** ISO-8601 timestamp of the resolution that produced the candidate. */
+  readonly resolvedAt: string;
+}
+
+/**
+ * Bounded projection of one saved hydration-payload library entry (M5b): the
+ * library id/name, the template binding, the canonical digest, and the save
+ * timestamp — never the raw payload body.
+ */
+export interface SavedInstancePayloadSummary {
+  /** Stable library id (`saved_payload_<n>`). */
+  readonly id: string;
+  /** Operator-chosen display name. */
+  readonly name: string;
+  /** Template id the payload targets. */
+  readonly templateId: string;
+  /** Effective template version the payload validated against (`sha256:<hex>`). */
+  readonly templateVersion: string;
+  /** Canonical `payloadDigest` of the authored payload. */
+  readonly digest: string;
+  /** ISO-8601 save timestamp. */
+  readonly savedAt: string;
+}
+
+/**
+ * Narrow host port consumed by the Wave U publishing meta tools and the M5b
+ * realm-knowledge reads.
  *
  * The composition root (the sandbox store) implements this port over its real
  * Wave T template registry and session candidate surface. The port is trusted
@@ -216,7 +273,9 @@ export interface RealmEffectiveTemplateView {
  * (`realmPublishingPort` is a pinned context key), import mutations reuse the
  * existing registry path (never a forked one), and `previewTemplateImport`
  * runs the identical validation/cap pipeline with zero side effects so
- * `dry_run` cannot drift from the real call.
+ * `dry_run` cannot drift from the real call. The M5b read members project the
+ * same registries into bounded, realm-opaque views (no bundle bodies, no raw
+ * payload bodies).
  */
 export interface RealmPublishingPort {
   /**
@@ -247,6 +306,33 @@ export interface RealmPublishingPort {
    * @param candidate - Frozen candidate produced by a validated submission.
    */
   storePendingInstancePayload(candidate: PendingInstancePayload): void;
+
+  /**
+   * Lists the effective catalog templates as bounded summaries (M5b): id,
+   * name, effective version, description, exposed format version, and
+   * launchability. Never bundle bodies, realm vocabulary, or host paths.
+   *
+   * @returns Frozen template summaries in effective catalog order.
+   */
+  listEffectiveTemplates(): readonly RealmEffectiveTemplateSummary[];
+
+  /**
+   * Lists the session-only pending instance payloads as bounded views (M5b):
+   * template id, pinned version, canonical payload digest, and resolution
+   * timestamp. Never the raw payload body.
+   *
+   * @returns Frozen pending-payload views in submission order.
+   */
+  listPendingInstancePayloads(): readonly PendingInstancePayloadSummary[];
+
+  /**
+   * Lists the persisted saved hydration-payload library as bounded views
+   * (M5b): library id/name, template binding, canonical digest, and save
+   * timestamp. Never the raw payload body.
+   *
+   * @returns Frozen saved-payload views in library order.
+   */
+  listSavedInstancePayloads(): readonly SavedInstancePayloadSummary[];
 }
 
 /**

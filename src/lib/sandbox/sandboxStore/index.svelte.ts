@@ -54,7 +54,7 @@
  * @decision Seed-target membership compares under the store trim semantics: the target lookup resolves a padded hydrated `config.realmId` to the same realm the grouping and `deleteRealm` resolve, a same-id registration in another Realm stays excluded (ambiguous registrations never fall back to a bare ghost workspace when an identity port exists), and the canonical write key is re-normalized to the resolved (trimmed) realm's identity while explicit pins stay verbatim
  * @invariant Template registry resolution: the effective launch catalog resolves shipped (baked demo/embedded bundles plus the `realmTemplateBundles` host injection) → runtime imports, replacing in place by template id, with re-import replacing the previous import so every id has exactly one effective entry; `listRealmTemplates`/`getRealmTemplateBundle`/`launchRealmFromTemplate`/`exportRealmTemplate` all read that one catalog and `listRealmTemplateSources` labels each entry's origin (`shipped`/`imported`/`replacesShipped`).
  * @invariant Template registry honesty: `importRealmTemplate`/`deleteRealmTemplate` mutate the effective catalog and persist the snapshot synchronously; a failed write (quota/unavailable storage) rolls the mutation back and surfaces the typed `ERR_STORE_TEMPLATE_PERSIST_FAILED`, so the registry is never silently in-memory-only. Imports are capped at 2 MiB per bundle and 3 MiB total (`ERR_STORE_TEMPLATE_TOO_LARGE`), persisted as canonical transport payloads, and re-parsed/re-capped fail-closed on hydration without ever rewriting persisted bytes. `previewRealmTemplateImport` runs the identical parse → cap → label pipeline with zero side effects (`dry_run`), so preview and import can never disagree.
- * @invariant Publishing surface: the store is the host-side realm publishing composition root — it exposes the frozen `RealmPublishingPort` (real import path, effective-catalog resolution, session candidate store) to the store-owned runtime; pending instance payloads are session-only and cleared by a reset; approved template authorities are applied under the operator principal as ordinary registry grants (`metaAuthorityGrants`, canonical identity keys, hydration re-applied) and a `templateAuthorityTrust` record auto-approves only exact declared matches at a later launch. A template declaring an authority id unknown to this host fails the launch closed (`ERR_TEMPLATE_AUTHORITY_UNSUPPORTED`), approvals beyond declarations and malformed approvals are rejected (`ERR_STORE_INVALID_PARAMS`), and grant-free/trust-free snapshots keep every existing field and byte.
+ * @invariant Publishing surface: the store is the host-side realm publishing composition root — it exposes the frozen `RealmPublishingPort` (real import path, effective-catalog resolution, session candidate store, plus the M5b bounded read projections over the effective catalog and the pending/saved payload stores — ids, versions, digests, and timestamps only, never bundle or payload bodies) to the store-owned runtime; pending instance payloads are session-only and cleared by a reset; approved template authorities are applied under the operator principal as ordinary registry grants (`metaAuthorityGrants`, canonical identity keys, hydration re-applied) and a `templateAuthorityTrust` record auto-approves only exact declared matches at a later launch. A template declaring an authority id unknown to this host fails the launch closed (`ERR_TEMPLATE_AUTHORITY_UNSUPPORTED`), approvals beyond declarations and malformed approvals are rejected (`ERR_STORE_INVALID_PARAMS`), and grant-free/trust-free snapshots keep every existing field and byte.
  * @invariant Realm launch resolution: a provider-bearing template launches — the retired providers gate no longer refuses it — and its requested extensions plus `<providerId>::<serverToolName>` references resolve against the global install registry and the Realm's attachments: installed-and-approved requests attach under the operator principal, unresolved requests ride the receipt's missing-extension disclosure and `instance.missingExtensions`, resolved tools are recorded as `instance.resolvedTools` (sanitized call name → extension id), and an attached payload/package (or the operator-assembled explicit inputs) is still validated against the effective template contract — including the pinned version — before the Realm record exists, so launch mismatches only with the explicit `allowVersionMismatch` confirmation, which rides the receipt as a warning.
  * @invariant Extension surface: the store is the extension composition root — global install records live in one injected registry persisted additively as `extensions`, realm attachments ride the realm records, install/remove/attach/detach validate and emit `extension_installed`/`extension_removed`/`extension_attached`/`extension_detached` audit events on the runtime stream, `removeExtension` refuses an extension any Realm still attaches (and drops its live session), an `active` attachment for an unknown extension degrades to `unavailable` and returns to `active` once the extension is installed again while the install-only heal never rewrites a `conflict` attachment, and install/attachment records alone never connect, discover a catalog, or grant runtime authorization.
  * @decision Instance provenance is hashes, paths, and resolved tool ids only: a successful template launch records `RealmRecord.instance` with the authored `templateVersion`, the canonical payload digest (`payloadDigest` over the attached payload, when one was attached), per-input hashes over each supplied value's canonical tagged JSON, the placement paths the launch actually wrote, `launchedAt`, the resolved extension tools (`resolvedTools`: sanitized call name → extension id) and the unresolved requested extension ids (`missingExtensions`); raw input values, package content, and credentials never reach the record
@@ -170,6 +170,7 @@ import type {
   ExtensionsAdminAttachmentView,
   ExtensionsAdminInstalledView,
   ExtensionsInspectReceipt,
+  PendingInstancePayloadSummary,
   RealmAdminAttachmentView,
   RealmAdminMemberView,
   RealmAdminPatch,
@@ -177,9 +178,11 @@ import type {
   RealmAdminProvenanceView,
   RealmAdminRealmSummary,
   RealmAdminToolSelection,
+  RealmEffectiveTemplateSummary,
   RealmInspectReceipt,
   RealmPublishingPort,
-  RealmUpdateReceipt
+  RealmUpdateReceipt,
+  SavedInstancePayloadSummary
 } from '../toolDefinitions/index.ts';
 import { synthesizeExtensionToolDescriptor } from '../tools/extensionTools/index.ts';
 import type {
@@ -12790,8 +12793,79 @@ export class SandboxStore {
       },
       storePendingInstancePayload: (candidate: PendingInstancePayload) => {
         this.#storePendingInstancePayload(candidate);
-      }
+      },
+      listEffectiveTemplates: () => this.#listEffectiveTemplateSummaries(),
+      listPendingInstancePayloads: () => this.#listPendingInstancePayloadViews(),
+      listSavedInstancePayloads: () => this.#listSavedInstancePayloadViews()
     });
+  }
+
+  /**
+   * Projects the effective launch catalog into the bounded M5b template
+   * summaries (id, name, effective version, description, exposed format
+   * version, launchability). Never bundle bodies or host paths; a versionless
+   * entry (malformed host injection) reports `version: null` and stays
+   * non-launchable.
+   *
+   * @returns Frozen template summaries in effective catalog order.
+   */
+  #listEffectiveTemplateSummaries(): readonly RealmEffectiveTemplateSummary[] {
+    const versions = new Map(
+      this.listRealmTemplateSources().map((source) => [source.templateId, source.templateVersion] as const)
+    );
+    return Object.freeze(this.#realmTemplates.map((template) => {
+      const version = versions.get(template.id) ?? null;
+      return Object.freeze({
+        templateId: template.id,
+        name: template.name,
+        version,
+        description: template.description,
+        formatVersion: template.formatVersion,
+        launchable: version !== null && Array.isArray(template.agents) && template.agents.length > 0
+      });
+    }));
+  }
+
+  /**
+   * Projects the session-only pending candidates into the bounded M5b digest
+   * views (template id, pinned version, canonical payload digest, resolution
+   * timestamp). A candidate whose payload cannot be digested is omitted rather
+   * than reported with a fabricated digest.
+   *
+   * @returns Frozen pending-payload views in submission order.
+   */
+  #listPendingInstancePayloadViews(): readonly PendingInstancePayloadSummary[] {
+    const views: PendingInstancePayloadSummary[] = [];
+    for (const entry of this.#pendingInstancePayloads.values()) {
+      try {
+        views.push(Object.freeze({
+          templateId: entry.templateId,
+          templateVersion: entry.templateVersion,
+          digest: payloadDigest(entry.payload),
+          resolvedAt: entry.resolvedAt
+        }));
+      } catch {
+        // A hostile direct-port candidate is omitted, never fabricated.
+      }
+    }
+    return Object.freeze(views);
+  }
+
+  /**
+   * Projects the saved hydration-payload library into the bounded M5b views
+   * (library id/name, template binding, canonical digest, save timestamp).
+   *
+   * @returns Frozen saved-payload views in library order.
+   */
+  #listSavedInstancePayloadViews(): readonly SavedInstancePayloadSummary[] {
+    return Object.freeze(this.#savedInstancePayloads.map((entry) => Object.freeze({
+      id: entry.id,
+      name: entry.name,
+      templateId: entry.templateId,
+      templateVersion: entry.templateVersion,
+      digest: entry.digest,
+      savedAt: entry.savedAt
+    })));
   }
 
   /**

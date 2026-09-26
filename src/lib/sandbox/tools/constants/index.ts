@@ -18,6 +18,7 @@
  * @invariant Publishing-tool vocabulary: `PUBLISHING_TOOLS` freezes the two publishing tool names (`import_realm_template`, `submit_hydration_package`) outside the canonical taxonomy — they are explicit-grant-only meta tools, never wildcard-implied capabilities.
  * @invariant Realm-admin tool vocabulary (M3): `REALM_ADMIN_TOOLS` freezes the two realm meta-tool names (`inspect_realm`, `update_realm`) outside the canonical taxonomy — explicit-grant-only (`@realm:inspect`/`@realm:edit`), never wildcard-, privileged-, or preset-implied, and exposed only through the exact-authority schema filter.
  * @invariant Extension-admin tool vocabulary (M4): `EXTENSIONS_ADMIN_TOOLS` freezes the two extension meta-tool names (`list_extensions`, `attach_extension`) outside the canonical taxonomy — explicit-grant-only (`@extensions:authority`), never wildcard-, privileged-, or preset-implied, and exposed only through the exact-authority schema filter.
+ * @invariant Realm-knowledge tool vocabulary (M5b): `REALM_KNOWLEDGE_TOOLS` freezes the three template/hydration read meta-tool names (`list_templates`, `get_template`, `list_hydration_packages`) outside the canonical taxonomy — explicit-grant-only (`@template:authority`/`@hydration:authority`), never wildcard-, privileged-, or preset-implied, and exposed only through the exact-authority schema filter.
  * @invariant `resolveToolPreset` is a pure resolver: `null`/`undefined`/empty input returns `[]`, the wildcard string returns exactly `['*']`, named presets resolve case-insensitively to fresh copies (never the frozen stored arrays), comma-separated strings are split and trimmed, Sets/arrays are copied without mutation, and every entry whose canonical form is a retired selector expands in place to that selector's frozen tool list (fixed legacy order, no de-duplication).
  */
 
@@ -548,6 +549,44 @@ export const EXTENSIONS_ADMIN_TOOLS: {
 } = Object.freeze({
   LIST_EXTENSIONS: 'list_extensions',
   ATTACH_EXTENSION: 'attach_extension'
+});
+
+// ============================================================================
+// 3e. Realm Knowledge Tool Names (M5b meta plane, ticket fb7d270)
+// ============================================================================
+
+/**
+ * Frozen vocabulary of the M5b realm-knowledge meta-tool names.
+ *
+ * These three tools are **not** part of the canonical `SANDBOX_TOOLS` taxonomy:
+ * they are explicit-grant-only authority tools — `list_templates`/`get_template`
+ * under `@template:authority` and `list_hydration_packages` under
+ * `@hydration:authority` — never implied by the wildcard capability,
+ * `privileged`, or any preset, and their schemas are exposed only to a caller
+ * whose frozen authority descriptor carries the matching exact id. They expose
+ * the read side of the template/hydration workflow (bounded, realm-opaque
+ * listings; no payload bodies); the write side stays `import_realm_template` /
+ * `submit_hydration_package`.
+ *
+ * @readonly
+ * @example
+ * ```typescript
+ * import { REALM_KNOWLEDGE_TOOLS } from './constants/index.ts';
+ *
+ * const listName = REALM_KNOWLEDGE_TOOLS.LIST_TEMPLATES; // 'list_templates'
+ * ```
+ */
+export const REALM_KNOWLEDGE_TOOLS: {
+  /** Lists the effective realm templates with id/name/version/description/formatVersion/launchability. */
+  readonly LIST_TEMPLATES: 'list_templates';
+  /** Resolves one effective realm template as its normalized format-v2 model. */
+  readonly GET_TEMPLATE: 'get_template';
+  /** Lists the pending/saved hydration payloads: ids, versions, digests, and timestamps only. */
+  readonly LIST_HYDRATION_PACKAGES: 'list_hydration_packages';
+} = Object.freeze({
+  LIST_TEMPLATES: 'list_templates',
+  GET_TEMPLATE: 'get_template',
+  LIST_HYDRATION_PACKAGES: 'list_hydration_packages'
 });
 
 // ============================================================================

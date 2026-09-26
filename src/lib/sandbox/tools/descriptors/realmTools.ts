@@ -60,7 +60,7 @@ import type {
 } from '../../realmCatalog/index.ts';
 import { FILE_PLUMBING_MAX_FILE_BYTES } from '../../virtualFs/index.ts';
 import type { ExecutionContext, JsonSchemaDraft07, RealmPublishingPort } from '../../toolDefinitions/index.ts';
-import { realmAdminToolDescriptors, extensionsAdminToolDescriptors } from './metaTools.ts';
+import { realmAdminToolDescriptors, extensionsAdminToolDescriptors, realmKnowledgeToolDescriptors } from './metaTools.ts';
 
 /** Sanitized canonical parameter record handed to a publishing descriptor handler. */
 type ToolParams = Record<string, unknown>;
@@ -1253,32 +1253,34 @@ export const submitHydrationPackage = submitHydrationPackageDescriptor;
 /** snake_case alias of `submitHydrationPackageDescriptor`. */
 export const submit_hydration_package = submitHydrationPackageDescriptor;
 
-/** Explicit authority ids owned by the Wave U publishing descriptors. */
-const PUBLISHING_AUTHORITY_ID_SET: ReadonlySet<string> = new Set<string>([
-  AGENT_AUTHORITIES.TEMPLATE,
-  AGENT_AUTHORITIES.HYDRATION
+/** The two Wave U publishing tool names, the frozen projection key. */
+const PUBLISHING_TOOL_NAME_SET: ReadonlySet<string> = new Set<string>([
+  PUBLISHING_TOOLS.IMPORT_REALM_TEMPLATE,
+  PUBLISHING_TOOLS.SUBMIT_HYDRATION_PACKAGE
 ]);
 
 /**
  * Every authority meta-tool descriptor (M1): the Wave U publishing pair, the
- * M3 realm-admin pair, and the M4 extension-admin pair; the remaining
- * meta-plane phases (M5b) append their descriptors here (`metaTools.ts` or the
- * same file), and every filter below derives its membership from this one
- * array plus each descriptor's `authority` id.
+ * M3 realm-admin pair, the M4 extension-admin pair, and the M5b
+ * template/hydration knowledge reads; every filter below derives its
+ * membership from this one array plus each descriptor's `authority` id.
  */
 export const authorityToolDescriptors: readonly AuthorityToolDescriptor[] = Object.freeze([
   importRealmTemplateDescriptor,
   submitHydrationPackageDescriptor,
   ...realmAdminToolDescriptors,
-  ...extensionsAdminToolDescriptors
+  ...extensionsAdminToolDescriptors,
+  ...realmKnowledgeToolDescriptors
 ] as AuthorityToolDescriptor[]);
 
 /**
- * Array of the two Wave U publishing meta-tool descriptors: the publishing
- * slice of {@link authorityToolDescriptors} (derived, never hand-maintained).
+ * Array of the two Wave U publishing meta-tool descriptors: the frozen
+ * publishing-pair projection of {@link authorityToolDescriptors} (derived by
+ * the Wave U name vocabulary, never hand-maintained). Later meta-plane phases
+ * may share the same authority ids, so the projection keys on the names.
  */
 export const publishingToolDescriptors: readonly PublishingToolDescriptor[] = Object.freeze(
-  authorityToolDescriptors.filter((descriptor) => PUBLISHING_AUTHORITY_ID_SET.has(descriptor.authority))
+  authorityToolDescriptors.filter((descriptor) => PUBLISHING_TOOL_NAME_SET.has(descriptor.name))
 );
 
 /**

@@ -36,15 +36,16 @@
  * the exact `@extensions:authority` holder.
  */
 
-import { EXTENSIONS_ADMIN_TOOLS, REALM_ADMIN_TOOLS, SANDBOX_TOOLS, TOOL_SYSTEM_ERROR_CODES } from '../constants/index.ts';
+import { EXTENSIONS_ADMIN_TOOLS, REALM_ADMIN_TOOLS, REALM_KNOWLEDGE_TOOLS, SANDBOX_TOOLS, TOOL_SYSTEM_ERROR_CODES } from '../constants/index.ts';
 import { toSnakeCase } from '../normalizers/index.ts';
 import {
   AGENT_AUTHORITIES,
   AUTHORITY_IDS,
   REALM_ADMIN_DENIED_PATCH_KEYS,
-  REALM_ADMIN_PATCH_FIELD_TOKENS
+  REALM_ADMIN_PATCH_FIELD_TOKENS,
+  normalizeTemplate
 } from '../../realmCatalog/index.ts';
-import type { ExecutionContext, RealmAdminPort, RealmAdminPatch } from '../../toolDefinitions/index.ts';
+import type { ExecutionContext, RealmAdminPort, RealmAdminPatch, RealmPublishingPort } from '../../toolDefinitions/index.ts';
 import { toAgentVisibleAgentReference, toAgentVisibleWorkspaceKey } from './lifecycleTools.ts';
 
 /** Sanitized canonical parameter record handed to a meta descriptor handler. */
@@ -1161,4 +1162,188 @@ export const attach_extension = attachExtensionDescriptor;
 export const extensionsAdminToolDescriptors = Object.freeze([
   listExtensionsDescriptor,
   attachExtensionDescriptor
+]);
+
+// ============================================================================
+// M5b realm-knowledge meta tools (`list_templates` / `get_template` /
+// `list_hydration_packages`, ticket fb7d270)
+// ============================================================================
+
+/**
+ * Resolves the trusted pinned publishing port and one of its M5b read members
+ * from the execution context (a partial port without the required member fails
+ * closed). Never a per-call claim: `realmPublishingPort` is a pinned context
+ * key.
+ *
+ * @param context - Trusted execution context.
+ * @param member - Required read member of the publishing port.
+ * @returns The host publishing port.
+ * @throws `Error` - When no trusted port carrying the member is bound.
+ * @internal
+ */
+function realmKnowledgePortOf(
+  context: ExecutionContext,
+  member: 'listEffectiveTemplates' | 'getEffectiveTemplateBundle' | 'listPendingInstancePayloads' | 'listSavedInstancePayloads'
+): RealmPublishingPort {
+  const port = context?.realmPublishingPort;
+  if (!port || typeof port !== 'object' || typeof (port as unknown as Record<string, unknown>)[member] !== 'function') {
+    throw new Error('realmPublishingPort service is not available in execution context');
+  }
+  return port;
+}
+
+/** `get_template` parameter alias map (template-id addressing only). @internal */
+const getTemplateParamAliasMap: Readonly<Record<string, string>> = Object.freeze({
+  templateId: 'templateId',
+  template_id: 'templateId',
+  id: 'templateId',
+  template: 'templateId',
+  name: 'templateId'
+});
+
+/**
+ * `list_templates` descriptor — exact-grant-only (`@template:authority`)
+ * bounded listing of the effective template catalog: id, name, effective
+ * version, description, exposed format version, and launchability. Bundle
+ * bodies, host paths, and realm vocabulary never appear.
+ */
+export const listTemplatesDescriptor = Object.freeze({
+  name: REALM_KNOWLEDGE_TOOLS.LIST_TEMPLATES,
+  authority: AGENT_AUTHORITIES.TEMPLATE,
+  description:
+    'List the realm templates available for launch, in catalog order: each entry carries the template id, display name, '
+    + 'effective content version, description, format version, and whether the template is launchable. '
+    + 'The listing never carries template file bodies, host paths, or runtime state; use get_template for one template\'s model.',
+  schema: Object.freeze({
+    type: 'object',
+    properties: {},
+    required: [] as string[],
+    additionalProperties: false
+  }),
+  paramAliasMap: Object.freeze({}) as Readonly<Record<string, string>>,
+  sanitize: (rawArgs?: unknown): ToolParams => sanitizeExtensionsAdminParams(rawArgs, Object.freeze({})),
+  handler: async (params: ToolParams, context: ExecutionContext) => {
+    const port = realmKnowledgePortOf(context, 'listEffectiveTemplates');
+    const keys = Object.keys(params || {});
+    if (keys.length > 0) {
+      // Static message: an unknown parameter never echoes its key.
+      return invalidArguments('list_templates does not accept parameters.');
+    }
+    const templates = port.listEffectiveTemplates();
+    return Object.freeze({ success: true, count: templates.length, templates });
+  }
+});
+/** camelCase alias of `listTemplatesDescriptor`. */
+export const listTemplates = listTemplatesDescriptor;
+/** snake_case alias of `listTemplatesDescriptor`. */
+export const list_templates = listTemplatesDescriptor;
+
+/**
+ * `get_template` descriptor — exact-grant-only (`@template:authority`)
+ * resolution of one effective template as its normalized format-v2 model
+ * (declared inputs, agent profiles, prompt/placement declarations). Bundle
+ * file bodies and host paths never appear.
+ */
+export const getTemplateDescriptor = Object.freeze({
+  name: REALM_KNOWLEDGE_TOOLS.GET_TEMPLATE,
+  authority: AGENT_AUTHORITIES.TEMPLATE,
+  description:
+    'Resolve one realm template by id and return its normalized format-v2 model: declared inputs, agent profiles, prompts, placements, '
+    + 'and directives. Use list_templates to discover template ids. Unknown ids fail closed without disclosing catalog state.',
+  schema: Object.freeze({
+    type: 'object',
+    properties: {
+      templateId: {
+        type: 'string',
+        description: 'Id of the realm template to resolve (from list_templates).'
+      }
+    },
+    required: ['templateId'],
+    additionalProperties: false
+  }),
+  paramAliasMap: getTemplateParamAliasMap,
+  sanitize: (rawArgs?: unknown): ToolParams => sanitizeExtensionsAdminParams(rawArgs, getTemplateParamAliasMap),
+  handler: async (params: ToolParams, context: ExecutionContext) => {
+    const port = realmKnowledgePortOf(context, 'getEffectiveTemplateBundle');
+    const sanitized = params && typeof params === 'object' && !Array.isArray(params) ? params : {};
+    const keys = Object.keys(sanitized);
+    for (let i = 0; i < keys.length; i++) {
+      if (keys[i] !== 'templateId') {
+        // Static message: an unknown parameter never echoes its key.
+        return invalidArguments('get_template does not accept unknown parameters.');
+      }
+    }
+    const rawId = sanitized.templateId;
+    if (typeof rawId !== 'string' || !rawId.trim()) {
+      return invalidArguments("get_template: 'templateId' is required and must be a non-empty string.");
+    }
+    const effective = port.getEffectiveTemplateBundle(rawId.trim());
+    if (!effective) {
+      // Static message: an unknown template id is never echoed.
+      return invalidArguments('get_template targets an unknown realm template.');
+    }
+    const template = normalizeTemplate(effective.template);
+    return Object.freeze({
+      success: true,
+      templateId: template.id,
+      templateVersion: effective.version,
+      template
+    });
+  }
+});
+/** camelCase alias of `getTemplateDescriptor`. */
+export const getTemplate = getTemplateDescriptor;
+/** snake_case alias of `getTemplateDescriptor`. */
+export const get_template = getTemplateDescriptor;
+
+/**
+ * `list_hydration_packages` descriptor — exact-grant-only
+ * (`@hydration:authority`) bounded listing of the session-pending and
+ * persisted saved hydration payloads: template id, version, canonical digest,
+ * and ids/timestamps. Raw payload bodies never appear.
+ */
+export const listHydrationPackagesDescriptor = Object.freeze({
+  name: REALM_KNOWLEDGE_TOOLS.LIST_HYDRATION_PACKAGES,
+  authority: AGENT_AUTHORITIES.HYDRATION,
+  description:
+    'List the hydration payloads known to this host: the session-pending candidate of each template and the persisted saved-payload library, '
+    + 'each with its template id, validated template version, canonical payload digest, and resolution/save timestamp. '
+    + 'The listing never carries payload bodies; use submit_hydration_package to author a candidate.',
+  schema: Object.freeze({
+    type: 'object',
+    properties: {},
+    required: [] as string[],
+    additionalProperties: false
+  }),
+  paramAliasMap: Object.freeze({}) as Readonly<Record<string, string>>,
+  sanitize: (rawArgs?: unknown): ToolParams => sanitizeExtensionsAdminParams(rawArgs, Object.freeze({})),
+  handler: async (params: ToolParams, context: ExecutionContext) => {
+    const pendingPort = realmKnowledgePortOf(context, 'listPendingInstancePayloads');
+    const savedPort = realmKnowledgePortOf(context, 'listSavedInstancePayloads');
+    const keys = Object.keys(params || {});
+    if (keys.length > 0) {
+      // Static message: an unknown parameter never echoes its key.
+      return invalidArguments('list_hydration_packages does not accept parameters.');
+    }
+    return Object.freeze({
+      success: true,
+      pending: pendingPort.listPendingInstancePayloads(),
+      saved: savedPort.listSavedInstancePayloads()
+    });
+  }
+});
+/** camelCase alias of `listHydrationPackagesDescriptor`. */
+export const listHydrationPackages = listHydrationPackagesDescriptor;
+/** snake_case alias of `listHydrationPackagesDescriptor`. */
+export const list_hydration_packages = listHydrationPackagesDescriptor;
+
+/**
+ * Array of the M5b realm-knowledge authority descriptors: appended to
+ * `authorityToolDescriptors` by `realmTools.ts`, so their schemas are exposed
+ * through the generic exact-id filter and never through the canonical taxonomy.
+ */
+export const realmKnowledgeToolDescriptors = Object.freeze([
+  listTemplatesDescriptor,
+  getTemplateDescriptor,
+  listHydrationPackagesDescriptor
 ]);
