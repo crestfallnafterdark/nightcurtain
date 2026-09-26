@@ -808,7 +808,7 @@ Conversational message snapshot with a guaranteed stable identifier. Every messa
 
 ### `isSafeRealmArchiveEndpointUrl` — function
 
-Tests whether a model-config endpoint URL may leave the host inside an archive: it must parse as an absolute `http:`/`https:` URL with no userinfo and no credential-shaped query parameter (`key`/`token`/`secret`/ `password`/`sig`-family names). Endpoint references are retained by the snapshot design; credentials embedded in them are archive-only drops.
+Tests whether a model-config endpoint URL may leave the host inside an archive: it must parse as an absolute `http:`/`https:` URL with no userinfo and no credential-shaped query parameter (`key`/`token`/`secret`/ `password`/`signature`/`credential`/`sig` families, the `X-Amz-*` and `X-Goog-*` presigned families, and access-key-id shapes). Endpoint references are retained by the snapshot design; credentials embedded in them are archive-only drops.
 
 #### Parameters
 

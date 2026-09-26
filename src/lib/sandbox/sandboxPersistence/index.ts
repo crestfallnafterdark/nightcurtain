@@ -3365,8 +3365,10 @@ export function buildRealmArchiveFilename(realmName: string, archiveId: string):
  * Tests whether a model-config endpoint URL may leave the host inside an
  * archive: it must parse as an absolute `http:`/`https:` URL with no userinfo
  * and no credential-shaped query parameter (`key`/`token`/`secret`/
- * `password`/`sig`-family names). Endpoint references are retained by the
- * snapshot design; credentials embedded in them are archive-only drops.
+ * `password`/`signature`/`credential`/`sig` families, the `X-Amz-*` and
+ * `X-Goog-*` presigned families, and access-key-id shapes). Endpoint
+ * references are retained by the snapshot design; credentials embedded in
+ * them are archive-only drops.
  *
  * @param url - Candidate endpoint reference.
  * @returns True when the URL is safe to archive.
@@ -3382,26 +3384,94 @@ export function isSafeRealmArchiveEndpointUrl(url: unknown): boolean {
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
   if (parsed.username || parsed.password) return false;
   for (const name of parsed.searchParams.keys()) {
-    const lower = name.toLowerCase();
-    if (ARCHIVE_CREDENTIAL_QUERY_PARAMS.has(lower)
-      || lower.includes('secret')
-      || lower.includes('token')
-      || lower.includes('password')
-      || lower.includes('apikey')
-      || lower.includes('api_key')
-      || lower.endsWith('key')
-      || lower === 'sig') {
-      return false;
-    }
+    if (isArchiveCredentialQueryParam(name)) return false;
   }
   return true;
 }
 
 /**
+ * Classifies one query-parameter name as credential-shaped. Covers the exact
+ * credential-name set plus the well-known signed-URL families (`X-Amz-*`,
+ * `X-Goog-*`), hyphen/underscore signature and credential variants, access-key
+ * ids, and the generic `secret`/`token`/`password`/`apikey`/`key` suffix
+ * shapes. Presigned URLs are bearer credentials, so their whole family is
+ * refused rather than parsed.
+ *
+ * @param name - Raw query-parameter name.
+ * @returns True when the parameter name is credential-shaped.
+ * @internal
+ */
+function isArchiveCredentialQueryParam(name: string): boolean {
+  const lower = name.toLowerCase();
+  return ARCHIVE_CREDENTIAL_QUERY_PARAMS.has(lower)
+    || lower.startsWith('x-amz-')
+    || lower.startsWith('x-goog-')
+    || lower.includes('secret')
+    || lower.includes('token')
+    || lower.includes('password')
+    || lower.includes('signature')
+    || lower.includes('credential')
+    || lower.includes('apikey')
+    || lower.includes('api_key')
+    || lower.includes('accesskey')
+    || lower.includes('accessid')
+    || lower.includes('signedheaders')
+    || lower.endsWith('key')
+    || lower === 'sig'
+    || lower.endsWith('_sig');
+}
+
+/**
+ * URL-shaped config property-name predicate: `url` and compound names ending
+ * in `url` (`baseUrl`, `base_url`, ...) are endpoint references whose embedded
+ * credentials must not leave the host.
+ *
+ * @param key - Config property name.
+ * @returns True when the property name is endpoint-shaped.
+ * @internal
+ */
+function isArchiveEndpointPropertyName(key: string): boolean {
+  const lower = key.toLowerCase();
+  return lower === 'url' || lower.endsWith('url');
+}
+
+/**
+ * Recursively drops archive-only credential material from one member-config
+ * copy: every `keyId` reference and every endpoint-shaped URL value that
+ * carries userinfo or credential-shaped query parameters. The recursive walk
+ * covers legacy/nested channels such as `config.settings.modelConfig` that the
+ * top-level drops miss.
+ *
+ * @param value - Config value to walk (mutated in place).
+ * @internal
+ */
+function redactRealmArchiveConfigProperties(value: unknown): void {
+  if (!value || typeof value !== 'object') return;
+  if (Array.isArray(value)) {
+    for (const entry of value) redactRealmArchiveConfigProperties(entry);
+    return;
+  }
+  const record = value as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (key === 'keyId') {
+      delete record[key];
+      continue;
+    }
+    const child = record[key];
+    if (isArchiveEndpointPropertyName(key) && typeof child === 'string') {
+      if (!isSafeRealmArchiveEndpointUrl(child)) delete record[key];
+      continue;
+    }
+    if (child && typeof child === 'object') redactRealmArchiveConfigProperties(child);
+  }
+}
+
+/**
  * Applies the archive-only config redaction to a serialized member snapshot:
- * drops the model-config `keyId` credential reference and any endpoint URL
- * carrying userinfo or credential-shaped query parameters. The snapshot strip
- * set already removed secret material and caller-asserted authority.
+ * drops every model-config `keyId` credential reference (top-level and nested)
+ * and any endpoint URL carrying userinfo or credential-shaped query
+ * parameters. The snapshot strip set already removed secret material and
+ * caller-asserted authority.
  *
  * @param snapshot - Sanitized serialized member snapshot.
  * @returns A copy with archive-only redactions applied.
@@ -3411,16 +3481,10 @@ function redactRealmArchiveAgentSnapshot(snapshot: SerializedAgent): SerializedA
   const rawConfig = snapshot.config as unknown as Record<string, unknown> | undefined;
   if (!isArchiveRecord(rawConfig)) return snapshot;
   const config: Record<string, unknown> = { ...rawConfig };
+  // The snapshot config is a fresh clone built by `sanitizeAgentConfigForPersistence`,
+  // so walking the copy in place never mutates the live agent entity.
   delete config.keyId;
-  const modelConfig = config.modelConfig;
-  if (isArchiveRecord(modelConfig)) {
-    const redactedModelConfig: Record<string, unknown> = { ...modelConfig };
-    delete redactedModelConfig.keyId;
-    if ('url' in redactedModelConfig && !isSafeRealmArchiveEndpointUrl(redactedModelConfig.url)) {
-      delete redactedModelConfig.url;
-    }
-    config.modelConfig = redactedModelConfig;
-  }
+  redactRealmArchiveConfigProperties(config);
   return { ...snapshot, config: config as unknown as SerializedAgent['config'] };
 }
 

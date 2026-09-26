@@ -7780,7 +7780,8 @@ export class SandboxStore {
       sourceKey: string | null;
     }> = [];
     const claimedSourceKeys = new Set<string>();
-    const pinnedKeys = new Set<string>();
+    const pinnedOpaqueKeys = new Set<string>();
+    const pinnedCanonicalTargets = new Set<string>();
     for (const entry of [...envelope.members.active, ...envelope.members.recycled]) {
       const memberId = entry.id.trim();
       const config = (entry.config ?? {}) as Record<string, unknown>;
@@ -7790,19 +7791,39 @@ export class SandboxStore {
       if (pinned && isReservedWorkspaceKey(pinned)) {
         throw invalidRealmParams(`importRealmArchive: member '${memberId}' resolves to the reserved workspace '${pinned}'`);
       }
-      if (pinned && pinnedKeys.has(pinned)) {
-        throw invalidRealmParams(`importRealmArchive: members share the workspace key '${pinned}' — refusing to merge tenants`);
+      if (pinned) {
+        const parsedPin = parseAgentIdentityKey(pinned);
+        if (parsedPin) {
+          // Canonical pins are remapped into the fresh realm namespace. A pin
+          // referencing a realm/agent outside the archive realm scope is
+          // refused fail-closed up front — never resolved against live
+          // workspace materialization, which is lazy and therefore absent for
+          // an unclaimed victim workspace (S2 verifier F-4).
+          if (parsedPin.realmId !== sourceRealmId || !memberIds.has(parsedPin.agentId)) {
+            throw invalidRealmParams(
+              `importRealmArchive: member '${memberId}' pins workspace '${pinned}' outside the archive realm scope`
+            );
+          }
+          if (pinnedCanonicalTargets.has(parsedPin.agentId)) {
+            throw invalidRealmParams(`importRealmArchive: members share the workspace key '${pinned}' — refusing to merge tenants`);
+          }
+          pinnedCanonicalTargets.add(parsedPin.agentId);
+        } else {
+          if (pinnedOpaqueKeys.has(pinned)) {
+            throw invalidRealmParams(`importRealmArchive: members share the workspace key '${pinned}' — refusing to merge tenants`);
+          }
+          if (this.#virtualFs.hasWorkspace(pinned)) {
+            const err = this.#realmArchiveImportFailure(
+              `importRealmArchive: pinned workspace '${pinned}' already exists — refusing to merge tenants`,
+              'vfs-preflight',
+              null,
+              false
+            );
+            throw err;
+          }
+          pinnedOpaqueKeys.add(pinned);
+        }
       }
-      if (pinned && this.#virtualFs.hasWorkspace(pinned)) {
-        const err = this.#realmArchiveImportFailure(
-          `importRealmArchive: pinned workspace '${pinned}' already exists — refusing to merge tenants`,
-          'vfs-preflight',
-          null,
-          false
-        );
-        throw err;
-      }
-      if (pinned) pinnedKeys.add(pinned);
       if (sourceKey) claimedSourceKeys.add(sourceKey);
       pendingMembers.push({ memberId, pinned, sourceKey });
     }
@@ -7826,13 +7847,15 @@ export class SandboxStore {
     });
     const newRealmId = newRealm.id;
 
-    // Target workspace plan: explicit pins verbatim, otherwise the fresh
-    // realm's canonical member key.
+    // Target workspace plan: canonical source-family pins remap onto the fresh
+    // realm id, opaque pins are preserved verbatim, and unpinned members use
+    // the fresh realm's canonical member key.
     const workspacePlan = pendingMembers
       .filter((member) => member.sourceKey !== null)
       .map((member) => ({
         memberId: member.memberId,
-        targetKey: member.pinned ?? createAgentIdentityKey(newRealmId, member.memberId),
+        targetKey: this.#realmArchiveTargetWorkspaceKey(member.pinned, sourceRealmId, newRealmId)
+          ?? createAgentIdentityKey(newRealmId, member.memberId),
         files: Object.values(envelope.vfs.members[member.sourceKey as string] ?? {})
       }));
 
@@ -8186,7 +8209,22 @@ export class SandboxStore {
         entry.id,
         realmId
       );
-      const present = candidates.filter((key) => key !== realmGlobalKey && vfsSnapshot[key] !== undefined);
+      // Reserved shared workspaces (global/public, realm-global partitions)
+      // and canonical keys outside the source realm family never leave the
+      // host (D0b §3.1 "excluded", §3.2 assertion 3): they are filtered before
+      // any bytes are collected, and each omission is disclosed.
+      for (const key of candidates) {
+        if (key === realmGlobalKey || vfsSnapshot[key] === undefined) continue;
+        if (isReservedWorkspaceKey(key) || !this.#realmArchiveWorkspaceKeyInRealmFamily(key, realmId)) {
+          warnings.push(
+            `member '${entry.id}' workspace '${key}' is outside the exportable workspace scope — its bytes were not exported`
+          );
+        }
+      }
+      const present = candidates.filter((key) => key !== realmGlobalKey
+        && !isReservedWorkspaceKey(key)
+        && this.#realmArchiveWorkspaceKeyInRealmFamily(key, realmId)
+        && vfsSnapshot[key] !== undefined);
       const chosen = present.find((key) => Object.keys(vfsSnapshot[key] ?? {}).length > 0) ?? null;
       if (!chosen) continue;
       if (chosen === entry.id && chosen !== candidates[0]) {
@@ -8310,6 +8348,46 @@ export class SandboxStore {
   }
 
   /**
+   * Tests whether one archived member workspace key is exportable from the
+   * source realm: opaque legacy/bare keys and canonical identity keys that
+   * belong to the source realm pass; canonical keys of any other realm (or the
+   * system scope) are foreign and must never leave the host (S2 verifier F-4
+   * export-side exclusion). Reserved shared keys are classified separately by
+   * `isReservedWorkspaceKey`.
+   *
+   * @param workspaceKey - Candidate workspace key.
+   * @param realmId - Source realm id.
+   * @returns True when the key is inside the source realm family.
+   * @internal
+   */
+  #realmArchiveWorkspaceKeyInRealmFamily(workspaceKey: string, realmId: string): boolean {
+    const parsed = parseAgentIdentityKey(workspaceKey);
+    if (!parsed) return true;
+    return parsed.realmId === realmId;
+  }
+
+  /**
+   * Resolves the import-time target workspace key of one explicit member pin:
+   * a canonical key inside the source realm family is remapped onto the fresh
+   * realm id (never preserved as a stale source key that could name another
+   * live realm's workspace); opaque pins are preserved verbatim. Out-of-scope
+   * canonical pins are rejected in preflight, so only in-family canonical keys
+   * reach the remap branch here.
+   *
+   * @param pinned - Explicit member pin, or `null`.
+   * @param sourceRealmId - Archive source realm id.
+   * @param newRealmId - Fresh target realm id.
+   * @returns Target workspace key, or `null` when the member carries no pin.
+   * @internal
+   */
+  #realmArchiveTargetWorkspaceKey(pinned: string | null, sourceRealmId: string, newRealmId: string): string | null {
+    if (!pinned) return null;
+    const parsed = parseAgentIdentityKey(pinned);
+    if (parsed && parsed.realmId === sourceRealmId) return createAgentIdentityKey(newRealmId, parsed.agentId);
+    return pinned;
+  }
+
+  /**
    * Fail-closed preflight of the archive's messaging/clock/schedule keys:
    * every partition key must resolve to a slice member (active or recycled) or
    * the source realm-global key.
@@ -8365,10 +8443,21 @@ export class SandboxStore {
       if (parsed && parsed.realmId === sourceRealmId) return createAgentIdentityKey(newRealmId, parsed.agentId);
       return key;
     };
-    const remapMember = (entry: RealmArchiveEnvelope['members']['active'][number]): RealmArchiveEnvelope['members']['active'][number] => ({
-      ...entry,
-      config: { ...(entry.config ?? {}), realmId: newRealmId } as typeof entry.config
-    });
+    const remapMember = (entry: RealmArchiveEnvelope['members']['active'][number]): RealmArchiveEnvelope['members']['active'][number] => {
+      const config: Record<string, unknown> = { ...(entry.config ?? {}), realmId: newRealmId };
+      // Canonical workspace pins inside the source family are remapped with
+      // every other canonical key so the hydrated member resolves exactly the
+      // fresh-namespace workspace its files were written to.
+      for (const alias of ['workspaceId', 'workspace']) {
+        const pin = config[alias];
+        if (typeof pin !== 'string' || !pin) continue;
+        const parsedPin = parseAgentIdentityKey(pin);
+        if (parsedPin && parsedPin.realmId === sourceRealmId) {
+          config[alias] = createAgentIdentityKey(newRealmId, parsedPin.agentId);
+        }
+      }
+      return { ...entry, config: config as typeof entry.config };
+    };
     const remapQueues = (
       map: Readonly<Record<string, readonly BusMessageEnvelope[]>>
     ): Record<string, BusMessageEnvelope[]> => {
