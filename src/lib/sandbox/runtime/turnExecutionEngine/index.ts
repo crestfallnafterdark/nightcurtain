@@ -24,7 +24,9 @@
  * @invariant Extension-tool exposure mirrors descriptor-exact authorization: the model-facing schema list and the merged `describe_tool` registry gain exactly the extension tools the agent's frozen `AuthorityDescriptor.extensions` axis grants and the bound provider registry currently resolves — never the whole catalog, never an ungranted name, and a missing provider exposes nothing; a granted name whose descriptor has gone (disconnected/conflicted/refused projection) carries no schema and resolves `TOOL_NOT_FOUND` at call time.
  * @invariant Precall execution exceptions are converted to `isError` tool receipts (`PRECALL_EXECUTION_ERROR`) and never halt the turn.
  * @invariant The multi-turn tool loop is bounded by a positive numeric `agent.config.maxTurns`; absent or non-positive values leave it open-ended by design (accepted QUIRK-001, no hard cap). When the budget is exhausted while the model is still dispatching tool calls, the turn throws an `Error` coded `MAX_TURNS_EXCEEDED` instead of resolving `completed`.
- * @invariant `EXECUTION_STATUS` and `EXECUTION_ERROR_CODES` (including `MAX_TURNS_EXCEEDED`) are frozen dictionaries and back every `status` and receipt `code` the engine returns. The concurrency chain always awaits `agent.currentTurnPromise`, so no `AGENT_BUSY` code exists.
+ * @invariant Non-progress is bounded independently of `maxTurns` (ticket 677b0c2): when 5 consecutive loop iterations dispatch only tool calls that were denied before execution (receipt code `PERMISSION_DENIED` or `TOOL_NOT_FOUND`), the turn throws an `Error` coded `NO_PROGRESS`; any iteration whose batch contains at least one executed tool call resets the streak, so legitimate long turns are unaffected.
+ * @invariant Every multi-turn loop iteration ends with a cooperative macrotask yield, so a provider that settles entirely on the microtask queue (mock/in-memory models, denied-call loops) can never starve timers, I/O, or UI for the duration of one agent's loop (starvation regression, ticket 677b0c2).
+ * @invariant `EXECUTION_STATUS` and `EXECUTION_ERROR_CODES` (including `MAX_TURNS_EXCEEDED` and `NO_PROGRESS`) are frozen dictionaries and back every `status` and receipt `code` the engine returns. The concurrency chain always awaits `agent.currentTurnPromise`, so no `AGENT_BUSY` code exists.
  * @invariant Every assistant history message carries `reasoning_content` as a string primitive (default `''`), never `null` or `undefined` (INV-REASONING-STRING).
  * @invariant `agent.currentStream`, `agent.currentReasoning`, `agent.activeToolCalls`, and `agent.abortController` are reset in a `finally` block on every settlement; emission and trigger failures never propagate into turn execution.
  * @invariant Every settled turn kicks the injected `triggerQueue.processTick()` from a `finally` block.
@@ -449,6 +451,7 @@ export type ExecutionStatus = typeof EXECUTION_STATUS[keyof typeof EXECUTION_STA
  * - `FORBIDDEN_PRECALL` (`'FORBIDDEN_PRECALL'`) - Queued precall tool name is not present in `PRECALL_ALLOWLIST`.
  * - `PRECALL_EXECUTION_ERROR` (`'PRECALL_EXECUTION_ERROR'`) - Precall tool execution threw an exception (recorded as tool error response).
  * - `MAX_TURNS_EXCEEDED` (`'MAX_TURNS_EXCEEDED'`) - Multi-turn tool loop exceeded `agent.config.maxTurns` limit without concluding.
+ * - `NO_PROGRESS` (`'NO_PROGRESS'`) - The model dispatched only dispatch-denied tool calls (no tool executed) for 5 consecutive loop iterations; the turn fails instead of looping without progress.
  *
  * @example
  * ```typescript
@@ -474,7 +477,8 @@ export const EXECUTION_ERROR_CODES = Object.freeze({
   TOOL_EXECUTION_ERROR: 'TOOL_EXECUTION_ERROR',
   FORBIDDEN_PRECALL: 'FORBIDDEN_PRECALL',
   PRECALL_EXECUTION_ERROR: 'PRECALL_EXECUTION_ERROR',
-  MAX_TURNS_EXCEEDED: 'MAX_TURNS_EXCEEDED'
+  MAX_TURNS_EXCEEDED: 'MAX_TURNS_EXCEEDED',
+  NO_PROGRESS: 'NO_PROGRESS'
 } as const);
 
 /**
@@ -548,6 +552,69 @@ function isToolResponseError(resp: unknown): boolean {
     return true;
   }
   return false;
+}
+
+/**
+ * Maximum number of consecutive loop iterations whose tool-call batch consists
+ * entirely of dispatch-denied calls before the turn fails with `NO_PROGRESS`
+ * (ticket 677b0c2). Five bounded sub-turns is the deliberate non-progress
+ * ceiling: a single executed call resets the streak, so only a model that keeps
+ * dispatching calls that never execute (zero-tool agents, revoked capability,
+ * hallucinated tool names) can reach it. Module-private — the public contract is
+ * the `NO_PROGRESS` error code.
+ */
+const MAX_CONSECUTIVE_DENIED_TOOL_TURNS = 5;
+
+/**
+ * Dispatch-level denial receipt codes: the call was never executed, so no tool
+ * result can advance the conversation. `PERMISSION_DENIED` is the
+ * authorization gate; `TOOL_NOT_FOUND` is a name the dispatcher could not
+ * resolve. Execution failures are deliberately excluded — they carry real
+ * feedback the model can recover from.
+ */
+const DISPATCH_DENIAL_RECEIPT_CODES: ReadonlySet<string> = new Set([
+  'PERMISSION_DENIED',
+  'TOOL_NOT_FOUND'
+]);
+
+/**
+ * Classifies an engine tool response as a dispatch-level denial (the call was
+ * never executed). Dispatcher receipts carry the failure payload as JSON text
+ * in `content`; custom-handler failures are `isError` receipts but are not
+ * denials.
+ *
+ * @param response - Engine tool response record pushed to agent history.
+ * @returns `true` when the receipt's payload code is a dispatch-denial code.
+ */
+function isDispatchDeniedToolResponse(response: unknown): boolean {
+  const content = readProperty(response, 'content');
+  let payload: unknown = content;
+  if (typeof content === 'string') {
+    try {
+      payload = JSON.parse(content);
+    } catch {
+      return false;
+    }
+  }
+  if (payload === null || typeof payload !== 'object') return false;
+  const code = readProperty(payload, 'code');
+  return typeof code === 'string' && DISPATCH_DENIAL_RECEIPT_CODES.has(code);
+}
+
+/**
+ * Cooperative macrotask yield used once per tool-loop iteration (ticket
+ * 677b0c2): awaiting a promise the runtime settles outside the microtask queue
+ * hands control back to the event loop, so timers, I/O callbacks, and UI
+ * rendering are never starved by a single agent's loop — even when the model
+ * provider settles every `await` on the microtask queue (mock/in-memory
+ * models, denied-call loops).
+ *
+ * @returns A promise resolving on the next macrotask.
+ */
+function yieldToEventLoop(): Promise<void> {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, 0);
+  });
 }
 
 /**
@@ -1267,6 +1334,8 @@ export interface TurnExecutionEngineOptions {
  *    (`{ name, result: { success: false } }`) do not block close: the batch extracts its summary,
  *    queues next precalls, and breaks immediately with the failures visible in history, pending precalls, and telemetry.
  *    If `maxTurns` is exhausted while tool calls are still pending, the turn throws an `Error` coded `MAX_TURNS_EXCEEDED`.
+ *    Independently of the budget, five consecutive iterations whose every call was denied before execution fail the
+ *    turn with `NO_PROGRESS`, and each iteration ends with a cooperative macrotask yield (ticket 677b0c2).
  * 6. **Deterministic Stream Cleanup & Fault Isolation (Invariant 6):**
  *    Resets `currentStream`, `currentReasoning`, and `activeToolCalls` in `finally` blocks,
  *    cleans up abort listeners, and transitions agent state cleanly.
@@ -1732,6 +1801,7 @@ export class TurnExecutionEngine {
    * @throws `Error` - Throws with code `AGENT_NOT_FOUND` if agent ID does not exist in runtime.
    * @throws `Error` - Throws with code `AGENT_TERMINATED` if agent is terminated or in recycle bin.
    * @throws `Error` - Throws with code `MAX_TURNS_EXCEEDED` when a positive `agent.config.maxTurns` is exhausted while the model is still dispatching tool calls.
+   * @throws `Error` - Throws with code `NO_PROGRESS` when five consecutive loop iterations dispatched only dispatch-denied tool calls (`PERMISSION_DENIED`/`TOOL_NOT_FOUND`) and executed none (ticket 677b0c2).
    * @throws `Error` - Rethrows any unhandled model, tool, or runtime error unchanged, after emitting an `error` event and moving the agent lifecycle state to `ERRORED` (`AGENT_STATES`).
    *
    * @example
@@ -2222,6 +2292,13 @@ export class TurnExecutionEngine {
       // calls (i.e. the model did not conclude within `maxTurns`); the turn
       // then fails with MAX_TURNS_EXCEEDED instead of resolving completed.
       let turnLimitExhausted = false;
+      // Consecutive loop iterations whose tool batch was entirely denied
+      // before execution; reset by any iteration that executes at least one
+      // tool call (ticket 677b0c2).
+      let consecutiveDeniedToolTurns = 0;
+      // Set when the denied-tool streak breaker trips; the turn then fails with
+      // NO_PROGRESS instead of invoking the model again.
+      let noProgressExhausted = false;
 
       // Prepare tool schemas
       const isPrivileged = Boolean(agent.config?.privileged);
@@ -2747,6 +2824,9 @@ export class TurnExecutionEngine {
         agent.activeToolCalls = [...toolCalls];
         turnToolCalls.push(...toolCalls);
 
+        // Dispatch-denied counter for this loop iteration (ticket 677b0c2).
+        let deniedToolResponses = 0;
+
         for (const toolCall of toolCalls) {
           if (turnAborted || agent.abortController?.signal?.aborted || normalizedOptions?.signal?.aborted) {
             break;
@@ -2849,6 +2929,10 @@ export class TurnExecutionEngine {
             }
           }
 
+          if (isDispatchDeniedToolResponse(toolResponse)) {
+            deniedToolResponses++;
+          }
+
           if (turnAborted || agent.abortController?.signal?.aborted || normalizedOptions?.signal?.aborted) {
             break;
           }
@@ -2868,6 +2952,22 @@ export class TurnExecutionEngine {
 
         if (turnAborted || agent.abortController?.signal?.aborted || normalizedOptions?.signal?.aborted) {
           break;
+        }
+
+        // Denied-tool streak breaker (ticket 677b0c2): an iteration in which
+        // *every* model-emitted call was denied before execution made no
+        // progress — the model only re-learned that it cannot call these
+        // tools. Bound the streak so a zero-tool (or revoked-capability) agent
+        // cannot spin forever with `maxTurns` unset; a batch containing at
+        // least one executed call resets the streak.
+        if (deniedToolResponses === toolCalls.length) {
+          consecutiveDeniedToolTurns++;
+          if (consecutiveDeniedToolTurns >= MAX_CONSECUTIVE_DENIED_TOOL_TURNS) {
+            noProgressExhausted = true;
+            break;
+          }
+        } else {
+          consecutiveDeniedToolTurns = 0;
         }
 
         // Terminal Batch & runtime_batchPrecall Execution Handling (R2.1, R2.2, R2.3, R5.1, PRC-1, PRC-2)
@@ -3024,6 +3124,13 @@ export class TurnExecutionEngine {
           turnLimitExhausted = true;
         }
         this.#setAgentState(agent, AGENT_STATES.RUNNING, 'Tool execution complete; re-invoking LLM');
+
+        // Cooperative macrotask yield (ticket 677b0c2): keeps timers, I/O, and
+        // UI alive across iterations even when the provider settles every
+        // `await` on the microtask queue (mock/in-memory models, denied-call
+        // loops). Real providers already yield on network I/O; this is a
+        // scheduling fence, not a behavior change.
+        await yieldToEventLoop();
       }
 
       // Check if aborted during loop
@@ -3050,6 +3157,18 @@ export class TurnExecutionEngine {
       // Hard turn cap: the model kept dispatching tool calls until the budget ran out.
       if (turnLimitExhausted) {
         throw createCodedError(`Turn limit exceeded: agent '${agent.id}' reached maxTurns (${maxTurns}) without concluding`, EXECUTION_ERROR_CODES.MAX_TURNS_EXCEEDED);
+      }
+
+      // Denied-tool non-progress cap (ticket 677b0c2): the model kept
+      // dispatching only denied tool calls, so further inference cannot
+      // advance the turn. Fail with a typed error instead of looping forever
+      // when `maxTurns` is unset (QUIRK-001 keeps legitimate long turns
+      // open-ended; this guard is independent of the turn budget).
+      if (noProgressExhausted) {
+        throw createCodedError(
+          `Turn aborted without progress: agent '${agent.id}' dispatched only denied tool calls (no tool executed) for ${MAX_CONSECUTIVE_DENIED_TOOL_TURNS} consecutive loop iterations`,
+          EXECUTION_ERROR_CODES.NO_PROGRESS
+        );
       }
 
       // Turn completed successfully (INV-OPEN-ENDED: continuous lifetime turns)

@@ -1034,6 +1034,45 @@ test('7.7 denied-tool streak resets on any executed tool call and does not trip 
   assert.strictEqual(runtime.events.find(e => e.type === 'error'), undefined, 'no NO_PROGRESS trip below the threshold');
 });
 
+test('7.8 hallucinated (TOOL_NOT_FOUND) tool names count as dispatch denials for the non-progress guard', async () => {
+  // The guard covers every dispatch-level denial, not only PERMISSION_DENIED:
+  // a model that keeps inventing tool names that never resolve is equally
+  // non-progressing.
+  const agent = createMockAgent('denied_guard_notfound_agent', {
+    allowedTools: [],
+    maxTurns: undefined
+  });
+  let modelCalls = 0;
+  agent.model = {
+    async *stream() {
+      modelCalls++;
+      const toolCalls = [{
+        id: `call_phantom_${modelCalls}`,
+        type: 'function',
+        function: { name: `phantom_tool_${modelCalls}`, arguments: '{}' }
+      }];
+      yield { type: 'tool_call', toolCalls };
+      yield { type: 'finish', content: '', toolCalls };
+    }
+  };
+
+  const agents = new Map([[agent.id, agent]]);
+  const runtime = createMockRuntime(agents);
+  const engine = new TurnExecutionEngine({ runtime, virtualFs: createMockVirtualFS() });
+
+  await assert.rejects(
+    () => engine.executeAgentTurn(agent.id, 'Keep inventing tools'),
+    (err) => {
+      assert.strictEqual(err.code, EXECUTION_ERROR_CODES.NO_PROGRESS);
+      return true;
+    }
+  );
+
+  assert.strictEqual(modelCalls, 5, 'guard bounds unresolved-name loops at the same threshold');
+  const notFoundReceipts = agent.history.filter(m => m.role === 'tool' && String(m.content).includes('TOOL_NOT_FOUND'));
+  assert.strictEqual(notFoundReceipts.length, 5, 'every unresolved dispatch stays model-visible in history');
+});
+
 // ============================================================================
 // 8. Deterministic Stream Cleanup & Cooperative Cancellation (Invariant 6)
 // ============================================================================
