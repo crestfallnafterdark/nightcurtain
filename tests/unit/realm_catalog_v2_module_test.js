@@ -1597,6 +1597,13 @@ test('50. derived tool call names resolve in v2 plans/summaries and collisions f
     'derived-vs-publishing collisions fail closed at validation'
   );
 
+  // The wildcard is reserved: a requirement id equal to it fails closed.
+  assert.throws(
+    () => validateTemplate(templateV2({ toolContract: { requirements: [requirement('*')] } })),
+    /id '\*' is the reserved wildcard/,
+    'a requirement id equal to the wildcard fails closed at v2 validation'
+  );
+
   // The v1 read shim validates the same contract.
   assert.throws(
     () => normalizeTemplate({

@@ -921,6 +921,10 @@ export function validateHydrationDeclaration(candidate: unknown, label: string):
 /**
  * Validates one `toolContract` requirement against the closed schema shape.
  *
+ * The wildcard `'*'` is reserved: a requirement id equal to it would make the
+ * requirement-map lookup and the wildcard grant spelling indistinguishable, so
+ * it is rejected outright rather than shadowing the wildcard.
+ *
  * @param candidate - Candidate requirement
  * @param label - Human-readable label used in error messages
  * @returns The validated requirement reference
@@ -930,7 +934,10 @@ export function validateToolRequirement(candidate: unknown, label: string): Real
     throw new Error(`${label} must be an object`);
   }
   rejectUnknownFields(candidate, REQUIREMENT_FIELDS, label);
-  requireNonReservedName(requireNonEmptyString(candidate.id, `${label} id`), `${label} id`);
+  const id = requireNonReservedName(requireNonEmptyString(candidate.id, `${label} id`), `${label} id`);
+  if (id === '*') {
+    throw new Error(`${label} id '*' is the reserved wildcard and cannot be a requirement id`);
+  }
   requireNonEmptyString(candidate.brief, `${label} brief`);
   const io = candidate.io;
   if (!isPlainRecord(io)) {
@@ -979,6 +986,9 @@ export function validateToolRequirement(candidate: unknown, label: string): Real
  *   (`isReservedToolCallName`: canonical names, aliases, the selector, and
  *   publishing spellings — `read.file` → `read_file`,
  *   `import.realm.template` → `import_realm_template`).
+ *
+ * A requirement id equal to the wildcard `'*'` is rejected outright — the
+ * wildcard is reserved, so a requirement can never shadow or masquerade as it.
  *
  * @param candidate - Candidate tool contract
  * @param label - Human-readable label used in error messages

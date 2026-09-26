@@ -1654,6 +1654,29 @@ test('32a. derived tool call names: derivation rule, plan grants, and collision 
   assert.ok(!isReservedToolCallName('acme_scoring_similarity'), 'a derived-safe name stays free');
   assert.ok(!isReservedToolCallName('docs_search'), 'a derived-safe name stays free');
 
+  // The wildcard is reserved: a declared requirement id equal to `'*'` used to
+  // be able to masquerade as it; it now fails closed before any plan is built,
+  // while an ordinary wildcard profile still resolves to the wildcard.
+  assert.throws(
+    () => materializeTemplate(
+      template({
+        toolContract: { requirements: [requirement('*')] },
+        agents: [agentSpec({ toolProfile: { tools: ['*'] } })]
+      }),
+      { realmId: 'r' }
+    ),
+    /id '\*' is the reserved wildcard/,
+    'a requirement id equal to the wildcard fails closed'
+  );
+  assert.deepStrictEqual(
+    materializeTemplate(
+      template({ agents: [agentSpec({ toolProfile: { tools: ['*'] } })] }),
+      { realmId: 'r' }
+    ).agents[0].toolProfile.tools,
+    ['*'],
+    'the wildcard grant itself is unaffected'
+  );
+
   // The v1 read shim validates the same contract: a v1-format requirement id
   // is rejected before any plan is built.
   assert.throws(
