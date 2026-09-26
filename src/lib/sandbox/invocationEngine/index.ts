@@ -1571,7 +1571,10 @@ export class InvocationEngine {
     if (!isSudoer && !isSelf && !isParent) {
       return {
         success: false,
-        error: `Permission denied: agent '${invokerDisplayId}' cannot invoke arbitrary peer agent '${targetDisplayId}' (must be sudoer or parent creator. Use 'messaging_sendMessage' to message peer agents)`,
+        // The remedy names the canonical model-facing tool (`send_message`),
+        // never the internal legacy alias `messaging_sendMessage` (ticket
+        // d872723 F9; this module is a leaf and cannot import SANDBOX_TOOLS).
+        error: `Permission denied: agent '${invokerDisplayId}' cannot invoke arbitrary peer agent '${targetDisplayId}' (must be sudoer or parent creator. Use 'send_message' to message peer agents)`,
         code: INVOCATION_ERROR_CODES.PERMISSION_DENIED
       };
     }

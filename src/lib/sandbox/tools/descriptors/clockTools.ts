@@ -58,10 +58,10 @@ const worldClockParamAliasMap = Object.freeze({
  * `world_clock` descriptor — query, advance, set, or reset the narrative world
  * clock.
  *
- * Args: `action` (defaults to "query"), optional `minutes`, `hours`, `seconds`,
- * `time`. Prefers `context.worldClock.handleClockTool()`, otherwise dispatches to
- * `advanceClock`/`setTime`/`resetClock`/`getTime`; throws when `worldClock` is
- * missing.
+ * Args: `action` (optional, defaults to "query"), optional `minutes`, `hours`,
+ * `seconds`, `time`. Prefers `context.worldClock.handleClockTool()`, otherwise
+ * dispatches to `advanceClock`/`setTime`/`resetClock`/`getTime`; throws when
+ * `worldClock` is missing.
  */
 export const worldClockDescriptor = Object.freeze({
   name: SANDBOX_TOOLS.WORLD_CLOCK,
@@ -72,7 +72,7 @@ export const worldClockDescriptor = Object.freeze({
       action: {
         type: 'string',
         enum: ['query', 'advance', 'set', 'reset'],
-        description: 'World clock operation: query current time, advance time, set absolute time, or reset clock.'
+        description: 'World clock operation: query current time, advance time, set absolute time, or reset clock (defaults to "query" when omitted).'
       },
       minutes: {
         type: 'number',
@@ -91,7 +91,6 @@ export const worldClockDescriptor = Object.freeze({
         description: 'Absolute time string (e.g. "14:30", "HH:MM:SS") or total seconds.'
       }
     },
-    required: ['action'],
     additionalProperties: false
   }),
   paramAliasMap: worldClockParamAliasMap,
@@ -151,7 +150,7 @@ const eventListParamAliasMap = Object.freeze({
  * `event_list` descriptor — query, register, resolve, or cancel world simulation
  * events.
  *
- * Args: `action` (defaults to "query"), optional `event_id`, `name`,
+ * Args: `action` (optional, defaults to "query"), optional `event_id`, `name`,
  * `trigger_minutes`, `category`, `description`. Prefers
  * `context.worldClock.handleEventTool()`, otherwise dispatches to
  * `registerEvent`/`resolveEvent`/`cancelEvent`/`queryEvents`; throws when
@@ -166,7 +165,7 @@ export const eventListDescriptor = Object.freeze({
       action: {
         type: 'string',
         enum: ['query', 'register', 'resolve', 'cancel'],
-        description: 'Event operation: query events, register a new event, resolve an active event, or cancel an event.'
+        description: 'Event operation: query events, register a new event, resolve an active event, or cancel an event (defaults to "query" when omitted).'
       },
       event_id: {
         type: 'string',
@@ -189,7 +188,6 @@ export const eventListDescriptor = Object.freeze({
         description: 'Detailed description or narrative notes for the event.'
       }
     },
-    required: ['action'],
     additionalProperties: false
   }),
   paramAliasMap: eventListParamAliasMap,

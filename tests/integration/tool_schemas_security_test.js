@@ -455,6 +455,11 @@ async function runEpic6UnitTests() {
     JSON.stringify([...writeFileSchema.function.parameters.required]) === JSON.stringify(['file_path']),
     'write_file requires only file_path (content/source_file form the oneOf alternatives)'
   );
+  assert(
+    Array.isArray(writeFileSchema.function.parameters.oneOf)
+      && writeFileSchema.function.parameters.oneOf.length === 2,
+    'write_file emitted schema carries the exactly-one-of constraint (d872723 F7)'
+  );
 
   const replaceSchemaPlumbing = allSchemas.find(s => s.function.name === SANDBOX_TOOLS.REPLACE_FILE_CONTENT);
   assert(replaceSchemaPlumbing.function.parameters.properties.replacement_source_file?.type === 'string', "replace_file_content schema exposes 'replacement_source_file'");
@@ -606,6 +611,11 @@ async function runEpic6UnitTests() {
     assert(exposed.length === 1, `${descriptor.name} is exposed for its exact authority`);
     assert(exposed[0].function.description.length > 0, `${descriptor.name} exposes a non-empty description`);
     assert(exposed[0].function.parameters.additionalProperties === false, `${descriptor.name} exposed schema is closed`);
+    assert(
+      Array.isArray(exposed[0].function.parameters.oneOf)
+        && exposed[0].function.parameters.oneOf.length === 2,
+      `${descriptor.name} exposed schema carries the exactly-one manifest oneOf (d872723 F7)`
+    );
   }
 
   // --- SECTION 10: Schema ⊆ dispatcher-authorized (preset invariance) -----

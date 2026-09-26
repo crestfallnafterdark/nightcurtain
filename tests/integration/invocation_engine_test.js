@@ -232,6 +232,14 @@ await test('[AC-INVOKE-03.1] Unauthorized peer invocation is rejected with PERMI
   assert.equal(res.success, false);
   assert.equal(res.code, 'PERMISSION_DENIED');
   assert.ok(res.error.includes("Permission denied: agent 'alice' cannot invoke arbitrary peer agent 'bob'"));
+  assert.ok(
+    res.error.includes("Use 'send_message'"),
+    'the denial remedy must name the canonical model-facing tool (d872723 F9)'
+  );
+  assert.ok(
+    !res.error.includes('messaging_sendMessage'),
+    'the denial remedy must never name the internal legacy alias (d872723 F9)'
+  );
   assert.equal(engine.getActiveInvocations().length, 0);
 });
 await test('[AC-INVOKE-03.2] Registry authority invokes; magic ids, flags, and roles do not (MOD-21)', () => {

@@ -8,7 +8,10 @@
  *   - legitimate aliases normalizing to allowlisted canonicals -> allowed (executes);
  *   - resolves to a non-allowlisted canonical name -> denied with PRECALL_FORBIDDEN;
  *   - cannot be resolved (null/undefined/unknown/typo/non-string) -> denied;
- *   - denied calls never reach the execution path (`executeTool` is never invoked).
+ *   - denied calls never reach the execution path (`executeTool` is never invoked);
+ *   - envelope truth (eba7c76): an all-denied batch reports `success:false` with the
+ *     denial code, and every batch carries explicit `executed`/`denied`/`partial`
+ *     accounting instead of a bare success.
  *
  * Hermetic and deterministic: no timers, no network, no filesystem writes.
  * This suite intentionally does NOT modify or import any other test file.
@@ -65,8 +68,15 @@ async function invokeSingle(name, args = {}) {
  */
 async function assertForbidden(name, expectedCanon = String(name)) {
   const { result, calls } = await invokeSingle(name);
-  assert.strictEqual(result.success, true, `'${String(name)}': batch envelope must remain successful`);
+  assert.strictEqual(result.success, false, `'${String(name)}': an all-denied batch must not report a bare success`);
+  assert.strictEqual(
+    result.code,
+    TOOL_SYSTEM_ERROR_CODES.PRECALL_FORBIDDEN,
+    `'${String(name)}': the all-denied envelope must carry the denial code`
+  );
   assert.strictEqual(result.count, 1, `'${String(name)}': batch must return one per-call result`);
+  assert.strictEqual(result.executed, 0, `'${String(name)}': nothing may execute`);
+  assert.strictEqual(result.denied, 1, `'${String(name)}': the denial must be counted`);
   const item = result.results[0];
   assert.strictEqual(item.success, false, `'${String(name)}': call must be denied`);
   assert.strictEqual(
@@ -84,8 +94,14 @@ async function assertForbidden(name, expectedCanon = String(name)) {
  */
 async function assertDeniedUnresolved(name) {
   const { result, calls } = await invokeSingle(name);
-  assert.strictEqual(result.success, true, `'${String(name)}': batch envelope must remain successful`);
+  assert.strictEqual(result.success, false, `'${String(name)}': an all-denied batch must not report a bare success`);
+  assert.ok(
+    UNRESOLVED_DENIAL_CODES.has(result.code),
+    `'${String(name)}': the all-denied envelope must carry PRECALL_FORBIDDEN or INVALID_ARGUMENTS (got '${result.code}')`
+  );
   assert.strictEqual(result.count, 1, `'${String(name)}': batch must return one per-call result`);
+  assert.strictEqual(result.executed, 0, `'${String(name)}': nothing may execute`);
+  assert.strictEqual(result.denied, 1, `'${String(name)}': the denial must be counted`);
   const item = result.results[0];
   assert.strictEqual(item.success, false, `'${String(name)}': unresolvable call must be denied`);
   assert.ok(
@@ -108,7 +124,10 @@ test('1. every allowlisted canonical precall name executes exactly once', async 
     const { result, calls, context } = await invokeSingle(canon, args);
 
     assert.strictEqual(result.success, true, `'${canon}': batch envelope`);
+    assert.strictEqual(result.partial, false, `'${canon}': a clean batch is not partial`);
     assert.strictEqual(result.count, 1, `'${canon}': count`);
+    assert.strictEqual(result.executed, 1, `'${canon}': the call must be counted as executed`);
+    assert.strictEqual(result.denied, 0, `'${canon}': nothing may be counted as denied`);
     assert.strictEqual(calls.length, 1, `'${canon}': allowlisted call must execute exactly once`);
     assert.strictEqual(getCanonToolName(calls[0].name), canon, `'${canon}': executed under canonical identity`);
     assert.deepStrictEqual(calls[0].args, args, `'${canon}': arguments must pass through unchanged`);
@@ -161,7 +180,10 @@ test('2. legitimate aliases normalize to allowlisted canonicals and execute', as
     const { result, calls } = await invokeSingle(alias, args);
 
     assert.strictEqual(result.success, true, `'${alias}': batch envelope`);
+    assert.strictEqual(result.partial, false, `'${alias}': a clean batch is not partial`);
     assert.strictEqual(result.count, 1, `'${alias}': count`);
+    assert.strictEqual(result.executed, 1, `'${alias}': the call must be counted as executed`);
+    assert.strictEqual(result.denied, 0, `'${alias}': nothing may be counted as denied`);
     assert.strictEqual(calls.length, 1, `'${alias}' must execute exactly once`);
     assert.strictEqual(
       getCanonToolName(calls[0].name),
@@ -320,8 +342,11 @@ test('8. mixed batch isolates denials: only allowlisted calls reach the executio
     ]
   }, context);
 
-  assert.strictEqual(result.success, true, 'batch envelope must remain successful');
+  assert.strictEqual(result.success, true, 'a partly executed batch keeps the success envelope');
+  assert.strictEqual(result.partial, true, 'a batch with denials must be explicitly partial');
   assert.strictEqual(result.count, 7, 'every item must produce a result');
+  assert.strictEqual(result.executed, 2, 'exactly the two allowlisted calls executed');
+  assert.strictEqual(result.denied, 5, 'exactly the five denied calls are counted');
   assert.strictEqual(result.results.length, 7, 'every item must produce a result');
 
   assert.deepStrictEqual(
@@ -363,8 +388,10 @@ test("9. R4 gate agreement: phantom 'time_now' is not canonical-resolvable and t
   assert.strictEqual(PRECALL_ALLOWLIST.has('time_now'), false, "'time_now' must not be allowlisted");
 
   const { result, calls } = await invokeSingle('time_now', {});
-  assert.strictEqual(result.success, true, 'batch envelope must remain successful');
+  assert.strictEqual(result.success, false, 'an all-denied batch must not report a bare success');
+  assert.strictEqual(result.code, TOOL_SYSTEM_ERROR_CODES.PRECALL_FORBIDDEN, 'the envelope carries the denial code');
   assert.strictEqual(result.count, 1, 'batch must return one per-call result');
+  assert.strictEqual(result.denied, 1, 'the denial must be counted');
   assert.strictEqual(result.results[0].success, false, "'time_now' must be denied");
   assert.strictEqual(
     result.results[0].code,
@@ -386,8 +413,12 @@ test("10. R7 Symbol guard: Symbol('read_file') yields a structured denial withou
   // Before the guard, the forged denial message interpolated the Symbol and threw
   // TypeError instead of producing a structured denial.
   const { result, calls } = await invokeSingle(symbolName, {});
-  assert.strictEqual(result.success, true, 'batch envelope must remain successful');
+  assert.strictEqual(result.success, false, 'an all-denied batch must not report a bare success');
   assert.strictEqual(result.count, 1, 'batch must return one per-call result');
+  assert.ok(
+    UNRESOLVED_DENIAL_CODES.has(result.code),
+    `Symbol-named envelope must carry PRECALL_FORBIDDEN or INVALID_ARGUMENTS (got '${result.code}')`
+  );
   const item = result.results[0];
   assert.strictEqual(item.success, false, 'Symbol-named call must be denied');
   assert.ok(

@@ -77,8 +77,31 @@ export const batch_precall: Readonly<{
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
     handler: (params: ToolParams_7, context: ExecutionContext) => Promise<{
         success: boolean;
+        error: string;
+        code: "INVALID_ARGUMENTS";
+        partial?: undefined;
+        count?: undefined;
+        executed?: undefined;
+        denied?: undefined;
+        results?: undefined;
+    } | {
+        success: boolean;
+        error: string;
+        code: "INVALID_ARGUMENTS" | "PRECALL_FORBIDDEN";
+        partial: boolean;
         count: number;
+        executed: number;
+        denied: number;
         results: unknown[];
+    } | {
+        success: boolean;
+        partial: boolean;
+        count: number;
+        executed: number;
+        denied: number;
+        results: unknown[];
+        error?: undefined;
+        code?: undefined;
     }>;
 }>;
 
@@ -120,8 +143,31 @@ export const batchPrecall: Readonly<{
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
     handler: (params: ToolParams_7, context: ExecutionContext) => Promise<{
         success: boolean;
+        error: string;
+        code: "INVALID_ARGUMENTS";
+        partial?: undefined;
+        count?: undefined;
+        executed?: undefined;
+        denied?: undefined;
+        results?: undefined;
+    } | {
+        success: boolean;
+        error: string;
+        code: "INVALID_ARGUMENTS" | "PRECALL_FORBIDDEN";
+        partial: boolean;
         count: number;
+        executed: number;
+        denied: number;
         results: unknown[];
+    } | {
+        success: boolean;
+        partial: boolean;
+        count: number;
+        executed: number;
+        denied: number;
+        results: unknown[];
+        error?: undefined;
+        code?: undefined;
     }>;
 }>;
 
@@ -163,8 +209,31 @@ export const batchPrecallDescriptor: Readonly<{
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
     handler: (params: ToolParams_7, context: ExecutionContext) => Promise<{
         success: boolean;
+        error: string;
+        code: "INVALID_ARGUMENTS";
+        partial?: undefined;
+        count?: undefined;
+        executed?: undefined;
+        denied?: undefined;
+        results?: undefined;
+    } | {
+        success: boolean;
+        error: string;
+        code: "INVALID_ARGUMENTS" | "PRECALL_FORBIDDEN";
+        partial: boolean;
         count: number;
+        executed: number;
+        denied: number;
         results: unknown[];
+    } | {
+        success: boolean;
+        partial: boolean;
+        count: number;
+        executed: number;
+        denied: number;
+        results: unknown[];
+        error?: undefined;
+        code?: undefined;
     }>;
 }>;
 
@@ -275,7 +344,6 @@ export const clockToolDescriptors: readonly (Readonly<{
                 description: string;
             };
         };
-        required: string[];
         additionalProperties: false;
     }>;
     paramAliasMap: Readonly<{
@@ -330,7 +398,6 @@ export const clockToolDescriptors: readonly (Readonly<{
                 description: string;
             };
         };
-        required: string[];
         additionalProperties: false;
     }>;
     paramAliasMap: Readonly<{
@@ -823,7 +890,6 @@ export const event_list: Readonly<{
                 description: string;
             };
         };
-        required: string[];
         additionalProperties: false;
     }>;
     paramAliasMap: Readonly<{
@@ -878,7 +944,6 @@ export const eventList: Readonly<{
                 description: string;
             };
         };
-        required: string[];
         additionalProperties: false;
     }>;
     paramAliasMap: Readonly<{
@@ -933,7 +998,6 @@ export const eventListDescriptor: Readonly<{
                 description: string;
             };
         };
-        required: string[];
         additionalProperties: false;
     }>;
     paramAliasMap: Readonly<{
@@ -1215,8 +1279,6 @@ export const grep: Readonly<{
         path: "path_prefix";
         isRegex: "is_regex";
         is_regex: "is_regex";
-        caseSensitive: "case_insensitive";
-        case_sensitive: "case_insensitive";
         caseInsensitive: "case_insensitive";
         case_insensitive: "case_insensitive";
     }>;
@@ -1264,8 +1326,6 @@ export const grepDescriptor: Readonly<{
         path: "path_prefix";
         isRegex: "is_regex";
         is_regex: "is_regex";
-        caseSensitive: "case_insensitive";
-        case_sensitive: "case_insensitive";
         caseInsensitive: "case_insensitive";
         case_insensitive: "case_insensitive";
     }>;
@@ -1324,6 +1384,13 @@ export const import_realm_template: Readonly<{
         replacedImport: boolean;
         totalImportedBytes: number;
         fileCount: number;
+        seedSlots: {
+            total: number;
+            fixed: number;
+            user: number;
+            generated: number;
+            targets: string[];
+        };
         manifestSource: string;
         dryRun: boolean;
         imported: boolean;
@@ -1382,6 +1449,13 @@ export const importRealmTemplate: Readonly<{
         replacedImport: boolean;
         totalImportedBytes: number;
         fileCount: number;
+        seedSlots: {
+            total: number;
+            fixed: number;
+            user: number;
+            generated: number;
+            targets: string[];
+        };
         manifestSource: string;
         dryRun: boolean;
         imported: boolean;
@@ -1440,6 +1514,13 @@ export const importRealmTemplateDescriptor: Readonly<{
         replacedImport: boolean;
         totalImportedBytes: number;
         fileCount: number;
+        seedSlots: {
+            total: number;
+            fixed: number;
+            user: number;
+            generated: number;
+            targets: string[];
+        };
         manifestSource: string;
         dryRun: boolean;
         imported: boolean;
@@ -2929,8 +3010,31 @@ export const precallToolDescriptors: readonly (Readonly<{
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
     handler: (params: ToolParams_7, context: ExecutionContext) => Promise<{
         success: boolean;
+        error: string;
+        code: "INVALID_ARGUMENTS";
+        partial?: undefined;
+        count?: undefined;
+        executed?: undefined;
+        denied?: undefined;
+        results?: undefined;
+    } | {
+        success: boolean;
+        error: string;
+        code: "INVALID_ARGUMENTS" | "PRECALL_FORBIDDEN";
+        partial: boolean;
         count: number;
+        executed: number;
+        denied: number;
         results: unknown[];
+    } | {
+        success: boolean;
+        partial: boolean;
+        count: number;
+        executed: number;
+        denied: number;
+        results: unknown[];
+        error?: undefined;
+        code?: undefined;
     }>;
 }> | Readonly<{
     name: "describe_tool";
@@ -3616,10 +3720,6 @@ export const schedule: Readonly<{
     schema: Readonly<{
         type: "object";
         properties: {
-            action: {
-                type: string;
-                description: string;
-            };
             prompt: {
                 type: string;
                 description: string;
@@ -3633,7 +3733,6 @@ export const schedule: Readonly<{
                 description: string;
             };
         };
-        required: string[];
         additionalProperties: false;
     }>;
     paramAliasMap: Readonly<{
@@ -3658,10 +3757,6 @@ export const scheduleDescriptor: Readonly<{
     schema: Readonly<{
         type: "object";
         properties: {
-            action: {
-                type: string;
-                description: string;
-            };
             prompt: {
                 type: string;
                 description: string;
@@ -3675,7 +3770,6 @@ export const scheduleDescriptor: Readonly<{
                 description: string;
             };
         };
-        required: string[];
         additionalProperties: false;
     }>;
     paramAliasMap: Readonly<{
@@ -3700,10 +3794,6 @@ export const schedulerToolDescriptors: readonly (Readonly<{
     schema: Readonly<{
         type: "object";
         properties: {
-            action: {
-                type: string;
-                description: string;
-            };
             prompt: {
                 type: string;
                 description: string;
@@ -3717,7 +3807,6 @@ export const schedulerToolDescriptors: readonly (Readonly<{
                 description: string;
             };
         };
-        required: string[];
         additionalProperties: false;
     }>;
     paramAliasMap: Readonly<{
@@ -5037,8 +5126,6 @@ export const vfsToolDescriptors: readonly (Readonly<{
         path: "path_prefix";
         isRegex: "is_regex";
         is_regex: "is_regex";
-        caseSensitive: "case_insensitive";
-        case_sensitive: "case_insensitive";
         caseInsensitive: "case_insensitive";
         case_insensitive: "case_insensitive";
     }>;
@@ -5537,7 +5624,6 @@ export const world_clock: Readonly<{
                 description: string;
             };
         };
-        required: string[];
         additionalProperties: false;
     }>;
     paramAliasMap: Readonly<{
@@ -5591,7 +5677,6 @@ export const worldClock: Readonly<{
                 description: string;
             };
         };
-        required: string[];
         additionalProperties: false;
     }>;
     paramAliasMap: Readonly<{
@@ -5645,7 +5730,6 @@ export const worldClockDescriptor: Readonly<{
                 description: string;
             };
         };
-        required: string[];
         additionalProperties: false;
     }>;
     paramAliasMap: Readonly<{
@@ -6035,18 +6119,18 @@ export const writeJsonDescriptor: Readonly<{
 
 // Warnings were encountered during analysis:
 //
-// <declarations>/tools/descriptors/clockTools.d.ts:446:5 - (ae-forgotten-export) The symbol "ToolParams_6" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/clockTools.d.ts:439:5 - (ae-forgotten-export) The symbol "ToolParams_6" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/invocationTools.d.ts:465:5 - (ae-forgotten-export) The symbol "ToolParams_4" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/lifecycleTools.d.ts:451:5 - (ae-forgotten-export) The symbol "ToolParams_3" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/lifecycleTools.d.ts:885:5 - (ae-forgotten-export) The symbol "PublicAgentDescriptor" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/lifecycleTools.d.ts:919:5 - (ae-forgotten-export) The symbol "UndoTurnPortResult" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/messagingTools.d.ts:823:5 - (ae-forgotten-export) The symbol "ToolParams_2" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/precallTools.d.ts:136:5 - (ae-forgotten-export) The symbol "ToolParams_7" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/precallTools.d.ts:136:5 - (ae-forgotten-export) The symbol "ExecutionContext" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/realmTools.d.ts:262:5 - (ae-forgotten-export) The symbol "ToolParams_8" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/realmTools.d.ts:262:5 - (ae-forgotten-export) The symbol "PublishingFailure" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/realmTools.d.ts:516:9 - (ae-forgotten-export) The symbol "JsonSchemaDraft07" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/schedulerTools.d.ts:227:5 - (ae-forgotten-export) The symbol "ToolParams_5" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/precallTools.d.ts:187:5 - (ae-forgotten-export) The symbol "ToolParams_7" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/precallTools.d.ts:187:5 - (ae-forgotten-export) The symbol "ExecutionContext" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/realmTools.d.ts:278:5 - (ae-forgotten-export) The symbol "ToolParams_8" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/realmTools.d.ts:278:5 - (ae-forgotten-export) The symbol "PublishingFailure" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/realmTools.d.ts:539:9 - (ae-forgotten-export) The symbol "JsonSchemaDraft07" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/schedulerTools.d.ts:220:5 - (ae-forgotten-export) The symbol "ToolParams_5" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/vfsTools.d.ts:713:5 - (ae-forgotten-export) The symbol "ToolParams" needs to be exported by the entry point index.d.ts
 ```
 
@@ -6068,7 +6152,7 @@ camelCase alias of `batchPrecallDescriptor`.
 
 `batch_precall` descriptor — execute an ordered batch of allowlisted precalls.
 
-Args: `calls` (required), each `{name, arguments}`. Unresolved or non-allowlisted names fail closed with `PRECALL_FORBIDDEN` and never reach `context.executeTool()`; returns `{success, count, results}` of per-item `{name, result}` receipts or structured denials; throws when `executeTool` is missing.
+Args: `calls` (required), each `{name, arguments}`; the terminal-close carrier shape `{summary}` without `calls` is admitted as a precall-free close. Any other missing or non-array `calls` fails closed with `INVALID_ARGUMENTS` (no false-success envelope). Unresolved or non-allowlisted names fail closed with `PRECALL_FORBIDDEN` and never reach `context.executeTool()`. Every batch carries explicit accounting (`count`, `executed`, `denied`, `partial`); a batch in which every entry was denied reports `success:false` with the denial code (and still carries the per-item receipts), while a partly executed batch keeps `success:true` with `partial:true`. Throws when `executeTool` is missing.
 
 ### `cancel_schedule` — variable
 
@@ -6156,7 +6240,7 @@ camelCase alias of `eventListDescriptor`.
 
 `event_list` descriptor — query, register, resolve, or cancel world simulation events.
 
-Args: `action` (defaults to "query"), optional `event_id`, `name`, `trigger_minutes`, `category`, `description`. Prefers `context.worldClock.handleEventTool()`, otherwise dispatches to `registerEvent`/`resolveEvent`/`cancelEvent`/`queryEvents`; throws when `worldClock` is missing.
+Args: `action` (optional, defaults to "query"), optional `event_id`, `name`, `trigger_minutes`, `category`, `description`. Prefers `context.worldClock.handleEventTool()`, otherwise dispatches to `registerEvent`/`resolveEvent`/`cancelEvent`/`queryEvents`; throws when `worldClock` is missing.
 
 ### `get_archive` — variable
 
@@ -6222,7 +6306,7 @@ Alias of `grepDescriptor` (single-word canonical name).
 
 `grep` descriptor — search workspace files for text or regular expression matches.
 
-Args: `pattern` (required), optional `path_prefix`, `is_regex`, `case_insensitive`. Delegates to `context.virtualFs.grep()` and throws when that service is missing.
+Args: `pattern` (required), optional `path_prefix`, `is_regex`, `case_insensitive` (the `caseSensitive`/`case_sensitive` spellings are accepted and negated onto the canonical flag). Delegates to `context.virtualFs.grep()` and throws when that service is missing.
 
 ### `import_realm_template` — variable
 
@@ -6238,7 +6322,7 @@ camelCase alias of `importRealmTemplateDescriptor`.
 
 Args: exactly one of `manifest` (the transport object) or `manifest_file` (a caller-visible JSON file), plus optional `dry_run`. The transport envelope declares `formatVersion` 1 or 2; bundle file values may be inline strings or `{ sourceFile }` references resolved server-side under the caller's workspace view. The resolved authored document validates through the catalog's own `parseTemplateBundle` (the same parser the registry uses) and the parser's canonical `serialized` transport travels to the port, so a format-v1 bundle is normalized through the read shim while a format-v2 bundle imports as authored. `dry_run: true` runs the identical resolve → validate → preview pipeline with zero side effects.
 
-Receipt: the store import receipt (`templateId`, authored `templateVersion`, shadow labels, effective byte budget, parser warnings) plus `sourceFormatVersion` (which authored format the transport declared), `fileCount`, `manifestSource`, `dryRun`, and `imported`.
+Receipt: the store import receipt (`templateId`, authored `templateVersion`, shadow labels, effective byte budget, parser warnings) plus `sourceFormatVersion` (which authored format the transport declared), `fileCount`, `seedSlots` (the declared seed-slot summary: counts by origin plus distinct targets, ticket 922fa34), `manifestSource`, `dryRun`, and `imported`.
 
 ### `inline_file_in_message` — variable
 
@@ -6482,7 +6566,7 @@ Alias of `scheduleDescriptor` (single-word canonical name).
 
 `schedule` descriptor — schedule a deferred one-shot turn execution or timer.
 
-Args: `action` (required), optional `prompt`, `delay_seconds`, `condition`. Delegates to `context.lifecyclePort.schedule()` with the bound caller id (target pin) and the identity-only caller scope as the trusted `context` (server-side authority/Realm resolution; ticket 61dae28); throws when that service is missing.
+Args: `prompt`, `delay_seconds`, optional `condition`. The retired decorative `action` discriminator is not advertised: the scheduler reads only the prompt, delay, and condition, and cancellation is the separate `cancel_schedule` tool (ticket d872723 F8). Delegates to `context.lifecyclePort.schedule()` with the bound caller id (target pin) and the identity-only caller scope as the trusted `context` (server-side authority/Realm resolution; ticket 61dae28); throws when that service is missing.
 
 ### `schedulerToolDescriptors` — variable
 
@@ -6660,7 +6744,7 @@ camelCase alias of `worldClockDescriptor`.
 
 `world_clock` descriptor — query, advance, set, or reset the narrative world clock.
 
-Args: `action` (defaults to "query"), optional `minutes`, `hours`, `seconds`, `time`. Prefers `context.worldClock.handleClockTool()`, otherwise dispatches to `advanceClock`/`setTime`/`resetClock`/`getTime`; throws when `worldClock` is missing.
+Args: `action` (optional, defaults to "query"), optional `minutes`, `hours`, `seconds`, `time`. Prefers `context.worldClock.handleClockTool()`, otherwise dispatches to `advanceClock`/`setTime`/`resetClock`/`getTime`; throws when `worldClock` is missing.
 
 ### `write_file` — variable
 

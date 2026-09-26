@@ -281,7 +281,10 @@ const scheduleParamAliasMap = Object.freeze({
 /**
  * `schedule` descriptor — schedule a deferred one-shot turn execution or timer.
  *
- * Args: `action` (required), optional `prompt`, `delay_seconds`, `condition`.
+ * Args: `prompt`, `delay_seconds`, optional `condition`. The retired
+ * decorative `action` discriminator is not advertised: the scheduler reads
+ * only the prompt, delay, and condition, and cancellation is the separate
+ * `cancel_schedule` tool (ticket d872723 F8).
  * Delegates to `context.lifecyclePort.schedule()` with the bound caller id
  * (target pin) and the identity-only caller scope as the trusted `context`
  * (server-side authority/Realm resolution; ticket 61dae28); throws when that
@@ -293,10 +296,6 @@ export const scheduleDescriptor = Object.freeze({
   schema: Object.freeze({
     type: 'object',
     properties: {
-      action: {
-        type: 'string',
-        description: 'Scheduling action (e.g. "create", "timer").'
-      },
       prompt: {
         type: 'string',
         description: 'Instruction prompt or task to execute upon trigger.'
@@ -310,7 +309,6 @@ export const scheduleDescriptor = Object.freeze({
         description: 'Early termination condition: "never", "any", or specific sender ID.'
       }
     },
-    required: ['action'],
     additionalProperties: false
   }),
   paramAliasMap: scheduleParamAliasMap,

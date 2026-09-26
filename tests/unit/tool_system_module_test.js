@@ -1006,14 +1006,19 @@ test('16. Precall & Tool Reflection Descriptor Delegations (2 Tools)', async () 
   assert.strictEqual(batchRes.count, 2);
   assert.strictEqual(batchRes.results[0].result.content, 'precall content');
 
-  // Forbidden mutating tool inside batch_precall triggers PRECALL_FORBIDDEN
+  // Forbidden mutating tool inside batch_precall triggers PRECALL_FORBIDDEN and
+  // an explicit all-denied failure envelope (never a bare success).
   const badBatch = await dispatcher.executeTool('batch_precall', {
     calls: [
       { name: 'write_file', arguments: { file_path: '/lore.txt', content: 'illegal' } }
     ]
   }, { executeTool: dispatcher.executeTool.bind(dispatcher) });
 
-  assert.strictEqual(badBatch.success, true);
+  assert.strictEqual(badBatch.success, false);
+  assert.strictEqual(badBatch.code, TOOL_SYSTEM_ERROR_CODES.PRECALL_FORBIDDEN);
+  assert.strictEqual(badBatch.count, 1);
+  assert.strictEqual(badBatch.executed, 0);
+  assert.strictEqual(badBatch.denied, 1);
   assert.strictEqual(badBatch.results[0].success, false);
   assert.strictEqual(badBatch.results[0].code, TOOL_SYSTEM_ERROR_CODES.PRECALL_FORBIDDEN);
 
@@ -1292,4 +1297,182 @@ test('21. a VFS-shaped call observes the bound workspace, never per-call workspa
       `${JSON.stringify(forgery)}: the snake_case scope alias must be pinned too`
     );
   }
+});
+
+// ============================================================================
+// 22. grep caseSensitive alias semantics (b52705d)
+// ============================================================================
+
+test('22. grep maps caseSensitive/case_sensitive onto case_insensitive with the value negated (b52705d)', async () => {
+  const vfs = new VirtualFS();
+  vfs.writeFile('/notes.txt', 'ALPHA beta GAMMA', {});
+  const dispatcher = createSandboxToolDispatcher({ virtualFs: vfs, allowedTools: ['grep'] });
+
+  const sensitive = await dispatcher.executeTool('grep', { pattern: 'alpha', caseSensitive: true });
+  assert.strictEqual(sensitive.success, true);
+  assert.deepStrictEqual(
+    sensitive.result,
+    [],
+    'caseSensitive:true must not match the lowercase pattern against uppercase text'
+  );
+
+  const insensitive = await dispatcher.executeTool('grep', { pattern: 'alpha', caseSensitive: false });
+  assert.strictEqual(insensitive.success, true);
+  assert.strictEqual(insensitive.result.length, 1, 'caseSensitive:false must match case-insensitively');
+
+  const snakeSensitive = await dispatcher.executeTool('grep', { pattern: 'alpha', case_sensitive: true });
+  assert.deepStrictEqual(snakeSensitive.result, [], 'case_sensitive:true must stay case-sensitive');
+  const snakeInsensitive = await dispatcher.executeTool('grep', { pattern: 'alpha', case_sensitive: false });
+  assert.strictEqual(snakeInsensitive.result.length, 1, 'case_sensitive:false must match case-insensitively');
+
+  const canonical = await dispatcher.executeTool('grep', { pattern: 'alpha', case_insensitive: true });
+  assert.strictEqual(canonical.result.length, 1, 'the canonical case_insensitive spelling still works');
+
+  // Strict truthiness: non-boolean values never flip the matching mode (default is case-sensitive).
+  for (const nonBoolean of ['true', 1, {}]) {
+    const strict = await dispatcher.executeTool('grep', { pattern: 'alpha', case_insensitive: nonBoolean });
+    assert.deepStrictEqual(
+      strict.result,
+      [],
+      `case_insensitive:${JSON.stringify(nonBoolean)} must not enable insensitive matching`
+    );
+  }
+
+  // An explicit canonical flag wins over the alias spelling.
+  const explicitWins = await dispatcher.executeTool('grep', {
+    pattern: 'alpha',
+    caseSensitive: true,
+    case_insensitive: true
+  });
+  assert.strictEqual(
+    explicitWins.result.length,
+    1,
+    'an explicit canonical case_insensitive flag must win over the caseSensitive alias'
+  );
+});
+
+// ============================================================================
+// 23. batch_precall envelope truth (eba7c76)
+// ============================================================================
+
+test('23. batch_precall rejects missing/non-array calls and reports explicit denied/partial accounting (eba7c76)', async () => {
+  const dispatcher = createSandboxToolDispatcher({
+    allowedTools: 'all',
+    virtualFs: { readFile: async () => ({ success: true, content: 'precall body' }) }
+  });
+
+  // Missing / non-array `calls`: INVALID_ARGUMENTS, never a false-success envelope.
+  for (const [label, args] of [
+    ['missing', {}],
+    ['null', { calls: null }],
+    ['string', { calls: 'nope' }],
+    ['number', { calls: 7 }],
+    ['object', { calls: { name: 'read_file' } }]
+  ]) {
+    const res = await dispatcher.executeTool('batch_precall', args);
+    assert.strictEqual(res.success, false, `${label}: batch must fail closed`);
+    assert.strictEqual(res.code, TOOL_SYSTEM_ERROR_CODES.INVALID_ARGUMENTS, `${label}: argument code`);
+  }
+
+  // The terminal-close carrier shape: a non-empty summary with no `calls` is a
+  // valid precall-free close (the turn engine closes the turn on it).
+  const terminalClose = await dispatcher.executeTool('batch_precall', { summary: 'Closed without precalls.' });
+  assert.strictEqual(terminalClose.success, true);
+  assert.strictEqual(terminalClose.partial, false);
+  assert.strictEqual(terminalClose.count, 0);
+  assert.strictEqual(terminalClose.executed, 0);
+  assert.strictEqual(terminalClose.denied, 0);
+  assert.deepStrictEqual(terminalClose.results, []);
+
+  // An empty or non-string summary without calls is not a close carrier.
+  const emptySummary = await dispatcher.executeTool('batch_precall', { summary: '   ' });
+  assert.strictEqual(emptySummary.success, false);
+  assert.strictEqual(emptySummary.code, TOOL_SYSTEM_ERROR_CODES.INVALID_ARGUMENTS);
+
+  // An empty array is a valid zero-call batch with explicit accounting.
+  const empty = await dispatcher.executeTool('batch_precall', { calls: [] });
+  assert.strictEqual(empty.success, true);
+  assert.strictEqual(empty.partial, false);
+  assert.strictEqual(empty.count, 0);
+  assert.strictEqual(empty.executed, 0);
+  assert.strictEqual(empty.denied, 0);
+  assert.deepStrictEqual(empty.results, []);
+
+  // Mixed batch: explicit partial accounting, per-item denials stay visible.
+  const mixed = await dispatcher.executeTool('batch_precall', {
+    calls: [
+      { name: 'read_file', arguments: { file_path: '/ok.txt' } },
+      { name: 'write_file', arguments: { file_path: '/x.txt', content: 'nope' } },
+      { name: 'not_a_tool', arguments: {} }
+    ]
+  });
+  assert.strictEqual(mixed.success, true, 'a partly executed batch keeps the success envelope');
+  assert.strictEqual(mixed.partial, true);
+  assert.strictEqual(mixed.count, 3);
+  assert.strictEqual(mixed.executed, 1);
+  assert.strictEqual(mixed.denied, 2);
+  assert.strictEqual(mixed.results[0].result.content, 'precall body');
+  assert.strictEqual(mixed.results[1].code, TOOL_SYSTEM_ERROR_CODES.PRECALL_FORBIDDEN);
+  assert.strictEqual(mixed.results[2].code, TOOL_SYSTEM_ERROR_CODES.PRECALL_FORBIDDEN);
+
+  // All-denied: explicit failure envelope that still carries every per-item receipt.
+  const allDenied = await dispatcher.executeTool('batch_precall', {
+    calls: [
+      { name: 'write_file', arguments: {} },
+      { name: 'totally_unknown_tool', arguments: {} }
+    ]
+  });
+  assert.strictEqual(allDenied.success, false);
+  assert.strictEqual(allDenied.code, TOOL_SYSTEM_ERROR_CODES.PRECALL_FORBIDDEN);
+  assert.strictEqual(allDenied.partial, false);
+  assert.strictEqual(allDenied.count, 2);
+  assert.strictEqual(allDenied.executed, 0);
+  assert.strictEqual(allDenied.denied, 2);
+  assert.strictEqual(allDenied.results.length, 2);
+  assert.strictEqual(allDenied.results[0].success, false);
+  assert.strictEqual(allDenied.results[1].success, false);
+});
+
+// ============================================================================
+// 24. Decorative action params match the runtime contract (d872723 F8)
+// ============================================================================
+
+test('24. clock/event action defaults and schedule action removal match the runtime contract (d872723 F8)', async () => {
+  const byName = new Map(ALL_TOOL_DESCRIPTORS.map((descriptor) => [descriptor.name, descriptor]));
+  const worldClock = byName.get('world_clock');
+  const eventList = byName.get('event_list');
+  const schedule = byName.get('schedule');
+
+  // world_clock/event_list honor `action` but default it to `query`; a schema
+  // that marks it required lies about the call contract.
+  for (const [name, descriptor] of [['world_clock', worldClock], ['event_list', eventList]]) {
+    assert.ok(descriptor.schema.properties.action, `'${name}' still declares action`);
+    assert.ok(
+      !(descriptor.schema.required ?? []).includes('action'),
+      `'${name}' action has a working default and must not be schema-required`
+    );
+  }
+
+  // schedule's `action` is read by nothing; it must not be advertised at all.
+  assert.ok(
+    !Object.prototype.hasOwnProperty.call(schedule.schema.properties, 'action'),
+    "schedule's decorative action must not be part of the advertised schema"
+  );
+  assert.ok(
+    !(schedule.schema.required ?? []).includes('action'),
+    'schedule must not require the decorative action'
+  );
+
+  // The defaulted calls keep working through the dispatcher.
+  const clockMock = {
+    getTime: () => ({ hour: 1, minute: 2, second: 3, formatted: '01:02:03' }),
+    queryEvents: () => ({ events: [], count: 0 })
+  };
+  const dispatcher = createSandboxToolDispatcher({ worldClock: clockMock, allowedTools: 'all' });
+  const queryTime = await dispatcher.executeTool('world_clock', {});
+  assert.strictEqual(queryTime.success, true, 'world_clock {} must default to a query');
+  assert.strictEqual(queryTime.formatted, '01:02:03');
+  const queryEvents = await dispatcher.executeTool('event_list', {});
+  assert.strictEqual(queryEvents.success, true, 'event_list {} must default to a query');
+  assert.deepStrictEqual(queryEvents.events, []);
 });

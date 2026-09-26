@@ -216,14 +216,18 @@ await recordTest('AC-EPIC12-01.5', 'Dispatcher batch_precall with no calls execu
     agentId: 'agent-1'
   });
 
+  // Missing `calls` is an invalid-arguments refusal, never a false success.
   const res1 = await dispatcher.executeTool('runtime_batchPrecall', {});
-  assert.equal(res1.success, true);
-  assert.equal(res1.count, 0);
-  assert.deepEqual(res1.results, []);
+  assert.equal(res1.success, false);
+  assert.equal(res1.code, 'INVALID_ARGUMENTS');
 
+  // An explicit empty array is a valid zero-call batch with explicit accounting.
   const res2 = await dispatcher.executeTool('runtime_batchPrecall', { calls: [] });
   assert.equal(res2.success, true);
+  assert.equal(res2.partial, false);
   assert.equal(res2.count, 0);
+  assert.equal(res2.executed, 0);
+  assert.equal(res2.denied, 0);
   assert.deepEqual(res2.results, []);
 });
 
@@ -279,7 +283,10 @@ await recordTest('AC-EPIC12-02.1', 'Rejection of mutating tool calls in precalls
     const res = await dispatcher.executeTool('runtime_batchPrecall', {
       calls: [forbidden]
     });
-    assert.equal(res.success, true, `Batch returns a per-call result for '${forbidden.name}'`);
+    assert.equal(res.success, false, `All-denied batch must fail explicitly for '${forbidden.name}'`);
+    assert.equal(res.code, 'PRECALL_FORBIDDEN');
+    assert.equal(res.executed, 0);
+    assert.equal(res.denied, 1);
     assert.equal(res.count, 1);
     const item = res.results[0];
     const callResult = item.result || item;
@@ -375,15 +382,15 @@ await recordTest('AC-EPIC12-02.3', 'Rejection of non-array or malformed precall 
     agentId: 'agent-1'
   });
 
-  // Non-array calls: malformed containers must execute zero precalls
+  // Non-array calls: malformed containers fail closed with INVALID_ARGUMENTS
+  // and must never report a false-success envelope.
   const invalidCallsTypes = ['not-an-array', 12345, true, {}];
   for (const val of invalidCallsTypes) {
     const res = await dispatcher.executeTool('runtime_batchPrecall', {
       calls: val
     });
-    assert.equal(res.success, true);
-    assert.equal(res.count, 0, `Calls value ${JSON.stringify(val)} must execute zero precalls`);
-    assert.deepEqual(res.results, []);
+    assert.equal(res.success, false);
+    assert.equal(res.code, 'INVALID_ARGUMENTS');
   }
 
   // Null or non-object item in calls array produces a per-item INVALID_ARGUMENTS result
@@ -444,7 +451,9 @@ await recordTest('AC-EPIC12-02.4', 'Fail-closed precall gate: unresolved names d
     const res = await dispatcher.executeTool('runtime_batchPrecall', {
       calls: [{ name, arguments: {} }]
     });
-    assert.equal(res.success, true);
+    assert.equal(res.success, false);
+    assert.equal(res.code, 'PRECALL_FORBIDDEN');
+    assert.equal(res.denied, 1);
     assert.equal(res.count, 1);
     const item = res.results[0];
     assert.equal(item.success, false, `Unresolved name ${String(name)} must be rejected`);
