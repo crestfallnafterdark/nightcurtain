@@ -983,6 +983,42 @@ test('20. [MOD-21 W8-D] Context identity outranks caller payload routing and sen
   assert.strictEqual(bus.sendMessage({ from: 'bob', to: 'mallory', content: 'direct' }).from, 'bob');
 });
 
+test('20b. [Wave I d57cbc1] drainInbox(string, context) honors the trusted context callerKey', () => {
+  const identities = [
+    { id: 'scout', key: 'realm:alpha:scout', realmId: 'alpha' },
+    { id: 'scout', key: 'realm:beta:scout', realmId: 'beta' },
+    { id: 'alpha_peer', key: 'realm:alpha:alpha_peer', realmId: 'alpha' }
+  ];
+  const identityPort = {
+    getAgentIdentity: (agentId, scope) => {
+      const matches = identities.filter((identity) => identity.id === agentId);
+      if (scope && typeof scope === 'object') {
+        return matches.find((identity) => identity.realmId === scope.realmId) || null;
+      }
+      return matches.length === 1 ? matches[0] : null;
+    },
+    listAgentIdentities: () => identities
+  };
+  const bus = new MessagingBus({ identityPort });
+  for (const identity of identities) bus.registerAgent(identity.key);
+
+  const delivery = bus.sendMessage(
+    { from: 'alpha_peer', to: 'scout', content: 'alpha canonical mail' },
+    { callerAgentId: 'alpha_peer', callerKey: 'realm:alpha:alpha_peer' }
+  );
+  assert.strictEqual(delivery.success, true);
+  assert.strictEqual(bus.getUnreadCount('realm:alpha:scout'), 1);
+  assert.strictEqual(bus.getUnreadCount('realm:beta:scout'), 0);
+
+  // Ticket 5b5fe63: the positional string branch must not discard the trailing
+  // trusted context — its canonical callerKey resolves the alpha partition.
+  const drained = bus.drainInbox('scout', { callerAgentId: 'scout', callerKey: 'realm:alpha:scout' });
+  assert.strictEqual(drained.length, 1, 'string+context drain must resolve the context canonical partition');
+  assert.strictEqual(drained[0].content, 'alpha canonical mail');
+  assert.strictEqual(bus.getUnreadCount('realm:alpha:scout'), 0);
+  assert.strictEqual(bus.getUnreadCount('realm:beta:scout'), 0);
+});
+
 test('21. [Realm wave A 7387ce1] identity-projection realm scope: cross-realm denial, bypass reachability, filtered broadcast', () => {
   const identityPort = {
     getAgentIdentity: (agentId) => {

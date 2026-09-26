@@ -745,3 +745,42 @@ test("8. Wave I d57cbc1: real runtime + real bus key two realms' same-id agents 
     runtime.destroy();
   }
 });
+
+// ============================================================================
+// 9. Ticket 5b5fe63: drainInbox positional string + trusted context
+// ============================================================================
+
+test('9. Ticket 5b5fe63: drainInbox(string, context) must not discard the trusted realm-exact context', async () => {
+  const { runtime, bus, keys } = await createRealRealmBusFixture();
+  const { alphaScout, betaScout, alphaPeer, betaPeer } = keys;
+  try {
+    // Alpha mail into the canonical alpha scout partition.
+    const alphaDelivery = bus.sendMessage(
+      { from: 'alpha_peer', to: 'scout', content: 'alpha string-branch mail' },
+      { callerAgentId: 'alpha_peer', callerKey: alphaPeer.key }
+    );
+    assert.equal(alphaDelivery.success, true);
+    assert.equal(bus.getUnreadCount(alphaScout.key), 1);
+    assert.equal(bus.getUnreadCount(betaScout.key), 0);
+
+    // Positional string form + trailing context: the canonical caller key
+    // resolves the alpha partition, never the empty bare-id partition.
+    const drained = bus.drainInbox('scout', { callerAgentId: 'scout', callerKey: alphaScout.key });
+    assert.equal(drained.length, 1, 'string+context drain must resolve the caller canonical partition');
+    assert.equal(drained[0].content, 'alpha string-branch mail');
+    assert.equal(bus.getUnreadCount(alphaScout.key), 0);
+
+    // The same literal string bound to beta resolves only beta.
+    const betaDelivery = bus.sendMessage(
+      { from: 'beta_peer', to: 'scout', content: 'beta string-branch mail' },
+      { callerAgentId: 'beta_peer', callerKey: betaPeer.key }
+    );
+    assert.equal(betaDelivery.success, true);
+    const betaDrained = bus.drainInbox('scout', { callerAgentId: 'scout', callerKey: betaScout.key });
+    assert.equal(betaDrained.length, 1);
+    assert.equal(betaDrained[0].content, 'beta string-branch mail');
+    assert.equal(bus.getUnreadCount(betaScout.key), 0);
+  } finally {
+    runtime.destroy();
+  }
+});
