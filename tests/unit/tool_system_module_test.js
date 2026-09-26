@@ -3,7 +3,7 @@
  * @description Comprehensive unit and integration test suite for Module 8: tool_system.
  * Validates strict ICD compliance, immutable .ts contracts, Draft-07 schema generation,
  * preset resolution, O(1) table dispatch, parameter sanitization, universal error shielding,
- * and pure 1-line delegations across all 35 tool descriptors and 7 substrate domains.
+ * and pure 1-line delegations across all 36 tool descriptors and 7 substrate domains.
  */
 
 import test from 'node:test';
@@ -74,7 +74,7 @@ test('1. Strict Export Whitelist & Constants Immutability', () => {
 
   // Master tools enum
   assert.ok(Object.isFrozen(SANDBOX_TOOLS));
-  assert.strictEqual(Object.keys(SANDBOX_TOOLS).length, 35);
+  assert.strictEqual(Object.keys(SANDBOX_TOOLS).length, 36);
 
   // Innate tools list
   assert.ok(Object.isFrozen(INNATE_TOOLS));
@@ -98,10 +98,10 @@ test('1. Strict Export Whitelist & Constants Immutability', () => {
 });
 
 // ============================================================================
-// 2. Canonical Tool Taxonomy (All 35 Tools)
+// 2. Canonical Tool Taxonomy (All 36 Tools)
 // ============================================================================
 
-test('2. Canonical Tool Taxonomy Enumeration (35 Tools across 7 Domains)', () => {
+test('2. Canonical Tool Taxonomy Enumeration (36 Tools across 7 Domains)', () => {
   const expectedTools = [
     // VFS (12)
     'read_file', 'write_file', 'replace_file_content', 'copy_file', 'delete_file',
@@ -112,8 +112,8 @@ test('2. Canonical Tool Taxonomy Enumeration (35 Tools across 7 Domains)', () =>
     'inline_file_in_message', 'get_inbox', 'drain_inbox',
     // Lifecycle (5)
     'spawn_agent', 'kill_agent', 'list_agents', 'whoami', 'undo_turn',
-    // Invocation (2)
-    'invoke_agent', 'wait_for_invocation',
+    // Invocation (3)
+    'invoke_agent', 'wait_for_invocation', 'wait_for_agent',
     // Scheduler (3)
     'schedule', 'list_schedules', 'cancel_schedule',
     // Clock & Events (3)
@@ -122,14 +122,14 @@ test('2. Canonical Tool Taxonomy Enumeration (35 Tools across 7 Domains)', () =>
     'batch_precall', 'describe_tool'
   ];
 
-  assert.strictEqual(expectedTools.length, 35);
+  assert.strictEqual(expectedTools.length, 36);
   for (const name of expectedTools) {
     const found = Object.values(SANDBOX_TOOLS).includes(name);
     assert.ok(found, `Tool '${name}' must exist in SANDBOX_TOOLS enum`);
     assert.ok(TOOL_REGISTRY[name], `Tool '${name}' must be registered in frozen TOOL_REGISTRY`);
   }
 
-  assert.strictEqual(ALL_TOOL_DESCRIPTORS.length, 35);
+  assert.strictEqual(ALL_TOOL_DESCRIPTORS.length, 36);
 });
 
 // ============================================================================
@@ -191,12 +191,12 @@ test('3. Capability Preset Resolution Engine (resolveToolPreset)', () => {
 test('4. Draft-07 JSON Schema Generation & Invariant 4 Zero Schema Pollution', () => {
   // 1. Full schema generation (all tools)
   const allSchemas = getSandboxToolsSchema('all');
-  assert.strictEqual(allSchemas.length, 35);
+  assert.strictEqual(allSchemas.length, 36);
 
   // 2. Preset-filtered schema generation (generated family tiers; every tier
   // carries the innate baseline, so `describe_tool` is schema-visible too)
   const managerSchemas = getSandboxToolsSchema('manager');
-  assert.strictEqual(managerSchemas.length, 31);
+  assert.strictEqual(managerSchemas.length, 32);
 
   const collabSchemas = getSandboxToolsSchema('collaborator');
   assert.strictEqual(collabSchemas.length, 25);
@@ -209,7 +209,7 @@ test('4. Draft-07 JSON Schema Generation & Invariant 4 Zero Schema Pollution', (
 
   // 3. Option: includeReflection: false
   const noReflectionSchemas = getSandboxToolsSchema('all', { includeReflection: false });
-  assert.strictEqual(noReflectionSchemas.length, 34);
+  assert.strictEqual(noReflectionSchemas.length, 35);
   assert.ok(!noReflectionSchemas.some(s => s.function.name === 'describe_tool'));
 
   // 4. Structural validation of Draft-07 schemas
@@ -784,10 +784,10 @@ test('12b. list_agents fails closed for a lifecycle port without listAgentDescri
 });
 
 // ============================================================================
-// 13. Subsystem Descriptor Delegations: Invocation Substrate (2 Tools)
+// 13. Subsystem Descriptor Delegations: Invocation Substrate (3 Tools)
 // ============================================================================
 
-test('13. Invocation Descriptor Delegations (2 Tools)', async () => {
+test('13. Invocation Descriptor Delegations (3 Tools)', async () => {
   const lifecyclePortMock = {
     invokeAgent: async (invokerId, targetAgentId, prompt) => ({
       success: true,
@@ -800,6 +800,14 @@ test('13. Invocation Descriptor Delegations (2 Tools)', async () => {
       success: true,
       op: 'waitForInvocation',
       timeout_ms: options?.timeout_ms
+    }),
+    waitForAgent: async (targetAgentId, options, scope) => ({
+      success: true,
+      op: 'waitForAgent',
+      targetAgentId,
+      notify: options?.notify,
+      timeout_ms: options?.timeout_ms,
+      callerAgentId: scope?.callerAgentId
     })
   };
 
@@ -820,6 +828,19 @@ test('13. Invocation Descriptor Delegations (2 Tools)', async () => {
   const r2 = await dispatcher.executeTool('wait_for_invocation', { timeoutMs: 15000 });
   assert.strictEqual(r2.op, 'waitForInvocation');
   assert.strictEqual(r2.timeout_ms, 15000);
+
+  // 3. wait_for_agent (ticket 17b5c47): aliases resolve, the bound caller
+  // scope is forwarded, and notify/timeout pass through.
+  const r3 = await dispatcher.executeTool('waitForAgent', {
+    targetAgentId: 'child_agent',
+    notify: true,
+    timeoutMs: 2500
+  });
+  assert.strictEqual(r3.op, 'waitForAgent');
+  assert.strictEqual(r3.targetAgentId, 'child_agent');
+  assert.strictEqual(r3.notify, true);
+  assert.strictEqual(r3.timeout_ms, 2500);
+  assert.strictEqual(r3.callerAgentId, 'parent_agent');
 });
 
 // ============================================================================

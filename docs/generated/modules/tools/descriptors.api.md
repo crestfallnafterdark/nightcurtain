@@ -29,7 +29,7 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 - Identity-only caller scope: invocation, lifecycle, and scheduler handlers forward only the dispatcher-bound subject id plus the identity-port principal; per-call caller identity, privilege flags, and role aliases are never read
 - `invoke_agent` pins recursion depth from the trusted bound `currentDepth`, never from a per-call `depth` key
 - VFS and messaging sanitizers strip caller-supplied identity and mailbox-routing keys from the fresh sanitized parameter copy
-- Realm publishing meta tools stay outside the canonical taxonomy (35 names) so no wildcard, preset, or `toolProfile` selector can expose or authorize them; descriptors resolve exclusively through `PUBLISHING_TOOL_REGISTRY`, and the dispatcher consults the caller's frozen authority descriptor for the exact explicit authority
+- Realm publishing meta tools stay outside the canonical taxonomy (36 names) so no wildcard, preset, or `toolProfile` selector can expose or authorize them; descriptors resolve exclusively through `PUBLISHING_TOOL_REGISTRY`, and the dispatcher consults the caller's frozen authority descriptor for the exact explicit authority
 
 ## Surface
 
@@ -1570,7 +1570,7 @@ export const inlineFileInMessageDescriptor: Readonly<{
 // @public
 export const invocationToolDescriptors: readonly (Readonly<{
     name: "invoke_agent";
-    description: "Directly invoke an agent to execute a turn with a prompt and await completion.";
+    description: "Dispatch a turn to another agent. Returns an invocation id immediately (fire-and-forget); call wait_for_invocation with that id to await the result, or wait_for_agent to await the target agent directly.";
     schema: Readonly<{
         type: "object";
         properties: {
@@ -1644,12 +1644,47 @@ export const invocationToolDescriptors: readonly (Readonly<{
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
     handler: (params: ToolParams_4, context: ExecutionContext) => Promise<unknown>;
+}> | Readonly<{
+    name: "wait_for_agent";
+    description: "Wait for another agent's pending work to finish (blocks this turn), or register a one-shot completion wake (notify) that starts a new turn on this agent when the target finishes. Use wait_for_invocation when you already hold an invocation id.";
+    schema: Readonly<{
+        type: "object";
+        properties: {
+            agent_id: {
+                type: string;
+                description: string;
+            };
+            notify: {
+                type: string;
+                description: string;
+            };
+            timeout_ms: {
+                type: string;
+                description: string;
+            };
+        };
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<{
+        agent_id: "agent_id";
+        agentId: "agent_id";
+        target_agent_id: "agent_id";
+        targetAgentId: "agent_id";
+        id: "agent_id";
+        notify: "notify";
+        timeout_ms: "timeout_ms";
+        timeoutMs: "timeout_ms";
+        timeout: "timeout_ms";
+    }>;
+    sanitize: (rawArgs?: unknown) => Record<string, unknown>;
+    handler: (params: ToolParams_4 | string, context: ExecutionContext) => Promise<unknown>;
 }>)[];
 
 // @public
 export const invoke_agent: Readonly<{
     name: "invoke_agent";
-    description: "Directly invoke an agent to execute a turn with a prompt and await completion.";
+    description: "Dispatch a turn to another agent. Returns an invocation id immediately (fire-and-forget); call wait_for_invocation with that id to await the result, or wait_for_agent to await the target agent directly.";
     schema: Readonly<{
         type: "object";
         properties: {
@@ -1690,7 +1725,7 @@ export const invoke_agent: Readonly<{
 // @public
 export const invokeAgent: Readonly<{
     name: "invoke_agent";
-    description: "Directly invoke an agent to execute a turn with a prompt and await completion.";
+    description: "Dispatch a turn to another agent. Returns an invocation id immediately (fire-and-forget); call wait_for_invocation with that id to await the result, or wait_for_agent to await the target agent directly.";
     schema: Readonly<{
         type: "object";
         properties: {
@@ -1731,7 +1766,7 @@ export const invokeAgent: Readonly<{
 // @public
 export const invokeAgentDescriptor: Readonly<{
     name: "invoke_agent";
-    description: "Directly invoke an agent to execute a turn with a prompt and await completion.";
+    description: "Dispatch a turn to another agent. Returns an invocation id immediately (fire-and-forget); call wait_for_invocation with that id to await the result, or wait_for_agent to await the target agent directly.";
     schema: Readonly<{
         type: "object";
         properties: {
@@ -5105,6 +5140,44 @@ export const vfsToolDescriptors: readonly (Readonly<{
 }>)[];
 
 // @public
+export const wait_for_agent: Readonly<{
+    name: "wait_for_agent";
+    description: "Wait for another agent's pending work to finish (blocks this turn), or register a one-shot completion wake (notify) that starts a new turn on this agent when the target finishes. Use wait_for_invocation when you already hold an invocation id.";
+    schema: Readonly<{
+        type: "object";
+        properties: {
+            agent_id: {
+                type: string;
+                description: string;
+            };
+            notify: {
+                type: string;
+                description: string;
+            };
+            timeout_ms: {
+                type: string;
+                description: string;
+            };
+        };
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<{
+        agent_id: "agent_id";
+        agentId: "agent_id";
+        target_agent_id: "agent_id";
+        targetAgentId: "agent_id";
+        id: "agent_id";
+        notify: "notify";
+        timeout_ms: "timeout_ms";
+        timeoutMs: "timeout_ms";
+        timeout: "timeout_ms";
+    }>;
+    sanitize: (rawArgs?: unknown) => Record<string, unknown>;
+    handler: (params: ToolParams_4 | string, context: ExecutionContext) => Promise<unknown>;
+}>;
+
+// @public
 export const wait_for_invocation: Readonly<{
     name: "wait_for_invocation";
     description: "Wait asynchronously for in-flight agent invocations to complete.";
@@ -5177,6 +5250,82 @@ export const wait_for_mail: Readonly<{
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
     handler: (params: ToolParams_2, context: ExecutionContext) => Promise<unknown>;
+}>;
+
+// @public
+export const waitForAgent: Readonly<{
+    name: "wait_for_agent";
+    description: "Wait for another agent's pending work to finish (blocks this turn), or register a one-shot completion wake (notify) that starts a new turn on this agent when the target finishes. Use wait_for_invocation when you already hold an invocation id.";
+    schema: Readonly<{
+        type: "object";
+        properties: {
+            agent_id: {
+                type: string;
+                description: string;
+            };
+            notify: {
+                type: string;
+                description: string;
+            };
+            timeout_ms: {
+                type: string;
+                description: string;
+            };
+        };
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<{
+        agent_id: "agent_id";
+        agentId: "agent_id";
+        target_agent_id: "agent_id";
+        targetAgentId: "agent_id";
+        id: "agent_id";
+        notify: "notify";
+        timeout_ms: "timeout_ms";
+        timeoutMs: "timeout_ms";
+        timeout: "timeout_ms";
+    }>;
+    sanitize: (rawArgs?: unknown) => Record<string, unknown>;
+    handler: (params: ToolParams_4 | string, context: ExecutionContext) => Promise<unknown>;
+}>;
+
+// @public
+export const waitForAgentDescriptor: Readonly<{
+    name: "wait_for_agent";
+    description: "Wait for another agent's pending work to finish (blocks this turn), or register a one-shot completion wake (notify) that starts a new turn on this agent when the target finishes. Use wait_for_invocation when you already hold an invocation id.";
+    schema: Readonly<{
+        type: "object";
+        properties: {
+            agent_id: {
+                type: string;
+                description: string;
+            };
+            notify: {
+                type: string;
+                description: string;
+            };
+            timeout_ms: {
+                type: string;
+                description: string;
+            };
+        };
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<{
+        agent_id: "agent_id";
+        agentId: "agent_id";
+        target_agent_id: "agent_id";
+        targetAgentId: "agent_id";
+        id: "agent_id";
+        notify: "notify";
+        timeout_ms: "timeout_ms";
+        timeoutMs: "timeout_ms";
+        timeout: "timeout_ms";
+    }>;
+    sanitize: (rawArgs?: unknown) => Record<string, unknown>;
+    handler: (params: ToolParams_4 | string, context: ExecutionContext) => Promise<unknown>;
 }>;
 
 // @public
@@ -5887,7 +6036,7 @@ export const writeJsonDescriptor: Readonly<{
 // Warnings were encountered during analysis:
 //
 // <declarations>/tools/descriptors/clockTools.d.ts:446:5 - (ae-forgotten-export) The symbol "ToolParams_6" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/invocationTools.d.ts:323:5 - (ae-forgotten-export) The symbol "ToolParams_4" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/invocationTools.d.ts:465:5 - (ae-forgotten-export) The symbol "ToolParams_4" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/lifecycleTools.d.ts:451:5 - (ae-forgotten-export) The symbol "ToolParams_3" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/lifecycleTools.d.ts:885:5 - (ae-forgotten-export) The symbol "PublicAgentDescriptor" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/lifecycleTools.d.ts:919:5 - (ae-forgotten-export) The symbol "UndoTurnPortResult" needs to be exported by the entry point index.d.ts
@@ -5905,7 +6054,7 @@ export const writeJsonDescriptor: Readonly<{
 
 ### `ALL_TOOL_DESCRIPTORS` — variable
 
-Array of all 35 Canonical Tool Descriptors
+Array of all 36 Canonical Tool Descriptors
 
 ### `batch_precall` — variable
 
@@ -6121,9 +6270,9 @@ camelCase alias of `invokeAgentDescriptor`.
 
 ### `invokeAgentDescriptor` — variable
 
-`invoke_agent` descriptor — invoke an agent with a prompt and await the turn.
+`invoke_agent` descriptor — dispatch a turn to another agent and return an invocation id immediately (fire-and-forget).
 
-Args: `agent_id`, `prompt` (both required), optional `timeout_ms`. Recursion depth comes from the trusted `context.currentDepth`, never from params. Delegates to `context.lifecyclePort.invokeAgent()` and throws when that service is missing.
+Args: `agent_id`, `prompt` (both required), optional `timeout_ms`. Recursion depth comes from the trusted `context.currentDepth`, never from params. Delegates to `context.lifecyclePort.invokeAgent()` and throws when that service is missing. The receipt carries the awaitable `invocationId`; the description never promises an in-call await (ticket 3b70d8d) — the caller awaits through `wait_for_invocation` (id-addressed) or `wait_for_agent` (agent-addressed).
 
 Realm identity wiring (Wave I, ticket d57cbc1): the trusted caller resolution (resolveTrustedCaller) forwards the dispatcher-pinned canonical `callerKey` as the invoker reference, and a bare target that only the caller's Realm can disambiguate resolves to its realm-exact canonical key (resolveTargetReference) — so a same-literal-id caller invokes its own Realm's same-literal-id target instead of failing closed. Per-call identity and realm claims are stripped before dispatch and never reach this handler; cross-Realm pairs, bypass ambiguity and unknown ids keep the engine's fail-closed denial semantics.
 
@@ -6441,6 +6590,10 @@ Args: optional `target_turn_id` selector. Delegates to `context.lifecyclePort.un
 
 Array of all 12 Virtual Filesystem (VFS) Tool Descriptors
 
+### `wait_for_agent` — variable
+
+snake_case alias of `waitForAgentDescriptor`.
+
 ### `wait_for_invocation` — variable
 
 snake_case alias of `waitForInvocationDescriptor`.
@@ -6448,6 +6601,20 @@ snake_case alias of `waitForInvocationDescriptor`.
 ### `wait_for_mail` — variable
 
 snake_case alias of `waitForMailDescriptor`.
+
+### `waitForAgent` — variable
+
+camelCase alias of `waitForAgentDescriptor`.
+
+### `waitForAgentDescriptor` — variable
+
+`wait_for_agent` descriptor — agent-addressed completion wait / one-shot completion wake (ticket 17b5c47; the 36th canonical tool).
+
+Args: `agent_id` (required), optional `notify` (default false) and `timeout_ms` (default 10000; wait mode only, 0 = immediate status probe). Delegates to `context.lifecyclePort.waitForAgent()` and throws when that service is missing.
+
+Wait mode suspends the caller's turn until the target agent's next completed turn and returns its bounded output (immediate status when the target is already quiescent; a timeout returns a partial status plus the latest output). Notify mode returns immediately after registering a one-shot completion wake: the settle enqueues one `INVOCATION` trigger to the watcher's own queue (INV-3) carrying the bounded result token in a bare-id-only prompt, and never creates a mailbox envelope (INV-1/INV-2).
+
+Authorization mirrors the invocation engine and is decided by the runtime, never by descriptor params: the caller may watch the target when the target is the caller itself, the caller is the target's registered parent creator, the caller holds `'*'`/`'@lifecycle:authority'`, or the caller is a realm-bypass principal; a non-bypass caller is confined to the target's own realm scope and fails closed on cross-realm or identity-ambiguous pairs. The handler forwards only the trusted identity-only bound caller scope (resolveTrustedCaller) and the realm-exact target resolution (resolveTargetReference); caller-supplied identity, realm, and privilege claims are stripped before dispatch and are never read here.
 
 ### `waitForInvocation` — variable
 
@@ -6525,10 +6692,10 @@ Args: `file_path` (required), exactly one of inline `data` or file-sourced `data
 
 ## Doc coverage
 
-- Top-level exports: 121
-- Declarations (exports + members): 128
-- Documented declarations: 128 / 128 (100%)
+- Top-level exports: 124
+- Declarations (exports + members): 131
+- Documented declarations: 131 / 131 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): `ExecutionContext`, `JsonSchemaDraft07`, `PublicAgentDescriptor`, `PublishingFailure`, `ToolDescriptor`, `ToolParams`, `ToolParams_2`, `ToolParams_3`, `ToolParams_4`, `ToolParams_5`, `ToolParams_6`, `ToolParams_7`, `ToolParams_8`, `UndoTurnPortResult`
-- Unresolved `{@link}` targets (`ae-unresolved-link`): 6 (policy `none`; see `scripts/api_reports.mjs`)
+- Unresolved `{@link}` targets (`ae-unresolved-link`): 8 (policy `none`; see `scripts/api_reports.mjs`)

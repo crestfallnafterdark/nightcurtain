@@ -323,6 +323,80 @@ export type { WaitForInvocationOptions } from '../invocationEngine/index.ts';
 export type { WaitForInvocationRequest } from '../invocationEngine/index.ts';
 
 /**
+ * Options accepted by `waitForAgent()` / `LifecyclePort.waitForAgent()`
+ * (ticket 17b5c47).
+ */
+export interface WaitForAgentOptions {
+  /**
+   * When true, register a one-shot completion wake and return immediately
+   * (`mode: 'notify'`): the watched agent's next completed turn enqueues a
+   * single `INVOCATION` trigger to the watcher's own queue. Notify mode
+   * requires a resolved watcher agent and ignores `timeout_ms`.
+   */
+  notify?: boolean;
+  /**
+   * Wait-mode timeout in milliseconds (default 10000; `0` returns the current
+   * status immediately without registering). Ignored in notify mode.
+   */
+  timeout_ms?: number;
+  /** camelCase alias of `timeout_ms`. */
+  timeoutMs?: number;
+}
+
+/**
+ * Receipt returned by `waitForAgent()` / `LifecyclePort.waitForAgent()`
+ * (ticket 17b5c47).
+ */
+export interface WaitForAgentResult {
+  /** False only for fail-closed receipts (`code`/`error` carry the reason). */
+  success: boolean;
+  /** Bare registered id of the watched target (never a canonical identity key). */
+  agentId?: string;
+  /**
+   * `'completed'` when the wait resolved on the target's settled turn;
+   * otherwise the target's current FSM state at probe/timeout time.
+   */
+  status?: string;
+  /** Bounded latest assistant output (at most 4000 chars plus the truncation marker). */
+  output?: string;
+  /** True when the delivered output was truncated to the bound. */
+  outputTruncated?: boolean;
+  /** Cumulative completed-turn count of the target at receipt time. */
+  turnCount?: number;
+  /** True when the wait returned a partial status at its timeout. */
+  timedOut?: boolean;
+  /** Resolution mode: `'wait'` (blocking) or `'notify'` (one-shot wake registration). */
+  mode?: 'wait' | 'notify';
+  /** Notify-mode one-shot registration id. */
+  subscriptionId?: string;
+  /** True when the target was already quiescent at registration (immediate fire). */
+  alreadySettled?: boolean;
+  /** Human-readable failure reason when `success` is false. */
+  error?: string;
+  /** Machine-readable failure code when `success` is false. */
+  code?: string;
+}
+
+/**
+ * Module-private one-shot watcher registration backing `waitForAgent`.
+ * Internal only: `watcherKey`/`targetKey` are canonical identity keys and are
+ * never projected into a receipt, wake prompt, or listing.
+ */
+interface AgentCompletionWatcher {
+  readonly subscriptionId: string;
+  readonly mode: 'wait' | 'notify';
+  readonly watcherKey: string;
+  readonly watcherDisplayId: string;
+  readonly targetKey: string;
+  readonly targetDisplayId: string;
+  readonly resolve?: (result: WaitForAgentResult) => void;
+  readonly timeoutHandle?: ReturnType<typeof setTimeout> | null;
+}
+
+/** Max characters of target output carried by a wait receipt or notify wake. */
+const AGENT_COMPLETION_OUTPUT_MAX_CHARS = 4000;
+
+/**
  * Options passed when awaiting mailbox message delivery via `waitForMail()`.
  *
  * Re-exported from the canonical messaging bus contract (`messagingBus`):
@@ -1033,6 +1107,19 @@ export interface LifecyclePort {
    * its target, or a Realm-bypass principal.
    */
   waitForInvocation(optionsOrIds: object | string[] | string, options?: object, context?: object): Promise<WaitForInvocationResult>;
+  /**
+   * Waits for another agent's next settled turn (bounded output), or registers
+   * a one-shot completion wake, via `AgentRuntime.waitForAgent` (ticket
+   * 17b5c47).
+   *
+   * Agent-facing port path: the trusted `context` carries the identity-only
+   * caller scope. A call with no caller context is caller-scoped but
+   * unresolved and therefore fails closed with `PERMISSION_DENIED`; a resolved
+   * caller must be the target itself, the target's registered parent creator,
+   * an `'*'`/`'@lifecycle:authority'` holder, or a Realm-bypass principal, and
+   * a non-bypass caller stays confined to its own Realm scope.
+   */
+  waitForAgent(targetAgentId: string, options?: object, context?: object): Promise<WaitForAgentResult>;
   /** Launches an agent via `AgentRuntime.launchAgent`, forwarding any extra positional arguments after `config`. */
   launchAgent(config: object, ...rest: unknown[]): Promise<Agent>;
   /**
@@ -1412,6 +1499,15 @@ export class AgentRuntime {
    * `TURN_DROPPED` coded error instead of leaving it stranded.
    */
   #userTurnWaiters: Map<string, PendingUserTurnWaiter> = new Map();
+
+  /**
+   * One-shot agent-completion watchers keyed by the watched target's canonical
+   * `(realmId, agentId)` identity key (ticket 17b5c47). Settled on the target's
+   * next `turn_complete` exactly once, then evicted; watcher/target lifecycle
+   * teardown drops registrations (a killed watcher never fires). Internal only —
+   * canonical keys never reach a receipt, prompt, or listing.
+   */
+  #agentCompletionWatchers: Map<string, Set<AgentCompletionWatcher>> = new Map();
 
   /** Unsubscriber for the runtime-level bus timer listener. */
   #busTimerListener: (() => void) | null = null;
@@ -2473,6 +2569,7 @@ export class AgentRuntime {
       null,
       createRuntimeError('Runtime reset before the queued user turn was dispatched', 'ERR_RUNTIME_NOT_READY')
     );
+    this.#clearAgentCompletionWatchers('Runtime reset before the agent completion was observed');
     this.cancelAll('Runtime reset', { principal: this.#internalPrincipal });
 
     // MOD-20: drop the catalog subscription across the reset so no listener
@@ -2535,6 +2632,7 @@ export class AgentRuntime {
       null,
       createRuntimeError('Runtime destroyed before the queued user turn was dispatched', 'ERR_RUNTIME_DESTROYED')
     );
+    this.#clearAgentCompletionWatchers('Runtime destroyed before the agent completion was observed');
 
     if (this.#busTimerListener && typeof this.#busTimerListener === 'function') {
       try {
@@ -3207,6 +3305,516 @@ export class AgentRuntime {
   }
 
   /**
+   * Agent-addressed completion primitive (ticket 17b5c47): waits for another
+   * agent's next completed turn and returns its bounded output, or registers a
+   * one-shot completion wake.
+   *
+   * Authorization mirrors the invocation engine and is resolved here, never
+   * from caller data: the caller may watch the target when the target is the
+   * caller itself, the caller is the target's registered parent creator
+   * (`spawnedBy`/`creatorId`), the caller holds `'*'` or
+   * `'@lifecycle:authority'`, or the caller is a Realm-bypass principal. A
+   * non-bypass caller is confined to the target's own Realm scope and fails
+   * closed on cross-realm or identity-ambiguous pairs. A call with no caller
+   * context is the composition-root/host path (wait mode only; notify needs a
+   * resolved watcher agent).
+   *
+   * Wait mode resolves on the target's next `turn_complete` (immediate status
+   * when the target has no in-flight turn and no pending trigger) and returns
+   * the bounded latest output; a timeout returns a partial status with the
+   * latest output. Notify mode enqueues exactly one `INVOCATION` trigger to the
+   * watcher's own queue when the target settles (INV-3; a busy watcher queues
+   * it), carries the result token in a bare-id-only prompt, and never creates a
+   * mailbox envelope (INV-1/INV-2). Registrations are one-shot, keyed by the
+   * canonical target identity, and dropped when either agent is killed,
+   * recycled, or purged; the runtime reset/destroy paths clear them.
+   *
+   * @param targetAgentId - Bare id or canonical identity key of the target.
+   * @param options - `{ notify, timeout_ms/timeoutMs }`.
+   * @param callerContext - Identity-only trusted caller context (`callerAgentId`/`callerKey`/`principal`).
+   * @returns The {@link WaitForAgentResult} receipt.
+   */
+  async waitForAgent(
+    targetAgentId: string,
+    options: WaitForAgentOptions = {},
+    callerContext: (CallerContext & { principal?: InternalPrincipal | AuthorityDescriptor }) | null = null
+  ): Promise<WaitForAgentResult> {
+    this.#assertNotDestroyed();
+    const targetRef = typeof targetAgentId === 'string' ? targetAgentId.trim() : '';
+    if (!targetRef) {
+      return {
+        success: false,
+        error: "Missing required string 'agent_id'",
+        code: 'INVALID_ARGUMENTS'
+      };
+    }
+    const targetAgent = this.#resolveActiveAgentByIdentity(targetRef);
+    if (!targetAgent) {
+      // A recycled record is a terminated target; an absent record is not
+      // found. (`isAgentTerminated` also reports absent ids, so it cannot
+      // distinguish the two on its own.)
+      const recycled = this.#recycledByRef(targetRef) !== null;
+      return {
+        success: false,
+        error: recycled
+          ? `Cannot wait for terminated agent '${this.#displayRef(targetRef)}'`
+          : `Target agent '${this.#displayRef(targetRef)}' not found`,
+        code: recycled ? 'AGENT_TERMINATED' : 'AGENT_NOT_FOUND'
+      };
+    }
+    const targetKey = this.#agentIdentityKeyOf(targetAgent);
+    const targetDisplayId = targetAgent.id;
+    if (this.isAgentTerminated(targetKey)) {
+      return {
+        success: false,
+        error: `Cannot wait for terminated agent '${targetDisplayId}'`,
+        code: 'AGENT_TERMINATED'
+      };
+    }
+
+    const authorization = this.#authorizeAgentWatch(callerContext, targetAgent, targetKey, targetDisplayId);
+    if (!authorization.allowed) {
+      return { success: false, error: authorization.error, code: 'PERMISSION_DENIED' };
+    }
+
+    const notify = options?.notify === true;
+    const rawTimeout = typeof options?.timeout_ms === 'number'
+      ? options.timeout_ms
+      : (typeof options?.timeoutMs === 'number' ? options.timeoutMs : undefined);
+    if (rawTimeout !== undefined && (!Number.isInteger(rawTimeout) || rawTimeout < 0)) {
+      return {
+        success: false,
+        error: "Invalid 'timeout_ms': must be a non-negative integer",
+        code: 'INVALID_ARGUMENTS'
+      };
+    }
+    const timeoutMs = rawTimeout ?? 10000;
+
+    if (notify) {
+      if (!authorization.watcherKey) {
+        return {
+          success: false,
+          error: 'notify mode requires a resolved watcher agent',
+          code: 'INVALID_ARGUMENTS'
+        };
+      }
+      const subscriptionId = this.#mintAgentCompletionSubscriptionId();
+      const watcher: AgentCompletionWatcher = {
+        subscriptionId,
+        mode: 'notify',
+        watcherKey: authorization.watcherKey,
+        watcherDisplayId: authorization.watcherDisplayId || targetDisplayId,
+        targetKey,
+        targetDisplayId,
+        timeoutHandle: null
+      };
+      if (this.#isAgentCompletionQuiescent(targetKey, targetDisplayId)) {
+        const latest = this.#latestAgentOutput(targetAgent);
+        this.#enqueueAgentCompletionWake(watcher, {
+          output: latest.text,
+          outputTruncated: latest.truncated,
+          turnCount: targetAgent.turnCount,
+          targetDisplayId
+        });
+        return {
+          success: true,
+          agentId: targetDisplayId,
+          mode: 'notify',
+          subscriptionId,
+          alreadySettled: true
+        };
+      }
+      this.#registerAgentCompletionWatcher(targetKey, watcher);
+      return {
+        success: true,
+        agentId: targetDisplayId,
+        mode: 'notify',
+        subscriptionId,
+        alreadySettled: false
+      };
+    }
+
+    if (timeoutMs === 0 || this.#isAgentCompletionQuiescent(targetKey, targetDisplayId)) {
+      return this.#buildAgentWaitReceipt(targetAgent, false, true);
+    }
+
+    return new Promise<WaitForAgentResult>((resolve) => {
+      const watcher: AgentCompletionWatcher = {
+        subscriptionId: this.#mintAgentCompletionSubscriptionId(),
+        mode: 'wait',
+        watcherKey: authorization.watcherKey || targetKey,
+        watcherDisplayId: authorization.watcherDisplayId || targetDisplayId,
+        targetKey,
+        targetDisplayId,
+        resolve,
+        timeoutHandle: setTimeout(() => {
+          this.#removeAgentCompletionWatcher(targetKey, watcher);
+          const current = this.#resolveActiveAgentByIdentity(targetKey) || targetAgent;
+          resolve(this.#buildAgentWaitReceipt(current, true, false));
+        }, timeoutMs)
+      };
+      this.#registerAgentCompletionWatcher(targetKey, watcher);
+    });
+  }
+
+  /**
+   * Authorizes an agent-addressed watch (ticket 17b5c47) from the trusted
+   * identity-only caller scope. Mirrors the invocation-engine gate: self,
+   * registered parent creator, `'*'`/`'@lifecycle:authority'`, or a
+   * Realm-bypass principal; non-bypass callers are realm-confined and any
+   * unresolvable/ambiguous caller fails closed. Never reads caller-asserted
+   * flags beyond the identity-only scope channels.
+   *
+   * @param callerContext - Identity-only caller context (or `null` for the host path).
+   * @param targetAgent - Resolved target entity.
+   * @param targetKey - Canonical identity key of the target.
+   * @param targetDisplayId - Bare registered id of the target.
+   * @returns The authorization verdict plus the resolved watcher identity.
+   */
+  #authorizeAgentWatch(
+    callerContext: (CallerContext & { principal?: InternalPrincipal | AuthorityDescriptor }) | null,
+    targetAgent: Agent,
+    targetKey: string,
+    targetDisplayId: string
+  ): { allowed: true; watcherKey: string | null; watcherDisplayId: string | null } | { allowed: false; error: string } {
+    // Composition-root/host path: no caller channel at all (the agent-facing
+    // port always supplies a context object, so this is the operator path).
+    if (!callerContext || typeof callerContext !== 'object') {
+      return { allowed: true, watcherKey: null, watcherDisplayId: null };
+    }
+    const source = callerContext as {
+      principal?: unknown;
+      callerAgentId?: unknown;
+      agentId?: unknown;
+      callerKey?: unknown;
+    };
+    if (source.principal === this.#internalPrincipal) {
+      return { allowed: true, watcherKey: null, watcherDisplayId: null };
+    }
+
+    const identityPort = this.createAgentIdentityPort();
+    const pinnedKey = typeof source.callerKey === 'string' && source.callerKey ? source.callerKey : null;
+    const claimedId = typeof source.callerAgentId === 'string' && source.callerAgentId
+      ? source.callerAgentId
+      : (typeof source.agentId === 'string' && source.agentId ? source.agentId : null);
+    let watcher = pinnedKey ? identityPort.getAgentIdentity(pinnedKey) : null;
+    if (!watcher && claimedId) watcher = identityPort.getAgentIdentity(claimedId);
+    if (!watcher) {
+      return { allowed: false, error: 'Permission denied: the caller identity could not be resolved' };
+    }
+
+    const allow = watcher.authority?.allow;
+    const isAuthorityHolder = Boolean(allow && (allow.has('*') || allow.has('@lifecycle:authority')));
+    const isSelf = watcher.key === targetKey;
+    const targetConfig = targetAgent.config as { spawnedBy?: unknown; creatorId?: unknown } | null | undefined;
+    const targetEntity = targetAgent as unknown as { spawnedBy?: unknown; creatorId?: unknown };
+    const isWatcherReference = (reference: unknown): boolean => (
+      typeof reference === 'string'
+      && reference.length > 0
+      && (reference === watcher.key || reference === watcher.id || reference === claimedId || reference === pinnedKey)
+    );
+    const isParent = isWatcherReference(targetConfig?.spawnedBy)
+      || isWatcherReference(targetConfig?.creatorId)
+      || isWatcherReference(targetEntity.spawnedBy)
+      || isWatcherReference(targetEntity.creatorId);
+
+    if (!isAuthorityHolder && !isSelf && !isParent) {
+      return {
+        allowed: false,
+        error: `Permission denied: agent '${watcher.id}' cannot watch agent '${targetDisplayId}' (must be the target itself, its parent creator, or hold lifecycle authority)`
+      };
+    }
+
+    // Realm confinement, one-way bypass (mirrors the invocation engine): a
+    // non-bypass caller never watches a foreign realm or a bypass subject.
+    if (watcher.realmBypass !== true) {
+      const targetProjection = this.#buildIdentityProjection(targetAgent);
+      if (targetProjection.realmBypass === true || watcher.realmId !== targetProjection.realmId) {
+        return {
+          allowed: false,
+          error: `Permission denied: agent '${watcher.id}' cannot watch agent '${targetDisplayId}' across Realm scopes`
+        };
+      }
+    }
+
+    return { allowed: true, watcherKey: watcher.key, watcherDisplayId: watcher.id };
+  }
+
+  /**
+   * Quiescence predicate for an immediate-fire completion registration: the
+   * target has no in-flight turn and no queued trigger. The canonical key and
+   * the bare display id are both probed so canonically and bare-keyed pending
+   * triggers are seen alike.
+   *
+   * @param targetKey - Canonical identity key of the target.
+   * @param targetDisplayId - Bare registered id of the target.
+   * @returns True when the target has no pending work.
+   */
+  #isAgentCompletionQuiescent(targetKey: string, targetDisplayId: string): boolean {
+    if (!this.#triggerQueue) return !this.isAgentBusy(targetKey);
+    return !this.isAgentBusy(targetKey)
+      && this.#triggerQueue.getPendingCount(targetKey) === 0
+      && this.#triggerQueue.getPendingCount(targetDisplayId) === 0;
+  }
+
+  /**
+   * Builds the bounded wait receipt for the target's current state.
+   *
+   * @param agent - Resolved target entity.
+   * @param timedOut - True for a timeout partial receipt.
+   * @param alreadySettled - True for an immediate-quiescent/probe receipt.
+   * @returns The {@link WaitForAgentResult} receipt.
+   */
+  #buildAgentWaitReceipt(agent: Agent, timedOut: boolean, alreadySettled: boolean): WaitForAgentResult {
+    const latest = this.#latestAgentOutput(agent);
+    return {
+      success: true,
+      agentId: agent.id,
+      status: timedOut || alreadySettled ? agent.state : 'completed',
+      output: latest.text,
+      outputTruncated: latest.truncated,
+      turnCount: agent.turnCount,
+      timedOut,
+      mode: 'wait',
+      ...(alreadySettled ? { alreadySettled: true } : {})
+    };
+  }
+
+  /**
+   * Latest assistant output of an agent (most recent non-empty assistant
+   * message), bounded to {@link AGENT_COMPLETION_OUTPUT_MAX_CHARS}.
+   *
+   * @param agent - Resolved target entity.
+   * @returns The bounded output and its truncation flag.
+   */
+  #latestAgentOutput(agent: Agent): { text: string; truncated: boolean } {
+    const history = Array.isArray(agent.history) ? agent.history : [];
+    for (let index = history.length - 1; index >= 0; index -= 1) {
+      const message = history[index];
+      if (!message || message.role !== 'assistant') continue;
+      const content = typeof message.content === 'string' ? message.content : '';
+      if (!content) continue;
+      return this.#boundAgentCompletionOutput(content);
+    }
+    return { text: '', truncated: false };
+  }
+
+  /**
+   * Enforces the completion-output bound (4000 chars + truncation marker).
+   *
+   * @param text - Raw output text.
+   * @returns The bounded output and its truncation flag.
+   */
+  #boundAgentCompletionOutput(text: string): { text: string; truncated: boolean } {
+    if (text.length <= AGENT_COMPLETION_OUTPUT_MAX_CHARS) return { text, truncated: false };
+    return {
+      text: `${text.slice(0, AGENT_COMPLETION_OUTPUT_MAX_CHARS)}\n… [truncated]`,
+      truncated: true
+    };
+  }
+
+  /** Mints a notify-mode one-shot registration id. */
+  #mintAgentCompletionSubscriptionId(): string {
+    return (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
+      ? `sub_${crypto.randomUUID()}`
+      : `sub_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+  }
+
+  /**
+   * Registers a one-shot completion watcher under the target's canonical key.
+   *
+   * @param targetKey - Canonical identity key of the target.
+   * @param watcher - Registration record.
+   */
+  #registerAgentCompletionWatcher(targetKey: string, watcher: AgentCompletionWatcher): void {
+    const existing = this.#agentCompletionWatchers.get(targetKey);
+    if (existing) {
+      existing.add(watcher);
+      return;
+    }
+    this.#agentCompletionWatchers.set(targetKey, new Set([watcher]));
+  }
+
+  /**
+   * Removes one registration (timeout path) without settling it.
+   *
+   * @param targetKey - Canonical identity key of the target.
+   * @param watcher - Registration record.
+   */
+  #removeAgentCompletionWatcher(targetKey: string, watcher: AgentCompletionWatcher): void {
+    const existing = this.#agentCompletionWatchers.get(targetKey);
+    if (!existing) return;
+    existing.delete(watcher);
+    if (existing.size === 0) this.#agentCompletionWatchers.delete(targetKey);
+  }
+
+  /**
+   * Settles one watcher on the target's completed turn: resolve the waiter, or
+   * enqueue the one-shot completion wake.
+   *
+   * @param watcher - Registration record.
+   * @param detail - Bounded output and identity detail of the settled turn.
+   */
+  #settleAgentCompletionWatcher(
+    watcher: AgentCompletionWatcher,
+    detail: { output: string; outputTruncated: boolean; turnCount: number; targetDisplayId: string }
+  ): void {
+    if (watcher.timeoutHandle) clearTimeout(watcher.timeoutHandle);
+    if (watcher.mode === 'notify') {
+      this.#enqueueAgentCompletionWake(watcher, detail);
+      return;
+    }
+    try {
+      watcher.resolve?.({
+        success: true,
+        agentId: detail.targetDisplayId,
+        status: 'completed',
+        output: detail.output,
+        outputTruncated: detail.outputTruncated,
+        turnCount: detail.turnCount,
+        timedOut: false,
+        mode: 'wait'
+      });
+    } catch {
+      // A throwing continuation never breaks the emit loop.
+    }
+  }
+
+  /**
+   * Enqueues the one-shot completion wake into the watcher's own queue
+   * (INV-3): one `INVOCATION` trigger, source `system:agent-completion`, with a
+   * bare-id-only prompt carrying the bounded result token. No mailbox
+   * envelope is ever created (INV-1/INV-2).
+   *
+   * @param watcher - Notify-mode registration record.
+   * @param detail - Bounded output and identity detail of the settled turn.
+   */
+  #enqueueAgentCompletionWake(
+    watcher: AgentCompletionWatcher,
+    detail: { output: string; outputTruncated: boolean; turnCount: number; targetDisplayId: string }
+  ): void {
+    if (this.isAgentTerminated(watcher.watcherKey)) return;
+    const prompt = [
+      `[AGENT COMPLETE] agent '${detail.targetDisplayId}' finished its pending work.`,
+      `Turns: ${detail.turnCount}. Last output:`,
+      '---',
+      detail.output || '(no output)'
+    ].join('\n');
+    try {
+      this.#triggerQueue.enqueue({
+        type: TRIGGER_TYPES.INVOCATION,
+        targetAgentId: watcher.watcherKey,
+        source: 'system:agent-completion',
+        payload: { prompt, options: {} }
+      });
+    } catch (err) {
+      console.error(`Agent completion wake enqueue failed for '${watcher.watcherDisplayId}':`, err);
+    }
+  }
+
+  /**
+   * Drops every registration involving a killed/recycled/purged agent: a
+   * terminated watcher never fires, and a terminated target resolves pending
+   * waiters fail-closed.
+   *
+   * @param agentId - Bare agent id carried by the lifecycle event.
+   */
+  #dropAgentCompletionWatchers(agentId: string): void {
+    for (const [targetKey, watchers] of [...this.#agentCompletionWatchers.entries()]) {
+      for (const watcher of [...watchers]) {
+        const isWatcher = watcher.watcherKey === agentId || watcher.watcherDisplayId === agentId;
+        const isTarget = watcher.targetKey === agentId || watcher.targetDisplayId === agentId;
+        if (!isWatcher && !isTarget) continue;
+        watchers.delete(watcher);
+        if (watcher.timeoutHandle) clearTimeout(watcher.timeoutHandle);
+        if (watcher.mode === 'wait' && watcher.resolve) {
+          try {
+            watcher.resolve({
+              success: false,
+              agentId: watcher.targetDisplayId,
+              code: 'AGENT_TERMINATED',
+              error: isWatcher
+                ? 'the watching agent was terminated before completion'
+                : 'the watched agent was terminated before completion'
+            });
+          } catch {
+            // Best-effort settlement; the registration is dropped either way.
+          }
+        }
+      }
+      if (watchers.size === 0) this.#agentCompletionWatchers.delete(targetKey);
+    }
+  }
+
+  /**
+   * Clears every completion registration (runtime reset/destroy).
+   *
+   * @param reason - Failure reason delivered to pending waiters.
+   */
+  #clearAgentCompletionWatchers(reason: string): void {
+    for (const watchers of [...this.#agentCompletionWatchers.values()]) {
+      for (const watcher of watchers) {
+        if (watcher.timeoutHandle) clearTimeout(watcher.timeoutHandle);
+        if (watcher.mode === 'wait' && watcher.resolve) {
+          try {
+            watcher.resolve({
+              success: false,
+              agentId: watcher.targetDisplayId,
+              code: 'EXECUTION_FAILED',
+              error: reason
+            });
+          } catch {
+            // Best-effort settlement; the registry is cleared either way.
+          }
+        }
+      }
+    }
+    this.#agentCompletionWatchers.clear();
+  }
+
+  /**
+   * Completion-pipe router (ticket 17b5c47), fed by `#emit`: a target's
+   * `turn_complete` settles its one-shot watchers (resolve waiters / enqueue
+   * notify wakes); a lifecycle teardown drops the involving registrations.
+   * Canonical-key resolution fails closed on an ambiguous bare id (no watcher
+   * fires rather than a wrong one).
+   *
+   * @param event - Runtime event being broadcast.
+   */
+  #handleAgentCompletionEvent(event: RuntimeEvent): void {
+    if (!event || typeof event !== 'object') return;
+    const agentId = typeof event.agentId === 'string' && event.agentId ? event.agentId : null;
+    if (!agentId) return;
+    if (event.type === 'turn_complete') {
+      if (this.#agentCompletionWatchers.size === 0) return;
+      const targetAgent = this.#resolveActiveAgentByIdentity(agentId);
+      if (!targetAgent) return;
+      const targetKey = this.#agentIdentityKeyOf(targetAgent);
+      const watchers = this.#agentCompletionWatchers.get(targetKey);
+      if (!watchers || watchers.size === 0) return;
+      this.#agentCompletionWatchers.delete(targetKey);
+      const payload = event.payload && typeof event.payload === 'object' ? event.payload : {};
+      const payloadOutput = typeof payload.output === 'string' && payload.output
+        ? payload.output
+        : this.#latestAgentOutput(targetAgent).text;
+      const bounded = this.#boundAgentCompletionOutput(payloadOutput);
+      const turnCount = typeof payload.turnCount === 'number' ? payload.turnCount : targetAgent.turnCount;
+      for (const watcher of [...watchers]) {
+        this.#settleAgentCompletionWatcher(watcher, {
+          output: bounded.text,
+          outputTruncated: bounded.truncated,
+          turnCount,
+          targetDisplayId: targetAgent.id
+        });
+      }
+      return;
+    }
+    if (event.type === 'agent_killed' || event.type === 'agent_purged' || event.type === 'agent_recycled') {
+      this.#dropAgentCompletionWatchers(agentId);
+    }
+  }
+
+  /**
    * Halts caller execution until specified sender(s) deliver messages to the target agent inbox.
    */
   async waitForMail(
@@ -3604,6 +4212,13 @@ export class AgentRuntime {
         console.error('Error in AgentRuntime event listener:', err);
       }
     }
+    // Completion pipe (ticket 17b5c47): internal one-shot watcher routing runs
+    // outside the public listener set, so a listener clear never disables it.
+    try {
+      this.#handleAgentCompletionEvent(event);
+    } catch (err) {
+      console.error('Error in AgentRuntime completion routing:', err);
+    }
   }
 
   /**
@@ -3666,6 +4281,11 @@ export class AgentRuntime {
       // context is coerced to the empty (unauthenticated) caller scope.
       waitForInvocation: (optionsOrIds: string | string[] | WaitForInvocationRequest, maybeOptions: WaitForInvocationOptions = {}, context?: object | null) =>
         this.waitForInvocation(optionsOrIds, maybeOptions, context ?? {}),
+      // Agent-facing completion pipe (ticket 17b5c47): the port call is
+      // caller-scoped even when the descriptor forwards no identity (an
+      // unauthenticated `{}` scope fails closed), never the host path.
+      waitForAgent: (targetAgentId: string, waitOptions: WaitForAgentOptions = {}, context?: object | null) =>
+        this.waitForAgent(targetAgentId, waitOptions, (context ?? {}) as CallerContext & { principal?: InternalPrincipal | AuthorityDescriptor }),
       launchAgent: (config: (LaunchAgentOptions & { principal?: InternalPrincipal | AuthorityDescriptor }) | AgentConfig, ...rest: unknown[]) => this.launchAgent(config, ...rest),
       killAgent: (agentId: string, reason: string = 'Terminated', callerContext: (CallerContext & { principal?: InternalPrincipal | AuthorityDescriptor }) | null = null) => Boolean(this.killAgent(agentId, reason, callerContext)),
       // Operator/host calls (no context) forward `options` unchanged and stay

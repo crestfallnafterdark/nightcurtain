@@ -476,6 +476,17 @@ export const TOOL_ALIAS_MAP: Readonly<Record<string, string>> = Object.freeze({
   'await_invocation': SANDBOX_TOOLS.WAIT_FOR_INVOCATION,
   'awaitInvocation': SANDBOX_TOOLS.WAIT_FOR_INVOCATION,
 
+  // wait_for_agent
+  'wait_for_agent': SANDBOX_TOOLS.WAIT_FOR_AGENT,
+  'waitForAgent': SANDBOX_TOOLS.WAIT_FOR_AGENT,
+  'runtime_waitForAgent': SANDBOX_TOOLS.WAIT_FOR_AGENT,
+  'runtime.waitForAgent': SANDBOX_TOOLS.WAIT_FOR_AGENT,
+  'runtimeWaitForAgent': SANDBOX_TOOLS.WAIT_FOR_AGENT,
+  'wait_agent': SANDBOX_TOOLS.WAIT_FOR_AGENT,
+  'waitAgent': SANDBOX_TOOLS.WAIT_FOR_AGENT,
+  'await_agent': SANDBOX_TOOLS.WAIT_FOR_AGENT,
+  'awaitAgent': SANDBOX_TOOLS.WAIT_FOR_AGENT,
+
   // --- Scheduler Primitives ---
 
   // schedule

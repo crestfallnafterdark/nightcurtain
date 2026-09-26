@@ -141,6 +141,7 @@ export const MESSAGE_PASSING_EXCLUSIONS: ReadonlySet<string> = Object.freeze(new
   // Invocations and lifecycle tools
   'runtime_invokeAgent', 'runtimeInvokeAgent', 'invoke_agent', 'invokeAgent',
   'runtime_waitForInvocation', 'runtimeWaitForInvocation', 'wait_for_invocation', 'waitForInvocation',
+  'runtime_waitForAgent', 'runtimeWaitForAgent', 'wait_for_agent', 'waitForAgent',
   'runtime_spawnAgent', 'runtimeSpawnAgent', 'spawn_agent', 'spawnAgent',
   'runtime_killAgent', 'runtimeKillAgent', 'kill_agent', 'killAgent',
   // Message transmission tools (receipts only)

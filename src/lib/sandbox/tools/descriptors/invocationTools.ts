@@ -50,6 +50,11 @@ interface LifecyclePortView {
     options: Record<string, unknown>,
     scope?: CallerScope
   ): unknown;
+  waitForAgent(
+    targetAgentId: unknown,
+    options: Record<string, unknown>,
+    scope?: CallerScope
+  ): unknown;
 }
 
 /**
@@ -199,12 +204,16 @@ const invokeAgentParamAliasMap = Object.freeze({
 });
 
 /**
- * `invoke_agent` descriptor — invoke an agent with a prompt and await the turn.
+ * `invoke_agent` descriptor — dispatch a turn to another agent and return an
+ * invocation id immediately (fire-and-forget).
  *
  * Args: `agent_id`, `prompt` (both required), optional `timeout_ms`. Recursion
  * depth comes from the trusted `context.currentDepth`, never from params.
  * Delegates to `context.lifecyclePort.invokeAgent()` and throws when that
- * service is missing.
+ * service is missing. The receipt carries the awaitable `invocationId`; the
+ * description never promises an in-call await (ticket 3b70d8d) — the caller
+ * awaits through `wait_for_invocation` (id-addressed) or `wait_for_agent`
+ * (agent-addressed).
  *
  * Realm identity wiring (Wave I, ticket d57cbc1): the trusted caller resolution
  * ({@link resolveTrustedCaller}) forwards the dispatcher-pinned canonical
@@ -218,7 +227,7 @@ const invokeAgentParamAliasMap = Object.freeze({
  */
 export const invokeAgentDescriptor = Object.freeze({
   name: SANDBOX_TOOLS.INVOKE_AGENT,
-  description: 'Directly invoke an agent to execute a turn with a prompt and await completion.',
+  description: 'Dispatch a turn to another agent. Returns an invocation id immediately (fire-and-forget); call wait_for_invocation with that id to await the result, or wait_for_agent to await the target agent directly.',
   schema: Object.freeze({
     type: 'object',
     properties: {
@@ -365,10 +374,107 @@ export const waitForInvocation = waitForInvocationDescriptor;
 /** snake_case alias of `waitForInvocationDescriptor`. */
 export const wait_for_invocation = waitForInvocationDescriptor;
 
+// --- 3. wait_for_agent ---
+const waitForAgentParamAliasMap = Object.freeze({
+  agent_id: 'agent_id',
+  agentId: 'agent_id',
+  target_agent_id: 'agent_id',
+  targetAgentId: 'agent_id',
+  id: 'agent_id',
+  notify: 'notify',
+  timeout_ms: 'timeout_ms',
+  timeoutMs: 'timeout_ms',
+  timeout: 'timeout_ms'
+});
+
+/**
+ * `wait_for_agent` descriptor — agent-addressed completion wait / one-shot
+ * completion wake (ticket 17b5c47; the 36th canonical tool).
+ *
+ * Args: `agent_id` (required), optional `notify` (default false) and
+ * `timeout_ms` (default 10000; wait mode only, 0 = immediate status probe).
+ * Delegates to `context.lifecyclePort.waitForAgent()` and throws when that
+ * service is missing.
+ *
+ * Wait mode suspends the caller's turn until the target agent's next completed
+ * turn and returns its bounded output (immediate status when the target is
+ * already quiescent; a timeout returns a partial status plus the latest
+ * output). Notify mode returns immediately after registering a one-shot
+ * completion wake: the settle enqueues one `INVOCATION` trigger to the
+ * watcher's own queue (INV-3) carrying the bounded result token in a
+ * bare-id-only prompt, and never creates a mailbox envelope (INV-1/INV-2).
+ *
+ * Authorization mirrors the invocation engine and is decided by the runtime,
+ * never by descriptor params: the caller may watch the target when the target
+ * is the caller itself, the caller is the target's registered parent creator,
+ * the caller holds `'*'`/`'@lifecycle:authority'`, or the caller is a
+ * realm-bypass principal; a non-bypass caller is confined to the target's own
+ * realm scope and fails closed on cross-realm or identity-ambiguous pairs.
+ * The handler forwards only the trusted identity-only bound caller scope
+ * ({@link resolveTrustedCaller}) and the realm-exact target resolution
+ * ({@link resolveTargetReference}); caller-supplied identity, realm, and
+ * privilege claims are stripped before dispatch and are never read here.
+ */
+export const waitForAgentDescriptor = Object.freeze({
+  name: SANDBOX_TOOLS.WAIT_FOR_AGENT,
+  description: "Wait for another agent's pending work to finish (blocks this turn), or register a one-shot completion wake (notify) that starts a new turn on this agent when the target finishes. Use wait_for_invocation when you already hold an invocation id.",
+  schema: Object.freeze({
+    type: 'object',
+    properties: {
+      agent_id: {
+        type: 'string',
+        description: 'Target agent ID to watch (bare id or realm-exact reference).'
+      },
+      notify: {
+        type: 'boolean',
+        description: 'When true, register a one-shot completion wake and return immediately instead of blocking.'
+      },
+      timeout_ms: {
+        type: 'integer',
+        description: 'Maximum time to wait in milliseconds (wait mode only; 0 returns the current status immediately).'
+      }
+    },
+    required: ['agent_id'],
+    additionalProperties: false
+  }),
+  paramAliasMap: waitForAgentParamAliasMap,
+  sanitize: createParamSanitizer(waitForAgentParamAliasMap),
+  handler: async (params: ToolParams | string, context: ExecutionContext) => {
+    const lifecyclePort: LifecyclePortView | undefined = context?.lifecyclePort;
+    if (!lifecyclePort || typeof lifecyclePort.waitForAgent !== 'function') {
+      throw new Error('lifecyclePort service is not available in execution context');
+    }
+    // Trusted caller resolution: identity-only scope pinned from bound
+    // construction; the resolved realm context scopes a bare same-id target
+    // realm-exactly (see resolveTrustedCaller/resolveTargetReference).
+    const caller = resolveTrustedCaller(context);
+    const scope = caller ? caller.scope : null;
+    const rawTargetAgentId = typeof params === 'object' ? (params?.agent_id || params?.agentId || params?.target_agent_id) : params;
+    const targetAgentId = caller
+      ? resolveTargetReference(context?.identityPort, rawTargetAgentId, caller)
+      : rawTargetAgentId;
+    const waitOptions: Record<string, unknown> = {};
+    if (typeof params === 'object' && typeof params?.notify === 'boolean') waitOptions.notify = params.notify;
+    if (typeof params === 'object' && typeof params?.timeout_ms === 'number') waitOptions.timeout_ms = params.timeout_ms;
+    return await lifecyclePort.waitForAgent(
+      targetAgentId,
+      waitOptions,
+      // A bound caller forwards its identity-only scope; an unbound caller
+      // forwards `undefined`, which the agent-facing port fails closed.
+      scope ?? undefined
+    );
+  }
+});
+/** camelCase alias of `waitForAgentDescriptor`. */
+export const waitForAgent = waitForAgentDescriptor;
+/** snake_case alias of `waitForAgentDescriptor`. */
+export const wait_for_agent = waitForAgentDescriptor;
+
 /**
  * Array of all Invocation Tool Descriptors
  */
 export const invocationToolDescriptors = Object.freeze([
   invokeAgentDescriptor,
-  waitForInvocationDescriptor
+  waitForInvocationDescriptor,
+  waitForAgentDescriptor
 ]);

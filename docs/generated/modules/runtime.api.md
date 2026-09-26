@@ -289,6 +289,9 @@ export class AgentRuntime {
     updateHistoryMessage(agentId: string, messageIndexOrId: number | string, updatedFields: string | MessageUpdateFields): HistoryMessage;
     // Warning: (ae-forgotten-export) The symbol "VirtualFS" needs to be exported by the entry point index.d.ts
     get virtualFs(): VirtualFS;
+    waitForAgent(targetAgentId: string, options?: WaitForAgentOptions, callerContext?: (CallerContext & {
+        principal?: InternalPrincipal | AuthorityDescriptor;
+    }) | null): Promise<WaitForAgentResult>;
     waitForInvocation(optionsOrIds: string | string[] | WaitForInvocationRequest, maybeOptions?: WaitForInvocationOptions, callerContext?: (CallerContext & {
         principal?: InternalPrincipal | AuthorityDescriptor;
     }) | null): Promise<WaitForInvocationResult>;
@@ -479,6 +482,7 @@ export interface LifecyclePort {
     restoreAgent(agentId: string, callerContext?: object | null): Agent;
     schedule(params: object, context?: object): object;
     undoAgentTurn(agentId: string, targetTurnId?: string | null): UndoResult | UndoTurnSelectionFailure;
+    waitForAgent(targetAgentId: string, options?: object, context?: object): Promise<WaitForAgentResult>;
     waitForInvocation(optionsOrIds: object | string[] | string, options?: object, context?: object): Promise<WaitForInvocationResult>;
     whoami(agentId: string): AgentIdentityDescriptor;
 }
@@ -713,6 +717,29 @@ export interface UnstickResult {
 
 // @public
 export type UnsubscribeFn = () => void;
+
+// @public
+export interface WaitForAgentOptions {
+    notify?: boolean;
+    timeout_ms?: number;
+    timeoutMs?: number;
+}
+
+// @public
+export interface WaitForAgentResult {
+    agentId?: string;
+    alreadySettled?: boolean;
+    code?: string;
+    error?: string;
+    mode?: 'wait' | 'notify';
+    output?: string;
+    outputTruncated?: boolean;
+    status?: string;
+    subscriptionId?: string;
+    success: boolean;
+    timedOut?: boolean;
+    turnCount?: number;
+}
 
 // @public
 export interface WaitForInvocationOptions {
@@ -1080,6 +1107,7 @@ const snapshot = runtime.exportSnapshot();
 - **`updateAgentConfig`** — Dynamically updates an agent's configuration, prompt directives, and model bindings. Authority-bearing fields (`privileged`, privilege flags, `admin`/`system` role claims) require `callerContext` to resolve to a principal whose frozen registry `AuthorityDescriptor` allows `@lifecycle:authority`. Anonymous and unprivileged callers are denied before mutation.
 - **`updateHistoryMessage`** — Updates an existing message in an agent's history in-place.
 - **`virtualFs`** — Access to underlying virtual filesystem substrate.
+- **`waitForAgent`** — Agent-addressed completion primitive (ticket 17b5c47): waits for another agent's next completed turn and returns its bounded output, or registers a one-shot completion wake. Authorization mirrors the invocation engine and is resolved here, never from caller data: the caller may watch the target when the target is the caller itself, the caller is the target's registered parent creator (`spawnedBy`/`creatorId`), the caller holds `'*'` or `'@lifecycle:authority'`, or the caller is a Realm-bypass principal. A non-bypass caller is confined to the target's own Realm scope and fails closed on cross-realm or identity-ambiguous pairs. A call with no caller context is the composition-root/host path (wait mode only; notify needs a resolved watcher agent). Wait mode resolves on the target's next `turn_complete` (immediate status when the target has no in-flight turn and no pending trigger) and returns the bounded latest output; a timeout returns a partial status with the latest output. Notify mode enqueues exactly one `INVOCATION` trigger to the watcher's own queue when the target settles (INV-3; a busy watcher queues it), carries the result token in a bare-id-only prompt, and never creates a mailbox envelope (INV-1/INV-2). Registrations are one-shot, keyed by the canonical target identity, and dropped when either agent is killed, recycled, or purged; the runtime reset/destroy paths clear them.
 - **`waitForInvocation`** — Turn-level await primitive: halts caller execution until specified invocations resolve. Realm wave A, ticket 3487c56: the facade/port path may supply a trusted `callerContext` (identity-only). When supplied, the invocation engine requires the caller to be the invocation's invoker, its target, or a Realm-bypass principal (the exact injected internal principal or an agent holding the registry `realmBypass` grant — Wave I, ticket c02d0b9); an unresolvable caller or an unrelated resolved caller fails closed with `PERMISSION_DENIED`. Omitted on the composition-root/host path (legacy behavior).
 - **`waitForMail`** — Halts caller execution until specified sender(s) deliver messages to the target agent inbox.
 - **`whoami`** — Introspects the identity, permissions, and status of an agent.
@@ -1447,6 +1475,7 @@ Canonical frozen lifecycle port consumed by tool descriptors.
 - **`restoreAgent`** — Restores a recycled agent via `AgentRuntime.restoreAgent`, forwarding the caller context unchanged.
 - **`schedule`** — Schedules a deferred task via `AgentRuntime.schedule`, forwarding `params` and the trusted `context` unchanged. Privilege, caller identity, and Realm scope are read only from `context`.
 - **`undoAgentTurn`** — Undoes the most recent turn bundle for an agent, optionally targeting a specific turn, and pushes it onto the redo stack.
+- **`waitForAgent`** — Waits for another agent's next settled turn (bounded output), or registers a one-shot completion wake, via `AgentRuntime.waitForAgent` (ticket 17b5c47). Agent-facing port path: the trusted `context` carries the identity-only caller scope. A call with no caller context is caller-scoped but unresolved and therefore fails closed with `PERMISSION_DENIED`; a resolved caller must be the target itself, the target's registered parent creator, an `'*'`/`'@lifecycle:authority'` holder, or a Realm-bypass principal, and a non-bypass caller stays confined to its own Realm scope.
 - **`waitForInvocation`** — Waits for invocation completion via `AgentRuntime.waitForInvocation`. Agent-facing port path (Realm wave A, ticket 3487c56): the trusted `context` carries the identity-only caller scope. A call with no caller context is caller-scoped but unresolved and therefore fails closed with `PERMISSION_DENIED`; a resolved caller must be the invocation's invoker, its target, or a Realm-bypass principal.
 - **`whoami`** — Identity and permission descriptor for the given agent (mirrors `AgentRuntime.whoami`).
 
@@ -1918,6 +1947,35 @@ Result returned by emergency unstick routine `unstickAgent()`.
 
 Function returned by subscription methods to safely detach a listener.
 
+### `WaitForAgentOptions` — interface
+
+Options accepted by `waitForAgent()` / `LifecyclePort.waitForAgent()` (ticket 17b5c47).
+
+#### Members
+
+- **`notify`** — When true, register a one-shot completion wake and return immediately (`mode: 'notify'`): the watched agent's next completed turn enqueues a single `INVOCATION` trigger to the watcher's own queue. Notify mode requires a resolved watcher agent and ignores `timeout_ms`.
+- **`timeout_ms`** — Wait-mode timeout in milliseconds (default 10000; `0` returns the current status immediately without registering). Ignored in notify mode.
+- **`timeoutMs`** — camelCase alias of `timeout_ms`.
+
+### `WaitForAgentResult` — interface
+
+Receipt returned by `waitForAgent()` / `LifecyclePort.waitForAgent()` (ticket 17b5c47).
+
+#### Members
+
+- **`agentId`** — Bare registered id of the watched target (never a canonical identity key).
+- **`alreadySettled`** — True when the target was already quiescent at registration (immediate fire).
+- **`code`** — Machine-readable failure code when `success` is false.
+- **`error`** — Human-readable failure reason when `success` is false.
+- **`mode`** — Resolution mode: `'wait'` (blocking) or `'notify'` (one-shot wake registration).
+- **`output`** — Bounded latest assistant output (at most 4000 chars plus the truncation marker).
+- **`outputTruncated`** — True when the delivered output was truncated to the bound.
+- **`status`** — `'completed'` when the wait resolved on the target's settled turn; otherwise the target's current FSM state at probe/timeout time.
+- **`subscriptionId`** — Notify-mode one-shot registration id.
+- **`success`** — False only for fail-closed receipts (`code`/`error` carry the reason).
+- **`timedOut`** — True when the wait returned a partial status at its timeout.
+- **`turnCount`** — Cumulative completed-turn count of the target at receipt time.
+
 ### `WaitForInvocationOptions` — interface
 
 Configuration options for the turn-level await primitive `waitForInvocation`.
@@ -2050,9 +2108,9 @@ Narrow on `success` to obtain the fully-populated delivery projection; the failu
 
 ## Doc coverage
 
-- Top-level exports: 54
-- Declarations (exports + members): 424
-- Documented declarations: 424 / 424 (100%)
+- Top-level exports: 56
+- Declarations (exports + members): 443
+- Documented declarations: 443 / 443 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): `Agent`, `AGENT_STATES`, `AgentModelConfig`, `AgentSecurityContext`, `AgentTelemetry_2`, `CancelScheduleSuccessReceipt`, `CredentialResolverPort`, `EngineModel`, `EngineStreamChunk`, `ExecutionErrorCode`, `ExecutionStatus`, `ExtensionExecutionPort`, `ExtensionToolProviderPort`, `HistoryToolCall`, `InterruptedTurn`, `InvocationEngine`, `InvocationReceipt`, `InvocationSingleResult`, `LaunchAgentOptions`, `MessagingBus`, `ModelPresetSourcePort`, `OrchestratorActionMode`, `RealmPublishingPort`, `ScheduledTaskProjection`, `ScheduleErrorReceipt`, `SchedulerStatus`, `ScheduleSuccessReceipt`, `TimerCondition`, `ToolCallRecord`, `TriggerPolicy`, `TriggerQueue`, `TurnInputObject`, `UndoTurnSelectionFailure`, `VirtualFS`, `WaitForMailFailureResult`, `WaitForMailSuccessResult`, `WorldClock`

@@ -395,8 +395,8 @@ test('5. publishing tools stay outside the canonical taxonomy and never wildcard
     Object.keys(PUBLISHING_TOOL_REGISTRY).sort(),
     [PUBLISHING_TOOLS.IMPORT_REALM_TEMPLATE, PUBLISHING_TOOLS.SUBMIT_HYDRATION_PACKAGE]
   );
-  assert.equal(ALL_TOOL_DESCRIPTORS.length, 35, 'the canonical taxonomy stays 35 descriptors');
-  assert.equal(Object.keys(TOOL_REGISTRY).length, 35, 'the canonical registry stays 35 entries');
+  assert.equal(ALL_TOOL_DESCRIPTORS.length, 36, 'the canonical taxonomy stays 36 descriptors');
+  assert.equal(Object.keys(TOOL_REGISTRY).length, 36, 'the canonical registry stays 36 entries');
   assert.equal(TOOL_REGISTRY[PUBLISHING_TOOLS.IMPORT_REALM_TEMPLATE], undefined);
   assert.equal(TOOL_REGISTRY[PUBLISHING_TOOLS.SUBMIT_HYDRATION_PACKAGE], undefined);
 

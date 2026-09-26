@@ -568,7 +568,7 @@ async function runEpic6UnitTests() {
     Object.keys(PUBLISHING_TOOL_REGISTRY).length === 2,
     'the publishing registry carries exactly the two meta tools'
   );
-  assert(ALL_TOOL_DESCRIPTORS.length === 35, 'publishing tools stay outside the 35-tool canonical catalog');
+  assert(ALL_TOOL_DESCRIPTORS.length === 36, 'publishing tools stay outside the 36-tool canonical catalog');
   assert(
     !Object.values(PUBLISHING_TOOLS).some((name) => Object.prototype.hasOwnProperty.call(TOOL_REGISTRY, name)),
     'publishing tools are absent from TOOL_REGISTRY'
