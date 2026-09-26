@@ -19,7 +19,11 @@ import type { TriggerPolicy } from '../runtime/agent/index.ts';
 export interface RealmAgentToolProfile {
   /** Canonical capability preset name (for example `manager` or `readonly`). */
   preset?: ToolPresetName;
-  /** Explicit tool names, resolved through the canonical preset resolver. */
+  /**
+   * Explicit tool names, resolved through the canonical preset resolver;
+   * declared requirement ids resolve to their derived call names
+   * (`deriveToolCallName`).
+   */
   tools?: readonly string[];
 }
 
@@ -210,8 +214,16 @@ export interface RealmHydrationDeclarationV1 {
  * Requirements are requests, never implementations: the capability id is
  * namespaced (`text.similarity`, `acme.scoring.similarity`), `io` records the
  * minimal signature, and `range`/`prefer` are resolution hints. The
- * model-facing call name is derived from the id (`text.similarity` →
- * `text_similarity`) and is stable across implementations. Requirements are
+ * model-facing call name is derived from the id by `deriveToolCallName()`
+ * (every character outside `[A-Za-z0-9_]` becomes `_`, per character:
+ * `text.similarity` → `text_similarity`,
+ * `acme.scoring.similarity` → `acme_scoring_similarity`) and is stable across
+ * implementations. Grants in `toolProfile.tools`, resolved plans, and
+ * capability summaries carry the derived call name, while the id remains the
+ * authoring identity (and the future `resolvedTools` capability key). Derived
+ * call names must be unique across the contract and must not collide with a
+ * recognized canonical tool (`read.file` → `read_file` is rejected), and both
+ * collisions fail closed at validation and materialization. Requirements are
  * accepted and shape-validated in this wave; resolution arrives with the
  * providers wave.
  */
@@ -372,7 +384,10 @@ export interface BakedTemplateBundle {
  *
  * `preset` reports the declared preset name (or `null` for explicit lists) and
  * `tools` carries the resolved grants exactly as the runtime allowlist will
- * receive them.
+ * receive them: canonical names and aliases pass through in declared order
+ * (the capability summary canonicalizes alias spellings), and declared
+ * `toolContract` requirement ids resolve to their derived model-facing call
+ * names (`deriveToolCallName`).
  */
 export interface RealmLaunchToolProfile {
   /** Declared preset name, or `null` when the spec declared an explicit list. */

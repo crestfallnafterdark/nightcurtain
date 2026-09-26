@@ -8,7 +8,7 @@ import { MUTATING_TOOLS, READ_ONLY_TOOLS, SANDBOX_TOOLS } from '../tools/constan
 import { getCanonToolName } from '../tools/normalizers/index.ts';
 import { deepFreeze } from './freeze.ts';
 import { CAPABILITY_WILDCARD_SOURCES } from './types.ts';
-import { resolveToolProfile, requireNonEmptyString, validateAgentSpec } from './validation.ts';
+import { deriveToolCallName, requireNonEmptyString, resolveToolProfile, validateAgentSpec } from './validation.ts';
 import type {
   AgentCapabilitySummary,
   CapabilityWildcardSource,
@@ -44,11 +44,13 @@ const SUBAGENT_MANAGEMENT_TOOLS: readonly string[] = Object.freeze([
  * against the canonical mutation vocabulary. The aggregate
  * subagent-management selector expands to its canonical tools, wildcard
  * grants (`'*'`) report full vocabulary coverage, declared requirement ids
- * (from the owning template's `toolContract`) surface in `grants` without a
- * mutation classification, and grants that map to no canonical tool and no
- * declared requirement are surfaced verbatim in `unrecognized`. A privileged
- * spec reports effective wildcard capability regardless of its declared
- * profile, matching the runtime authority derivation.
+ * (from the owning template's `toolContract`) surface in `grants` as their
+ * derived model-facing call names (`text.similarity` → `text_similarity`,
+ * `deriveToolCallName`) without a mutation classification, and grants that map
+ * to no canonical tool and no declared requirement are surfaced verbatim in
+ * `unrecognized`. A privileged spec reports effective wildcard capability
+ * regardless of its declared profile, matching the runtime authority
+ * derivation.
  *
  * @param spec - Agent spec to summarize
  * @param requirements - The owning template's declared tool requirements, when the spec references requirement ids
@@ -67,42 +69,47 @@ export function summarizeAgentCapabilities(
   spec: RealmAgentSpec,
   requirements?: readonly RealmToolRequirement[]
 ): AgentCapabilitySummary {
-  const requirementIds = collectRequirementIds(requirements, 'summarizeAgentCapabilities');
-  const validated = validateAgentSpec(spec, 'agent spec', requirementIds);
-  return summarizeValidatedAgent(validated, requirementIds);
+  const requirementCallNames = collectRequirementCallNames(requirements, 'summarizeAgentCapabilities');
+  const validated = validateAgentSpec(spec, 'agent spec', requirementCallNames);
+  return summarizeValidatedAgent(validated, requirementCallNames);
 }
 
 /**
- * Validates and collects an optional requirement list into an id set.
+ * Validates and collects an optional requirement list into an id → derived
+ * call-name map.
  *
  * @param requirements - Declared tool requirements, when supplied
  * @param label - Human-readable label used in error messages
- * @returns The declared requirement ids, or `undefined` when no list was supplied
+ * @returns Declared ids mapped to derived call names, or `undefined` when no list was supplied
  */
-function collectRequirementIds(
+function collectRequirementCallNames(
   requirements: readonly RealmToolRequirement[] | undefined,
   label: string
-): ReadonlySet<string> | undefined {
+): ReadonlyMap<string, string> | undefined {
   if (requirements === undefined) return undefined;
-  const ids: Set<string> = new Set();
+  const callNames: Map<string, string> = new Map();
   requirements.forEach((requirement, index) => {
-    ids.add(requireNonEmptyString(requirement?.id, `${label} requirements[${index}] id`));
+    const id = requireNonEmptyString(requirement?.id, `${label} requirements[${index}] id`);
+    callNames.set(id, deriveToolCallName(id));
   });
-  return ids;
+  return callNames;
 }
 
 /**
  * Projects one validated agent spec into the capability summary display model.
  *
  * @param validated - Validated agent spec
- * @param requirementIds - Declared requirement ids, when known
+ * @param requirementCallNames - Declared requirement ids mapped to derived call names, when known
  * @returns A deeply frozen capability summary
  */
 function summarizeValidatedAgent(
   validated: RealmAgentSpec,
-  requirementIds: ReadonlySet<string> | undefined
+  requirementCallNames: ReadonlyMap<string, string> | undefined
 ): AgentCapabilitySummary {
-  const profile = resolveToolProfile(validated.toolProfile, `agent '${validated.key}' toolProfile`, requirementIds);
+  const profile = resolveToolProfile(validated.toolProfile, `agent '${validated.key}' toolProfile`, requirementCallNames);
+
+  /** Derived call names of the declared requirements (the resolved grant form). */
+  const requirementCallNameSet: ReadonlySet<string> = new Set(requirementCallNames?.values() ?? []);
 
   const grants: string[] = [];
   const mutating: string[] = [];
@@ -119,7 +126,7 @@ function summarizeValidatedAgent(
     }
     const canonical = getCanonToolName(grant);
     if (canonical === null) {
-      if (requirementIds !== undefined && requirementIds.has(grant)) {
+      if (requirementCallNameSet.has(grant)) {
         if (!seen.has(grant)) {
           seen.add(grant);
           grants.push(grant);

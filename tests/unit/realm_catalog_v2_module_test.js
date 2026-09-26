@@ -27,7 +27,9 @@
  *     serialize round-trips, closed envelopes, frozen output.
  * 10. Materialization: v2 plans (placements/directives/agents), id overrides,
  *     demo and legacy fixtures.
- * 11. Capability summaries and provider/authority gates accept v2 specs.
+ * 11. Capability summaries and provider/authority gates accept v2 specs;
+ *     derived requirement call names resolve in v2 plans/summaries and
+ *     derived call-name collisions fail closed.
  * 12. Gap matrix: totality reference permutations, v2-only path/reserved-name
  *     surfaces, directive target/requiredness details, per-target placement
  *     destinations and root/file collisions, fileset-selection edges, payload
@@ -45,6 +47,7 @@ import {
   RealmCatalogError,
   composeAgentHistory,
   composeSystemPrompt,
+  deriveToolCallName,
   materializeTemplate,
   normalizeTemplate,
   parseTemplateBundle,
@@ -155,6 +158,7 @@ const LEGACY_FILES = { 'prompts/p.md': 'Protocol.', 'files/readme.md': 'Readme.'
 
 test('1. runtime surface exports the canonical helpers', () => {
   for (const name of [
+    'deriveToolCallName',
     'normalizeTemplate',
     'validateTemplate',
     'materializeTemplate',
@@ -1520,5 +1524,82 @@ test('49. v2 directive resolution fails closed on a required empty input', () =>
       {}
     ),
     /input 'kickoff' is required and resolves empty/
+  );
+});
+
+// ============================================================================
+// 13. Derived requirement call names (P1)
+// ============================================================================
+
+test('50. derived tool call names resolve in v2 plans/summaries and collisions fail closed', () => {
+  assert.strictEqual(deriveToolCallName('text.similarity'), 'text_similarity');
+  assert.strictEqual(deriveToolCallName('acme.scoring.similarity'), 'acme_scoring_similarity');
+  assert.strictEqual(deriveToolCallName('a-b'), 'a_b');
+  assert.strictEqual(deriveToolCallName('a..b'), 'a__b');
+
+  /** Builds a minimal requirement declaration with the given id. */
+  const requirement = (id) => ({ id, brief: 'b', io: { in: {}, out: {} } });
+
+  // A derived-name-safe contract validates, materializes, and summarizes.
+  const accepted = templateV2({
+    agents: [agentV2({ toolProfile: { tools: ['acme.scoring.similarity', 'read_file'] } })],
+    toolContract: { requirements: [requirement('acme.scoring.similarity')] }
+  });
+  assert.strictEqual(validateTemplate(accepted), accepted, 'the canonical validator accepts the derived-safe contract');
+  const plan = materializeTemplate(accepted, { realmId: 'realm_1' });
+  assert.deepStrictEqual(
+    plan.agents[0].toolProfile.tools,
+    ['acme_scoring_similarity', 'read_file'],
+    'the v2 plan grant carries the derived call name'
+  );
+  const summary = summarizeAgentCapabilities(accepted.agents[0], accepted.toolContract.requirements);
+  assert.deepStrictEqual(summary.grants, ['acme_scoring_similarity', 'read_file']);
+  assert.deepStrictEqual(summary.unrecognized, [], 'a derived grant is not unrecognized');
+  assert.deepStrictEqual(
+    summarizeAgentCapabilities(agentV2({ toolProfile: { tools: ['save_file'] } })).grants,
+    ['write_file'],
+    'alias canonicalization is unaffected by the mapping'
+  );
+
+  // Derived duplicates and derived-vs-canonical collisions are validation errors.
+  assert.throws(
+    () => validateTemplate(templateV2({ toolContract: { requirements: [requirement('a.b'), requirement('a_b')] } })),
+    (error) => /'a\.b' and 'a_b' both derive the tool call name 'a_b'/.test(error.message),
+    'derived duplicates fail closed at validation'
+  );
+  assert.throws(
+    () => validateTemplate(templateV2({ toolContract: { requirements: [requirement('read.file')] } })),
+    (error) => /'read\.file'.*'read_file'.*canonical/.test(error.message),
+    'derived-vs-canonical collisions fail closed at validation'
+  );
+  assert.throws(
+    () => materializeTemplate(
+      templateV2({ toolContract: { requirements: [requirement('read.file')] } }),
+      { realmId: 'realm_1' }
+    ),
+    /canonical/,
+    'materialization rejects the same collision'
+  );
+  assert.throws(
+    () => validateTemplate(templateV2({ toolContract: { requirements: [requirement('a'), requirement('a')] } })),
+    /carries duplicate requirement id 'a'/,
+    'exact duplicate ids keep the existing error'
+  );
+
+  // The v1 read shim validates the same contract.
+  assert.throws(
+    () => normalizeTemplate({
+      ...legacyTemplate(),
+      toolContract: { requirements: [requirement('a.b'), requirement('a_b')] }
+    }),
+    /both derive the tool call name 'a_b'/,
+    'the v1 shim carries the derived-collision rejection'
+  );
+
+  // Requirement ids are still valid grants only when declared; unknown grants
+  // are still rejected.
+  assert.throws(
+    () => validateTemplate(templateV2({ agents: [agentV2({ toolProfile: { tools: ['text.similarity'] } })] })),
+    /neither a canonical tool name nor a declared toolContract requirement id/
   );
 });

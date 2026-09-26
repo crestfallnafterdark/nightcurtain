@@ -17,7 +17,8 @@ import {
   isPlainRecord,
   requireNonEmptyString,
   resolveAgentId,
-  resolveToolProfile
+  resolveToolProfile,
+  validateToolContract
 } from './validation.ts';
 import type {
   RealmComposeOptions,
@@ -64,11 +65,15 @@ function validateIdOverrides(
  * values resolved supplied → default → defaultFile → empty, with `files`
  * inputs selecting one named file and `required` empty values failing closed);
  * baked history composes through the same part model; placements resolve to
- * concrete workspace writes; and directives resolve to launch messages.
+ * concrete workspace writes; directives resolve to launch messages; and
+ * declared `toolContract` requirement ids granted by a tool profile resolve to
+ * their derived model-facing call names (`deriveToolCallName`).
  * Duplicate keys, duplicate resolved ids, retired placeholder patterns,
  * unknown presets, ambiguous or absent tool profiles, undeclared input
  * references, missing bundle entries, fileset selection mismatches, placement
- * destination collisions, and unknown override or input keys are rejected.
+ * destination collisions, derived call-name collisions (duplicate derivations
+ * or collisions with a recognized canonical tool), and unknown override or
+ * input keys are rejected.
  *
  * @param template - Template to materialize (legacy format-v1 documents accepted)
  * @param options - Target realm id, optional per-key id overrides, supplied input values, and bundle files
@@ -92,9 +97,7 @@ export function materializeTemplate(
   }
   const realmId = requireNonEmptyString(options.realmId, 'materializeTemplate realmId');
   const validated = normalizeTemplate(template);
-  const requirementIds: ReadonlySet<string> = new Set(
-    (validated.toolContract?.requirements ?? []).map((requirement) => requirement.id)
-  );
+  const requirementCallNames = validateToolContract(validated.toolContract, 'template toolContract');
   const overrides = validateIdOverrides(options.idOverrides, validated);
   const composeOptions: RealmComposeOptions = {
     ...(options.inputs !== undefined ? { inputs: options.inputs } : {}),
@@ -121,7 +124,7 @@ export function materializeTemplate(
       systemPrompt: composed.systemPrompt,
       inputProvenance: composed.inputProvenance,
       history,
-      toolProfile: resolveToolProfile(spec.toolProfile, `agent '${spec.key}' toolProfile`, requirementIds),
+      toolProfile: resolveToolProfile(spec.toolProfile, `agent '${spec.key}' toolProfile`, requirementCallNames),
       privileged: spec.privileged,
       authorities: spec.authorities ?? [],
       ...(spec.triggerPolicy !== undefined ? { triggerPolicy: spec.triggerPolicy } : {}),

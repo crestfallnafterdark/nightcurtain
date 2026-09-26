@@ -327,21 +327,50 @@ export function seedSlotKey(path: string, target: 'realm' | { agent: string }): 
 }
 
 /**
+ * Derives the model-facing tool call name from a capability requirement id:
+ * every character outside `[A-Za-z0-9_]` becomes `_` — per character, with no
+ * collapsing, case folding, or trimming, so the derivation is total and
+ * deterministic for any input string.
+ *
+ * The call name is a stability promise: it is what models and providers see
+ * (and what plans and capability summaries carry), so it must never change
+ * between implementations of the same requirement
+ * (`text.similarity` → `text_similarity`,
+ * `acme.scoring.similarity` → `acme_scoring_similarity`, `a-b` → `a_b`,
+ * `a..b` → `a__b`). Derived names must be unique across a contract and must
+ * not collide with a recognized canonical tool; `validateToolContract()`
+ * fails closed on both.
+ *
+ * @param capabilityId - Capability requirement id
+ * @returns The derived call name
+ *
+ * @example
+ * ```typescript
+ * import { deriveToolCallName } from './realmCatalog/index.ts';
+ *
+ * deriveToolCallName('text.similarity'); // 'text_similarity'
+ * ```
+ */
+export function deriveToolCallName(capabilityId: string): string {
+  return capabilityId.replace(/[^A-Za-z0-9_]/g, '_');
+}
+
+/**
  * Asserts that one declared tool-list entry is a recognized grant: the
  * wildcard, a canonical tool name (or alias resolving to one, including the
  * aggregate subagent-management selector), or a declared requirement id.
  *
  * @param entry - Declared entry (validated non-empty)
  * @param label - Human-readable label used in the error message
- * @param requirementIds - Declared `toolContract` requirement ids, when known
+ * @param requirementCallNames - Declared requirement ids mapped to their derived call names, when known
  */
 function assertRecognizedToolGrant(
   entry: string,
   label: string,
-  requirementIds: ReadonlySet<string> | undefined
+  requirementCallNames: ReadonlyMap<string, string> | undefined
 ): void {
   if (entry === '*') return;
-  if (requirementIds !== undefined && requirementIds.has(entry)) return;
+  if (requirementCallNames !== undefined && requirementCallNames.has(entry)) return;
   const canonical = getCanonToolName(entry);
   if (canonical !== null && RECOGNIZED_TOOL_GRANTS.has(canonical)) return;
   throw new Error(
@@ -357,19 +386,22 @@ function assertRecognizedToolGrant(
  * Explicit lists pass through the canonical resolver in declared order, but
  * every entry is validated first: an entry must be the wildcard, a canonical
  * tool name (or an alias that resolves to one), or — when the template's
- * declared requirement ids are supplied — a declared `toolContract` requirement
- * id. Unknown entries are rejected instead of silently passing through as
- * unrecognized grants.
+ * declared requirements are supplied — a declared `toolContract` requirement
+ * id. Declared requirement ids resolve to their derived model-facing call
+ * names (`deriveToolCallName`), so the resolved profile carries exactly the
+ * names the runtime allowlist will receive; canonical names, aliases, and the
+ * wildcard pass through unchanged. Unknown entries are rejected instead of
+ * silently passing through as unrecognized grants.
  *
  * @param profile - Candidate tool-profile value
  * @param label - Human-readable label used in error messages
- * @param requirementIds - Declared `toolContract` requirement ids, when known
+ * @param requirementCallNames - Declared requirement ids mapped to derived call names, when known
  * @returns A frozen resolved profile (`preset` `null` for explicit lists)
  */
 export function resolveToolProfile(
   profile: unknown,
   label: string,
-  requirementIds?: ReadonlySet<string>
+  requirementCallNames?: ReadonlyMap<string, string>
 ): RealmLaunchToolProfile {
   if (!isPlainRecord(profile)) {
     throw new Error(`${label} must be an object`);
@@ -394,11 +426,13 @@ export function resolveToolProfile(
   if (!Array.isArray(tools)) {
     throw new Error(`${label} tools must be an array of tool names`);
   }
+  const resolvedTools: string[] = [];
   tools.forEach((tool, index) => {
     const entry = requireNonEmptyString(tool, `${label} tools[${index}]`);
-    assertRecognizedToolGrant(entry, `${label} tools[${index}]`, requirementIds);
+    assertRecognizedToolGrant(entry, `${label} tools[${index}]`, requirementCallNames);
+    resolvedTools.push(requirementCallNames?.get(entry) ?? entry);
   });
-  return deepFreeze({ preset: null, tools: resolveToolPreset(tools as readonly string[]) });
+  return deepFreeze({ preset: null, tools: resolveToolPreset(resolvedTools) });
 }
 
 /**
@@ -855,31 +889,58 @@ export function validateToolRequirement(candidate: unknown, label: string): Real
 
 /**
  * Validates the optional tool contract and returns its declared requirement
- * ids (used to validate `toolProfile.tools` entries).
+ * ids mapped to their derived model-facing call names (used to validate and
+ * resolve `toolProfile.tools` entries).
+ *
+ * Beyond the per-requirement shape checks and the exact-duplicate-id check,
+ * every requirement id derives its call name (`deriveToolCallName`) and fails
+ * closed on either collision:
+ * - two ids deriving the same call name (`a.b` + `a_b` → `a_b`), and
+ * - a derived call name resolving to a recognized canonical tool grant
+ *   (`read.file` → `read_file`), using the same predicate as
+ *   `assertRecognizedToolGrant`'s canonical branch.
  *
  * @param candidate - Candidate tool contract
  * @param label - Human-readable label used in error messages
- * @returns Declared requirement ids; empty when the contract is absent
+ * @returns Declared requirement ids mapped to their derived call names; empty when the contract is absent
  */
-export function validateToolContract(candidate: unknown, label: string): ReadonlySet<string> {
-  if (candidate === undefined) return new Set();
+export function validateToolContract(candidate: unknown, label: string): ReadonlyMap<string, string> {
+  if (candidate === undefined) return new Map();
   if (!isPlainRecord(candidate)) {
     throw new Error(`${label} must be an object`);
   }
   rejectUnknownFields(candidate, TOOL_CONTRACT_FIELDS, label);
-  if (candidate.requirements === undefined) return new Set();
+  if (candidate.requirements === undefined) return new Map();
   if (!Array.isArray(candidate.requirements)) {
     throw new Error(`${label} requirements must be an array`);
   }
   const ids: Set<string> = new Set();
+  const callNamesById: Map<string, string> = new Map();
+  const idsByCallName: Map<string, string> = new Map();
   candidate.requirements.forEach((requirement, index) => {
     const validated = validateToolRequirement(requirement, `${label} requirements[${index}]`);
     if (ids.has(validated.id)) {
       throw new Error(`${label} carries duplicate requirement id '${validated.id}'`);
     }
     ids.add(validated.id);
+    const callName = deriveToolCallName(validated.id);
+    const collidingId = idsByCallName.get(callName);
+    if (collidingId !== undefined) {
+      throw new Error(
+        `${label} requirement ids '${collidingId}' and '${validated.id}' both derive the tool call name '${callName}'`
+      );
+    }
+    const canonical = getCanonToolName(callName);
+    if (canonical !== null && RECOGNIZED_TOOL_GRANTS.has(canonical)) {
+      throw new Error(
+        `${label} requirement '${validated.id}' derives the tool call name '${callName}', `
+        + `which collides with the recognized canonical tool '${canonical}'`
+      );
+    }
+    idsByCallName.set(callName, validated.id);
+    callNamesById.set(validated.id, callName);
   });
-  return ids;
+  return callNamesById;
 }
 
 /**
@@ -1076,13 +1137,13 @@ export function templateUnsupportedAuthorities(
  *
  * @param candidate - Candidate agent spec
  * @param label - Human-readable label used in error messages
- * @param requirementIds - Declared `toolContract` requirement ids, when known
+ * @param requirementCallNames - Declared requirement ids mapped to derived call names, when known
  * @returns The validated spec reference
  */
 export function validateAgentSpecV1(
   candidate: unknown,
   label: string,
-  requirementIds?: ReadonlySet<string>
+  requirementCallNames?: ReadonlyMap<string, string>
 ): RealmAgentSpec {
   if (!isPlainRecord(candidate)) {
     throw new Error(`${label} must be an object`);
@@ -1099,7 +1160,7 @@ export function validateAgentSpecV1(
   requireNonEmptyString(candidate.name, `${label} name`);
   requireNonEmptyString(candidate.role, `${label} role`);
   validatePromptPartsV1(candidate.prompt, `${label} prompt`);
-  resolveToolProfile(candidate.toolProfile, `${label} toolProfile`, requirementIds);
+  resolveToolProfile(candidate.toolProfile, `${label} toolProfile`, requirementCallNames);
   if (typeof candidate.privileged !== 'boolean') {
     throw new Error(`${label} privileged must be a boolean`);
   }
@@ -1119,11 +1180,11 @@ export function validateAgentSpecV1(
  *
  * Beyond the structural checks, the cross-references fail closed here: the
  * hydration declaration, tool contract, and provider requests validate (with
- * requirement ids collected first so `toolProfile.tools` can reference them),
- * every `input` part in a prompt or history entry must name a declared input,
- * input ids and requirement ids must be unique, and every seed target (file
- * `target.agent` and the directive `targetAgentKey`) must name a declared
- * template agent key.
+ * requirement ids and their derived call names collected first so
+ * `toolProfile.tools` can reference them), every `input` part in a prompt or
+ * history entry must name a declared input, input ids and requirement ids must
+ * be unique, and every seed target (file `target.agent` and the directive
+ * `targetAgentKey`) must name a declared template agent key.
  *
  * @param candidate - Candidate template
  * @returns The validated template reference
@@ -1145,7 +1206,7 @@ export function validateTemplateV1(candidate: unknown): RealmTemplateV1 {
     throw new Error(`template formatVersion must be 1 (got '${String(candidate.formatVersion)}')`);
   }
   validateHydrationDeclaration(candidate.hydration, 'template hydration');
-  const requirementIds = validateToolContract(candidate.toolContract, 'template toolContract');
+  const requirementCallNames = validateToolContract(candidate.toolContract, 'template toolContract');
   validateProviders(candidate.providers, 'template providers');
 
   const inputs = validateTemplateInputsV1(candidate.inputs, 'template inputs');
@@ -1158,7 +1219,7 @@ export function validateTemplateV1(candidate: unknown): RealmTemplateV1 {
 
   const keys: Set<string> = new Set();
   agents.forEach((agent, index) => {
-    const spec = validateAgentSpecV1(agent, `template agent[${index}]`, requirementIds);
+    const spec = validateAgentSpecV1(agent, `template agent[${index}]`, requirementCallNames);
     if (keys.has(spec.key)) {
       throw new Error(`template carries duplicate agent key '${spec.key}'`);
     }
@@ -1632,13 +1693,13 @@ export function validateAgentHistory(
  *
  * @param candidate - Candidate agent spec
  * @param label - Human-readable label used in error messages
- * @param requirementIds - Declared `toolContract` requirement ids, when known
+ * @param requirementCallNames - Declared requirement ids mapped to derived call names, when known
  * @returns The validated spec reference
  */
 export function validateAgentSpec(
   candidate: unknown,
   label: string,
-  requirementIds?: ReadonlySet<string>
+  requirementCallNames?: ReadonlyMap<string, string>
 ): RealmAgentSpec {
   if (!isPlainRecord(candidate)) {
     throw new Error(`${label} must be an object`);
@@ -1655,7 +1716,7 @@ export function validateAgentSpec(
   requireNonEmptyString(candidate.name, `${label} name`);
   requireNonEmptyString(candidate.role, `${label} role`);
   validatePromptParts(candidate.prompt, `${label} prompt`);
-  resolveToolProfile(candidate.toolProfile, `${label} toolProfile`, requirementIds);
+  resolveToolProfile(candidate.toolProfile, `${label} toolProfile`, requirementCallNames);
   if (typeof candidate.privileged !== 'boolean') {
     throw new Error(`${label} privileged must be a boolean`);
   }
@@ -1770,14 +1831,14 @@ function assertUniquePlacementDestinations(placements: readonly RealmPlacement[]
  * Validates a whole format-v2 template against the closed schema shape.
  *
  * Beyond the structural checks, the cross-references fail closed here: the
- * tool contract and provider requests validate (with requirement ids collected
- * first so `toolProfile.tools` can reference them), every prompt/history
- * `input` part, placement, and directive must resolve to a declared input with
- * the right shape, input ids and requirement ids must be unique, every
- * placement target and directive target must name a declared template agent
- * key, and the format-v2 **totality** rule holds: every declared input is
- * referenced at least once. Inputs that no surface consumes are template
- * errors — an input can never have an implicit role.
+ * tool contract and provider requests validate (with requirement ids and their
+ * derived call names collected first so `toolProfile.tools` can reference
+ * them), every prompt/history `input` part, placement, and directive must
+ * resolve to a declared input with the right shape, input ids and requirement
+ * ids must be unique, every placement target and directive target must name a
+ * declared template agent key, and the format-v2 **totality** rule holds:
+ * every declared input is referenced at least once. Inputs that no surface
+ * consumes are template errors — an input can never have an implicit role.
  *
  * @param candidate - Candidate template
  * @returns The validated template reference
@@ -1798,7 +1859,7 @@ export function validateTemplate(candidate: unknown): RealmTemplate {
   if (candidate.formatVersion !== 2) {
     throw new Error(`template formatVersion must be 2 (got '${String(candidate.formatVersion)}')`);
   }
-  const requirementIds = validateToolContract(candidate.toolContract, 'template toolContract');
+  const requirementCallNames = validateToolContract(candidate.toolContract, 'template toolContract');
   validateProviders(candidate.providers, 'template providers');
 
   const inputs = validateTemplateInputs(candidate.inputs, 'template inputs');
@@ -1814,7 +1875,7 @@ export function validateTemplate(candidate: unknown): RealmTemplate {
   const referenced: Set<string> = new Set();
   const keys: Set<string> = new Set();
   agents.forEach((agent, index) => {
-    const spec = validateAgentSpec(agent, `template agent[${index}]`, requirementIds);
+    const spec = validateAgentSpec(agent, `template agent[${index}]`, requirementCallNames);
     if (keys.has(spec.key)) {
       throw new Error(`template carries duplicate agent key '${spec.key}'`);
     }

@@ -27,13 +27,13 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 - `INV-VERSION` — The bundle version is `sha256:<hex>` over the authored-form spec (canonical, or the v1 spec for a legacy bundle) re-serialized as UTF-8 JSON with recursively sorted keys and no insignificant whitespace, then each referenced bundle file (prompt/history `file` parts, input `defaultFile` prefills, placement `file` sources) in lexicographic path order framed as `<pathLength>:<path>\n<contentLength>:<content>` (UTF-8 byte counts); `parseTemplateBundle` returns both the normalized template and the canonical authored `serialized` text, so a persisted bundle round-trips to a deep-equal parse with the same version.
 - `INV-FROZEN` — Every baked template, parsed bundle, validated payload, and every plan, composed prompt, composed history, resolved placement/directive, or summary returned by the module's helpers is deeply frozen plain data; callers can never mutate module state through a returned reference.
 - `INV-DETERMINISM` — materializeTemplate, composeSystemPrompt, composeAgentHistory, resolvePlacements, resolveDirectives, templateBundleVersion, parseTemplateBundle, serializeTemplateBundle, and summarizeAgentCapabilities are pure: agent order is template order, part order is declared order, bundle files hash in lexicographic path order, no timestamps or randomness are introduced, and repeated calls with equal inputs return deep-equal results.
-- `INV-FAIL-CLOSED` — materializeTemplate validates the whole template before building any plan and rejects malformed or unknown fields, empty agent lists or prompt-part lists, duplicate keys, resolved ids, input ids, or requirement ids, empty or placeholder-bearing ids, reserved property names (`__proto__`/`constructor`/`prototype`) as identifiers or path segments, placeholder syntax (the retired `{realm}` token included), unknown presets, ambiguous or absent tool profiles, tool grants that are neither canonical tool names nor declared requirement ids, invalid optional fields, undeclared input references (prompts and history), missing bundle entries, required inputs that resolve empty, history entries that compose empty, placement targets that name unknown agent keys, unsafe placement paths, placement destination collisions, directive targets that name unknown agent keys, unknown id-override or input-value keys, and fileset selection mismatches.
+- `INV-FAIL-CLOSED` — materializeTemplate validates the whole template before building any plan and rejects malformed or unknown fields, empty agent lists or prompt-part lists, duplicate keys, resolved ids, input ids, or requirement ids, empty or placeholder-bearing ids, reserved property names (`__proto__`/`constructor`/`prototype`) as identifiers or path segments, placeholder syntax (the retired `{realm}` token included), unknown presets, ambiguous or absent tool profiles, tool grants that are neither canonical tool names nor declared requirement ids, derived requirement call-name collisions (two ids deriving the same call name, or a derived name colliding with a recognized canonical tool), invalid optional fields, undeclared input references (prompts and history), missing bundle entries, required inputs that resolve empty, history entries that compose empty, placement targets that name unknown agent keys, unsafe placement paths, placement destination collisions, directive targets that name unknown agent keys, unknown id-override or input-value keys, and fileset selection mismatches.
 - `INV-COMPOSITION` — System prompts compose from parts in declared order — `file` and `text` parts contribute verbatim, a `text` input resolving empty contributes nothing (unless declared `required`, which fails closed), a `files` input reference selects exactly one file by `path`, contributing pieces join with a blank line, and per-referenced-input provenance records the id and value source (`launch`/`default`/`defaultFile`/`empty`) without duplicating value text.
 - `INV-HISTORY` — A spec's declared history composes through the same part model and separator as prompts (missing `file` entries fail closed, empty inputs contribute nothing, an entry that composes empty is rejected), composes with the same launch/default/defaultFile input precedence as prompts, lands in the launch plan in declared order, and carries `source: 'template'` host-side provenance; message ids and seeding belong to the runtime, and no model call is made for baked entries.
 - `INV-BUNDLE-VERSION` — templateBundleVersion is `sha256:<hex>` over the canonical byte stream — the authored spec re-serialized as UTF-8 JSON with recursively sorted keys and no insignificant whitespace, then each referenced bundle file (prompt/history `file` parts, input `defaultFile` prefills, placement `file` sources) in lexicographic path order, each framed as `<pathLength>:<path>\n<contentLength>:<content>` with UTF-8 byte lengths — computed by a self-contained synchronous SHA-256 with no dependencies, no `crypto.subtle`, and no ambient I/O; baked and JSON-imported bundles hash identically, legacy v1 pins stay reproducible, the same primitive backs the public `hashText` content-hash helper, and the pipeline's global `REALM_CONTENT_VERSION` keeps its own meaning (whole embedded payload freshness).
 - `INV-BAKED-BUNDLES` — The baked bundles (the demo fixture plus the generated embedded bundles) and every nested bundle file body are deeply frozen plain data; the generated content module is embedded at generation time by `scripts/embed_realm_content.mjs` and is never hand-edited, bundle files are the only source for prompt/history `file` parts, input `defaultFile` prefills, and placement `file` sources, and the module performs no runtime file reads or `?raw` imports.
 - `INV-OPAQUE-IDS` — Agent ids are realm-opaque and ordinary: `idPattern` values are literal ids (no placeholder is resolved), a per-key id override wins over the pattern, a resolved id is rejected only when it is empty or still carries a placeholder, and no id value is reserved or confers authority.
-- `INV-RESOLVED-GRANTS` — Plans and capability summaries carry tool grants resolved through the canonical tool-constants resolver; classification uses the canonical mutation vocabulary, the aggregate subagent-management selector expands to its canonical tools, and declared `toolContract` requirement ids surface in `grants` without a mutation classification (resolution of those requirements arrives with the providers integration).
+- `INV-RESOLVED-GRANTS` — Plans and capability summaries carry tool grants resolved through the canonical tool-constants resolver; classification uses the canonical mutation vocabulary, the aggregate subagent-management selector expands to its canonical tools, and declared `toolContract` requirement ids resolve to their derived model-facing call names (`deriveToolCallName`: every character outside `[A-Za-z0-9_]` becomes `_`, per character, with no collapsing, case folding, or trimming) in `grants` without a mutation classification, while the requirement id itself remains the authoring identity (and the future `resolvedTools` capability key); derived call names are unique per contract and never collide with a recognized canonical tool, and resolution of those requirements arrives with the providers integration.
 - `INV-PRIVILEGE-HONEST` — A privileged spec reports effective wildcard capability in its summary, matching the runtime authority derivation, so previews never understate what a launched agent can do.
 - `INV-DECLARED-AUTHORITIES` — `AgentSpec.authorities` declares publishing-grant requests as non-empty unique strings and is inert data — validation accepts identifiers unknown to the host (`KNOWN_AGENT_AUTHORITIES` lists the known set), `templateUnsupportedAuthorities()` reports declared-but-unknown ids for the launch gate to fail closed on, and materialization copies the declarations verbatim onto `RealmLaunchAgentPlan.authorities` (empty when none declared) without ever granting anything: approval and grant application belong exclusively to the launch seam.
 - `INV-NO-MODEL-LITERALS` — The catalog contains no model identifiers, endpoints, credentials, or provider implementations; model-preset ids pass through verbatim, tool selectors resolve through the canonical preset resolver, and `toolContract`/`providers` are requests that are accepted and shape-validated but never resolved or connected.
@@ -42,6 +42,7 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 
 - Agent ids materialize as trimmed literal strings with no realm-derived prefix; the retired `{realm}` placeholder is rejected at validation with a clear message, per-key overrides win over patterns, and every resolved id is ordinary — the historically reserved `director` identity included, because ids confer no authority under the principal model
 - A tool profile declares exactly one of a canonical preset name or an explicit tools list; presets resolve through the tool constants, explicit lists pass through in declared order, and the capability summary canonicalizes alias spellings before classification so the preview matches dispatcher authorization
+- A declared requirement id derives its model-facing call name by replacing every character outside `[A-Za-z0-9_]` with `_` (per character; stable across implementations), granted requirement ids resolve to that derived name in plans and summaries while the id remains the authoring identity, and derived duplicates (`a.b` vs `a_b`) or derived-vs-canonical collisions (`read.file` → `read_file`) fail closed at validation and materialization
 - Unknown fields on templates, agent specs, tool profiles, inputs, prompt parts, placements, directives, history entries, tool contracts, and provider requests are rejected rather than dropped, because a misspelled privilege, capability, input, or placement field must fail closed instead of silently launching a weaker or differently configured agent
 - A privileged spec implies wildcard capability in the summary (the runtime authority derivation appends the wildcard for privileged agents); wildcardSource reports whether the wildcard came from the declared profile or from privilege
 - A system prompt is declared as ordered parts (bundle file, template input, inline text) instead of a single reference: composition joins contributing pieces with a blank line, empty inputs are omitted, required inputs fail closed, and the kernel ships no policy content — whether a template includes refusal, lore, or directive text is entirely the template author's decision
@@ -104,6 +105,9 @@ export function composeSystemPrompt(parts: readonly PromptPart[], inputs?: reado
 
 // @public
 export const DEMO_TEMPLATE: RealmTemplate;
+
+// @public
+export function deriveToolCallName(capabilityId: string): string;
 
 // @public
 export function getBakedTemplateBundle(templateId: string): BakedTemplateBundle | null;
@@ -604,6 +608,28 @@ Baked demo template (frozen): two agents, one privileged coordinator with a mana
 
 The template is the stable launch/test fixture for the Realm launcher and materializes deterministic plans for any target realm id.
 
+### `deriveToolCallName` — function
+
+Derives the model-facing tool call name from a capability requirement id: every character outside `[A-Za-z0-9_]` becomes `_` — per character, with no collapsing, case folding, or trimming, so the derivation is total and deterministic for any input string.
+
+The call name is a stability promise: it is what models and providers see (and what plans and capability summaries carry), so it must never change between implementations of the same requirement (`text.similarity` → `text_similarity`, `acme.scoring.similarity` → `acme_scoring_similarity`, `a-b` → `a_b`, `a..b` → `a__b`). Derived names must be unique across a contract and must not collide with a recognized canonical tool; `validateToolContract()` fails closed on both.
+
+#### Parameters
+
+- `capabilityId` — Capability requirement id
+
+#### Returns
+
+The derived call name
+
+#### Examples
+
+```typescript
+import { deriveToolCallName } from './realmCatalog/index.ts';
+
+deriveToolCallName('text.similarity'); // 'text_similarity'
+```
+
 ### `getBakedTemplateBundle` — function
 
 Resolves one baked template bundle by id.
@@ -664,7 +690,7 @@ Validation accepts any non-empty unique identifier in `AgentSpec.authorities`; i
 
 Materializes a template into a frozen launch plan.
 
-The template normalizes first (a legacy format-v1 document shims to the canonical model), then the whole plan is built in one pass: agent ids resolve as literal plain ids from `idPattern` with per-key `idOverrides` winning over the pattern; each agent's system prompt composes from its declared parts (`text` verbatim, `file` bodies from `bundleFiles`, `input` values resolved supplied → default → defaultFile → empty, with `files` inputs selecting one named file and `required` empty values failing closed); baked history composes through the same part model; placements resolve to concrete workspace writes; and directives resolve to launch messages. Duplicate keys, duplicate resolved ids, retired placeholder patterns, unknown presets, ambiguous or absent tool profiles, undeclared input references, missing bundle entries, fileset selection mismatches, placement destination collisions, and unknown override or input keys are rejected.
+The template normalizes first (a legacy format-v1 document shims to the canonical model), then the whole plan is built in one pass: agent ids resolve as literal plain ids from `idPattern` with per-key `idOverrides` winning over the pattern; each agent's system prompt composes from its declared parts (`text` verbatim, `file` bodies from `bundleFiles`, `input` values resolved supplied → default → defaultFile → empty, with `files` inputs selecting one named file and `required` empty values failing closed); baked history composes through the same part model; placements resolve to concrete workspace writes; directives resolve to launch messages; and declared `toolContract` requirement ids granted by a tool profile resolve to their derived model-facing call names (`deriveToolCallName`). Duplicate keys, duplicate resolved ids, retired placeholder patterns, unknown presets, ambiguous or absent tool profiles, undeclared input references, missing bundle entries, fileset selection mismatches, placement destination collisions, derived call-name collisions (duplicate derivations or collisions with a recognized canonical tool), and unknown override or input keys are rejected.
 
 #### Parameters
 
@@ -843,7 +869,7 @@ A profile declares exactly one selector: a canonical preset name (`preset`) or a
 #### Members
 
 - **`preset`** — Canonical capability preset name (for example `manager` or `readonly`).
-- **`tools`** — Explicit tool names, resolved through the canonical preset resolver.
+- **`tools`** — Explicit tool names, resolved through the canonical preset resolver; declared requirement ids resolve to their derived call names (`deriveToolCallName`).
 
 ### `RealmCatalogError` — class
 
@@ -989,7 +1015,7 @@ The plan is deterministic: agent order is template order, placement and directiv
 
 Resolved tool profile carried by a materialized agent plan.
 
-`preset` reports the declared preset name (or `null` for explicit lists) and `tools` carries the resolved grants exactly as the runtime allowlist will receive them.
+`preset` reports the declared preset name (or `null` for explicit lists) and `tools` carries the resolved grants exactly as the runtime allowlist will receive them: canonical names and aliases pass through in declared order (the capability summary canonicalizes alias spellings), and declared `toolContract` requirement ids resolve to their derived model-facing call names (`deriveToolCallName`).
 
 #### Members
 
@@ -1185,7 +1211,7 @@ The template's capability contract: the requirements it asks the host to satisfy
 
 One capability the template requires from the host (format v1 §3.9).
 
-Requirements are requests, never implementations: the capability id is namespaced (`text.similarity`, `acme.scoring.similarity`), `io` records the minimal signature, and `range`/`prefer` are resolution hints. The model-facing call name is derived from the id (`text.similarity` → `text_similarity`) and is stable across implementations. Requirements are accepted and shape-validated in this wave; resolution arrives with the providers wave.
+Requirements are requests, never implementations: the capability id is namespaced (`text.similarity`, `acme.scoring.similarity`), `io` records the minimal signature, and `range`/`prefer` are resolution hints. The model-facing call name is derived from the id by `deriveToolCallName()` (every character outside `[A-Za-z0-9_]` becomes `_`, per character: `text.similarity` → `text_similarity`, `acme.scoring.similarity` → `acme_scoring_similarity`) and is stable across implementations. Grants in `toolProfile.tools`, resolved plans, and capability summaries carry the derived call name, while the id remains the authoring identity (and the future `resolvedTools` capability key). Derived call names must be unique across the contract and must not collide with a recognized canonical tool (`read.file` → `read_file` is rejected), and both collisions fail closed at validation and materialization. Requirements are accepted and shape-validated in this wave; resolution arrives with the providers wave.
 
 #### Members
 
@@ -1293,7 +1319,7 @@ Canonical transport JSON text
 
 Builds the honest capability summary for one template agent spec.
 
-The declared profile resolves through the canonical preset resolver; each grant is then canonicalized through the tool alias resolver and classified against the canonical mutation vocabulary. The aggregate subagent-management selector expands to its canonical tools, wildcard grants (`'*'`) report full vocabulary coverage, declared requirement ids (from the owning template's `toolContract`) surface in `grants` without a mutation classification, and grants that map to no canonical tool and no declared requirement are surfaced verbatim in `unrecognized`. A privileged spec reports effective wildcard capability regardless of its declared profile, matching the runtime authority derivation.
+The declared profile resolves through the canonical preset resolver; each grant is then canonicalized through the tool alias resolver and classified against the canonical mutation vocabulary. The aggregate subagent-management selector expands to its canonical tools, wildcard grants (`'*'`) report full vocabulary coverage, declared requirement ids (from the owning template's `toolContract`) surface in `grants` as their derived model-facing call names (`text.similarity` → `text_similarity`, `deriveToolCallName`) without a mutation classification, and grants that map to no canonical tool and no declared requirement are surfaced verbatim in `unrecognized`. A privileged spec reports effective wildcard capability regardless of its declared profile, matching the runtime authority derivation.
 
 #### Parameters
 
@@ -1427,7 +1453,7 @@ const resolved = validatePayload(DEMO_TEMPLATE, {
 
 Validates a whole format-v2 template against the closed schema shape.
 
-Beyond the structural checks, the cross-references fail closed here: the tool contract and provider requests validate (with requirement ids collected first so `toolProfile.tools` can reference them), every prompt/history `input` part, placement, and directive must resolve to a declared input with the right shape, input ids and requirement ids must be unique, every placement target and directive target must name a declared template agent key, and the format-v2 **totality** rule holds: every declared input is referenced at least once. Inputs that no surface consumes are template errors — an input can never have an implicit role.
+Beyond the structural checks, the cross-references fail closed here: the tool contract and provider requests validate (with requirement ids and their derived call names collected first so `toolProfile.tools` can reference them), every prompt/history `input` part, placement, and directive must resolve to a declared input with the right shape, input ids and requirement ids must be unique, every placement target and directive target must name a declared template agent key, and the format-v2 **totality** rule holds: every declared input is referenced at least once. Inputs that no surface consumes are template errors — an input can never have an implicit role.
 
 #### Parameters
 
@@ -1439,9 +1465,9 @@ The validated template reference
 
 ## Doc coverage
 
-- Top-level exports: 65
-- Declarations (exports + members): 211
-- Documented declarations: 211 / 211 (100%)
+- Top-level exports: 66
+- Declarations (exports + members): 212
+- Documented declarations: 212 / 212 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): `ToolPresetName`, `TriggerPolicy`

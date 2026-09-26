@@ -17,8 +17,8 @@
  *  6. Fail-closed validation of options, templates, specs, prompt parts,
  *     inputs, legacy seed manifests, and tool profiles.
  *  7. Capability summaries: presets, aggregate expansion, wildcard, aliases,
- *     declared requirement ids, strict grant validation, privilege escalation,
- *     frozen deterministic output.
+ *     derived requirement call names, strict grant validation, privilege
+ *     escalation, frozen deterministic output.
  *  8. Composition: declared order, verbatim pieces, empty-input omission,
  *     required rejection, default/defaultFile resolution, bundle files,
  *     provenance, frozen deterministic output.
@@ -26,7 +26,8 @@
  * 10. Baked bundles: demo fixture first, frozen generated bundles appended in
  *     sorted id order, accessor semantics, and a stable sha256 content version.
  * 11. Legacy format-v1 schema (through the shim): input origins/briefs,
- *     seed-slot origin/source rules, history schema, toolContract/providers.
+ *     seed-slot origin/source rules, history schema, toolContract/providers,
+ *     derived requirement call names and their collision rejection.
  * 12. Baked history: composition, empty-entry rejection, plan carriage, input
  *     precedence, missing-file failure, frozen deterministic output.
  * 13. Per-bundle versioning: canonical byte stream (independently reproduced
@@ -53,9 +54,11 @@ import {
   RealmCatalogError,
   composeAgentHistory,
   composeSystemPrompt,
+  deriveToolCallName,
   getBakedTemplateBundle,
   hashText,
   materializeTemplate,
+  normalizeTemplate,
   parseTemplateBundle,
   resolveDirectives,
   resolvePlacements,
@@ -152,6 +155,7 @@ test('1. runtime surface exports the demo template, the baked bundles, and the p
     'RealmCatalogError',
     'composeAgentHistory',
     'composeSystemPrompt',
+    'deriveToolCallName',
     'getBakedTemplateBundle',
     'hashText',
     'materializeTemplate',
@@ -170,6 +174,7 @@ test('1. runtime surface exports the demo template, the baked bundles, and the p
   ]);
   assert.strictEqual(typeof composeSystemPrompt, 'function');
   assert.strictEqual(typeof composeAgentHistory, 'function');
+  assert.strictEqual(typeof deriveToolCallName, 'function');
   assert.strictEqual(typeof materializeTemplate, 'function');
   assert.strictEqual(typeof resolvePlacements, 'function');
   assert.strictEqual(typeof resolveDirectives, 'function');
@@ -786,7 +791,11 @@ test('14. explicit grants are strict: aliases canonicalize; unknown names and un
     agentSpec({ toolProfile: { tools: ['read_file', 'text.similarity', 'text.similarity'] } }),
     requirements
   );
-  assert.deepStrictEqual(withRequirement.grants, ['read_file', 'text.similarity']);
+  assert.deepStrictEqual(
+    withRequirement.grants,
+    ['read_file', 'text_similarity'],
+    'a declared requirement id surfaces in grants as its derived call name, deduped'
+  );
   assert.deepStrictEqual(withRequirement.readOnly, ['read_file']);
   assert.deepStrictEqual(withRequirement.mutating, []);
   assert.deepStrictEqual(withRequirement.unrecognized, [], 'declared requirement ids are not unrecognized');
@@ -1379,8 +1388,12 @@ test('32. toolContract and providers are accepted and shape-validated, never res
   });
   const plan = materializeTemplate(declared, { realmId: 'r' });
   assert.ok(
-    plan.agents[0].toolProfile.tools.includes('text.similarity'),
-    'a declared requirement id surfaces as a plan grant'
+    plan.agents[0].toolProfile.tools.includes('text_similarity'),
+    'a declared requirement id surfaces as a plan grant under its derived call name'
+  );
+  assert.ok(
+    !plan.agents[0].toolProfile.tools.includes('text.similarity'),
+    'the authoring requirement id never leaks into a resolved plan'
   );
   assert.ok(plan.agents[0].toolProfile.tools.includes('read_file'));
 
@@ -1468,6 +1481,90 @@ test('32. toolContract and providers are accepted and shape-validated, never res
   assert.throws(
     () => materializeTemplate(template({ agents: [agentSpec({ toolProfile: { tools: ['text.similarity'] } })] }), { realmId: 'r' }),
     /neither a canonical tool name nor a declared toolContract requirement id/
+  );
+});
+
+test('32a. derived tool call names: derivation rule, plan grants, and collision rejection', () => {
+  // Derivation rule: every character outside [A-Za-z0-9_] becomes '_', per
+  // character — no collapsing, no case folding, no trimming.
+  assert.strictEqual(deriveToolCallName('text.similarity'), 'text_similarity');
+  assert.strictEqual(deriveToolCallName('acme.scoring.similarity'), 'acme_scoring_similarity');
+  assert.strictEqual(deriveToolCallName('a-b'), 'a_b');
+  assert.strictEqual(deriveToolCallName('a..b'), 'a__b');
+  assert.strictEqual(deriveToolCallName('already_snake_1'), 'already_snake_1');
+  assert.strictEqual(deriveToolCallName('camelCase'), 'camelCase', 'no case folding');
+  assert.strictEqual(deriveToolCallName('  spaced  '), '__spaced__', 'no trimming');
+  assert.strictEqual(deriveToolCallName(''), '', 'total for any string');
+  assert.strictEqual(
+    deriveToolCallName('acme.scoring.similarity'),
+    deriveToolCallName('acme.scoring.similarity'),
+    'derivation is deterministic'
+  );
+
+  // A multi-segment id resolves to its derived call name in the resolved plan.
+  const multi = template({
+    agents: [agentSpec({ toolProfile: { tools: ['acme.scoring.similarity'] } })],
+    toolContract: {
+      requirements: [{ id: 'acme.scoring.similarity', brief: 'Scoring.', io: { in: {}, out: {} } }]
+    }
+  });
+  const multiPlan = materializeTemplate(multi, { realmId: 'r' });
+  assert.deepStrictEqual(multiPlan.agents[0].toolProfile.tools, ['acme_scoring_similarity']);
+
+  // Canonical, alias, and wildcard grants pass through the mapping unchanged.
+  const unaffected = template({
+    agents: [agentSpec({ toolProfile: { tools: ['read_file', 'save_file', '*'] } })]
+  });
+  const unaffectedPlan = materializeTemplate(unaffected, { realmId: 'r' });
+  assert.deepStrictEqual(unaffectedPlan.agents[0].toolProfile.tools, ['read_file', 'save_file', '*']);
+
+  /** Builds a minimal requirement declaration with the given id. */
+  const requirement = (id) => ({ id, brief: 'b', io: { in: {}, out: {} } });
+
+  // Derived duplicates: a.b and a_b both derive a_b; the error names both ids.
+  assert.throws(
+    () => materializeTemplate(
+      template({ toolContract: { requirements: [requirement('a.b'), requirement('a_b')] } }),
+      { realmId: 'r' }
+    ),
+    (error) => /'a\.b' and 'a_b' both derive the tool call name 'a_b'/.test(error.message),
+    'two ids deriving the same call name fail closed'
+  );
+  assert.throws(
+    () => materializeTemplate(
+      template({ toolContract: { requirements: [requirement('a_b'), requirement('a.b')] } }),
+      { realmId: 'r' }
+    ),
+    (error) => /'a_b' and 'a\.b' both derive the tool call name 'a_b'/.test(error.message),
+    'derived-duplicate rejection is independent of declaration order'
+  );
+
+  // Canonical collisions: read.file derives read_file (a recognized canonical
+  // tool); save.file derives save_file, which resolves through the alias map
+  // to write_file.
+  assert.throws(
+    () => materializeTemplate(
+      template({ toolContract: { requirements: [requirement('read.file')] } }),
+      { realmId: 'r' }
+    ),
+    (error) => /'read\.file'.*'read_file'.*'read_file'/.test(error.message),
+    'a derived call name colliding with a canonical tool fails closed'
+  );
+  assert.throws(
+    () => materializeTemplate(
+      template({ toolContract: { requirements: [requirement('save.file')] } }),
+      { realmId: 'r' }
+    ),
+    (error) => /'save\.file'.*'save_file'.*'write_file'/.test(error.message),
+    'an alias-resolving derived name collides through the canonical resolution too'
+  );
+
+  // The v1 read shim validates the same contract: a v1-format requirement id
+  // is rejected before any plan is built.
+  assert.throws(
+    () => normalizeTemplate(template({ toolContract: { requirements: [requirement('read.file')] } })),
+    /canonical/,
+    'the v1 shim carries the collision rejection'
   );
 });
 
