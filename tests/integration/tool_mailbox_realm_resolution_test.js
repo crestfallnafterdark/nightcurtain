@@ -164,14 +164,15 @@ test('1. same bare id in two realms: all four mailbox verbs hit the caller canon
     assert.ok(!String(alphaHeaders.messages[0].snippet).includes('beta'));
     assert.equal(bus.getUnreadCount(betaScout.key), 1, 'the beta partition stays untouched');
 
-    // list_inbox control path.
+    // list_inbox control path (array results wrap in a ToolResult receipt).
     const alphaList = await alphaDispatcher.executeTool('list_inbox', {});
-    assert.equal(alphaList.length, 1);
-    assert.equal(alphaList[0].from, 'alpha_peer');
+    assert.equal(alphaList.success, true);
+    assert.equal(alphaList.result.length, 1);
+    assert.equal(alphaList.result[0].from, 'alpha_peer');
 
     // read_message control path (peek: no consumption).
     const peek = await alphaDispatcher.executeTool('read_message', {
-      message_id: alphaList[0].id,
+      message_id: alphaList.result[0].id,
       mark_as_read: false
     });
     assert.equal(peek.success, true);

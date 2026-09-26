@@ -441,13 +441,15 @@ const getInboxParamAliasMap = Object.freeze({
  * `get_inbox` descriptor — retrieve unread messages for the bound caller.
  *
  * Args: optional `mark_as_read`. Prefers `context.messagingBus.getInbox()` and
- * otherwise composes `drainInbox()`/`listInbox()`; returns
- * `{success, deliveryNote, count, messages}` and throws when `messagingBus` is
- * missing.
+ * otherwise composes `drainInbox()`/`listInbox()`; the header-only mode returns
+ * bounded headers/previews (never full message bodies) and says so, while the
+ * mark-as-read mode drains the caller's canonical partition and returns full
+ * envelopes. Returns `{success, deliveryNote, count, messages}` and throws when
+ * `messagingBus` is missing.
  */
 export const getInboxDescriptor = Object.freeze({
   name: SANDBOX_TOOLS.GET_INBOX,
-  description: "Retrieve all unread messages from the calling agent's inbox, with option to mark as read.",
+  description: "Retrieve unread messages from the calling agent's inbox. Returns header summaries with short content previews by default; set mark_as_read to true to retrieve full message contents and mark them as read.",
   schema: Object.freeze({
     type: 'object',
     properties: {
@@ -474,6 +476,9 @@ export const getInboxDescriptor = Object.freeze({
     const agentId = context?.callerAgentId || context?.agentId;
     const markRead = params.mark_as_read === true || params.markAsRead === true || String(params.mark_as_read) === 'true' || String(params.markAsRead) === 'true';
     if (markRead) {
+      // The trailing trusted context is the mailbox authority: the bus resolves
+      // the caller's canonical (realm-exact) partition through its `callerKey`
+      // (tickets 5b5fe63, d57cbc1).
       const messages = bus.drainInbox(agentId, context);
       return {
         success: true,
@@ -482,10 +487,14 @@ export const getInboxDescriptor = Object.freeze({
         messages
       };
     } else {
-      const headers = bus.listInbox({ agentId, unread_only: true });
+      // Header-only mode: pass the trusted context so a realm-ambiguous bare id
+      // resolves the caller's canonical partition, and describe the payload
+      // truthfully — these are bounded previews, not full message bodies
+      // (tickets 5b5fe63, 636ca85).
+      const headers = bus.listInbox({ unread_only: true }, context);
       return {
         success: true,
-        deliveryNote: 'Inbox retrieved. All message contents delivered in full.',
+        deliveryNote: 'Inbox headers retrieved (short previews only). Use read_message or drain_inbox to retrieve full message contents.',
         count: headers.length,
         messages: headers
       };
@@ -524,6 +533,8 @@ export const drainInboxDescriptor = Object.freeze({
     }
     // The dispatcher pins `callerAgentId` from bound construction only; the
     // nested `callerContext.agentId` key is caller data and is never consulted.
+    // The trailing trusted context resolves the canonical (realm-exact)
+    // partition through its `callerKey` (ticket 5b5fe63).
     const agentId = context?.callerAgentId || context?.agentId;
     const messages = bus.drainInbox(agentId, context);
     return {

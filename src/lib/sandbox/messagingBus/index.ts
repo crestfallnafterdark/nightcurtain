@@ -3271,8 +3271,8 @@ export class MessagingBus {
    * Shifts each pending envelope from `#activeQueues`, sets `read = true`, appends it to `#archives`,
    * and returns the full array of consumed envelopes. Subsequent invocations immediately return `[]`.
    *
-   * @param agentIdOrParams - Target agent ID or params object containing `agentId` (or its `recipient` alias); when a supplied `ExecutionContext` is the trailing argument it is the only mailbox source (an anonymous context drains nothing) and the payload aliases are never promoted (MOD-21 W10-B).
-   * @param context - Optional `ExecutionContext` supplying the trusted `callerAgentId` / `agentId`.
+   * @param agentIdOrParams - Target agent ID or params object containing `agentId` (or its `recipient` alias); when a supplied `ExecutionContext` is the trailing argument it is the only mailbox source (an anonymous context drains nothing) and the payload aliases are never promoted (MOD-21 W10-B). In the positional string form the string keeps its ref semantics and a supplied context's trusted `callerKey` resolves the canonical (realm-exact) partition (ticket 5b5fe63).
+   * @param context - Optional `ExecutionContext` supplying the trusted `callerAgentId` / `agentId` / `callerKey`.
    * @returns Array of consumed envelopes with `read: true`.
    *
    * @example
@@ -3302,6 +3302,13 @@ export class MessagingBus {
       if (contextSupplied) mailboxContext = context;
     } else if (typeof agentIdOrParams === 'string') {
       agentId = agentIdOrParams;
+      // Ticket 5b5fe63: the positional string branch must not discard a
+      // trailing trusted context. The string keeps its documented direct-API
+      // ref semantics, while the supplied context's trusted `callerKey` stays
+      // available to `#resolveContextMailboxKey` so a realm-ambiguous bare ref
+      // drains the caller's canonical partition instead of the empty
+      // unprefixed one.
+      if (isContextSupplied(context)) mailboxContext = context;
     }
 
     if (!agentId || typeof agentId !== 'string') return [];
