@@ -1709,7 +1709,12 @@ export class InvocationEngine {
             sender: invokerId,
             role: record.role,
             depth,
-            metadata: { invocationId, invokerId, depth },
+            // Bare-id projection (ticket 9aca63c): the child turn's history
+            // metadata (and the provider payload built from it) carries the
+            // invoker's bare registered id, never the canonical identity key
+            // that authorized this dispatch. The raw `invokerId` stays the
+            // private routing reference (`sender`).
+            metadata: { invocationId, invokerId: invokerDisplayId, depth },
             onChunk: (chunk) => {
               if (isSettled || !this.#activeInvocations.has(invocationId) || isCancelled()) return;
               this.#emitChunk({
