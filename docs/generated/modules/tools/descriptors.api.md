@@ -22,7 +22,7 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 
 - Frozen catalog: every descriptor, schema, alias map, and descriptor array is `Object.freeze`d; `TOOL_REGISTRY` is built once from `ALL_TOOL_DESCRIPTORS` as a null-prototype lookup table and frozen, with no registration or mutation path.
 - Catalog reflection (M5a): the three canonical read-only reflection tools (`list_tools`, `list_tool_presets`, `describe_preset`) are ordinary members of `ALL_TOOL_DESCRIPTORS`/`TOOL_REGISTRY` (innate, `precall` family); `list_tools` enumerates the canonical registry slice only and never an authority meta tool or extension call name, and the preset surfaces read the frozen `TOOL_PRESETS` catalog.
-- Authority meta tools: `AUTHORITY_TOOL_REGISTRY` carries every explicit-grant-only authority tool (the Wave U publishing pair and the M3 realm-admin pair `inspect_realm`/`update_realm`; the remaining meta-plane phases append theirs), each declaring the exact authority id (`@template:authority`/`@hydration:authority`/`@realm:inspect`/`@realm:edit`/…) its invocation requires; they are not members of `ALL_TOOL_DESCRIPTORS`/`TOOL_REGISTRY`, their schemas are exposed only through `getAuthorityToolSchemas()` for callers holding the matching exact id (with `getAuthorityToolDescriptors()` as the describe-merge source), and the wildcard `'*'`/`privileged` never satisfy them. The M2 `inspect_agent`/`update_agent` surfaces are the deliberate exception: they are **canonical** ordinary tools (manager preset) whose parental tier is inherent and whose meta tier is enforced registry-side by the lifecycle manager, so no `requiredAuthority` gate applies.
+- Authority meta tools: `AUTHORITY_TOOL_REGISTRY` carries every explicit-grant-only authority tool (the Wave U publishing pair, the M3 realm-admin pair `inspect_realm`/`update_realm`, the M4 extension-admin pair, and the M5b template/hydration knowledge reads), each declaring the exact authority id (`@template:authority`/`@hydration:authority`/`@realm:inspect`/`@realm:edit`/…) its invocation requires; they are not members of `ALL_TOOL_DESCRIPTORS`/`TOOL_REGISTRY`, their schemas are exposed only through `getAuthorityToolSchemas()` for callers holding the matching exact id (with `getAuthorityToolDescriptors()` as the describe-merge source), and the wildcard `'*'`/`privileged` never satisfy them. The M2 `inspect_agent`/`update_agent` surfaces are the deliberate exception: they are **canonical** ordinary tools (manager preset) whose parental tier is inherent and whose meta tier is enforced registry-side by the lifecycle manager, so no `requiredAuthority` gate applies.
 - Fail-closed precalls: `batch_precall` denies any call whose name does not canonically resolve to a `PRECALL_ALLOWLIST` member, so unresolved or non-allowlisted names never reach the executor.
 
 ## Decisions
@@ -1442,6 +1442,36 @@ export const get_inbox: Readonly<{
 }>;
 
 // @public
+export const get_template: Readonly<{
+    name: "get_template";
+    authority: "@template:authority";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {
+            templateId: {
+                type: string;
+                description: string;
+            };
+        };
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: (rawArgs?: unknown) => ToolParams_4;
+    handler: (params: ToolParams_4, context: ExecutionContext) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | Readonly<{
+        success: true;
+        templateId: string;
+        templateVersion: string;
+        template: RealmTemplate;
+    }>>;
+}>;
+
+// @public
 export const getArchive: Readonly<{
     name: "get_archive";
     description: "Retrieve archived historical messages that were previously consumed.";
@@ -1602,6 +1632,66 @@ export function getPublishingToolSchemas(authorities: readonly string[]): Array<
         description: string;
         parameters: JsonSchemaDraft07;
     };
+}>;
+
+// @public
+export const getTemplate: Readonly<{
+    name: "get_template";
+    authority: "@template:authority";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {
+            templateId: {
+                type: string;
+                description: string;
+            };
+        };
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: (rawArgs?: unknown) => ToolParams_4;
+    handler: (params: ToolParams_4, context: ExecutionContext) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | Readonly<{
+        success: true;
+        templateId: string;
+        templateVersion: string;
+        template: RealmTemplate;
+    }>>;
+}>;
+
+// @public
+export const getTemplateDescriptor: Readonly<{
+    name: "get_template";
+    authority: "@template:authority";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {
+            templateId: {
+                type: string;
+                description: string;
+            };
+        };
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: (rawArgs?: unknown) => ToolParams_4;
+    handler: (params: ToolParams_4, context: ExecutionContext) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | Readonly<{
+        success: true;
+        templateId: string;
+        templateVersion: string;
+        template: RealmTemplate;
+    }>>;
 }>;
 
 // @public
@@ -2984,6 +3074,30 @@ export const list_files: Readonly<{
 }>;
 
 // @public
+export const list_hydration_packages: Readonly<{
+    name: "list_hydration_packages";
+    authority: "@hydration:authority";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {};
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: (rawArgs?: unknown) => ToolParams_4;
+    handler: (params: ToolParams_4, context: ExecutionContext) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | Readonly<{
+        success: true;
+        pending: readonly PendingInstancePayloadSummary[];
+        saved: readonly SavedInstancePayloadSummary[];
+    }>>;
+}>;
+
+// @public
 export const list_inbox: Readonly<{
     name: "list_inbox";
     description: "List pending messages in the calling agent's inbox.";
@@ -3028,6 +3142,30 @@ export const list_schedules: Readonly<{
     paramAliasMap: Readonly<{}>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
     handler: (params: ToolParams_6, context: ExecutionContext) => Promise<unknown>;
+}>;
+
+// @public
+export const list_templates: Readonly<{
+    name: "list_templates";
+    authority: "@template:authority";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {};
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: (rawArgs?: unknown) => ToolParams_4;
+    handler: (params: ToolParams_4, context: ExecutionContext) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | Readonly<{
+        success: true;
+        count: number;
+        templates: readonly RealmEffectiveTemplateSummary[];
+    }>>;
 }>;
 
 // @public
@@ -3263,6 +3401,54 @@ export const listFilesDescriptor: Readonly<{
 }>;
 
 // @public
+export const listHydrationPackages: Readonly<{
+    name: "list_hydration_packages";
+    authority: "@hydration:authority";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {};
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: (rawArgs?: unknown) => ToolParams_4;
+    handler: (params: ToolParams_4, context: ExecutionContext) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | Readonly<{
+        success: true;
+        pending: readonly PendingInstancePayloadSummary[];
+        saved: readonly SavedInstancePayloadSummary[];
+    }>>;
+}>;
+
+// @public
+export const listHydrationPackagesDescriptor: Readonly<{
+    name: "list_hydration_packages";
+    authority: "@hydration:authority";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {};
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: (rawArgs?: unknown) => ToolParams_4;
+    handler: (params: ToolParams_4, context: ExecutionContext) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | Readonly<{
+        success: true;
+        pending: readonly PendingInstancePayloadSummary[];
+        saved: readonly SavedInstancePayloadSummary[];
+    }>>;
+}>;
+
+// @public
 export const listInbox: Readonly<{
     name: "list_inbox";
     description: "List pending messages in the calling agent's inbox.";
@@ -3354,6 +3540,54 @@ export const listSchedulesDescriptor: Readonly<{
     paramAliasMap: Readonly<{}>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
     handler: (params: ToolParams_6, context: ExecutionContext) => Promise<unknown>;
+}>;
+
+// @public
+export const listTemplates: Readonly<{
+    name: "list_templates";
+    authority: "@template:authority";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {};
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: (rawArgs?: unknown) => ToolParams_4;
+    handler: (params: ToolParams_4, context: ExecutionContext) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | Readonly<{
+        success: true;
+        count: number;
+        templates: readonly RealmEffectiveTemplateSummary[];
+    }>>;
+}>;
+
+// @public
+export const listTemplatesDescriptor: Readonly<{
+    name: "list_templates";
+    authority: "@template:authority";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {};
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: (rawArgs?: unknown) => ToolParams_4;
+    handler: (params: ToolParams_4, context: ExecutionContext) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | Readonly<{
+        success: true;
+        count: number;
+        templates: readonly RealmEffectiveTemplateSummary[];
+    }>>;
 }>;
 
 // @public
@@ -4431,6 +4665,78 @@ export const realmAdminToolDescriptors: readonly (Readonly<{
         error: string;
         code: "PERMISSION_DENIED";
     }>;
+}>)[];
+
+// @public
+export const realmKnowledgeToolDescriptors: readonly (Readonly<{
+    name: "list_templates";
+    authority: "@template:authority";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {};
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: (rawArgs?: unknown) => ToolParams_4;
+    handler: (params: ToolParams_4, context: ExecutionContext) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | Readonly<{
+        success: true;
+        count: number;
+        templates: readonly RealmEffectiveTemplateSummary[];
+    }>>;
+}> | Readonly<{
+    name: "get_template";
+    authority: "@template:authority";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {
+            templateId: {
+                type: string;
+                description: string;
+            };
+        };
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: (rawArgs?: unknown) => ToolParams_4;
+    handler: (params: ToolParams_4, context: ExecutionContext) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | Readonly<{
+        success: true;
+        templateId: string;
+        templateVersion: string;
+        template: RealmTemplate;
+    }>>;
+}> | Readonly<{
+    name: "list_hydration_packages";
+    authority: "@hydration:authority";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {};
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: (rawArgs?: unknown) => ToolParams_4;
+    handler: (params: ToolParams_4, context: ExecutionContext) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | Readonly<{
+        success: true;
+        pending: readonly PendingInstancePayloadSummary[];
+        saved: readonly SavedInstancePayloadSummary[];
+    }>>;
 }>)[];
 
 // @public
@@ -7548,6 +7854,10 @@ export const writeJsonDescriptor: Readonly<{
 // <declarations>/tools/descriptors/metaTools.d.ts:1085:5 - (ae-forgotten-export) The symbol "ExecutionContext" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/metaTools.d.ts:1085:5 - (ae-forgotten-export) The symbol "ExtensionAttachReceipt" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/metaTools.d.ts:1112:5 - (ae-forgotten-export) The symbol "ExtensionsInspectReceipt" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/metaTools.d.ts:1226:9 - (ae-forgotten-export) The symbol "RealmEffectiveTemplateSummary" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/metaTools.d.ts:1318:9 - (ae-forgotten-export) The symbol "RealmTemplate" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/metaTools.d.ts:1391:9 - (ae-forgotten-export) The symbol "PendingInstancePayloadSummary" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/metaTools.d.ts:1392:9 - (ae-forgotten-export) The symbol "SavedInstancePayloadSummary" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/precallTools.d.ts:187:5 - (ae-forgotten-export) The symbol "ToolParams_8" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/realmTools.d.ts:290:5 - (ae-forgotten-export) The symbol "PublishingFailure" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/schedulerTools.d.ts:220:5 - (ae-forgotten-export) The symbol "ToolParams_6" needs to be exported by the entry point index.d.ts
@@ -7596,7 +7906,7 @@ The `authority` member is the single capability declaration the dispatcher consu
 
 ### `authorityToolDescriptors` — variable
 
-Every authority meta-tool descriptor (M1): the Wave U publishing pair, the M3 realm-admin pair, and the M4 extension-admin pair; the remaining meta-plane phases (M5b) append their descriptors here (`metaTools.ts` or the same file), and every filter below derives its membership from this one array plus each descriptor's `authority` id.
+Every authority meta-tool descriptor (M1): the Wave U publishing pair, the M3 realm-admin pair, the M4 extension-admin pair, and the M5b template/hydration knowledge reads; every filter below derives its membership from this one array plus each descriptor's `authority` id.
 
 ### `batch_precall` — variable
 
@@ -7736,6 +8046,10 @@ snake_case alias of `getCurrentTimeDescriptor`.
 
 snake_case alias of `getInboxDescriptor`.
 
+### `get_template` — variable
+
+snake_case alias of `getTemplateDescriptor`.
+
 ### `getArchive` — variable
 
 camelCase alias of `getArchiveDescriptor`.
@@ -7803,6 +8117,14 @@ Source-compatible Wave U alias of getAuthorityToolSchemas.
 #### Returns
 
 Fresh OpenAI tool definitions (empty when no authority matches).
+
+### `getTemplate` — variable
+
+camelCase alias of `getTemplateDescriptor`.
+
+### `getTemplateDescriptor` — variable
+
+`get_template` descriptor — exact-grant-only (`@template:authority`) resolution of one effective template as its normalized format-v2 model (declared inputs, agent profiles, prompt/placement declarations). Bundle file bodies and host paths never appear.
 
 ### `grep` — variable
 
@@ -7938,6 +8260,10 @@ snake_case alias of `listExtensionsDescriptor`.
 
 snake_case alias of `listFilesDescriptor`.
 
+### `list_hydration_packages` — variable
+
+snake_case alias of `listHydrationPackagesDescriptor`.
+
 ### `list_inbox` — variable
 
 snake_case alias of `listInboxDescriptor`.
@@ -7945,6 +8271,10 @@ snake_case alias of `listInboxDescriptor`.
 ### `list_schedules` — variable
 
 snake_case alias of `listSchedulesDescriptor`.
+
+### `list_templates` — variable
+
+snake_case alias of `listTemplatesDescriptor`.
 
 ### `list_tool_presets` — variable
 
@@ -7986,6 +8316,14 @@ camelCase alias of `listFilesDescriptor`.
 
 Args: optional `dir_path` (defaults to "/") and `recursive`. Delegates to `context.virtualFs.listFiles()` and throws when that service is missing.
 
+### `listHydrationPackages` — variable
+
+camelCase alias of `listHydrationPackagesDescriptor`.
+
+### `listHydrationPackagesDescriptor` — variable
+
+`list_hydration_packages` descriptor — exact-grant-only (`@hydration:authority`) bounded listing of the session-pending and persisted saved hydration payloads: template id, version, canonical digest, and ids/timestamps. Raw payload bodies never appear.
+
 ### `listInbox` — variable
 
 camelCase alias of `listInboxDescriptor`.
@@ -8005,6 +8343,14 @@ camelCase alias of `listSchedulesDescriptor`.
 `list_schedules` descriptor — list active, pending, and triggered schedules and timers.
 
 Declares no parameters; delegates to `context.lifecyclePort.listSchedules({}, scope)` and throws when that service is missing.
+
+### `listTemplates` — variable
+
+camelCase alias of `listTemplatesDescriptor`.
+
+### `listTemplatesDescriptor` — variable
+
+`list_templates` descriptor — exact-grant-only (`@template:authority`) bounded listing of the effective template catalog: id, name, effective version, description, exposed format version, and launchability. Bundle bodies, host paths, and realm vocabulary never appear.
 
 ### `listToolPresets` — variable
 
@@ -8044,7 +8390,7 @@ Backward-compatible alias of AuthorityToolDescriptor (Wave U name). The publishi
 
 ### `publishingToolDescriptors` — variable
 
-Array of the two Wave U publishing meta-tool descriptors: the publishing slice of authorityToolDescriptors (derived, never hand-maintained).
+Array of the two Wave U publishing meta-tool descriptors: the frozen publishing-pair projection of authorityToolDescriptors (derived by the Wave U name vocabulary, never hand-maintained). Later meta-plane phases may share the same authority ids, so the projection keys on the names.
 
 ### `query_json` — variable
 
@@ -8103,6 +8449,10 @@ Aggregate byte cap for one resolved hydration package (Wave U decision 9): resol
 ### `realmAdminToolDescriptors` — variable
 
 Array of the M3 realm-admin authority descriptors: appended to `authorityToolDescriptors` by `realmTools.ts`, so their schemas are exposed through the generic exact-id filter and never through the canonical taxonomy.
+
+### `realmKnowledgeToolDescriptors` — variable
+
+Array of the M5b realm-knowledge authority descriptors: appended to `authorityToolDescriptors` by `realmTools.ts`, so their schemas are exposed through the generic exact-id filter and never through the canonical taxonomy.
 
 ### `replace_file_content` — variable
 
@@ -8362,10 +8712,10 @@ Args: `file_path` (required), exactly one of inline `data` or file-sourced `data
 
 ## Doc coverage
 
-- Top-level exports: 161
-- Declarations (exports + members): 168
-- Documented declarations: 168 / 168 (100%)
+- Top-level exports: 171
+- Declarations (exports + members): 178
+- Documented declarations: 178 / 178 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
-- Referenced but not exported (`ae-forgotten-export`): `AgentUpdateReceipt`, `ExecutionContext`, `ExtensionAttachReceipt`, `ExtensionsInspectReceipt`, `JsonSchemaDraft07`, `PublicAgentDescriptor`, `PublishingFailure`, `RealmInspectReceipt`, `RealmUpdateReceipt`, `sanitizeMetaUpdateParams`, `sanitizeRealmAdminUpdateParams`, `ToolDescriptor`, `ToolParams`, `ToolParams_10`, `ToolParams_2`, `ToolParams_3`, `ToolParams_4`, `ToolParams_5`, `ToolParams_6`, `ToolParams_7`, `ToolParams_8`, `ToolParams_9`, `UndoTurnPortResult`
+- Referenced but not exported (`ae-forgotten-export`): `AgentUpdateReceipt`, `ExecutionContext`, `ExtensionAttachReceipt`, `ExtensionsInspectReceipt`, `JsonSchemaDraft07`, `PendingInstancePayloadSummary`, `PublicAgentDescriptor`, `PublishingFailure`, `RealmEffectiveTemplateSummary`, `RealmInspectReceipt`, `RealmTemplate`, `RealmUpdateReceipt`, `sanitizeMetaUpdateParams`, `sanitizeRealmAdminUpdateParams`, `SavedInstancePayloadSummary`, `ToolDescriptor`, `ToolParams`, `ToolParams_10`, `ToolParams_2`, `ToolParams_3`, `ToolParams_4`, `ToolParams_5`, `ToolParams_6`, `ToolParams_7`, `ToolParams_8`, `ToolParams_9`, `UndoTurnPortResult`
 - Unresolved `{@link}` targets (`ae-unresolved-link`): 8 (policy `none`; see `scripts/api_reports.mjs`)

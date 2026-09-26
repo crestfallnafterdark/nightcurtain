@@ -192,6 +192,14 @@ export interface OpenAIToolDefinition {
 export type ParamSanitizerFn = (rawArgs?: unknown) => Record<string, unknown>;
 
 // @public
+export interface PendingInstancePayloadSummary {
+    readonly digest: string;
+    readonly resolvedAt: string;
+    readonly templateId: string;
+    readonly templateVersion: string;
+}
+
+// @public
 export interface RealmAdminAttachmentView {
     readonly conflictWith?: readonly string[];
     readonly displayName?: string;
@@ -281,6 +289,16 @@ export interface RealmAdminRealmSummary {
 export type RealmAdminToolSelection = 'all' | readonly string[];
 
 // @public
+export interface RealmEffectiveTemplateSummary {
+    readonly description: string;
+    readonly formatVersion: number;
+    readonly launchable: boolean;
+    readonly name: string;
+    readonly templateId: string;
+    readonly version: string | null;
+}
+
+// @public
 export interface RealmEffectiveTemplateView {
     // Warning: (ae-forgotten-export) The symbol "BundleFiles" needs to be exported by the entry point index.d.ts
     readonly files: BundleFiles;
@@ -309,6 +327,9 @@ export interface RealmInspectReceipt {
 export interface RealmPublishingPort {
     getEffectiveTemplateBundle(templateId: string): RealmEffectiveTemplateView | null;
     importTemplate(canonicalPayload: string): RealmTemplateImportView;
+    listEffectiveTemplates(): readonly RealmEffectiveTemplateSummary[];
+    listPendingInstancePayloads(): readonly PendingInstancePayloadSummary[];
+    listSavedInstancePayloads(): readonly SavedInstancePayloadSummary[];
     previewTemplateImport(canonicalPayload: string): RealmTemplateImportView;
     // Warning: (ae-forgotten-export) The symbol "PendingInstancePayload" needs to be exported by the entry point index.d.ts
     storePendingInstancePayload(candidate: PendingInstancePayload): void;
@@ -400,6 +421,16 @@ export interface SandboxToolDispatcher {
 
 // @public
 export type SandboxToolName = typeof SANDBOX_TOOLS[keyof typeof SANDBOX_TOOLS];
+
+// @public
+export interface SavedInstancePayloadSummary {
+    readonly digest: string;
+    readonly id: string;
+    readonly name: string;
+    readonly savedAt: string;
+    readonly templateId: string;
+    readonly templateVersion: string;
+}
 
 // @public
 export interface SchemaGenerationOptions {
@@ -778,6 +809,17 @@ Parameter sanitizer function signature. Normalizes raw/hallucinated parameters t
 
 Sanitized canonical parameter object
 
+### `PendingInstancePayloadSummary` — interface
+
+Bounded projection of one session-only pending instance payload (M5b): the template binding, the canonical payload digest, and the resolution timestamp — never the raw payload body.
+
+#### Members
+
+- **`digest`** — Canonical `payloadDigest` of the stored authored payload.
+- **`resolvedAt`** — ISO-8601 timestamp of the resolution that produced the candidate.
+- **`templateId`** — Template id the candidate targets.
+- **`templateVersion`** — Effective template version the candidate was validated against (`sha256:<hex>`).
+
 ### `RealmAdminAttachmentView` — interface
 
 One realm attachment view carrying the ceiling and live connection state.
@@ -865,6 +907,19 @@ Label-only realm summary used by the update receipt's before/after pair.
 
 Realm-level tool-selection ceiling of one realm extension attachment: `'all'` or an explicit non-empty list of sanitized model-facing call names.
 
+### `RealmEffectiveTemplateSummary` — interface
+
+Bounded summary of one effective catalog template (M5b). Carries exactly the launch-relevant metadata — never bundle bodies, realm vocabulary, or host paths.
+
+#### Members
+
+- **`description`** — Operator-facing description.
+- **`formatVersion`** — Schema format version of the exposed (normalized) template.
+- **`launchable`** — Whether the entry resolves as a launchable template (version + non-empty agent set).
+- **`name`** — Human-readable display name.
+- **`templateId`** — Effective catalog template id.
+- **`version`** — Effective authored-form content version (`sha256:<hex>`), or `null` when the entry cannot be versioned.
+
 ### `RealmEffectiveTemplateView` — interface
 
 Structural view of one effective catalog template: the authored template (format v1 or v2), its bundle file bodies, and the canonical authored-form content version.
@@ -892,14 +947,17 @@ Bounded realm inspection receipt. Realm-id-free: label addressing only.
 
 ### `RealmPublishingPort` — interface
 
-Narrow host port consumed by the Wave U publishing meta tools.
+Narrow host port consumed by the Wave U publishing meta tools and the M5b realm-knowledge reads.
 
-The composition root (the sandbox store) implements this port over its real Wave T template registry and session candidate surface. The port is trusted bound construction: per-call context cannot substitute it (`realmPublishingPort` is a pinned context key), import mutations reuse the existing registry path (never a forked one), and `previewTemplateImport` runs the identical validation/cap pipeline with zero side effects so `dry_run` cannot drift from the real call.
+The composition root (the sandbox store) implements this port over its real Wave T template registry and session candidate surface. The port is trusted bound construction: per-call context cannot substitute it (`realmPublishingPort` is a pinned context key), import mutations reuse the existing registry path (never a forked one), and `previewTemplateImport` runs the identical validation/cap pipeline with zero side effects so `dry_run` cannot drift from the real call. The M5b read members project the same registries into bounded, realm-opaque views (no bundle bodies, no raw payload bodies).
 
 #### Members
 
 - **`getEffectiveTemplateBundle`** — Resolves one effective catalog template by id.
 - **`importTemplate`** — Imports one canonical authored transport bundle through the host registry.
+- **`listEffectiveTemplates`** — Lists the effective catalog templates as bounded summaries (M5b): id, name, effective version, description, exposed format version, and launchability. Never bundle bodies, realm vocabulary, or host paths.
+- **`listPendingInstancePayloads`** — Lists the session-only pending instance payloads as bounded views (M5b): template id, pinned version, canonical payload digest, and resolution timestamp. Never the raw payload body.
+- **`listSavedInstancePayloads`** — Lists the persisted saved hydration-payload library as bounded views (M5b): library id/name, template binding, canonical digest, and save timestamp. Never the raw payload body.
 - **`previewTemplateImport`** — Computes the would-be import receipt (caps, shadow labels, effective budget) without mutating the registry, the persisted snapshot, or trust.
 - **`storePendingInstancePayload`** — Stores (or replaces) the session-only pending instance payload for a template id. Never persisted; the launch attach path stays `{ package }`.
 
@@ -1046,6 +1104,19 @@ function isVfsTool(name: SandboxToolName): boolean {
   return name === 'read_file' || name === 'write_file' || name === 'list_files';
 }
 ```
+
+### `SavedInstancePayloadSummary` — interface
+
+Bounded projection of one saved hydration-payload library entry (M5b): the library id/name, the template binding, the canonical digest, and the save timestamp — never the raw payload body.
+
+#### Members
+
+- **`digest`** — Canonical `payloadDigest` of the authored payload.
+- **`id`** — Stable library id (`saved_payload_<n>`).
+- **`name`** — Operator-chosen display name.
+- **`savedAt`** — ISO-8601 save timestamp.
+- **`templateId`** — Template id the payload targets.
+- **`templateVersion`** — Effective template version the payload validated against (`sha256:<hex>`).
 
 ### `SchemaGenerationOptions` — interface
 
@@ -1247,9 +1318,9 @@ function handleToolError(code: ToolSystemErrorCode, message: string) {
 
 ## Doc coverage
 
-- Top-level exports: 45
-- Declarations (exports + members): 195
-- Documented declarations: 195 / 195 (100%)
+- Top-level exports: 48
+- Declarations (exports + members): 217
+- Documented declarations: 217 / 217 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): `AgentIdentityPort`, `AgentIdentityProjection`, `AgentIdentityScope`, `AgentRuntime`, `BundleFiles`, `ExtensionExecutionPort`, `ExtensionToolDescriptor`, `LifecyclePort`, `PendingInstancePayload`, `RealmTemplate`

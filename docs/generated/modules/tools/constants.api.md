@@ -33,6 +33,7 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 - Publishing-tool vocabulary: `PUBLISHING_TOOLS` freezes the two publishing tool names (`import_realm_template`, `submit_hydration_package`) outside the canonical taxonomy — they are explicit-grant-only meta tools, never wildcard-implied capabilities.
 - Realm-admin tool vocabulary (M3): `REALM_ADMIN_TOOLS` freezes the two realm meta-tool names (`inspect_realm`, `update_realm`) outside the canonical taxonomy — explicit-grant-only (`@realm:inspect`/`@realm:edit`), never wildcard-, privileged-, or preset-implied, and exposed only through the exact-authority schema filter.
 - Extension-admin tool vocabulary (M4): `EXTENSIONS_ADMIN_TOOLS` freezes the two extension meta-tool names (`list_extensions`, `attach_extension`) outside the canonical taxonomy — explicit-grant-only (`@extensions:authority`), never wildcard-, privileged-, or preset-implied, and exposed only through the exact-authority schema filter.
+- Realm-knowledge tool vocabulary (M5b): `REALM_KNOWLEDGE_TOOLS` freezes the three template/hydration read meta-tool names (`list_templates`, `get_template`, `list_hydration_packages`) outside the canonical taxonomy — explicit-grant-only (`@template:authority`/`@hydration:authority`), never wildcard-, privileged-, or preset-implied, and exposed only through the exact-authority schema filter.
 - `resolveToolPreset` is a pure resolver: `null`/`undefined`/empty input returns `[]`, the wildcard string returns exactly `['*']`, named presets resolve case-insensitively to fresh copies (never the frozen stored arrays), comma-separated strings are split and trimmed, Sets/arrays are copied without mutation, and every entry whose canonical form is a retired selector expands in place to that selector's frozen tool list (fixed legacy order, no de-duplication).
 
 ## Decisions
@@ -81,6 +82,13 @@ export const READ_ONLY_TOOLS: readonly SandboxToolName[];
 export const REALM_ADMIN_TOOLS: {
     readonly INSPECT_REALM: 'inspect_realm';
     readonly UPDATE_REALM: 'update_realm';
+};
+
+// @public
+export const REALM_KNOWLEDGE_TOOLS: {
+    readonly LIST_TEMPLATES: 'list_templates';
+    readonly GET_TEMPLATE: 'get_template';
+    readonly LIST_HYDRATION_PACKAGES: 'list_hydration_packages';
 };
 
 // @public
@@ -338,6 +346,20 @@ import { REALM_ADMIN_TOOLS } from './constants/index.ts';
 const inspectName = REALM_ADMIN_TOOLS.INSPECT_REALM; // 'inspect_realm'
 ```
 
+### `REALM_KNOWLEDGE_TOOLS` — variable
+
+Frozen vocabulary of the M5b realm-knowledge meta-tool names.
+
+These three tools are **not** part of the canonical `SANDBOX_TOOLS` taxonomy: they are explicit-grant-only authority tools — `list_templates`/`get_template` under `@template:authority` and `list_hydration_packages` under `@hydration:authority` — never implied by the wildcard capability, `privileged`, or any preset, and their schemas are exposed only to a caller whose frozen authority descriptor carries the matching exact id. They expose the read side of the template/hydration workflow (bounded, realm-opaque listings; no payload bodies); the write side stays `import_realm_template` / `submit_hydration_package`.
+
+#### Examples
+
+```typescript
+import { REALM_KNOWLEDGE_TOOLS } from './constants/index.ts';
+
+const listName = REALM_KNOWLEDGE_TOOLS.LIST_TEMPLATES; // 'list_templates'
+```
+
 ### `resolveToolPreset` — function
 
 Resolves a tool preset identifier, tool array, Set, or comma-separated string into a canonical array of permitted tool names or wildcard patterns.
@@ -522,9 +544,9 @@ function handleToolError(code: ToolSystemErrorCode, message: string) {
 
 ## Doc coverage
 
-- Top-level exports: 22
-- Declarations (exports + members): 23
-- Documented declarations: 23 / 23 (100%)
+- Top-level exports: 23
+- Declarations (exports + members): 24
+- Documented declarations: 24 / 24 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): none
