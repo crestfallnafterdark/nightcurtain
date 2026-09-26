@@ -3035,3 +3035,130 @@ test('25. [M1] launch composes grants only on the engine path; caller claims sta
   assert.strictEqual(lifecycle.getAuthorityDescriptor('auth_claim').allow.has(AGENT_AUTHORITIES.AGENT_EDIT), false);
   assert.strictEqual(claimed.config.authorities, undefined, 'the claim never lands on the entity config');
 });
+
+// ============================================================================
+// 26-28. M2 meta plane: parental inspect/edit, safe-state queue, listings
+// ============================================================================
+
+test('26. [M2] updateAgent defers on a busy target, latest-wins, flush applies once, drop clears', async () => {
+  const events = [];
+  const lifecycle = new AgentLifecycleManager({
+    emit: { emit: (event) => events.push(event) },
+    internalPrincipal: TEST_PRINCIPAL
+  });
+  await lifecycle.launchAgent({ config: { id: 'm2-parent' } });
+  await lifecycle.launchAgent({ config: { id: 'm2-kid' }, callerContext: { callerAgentId: 'm2-parent' } });
+  const kid = lifecycle.getAgent('m2-kid');
+  assert.ok(
+    kid.config.spawnedBy === 'm2-parent' || kid.config.creatorId === 'm2-parent',
+    'the fixture records direct parentage'
+  );
+
+  // Inspect is available to the parent and bounded to the shared scope.
+  const inspected = lifecycle.inspectAgent('m2-kid', { callerAgentId: 'm2-parent' });
+  assert.strictEqual(inspected.id, 'm2-kid');
+  assert.strictEqual(inspected.spawnedBy, 'm2-parent');
+  assert.ok(Array.isArray(inspected.tools.baked));
+  assert.strictEqual(JSON.stringify(inspected).includes('realm:'), false);
+
+  // Idle target: the edit applies immediately.
+  const applied = lifecycle.updateAgent('m2-kid', { name: 'Immediate' }, { callerAgentId: 'm2-parent' });
+  assert.strictEqual(applied.applied, true);
+  assert.strictEqual(lifecycle.getAgent('m2-kid').name, 'Immediate');
+
+  // Busy target: deferred, latest-wins.
+  lifecycle.transitionAgentState('m2-kid', AGENT_STATES.RUNNING, 'busy', { principal: TEST_PRINCIPAL });
+  assert.strictEqual(lifecycle.isAgentBusy('m2-kid'), true);
+  const first = lifecycle.updateAgent('m2-kid', { name: 'First' }, { callerAgentId: 'm2-parent' });
+  assert.strictEqual(first.applied, false);
+  assert.strictEqual(first.deferred, true);
+  const second = lifecycle.updateAgent('m2-kid', { systemPrompt: 'Second wins' }, { callerAgentId: 'm2-parent' });
+  assert.strictEqual(second.deferred, true);
+  assert.strictEqual(lifecycle.getAgent('m2-kid').name, 'Immediate', 'nothing applied while busy');
+
+  assert.strictEqual(lifecycle.flushPendingAgentEdits('m2-kid'), 1, 'exactly one pending edit was flushed');
+  assert.strictEqual(lifecycle.getAgent('m2-kid').name, 'Immediate', 'latest-wins replaced the first patch');
+  assert.strictEqual(lifecycle.getAgent('m2-kid').config.systemPrompt, 'Second wins');
+  assert.strictEqual(lifecycle.flushPendingAgentEdits('m2-kid'), 0, 'the queue is drained exactly once');
+
+  const appliedEvents = events.filter((event) => event.type === 'agent_edit_applied' && event.payload?.targetId === 'm2-kid');
+  assert.strictEqual(appliedEvents.length, 2, 'both the immediate and the flushed edit are audited');
+  assert.deepStrictEqual(appliedEvents[1].payload.fields, ['prompt']);
+  assert.strictEqual(appliedEvents[1].payload.tier, 'parental');
+
+  // Deferred then dropped: kill removes the registration before any flush.
+  lifecycle.transitionAgentState('m2-kid', AGENT_STATES.RUNNING, 'busy again', { principal: TEST_PRINCIPAL });
+  lifecycle.updateAgent('m2-kid', { name: 'Never' }, { callerAgentId: 'm2-parent' });
+  assert.strictEqual(lifecycle.dropPendingAgentEdits('m2-kid'), 1);
+  assert.strictEqual(lifecycle.flushPendingAgentEdits('m2-kid'), 0);
+  assert.strictEqual(lifecycle.getAgent('m2-kid').name, 'Immediate');
+  const dropped = events.filter((event) => event.type === 'agent_edit_dropped' && event.payload?.targetId === 'm2-kid');
+  assert.ok(dropped.length >= 1, 'the drop is audited');
+  assert.deepStrictEqual(Object.keys(dropped[0].payload).sort(), ['actorId', 'fields', 'reason', 'targetId']);
+});
+
+test('27. [M2] updateAgent rejects operator-only keys, unknown keys, and self-target edits uniformly', async () => {
+  const lifecycle = new AgentLifecycleManager({ emit: { emit: () => {} }, internalPrincipal: TEST_PRINCIPAL });
+  await lifecycle.launchAgent({ config: { id: 'm2r-parent' } });
+  await lifecycle.launchAgent({ config: { id: 'm2r-kid' }, callerContext: { callerAgentId: 'm2r-parent' } });
+  const caller = { callerAgentId: 'm2r-parent' };
+
+  for (const key of ['modelConfig', 'presetId', 'workspaceId', 'workspace', 'extensionTools', 'settings', 'role', 'spawnedBy', 'realmId', 'realmBypass', 'authorities']) {
+    assert.throws(
+      () => lifecycle.updateAgent('m2r-kid', { [key]: null }, caller),
+      (err) => err?.code === 'PERMISSION_DENIED',
+      `'${key}' must be denied even with a null value`
+    );
+  }
+  assert.throws(
+    () => lifecycle.updateAgent('m2r-kid', { bogus: 1 }, caller),
+    (err) => err?.code === 'INVALID_ARGUMENTS',
+    'unknown keys are malformed params'
+  );
+  assert.throws(
+    () => lifecycle.updateAgent('m2r-kid', {}, caller),
+    (err) => err?.code === 'INVALID_ARGUMENTS',
+    'an empty patch is malformed'
+  );
+  assert.throws(
+    () => lifecycle.updateAgent('m2r-parent', { name: 'self' }, caller),
+    (err) => err?.code === 'PERMISSION_DENIED',
+    'self-target updates are denied'
+  );
+  assert.throws(
+    () => lifecycle.updateAgent('m2r-kid', { [AGENT_AUTHORITIES.AGENT_EDIT]: true }, caller),
+    (err) => err?.code === 'PERMISSION_DENIED',
+    'authority ids are operator-grant-only'
+  );
+  assert.throws(
+    () => lifecycle.updateAgent('m2r-kid', { tools: ['*'] }, caller),
+    (err) => err?.code === 'PERMISSION_DENIED',
+    'a wildcard promotion is denied on the resulting state'
+  );
+  assert.deepStrictEqual(lifecycle.getAuthorityGrants('m2r-kid'), []);
+  assert.strictEqual(lifecycle.getAgent('m2r-kid').config.realmId, 'realm_generic');
+});
+
+test('28. [M2] listAuthorityGrantRecords carries scopes; whoami exposes own ids; inspect denies peers', async () => {
+  const lifecycle = new AgentLifecycleManager({ emit: { emit: () => {} }, internalPrincipal: TEST_PRINCIPAL });
+  await lifecycle.launchAgent({ config: { id: 'm2l-holder' } });
+  await lifecycle.launchAgent({ config: { id: 'm2l-peer' } });
+  const operator = { principal: TEST_PRINCIPAL };
+  lifecycle.grantAuthority('m2l-holder', AGENT_AUTHORITIES.AGENT_EDIT, { ownSpawns: true, fields: ['tools'] }, operator);
+
+  const key = createAgentIdentityKey('realm_generic', 'm2l-holder');
+  const records = lifecycle.listAuthorityGrantRecords();
+  assert.deepStrictEqual(Object.keys(records), [AGENT_AUTHORITIES.AGENT_EDIT]);
+  assert.deepStrictEqual(records[AGENT_AUTHORITIES.AGENT_EDIT], [{ ref: key, scope: { ownSpawns: true, fields: ['tools'] } }]);
+  assert.ok(Object.isFrozen(records[AGENT_AUTHORITIES.AGENT_EDIT][0]));
+
+  const who = lifecycle.whoami('m2l-holder');
+  assert.deepStrictEqual(who.authorities, [AGENT_AUTHORITIES.AGENT_EDIT], 'own ids only');
+  assert.strictEqual(JSON.stringify(who).includes('ownSpawns'), false, 'scopes never surface');
+
+  assert.throws(
+    () => lifecycle.inspectAgent('m2l-peer', { callerAgentId: 'm2l-holder' }),
+    (err) => err?.code === 'PERMISSION_DENIED',
+    'ownSpawns never reaches a peer'
+  );
+});

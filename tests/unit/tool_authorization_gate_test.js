@@ -1060,3 +1060,71 @@ test('36. a rejecting execution port surfaces as a redacted EXECUTION_FAILED rec
   assert.equal(receipt.code, TOOL_SYSTEM_ERROR_CODES.EXECUTION_FAILED, 'out-of-dictionary port codes normalize to EXECUTION_FAILED');
   assert.equal(receipt.error, 'MCP request exceeded its timeout budget', 'the canonical typed message is preserved');
 });
+
+// ============================================================================
+// 37-38. M2 parental surfaces: ordinary dispatcher authorization (no
+// requiredAuthority) — the descriptor allow decides; the handler receives the
+// dispatcher-pinned caller identity only.
+// ============================================================================
+
+test('37. inspect_agent/update_agent are ordinary canonical tools: the descriptor allow authorizes', async () => {
+  const calls = [];
+  const lifecyclePort = {
+    inspectAgent: (target, context) => {
+      calls.push(['inspect', target, context?.callerAgentId]);
+      return { success: true, id: target, tools: { baked: [], extensions: [] } };
+    },
+    updateAgent: (target, patch, context) => {
+      calls.push(['update', target, patch?.name, context?.callerAgentId]);
+      return { success: true, target, applied: true, fields: ['prompt'] };
+    }
+  };
+
+  const granted = createDispatcher(
+    createIdentity({ authority: createAuthority(['inspect_agent', 'update_agent']) }),
+    { lifecyclePort }
+  );
+  const inspected = await granted.executeTool('inspect_agent', { target: 'kid' });
+  assert.equal(inspected.success, true, 'the descriptor grant authorizes inspect_agent');
+  assert.equal(inspected.id, 'kid');
+  const updated = await granted.executeTool('update_agent', { target: 'kid', name: 'x' });
+  assert.equal(updated.success, true, 'the descriptor grant authorizes update_agent');
+  assert.equal(updated.applied, true);
+
+  // The dispatcher pins the bound caller: a per-call identity claim is inert.
+  assert.deepEqual(calls, [
+    ['inspect', 'kid', GATE_AGENT],
+    ['update', 'kid', 'x', GATE_AGENT]
+  ]);
+
+  // A descriptor without the tools denies before any handler runs.
+  const denied = createDispatcher(
+    createIdentity({ authority: createAuthority(['read_file']) }),
+    { lifecyclePort }
+  );
+  for (const tool of ['inspect_agent', 'update_agent']) {
+    const receipt = await denied.executeTool(tool, { target: 'kid', name: 'x' });
+    assert.equal(receipt.success, false);
+    assert.equal(receipt.code, TOOL_SYSTEM_ERROR_CODES.PERMISSION_DENIED);
+  }
+  assert.equal(calls.length, 2, 'a denied call never reaches the lifecycle port');
+});
+
+test('38. a wildcard descriptor authorizes the parental surfaces; an anonymous caller never does', async () => {
+  const lifecyclePort = {
+    inspectAgent: (target) => ({ success: true, id: target }),
+    updateAgent: (target) => ({ success: true, target, applied: true })
+  };
+  const wildcard = createDispatcher(
+    createIdentity({ authority: createAuthority(['*']) }),
+    { lifecyclePort }
+  );
+  assert.equal((await wildcard.executeTool('inspect_agent', { target: 'kid' })).success, true);
+  assert.equal((await wildcard.executeTool('update_agent', { target: 'kid' })).success, true);
+
+  const anonymous = createSandboxToolDispatcher({ lifecyclePort, virtualFs: createVfsSpy() });
+  for (const tool of ['inspect_agent', 'update_agent']) {
+    const receipt = await anonymous.executeTool(tool, { target: 'kid' });
+    assert.equal(receipt.code, TOOL_SYSTEM_ERROR_CODES.PERMISSION_DENIED, `an anonymous caller never reaches ${tool}`);
+  }
+});
