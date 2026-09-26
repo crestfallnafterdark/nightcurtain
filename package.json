@@ -49,6 +49,7 @@
     "vite": "^8.2.0"
   },
   "dependencies": {
+    "@modelcontextprotocol/client": "2.1.0",
     "@premai/api-sdk": "^1.0.65",
     "buffer": "^6.0.3",
     "dompurify": "^3.4.13",

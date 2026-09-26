@@ -149,6 +149,7 @@ const EXPECTED_MODULES_FOLDERS = [
   'inference/retry',
   'inference/RunwareProvider',
   'invocationEngine',
+  'mcpClient',
   'messagingBus',
   'modelConfig',
   'presetCatalog',
