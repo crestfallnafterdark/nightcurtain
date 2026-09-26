@@ -41,6 +41,7 @@ import type { PartitionClockSnapshot, WorldClock, WorldEvent } from '../worldClo
 import type { SerializedScheduledTimer } from '../runtime/runtimeScheduler/index.ts';
 import type { Agent, AgentState, HistoryMessage, InterruptedTurn } from '../runtime/agent/index.ts';
 import type { AuthorityGrantSnapshotEntry } from '../realmCatalog/index.ts';
+import { canonicalJsonStringify } from '../realmCatalog/index.ts';
 
 import {
   SANDBOX_STATE_STORAGE_KEY,
@@ -1002,6 +1003,201 @@ export interface SandboxPersistedState {
    * never at load.
    */
   readonly savedInstancePayloads?: readonly PersistedSavedInstancePayload[];
+}
+
+// ============================================================================
+// Realm Archive Contract (D0b, ticket 3fe5221)
+// ============================================================================
+
+/**
+ * Canonical transport format tag of a full-realm archive (`RealmArchiveEnvelope`).
+ * An envelope with any other `format` value is rejected fail-closed — the
+ * archive path never parses best-effort.
+ */
+export const REALM_ARCHIVE_FORMAT = 'ai-story.realm-archive' as const;
+
+/**
+ * Canonical schema version of `RealmArchiveEnvelope`. Independent of
+ * `SANDBOX_PERSISTENCE_VERSION` (the envelope records the persistence version
+ * it was produced against in `persistenceVersion`), and an unknown version is
+ * rejected fail-closed.
+ */
+export const REALM_ARCHIVE_FORMAT_VERSION = 1 as const;
+
+/** Provenance block of one realm archive; never trusted on import (fresh-realm remap). */
+export interface RealmArchiveSource {
+  /** Source realm id the archive was exported from. */
+  readonly realmId: string;
+}
+
+/**
+ * One launch-template section carried by a realm archive: the authored-form
+ * content version pin plus the canonical transport JSON text exactly as
+ * exported. Omitted when the realm has no resolvable template; a template id
+ * already known to the importing host is skipped on import (never shadowed).
+ */
+export interface RealmArchiveTemplate {
+  /** Template id the realm was launched from. */
+  readonly id: string;
+  /** Authored-form content version (`sha256:<hex>`) at export time. */
+  readonly version: string;
+  /** Canonical transport JSON text of the bundle (`{ formatVersion, template, files }`). */
+  readonly payload: string;
+}
+
+/**
+ * Realm-scoped saved hydration payload carried by the archive. Reuses the
+ * snapshot contract shape (`PersistedSavedInstancePayload`) so payloads travel
+ * without a second schema; the library digest is recomputed on import.
+ */
+export type RealmArchiveSavedPayload = PersistedSavedInstancePayload;
+
+/** One descriptive authority grant record: authority id plus the member it targets (bare member id). */
+export interface RealmArchiveAuthorityHostGrant {
+  /** Exact authority id (`realmBypass`, or an `AUTHORITY_IDS` member). */
+  readonly authorityId: string;
+  /** Bare realm-local member id the grant belonged to. */
+  readonly memberId: string;
+}
+
+/**
+ * Descriptive projection of one active member's frozen authority descriptor.
+ * Recorded for operator reference only: import never consumes it — hydration
+ * is default-deny and every dropped item is receipted instead.
+ */
+export interface RealmArchiveAuthorityMemberProjection {
+  /** Descriptor principal class. */
+  readonly kind: string;
+  /** Descriptor read visibility. */
+  readonly visibility: string;
+  /** Legacy privilege boolean projection. */
+  readonly privileged: boolean;
+  /** Descriptor allow set (may include the wildcard `'*'`). */
+  readonly allow: readonly string[];
+  /** Descriptor extension-tool allow set. */
+  readonly extensions: readonly string[];
+  /** Cross-realm scope grant flag. */
+  readonly realmBypass: boolean;
+}
+
+/** Descriptive authority state of the archived realm (never applied on import). */
+export interface RealmArchiveAuthority {
+  /** Realm-filtered explicit grant records (`realmBypass` + authority ids), bare member ids. */
+  readonly hostGrants: readonly RealmArchiveAuthorityHostGrant[];
+  /** Bare member id → descriptor projection, active members only. */
+  readonly members: Readonly<Record<string, RealmArchiveAuthorityMemberProjection>>;
+}
+
+/**
+ * Realm-scoped messaging-bus slice. Keys are the source canonical
+ * `(realmId, agentId)` registration keys exactly as `exportSnapshot` emits
+ * them; the audit log carries only entries attributable to the realm
+ * (fail-closed recipient resolution).
+ */
+export interface RealmArchiveMessaging {
+  /** Source registration key → unread envelopes. */
+  readonly activeQueues: Readonly<Record<string, readonly MessageEnvelope[]>>;
+  /** Source registration key → read/archived envelopes. */
+  readonly archives: Readonly<Record<string, readonly MessageEnvelope[]>>;
+  /** Source canonical registration keys of registered agents. */
+  readonly registeredAgents: readonly string[];
+  /** Source canonical registration keys of terminated agents. */
+  readonly terminatedAgents: readonly string[];
+  /** Realm-attributable audit entries, verbatim. */
+  readonly auditLog: readonly MessageEnvelope[];
+}
+
+/**
+ * Realm-scoped world-clock slice. Partition keys are the source canonical
+ * `(realmId, agentId)` keys plus the source realm-global key
+ * (`realm:<realmId>:global`); the envelope never splits or parses them in the
+ * clock layer — the store owns the remap.
+ */
+export interface RealmArchiveWorldClock {
+  /** Source realm-global partition clock snapshot. */
+  readonly global: PartitionClockSnapshot;
+  /** Source partition key → clock snapshot (member partitions + realm-global). */
+  readonly clocks: Readonly<Record<string, PartitionClockSnapshot>>;
+  /** Source partition key → events. */
+  readonly events: Readonly<Record<string, readonly WorldEvent[]>>;
+}
+
+/**
+ * Realm-scoped VirtualFS slice: the realm-global container plus the resolved
+ * member workspace containers. File records are the export-time projection
+ * (`VirtualFsPersistedFile`; `mode`/`permissions` are not part of the export
+ * contract, and `updatedAt` is import-time best-effort).
+ */
+export interface RealmArchiveVfs {
+  /** Realm-global container (`realm:<source>:global`) files keyed by path. */
+  readonly realmGlobal: Readonly<Record<string, VirtualFsPersistedFile>>;
+  /** Resolved member workspace key → path → file record (explicit pins preserved verbatim). */
+  readonly members: Readonly<Record<string, Readonly<Record<string, VirtualFsPersistedFile>>>>;
+}
+
+/** Member snapshots of the archived realm: active entity snapshots plus recycle-bin snapshots. */
+export interface RealmArchiveMembers {
+  /** Sanitized active member snapshots (histories, redo stacks, telemetry, configs). */
+  readonly active: readonly SerializedAgent[];
+  /** Sanitized recycled member snapshots. */
+  readonly recycled: readonly SerializedRecycledAgent[];
+}
+
+/**
+ * Canonical full-realm archive envelope (format v1). Only canonical fields are
+ * emitted; unknown input fields are dropped at the validation boundary.
+ * Optional sections (`template`, `savedPayloads`, `warnings`) are omitted when
+ * empty; member/partition dictionaries are emitted as empty containers.
+ */
+export interface RealmArchiveEnvelope {
+  /** Transport format tag; always {@link REALM_ARCHIVE_FORMAT}. */
+  readonly format: typeof REALM_ARCHIVE_FORMAT;
+  /** Envelope schema version; always {@link REALM_ARCHIVE_FORMAT_VERSION}. */
+  readonly formatVersion: typeof REALM_ARCHIVE_FORMAT_VERSION;
+  /** Unique archive id (`crypto.randomUUID()` or a timestamp/random fallback). */
+  readonly archiveId: string;
+  /** ISO-8601 export timestamp. */
+  readonly exportedAt: string;
+  /** `SANDBOX_PERSISTENCE_VERSION` the exporting session ran. */
+  readonly persistenceVersion: string;
+  /** Export provenance; never trusted on import. */
+  readonly source: RealmArchiveSource;
+  /** The realm record (canonical registry fields incl. provenance + attachments). */
+  readonly realm: PersistedRealmRecord;
+  /** Launch-template section; omitted when the template is absent/unresolvable. */
+  readonly template?: RealmArchiveTemplate;
+  /** Realm-scoped saved hydration payloads (only entries targeting the realm template). */
+  readonly savedPayloads?: readonly RealmArchiveSavedPayload[];
+  /** Active + recycled member snapshots. */
+  readonly members: RealmArchiveMembers;
+  /** Descriptive authority state (never applied on import). */
+  readonly authority: RealmArchiveAuthority;
+  /** Realm-scoped messaging-bus partitions + audit. */
+  readonly messaging: RealmArchiveMessaging;
+  /** Realm-scoped scheduled timers (`agentRef` = source canonical dispatch key). */
+  readonly schedules: readonly SerializedScheduledTimer[];
+  /** Realm-scoped world clock partitions + events. */
+  readonly worldClock: RealmArchiveWorldClock;
+  /** Realm-scoped VirtualFS containers. */
+  readonly vfs: RealmArchiveVfs;
+  /** Export-time completeness disclosures (missing template, bare-key workspace fallback, ...). */
+  readonly warnings?: readonly string[];
+}
+
+/**
+ * Result returned by {@link validateRealmArchive} and {@link parseRealmArchive}.
+ * `envelope` is a normalized canonical-field projection (unknown input fields
+ * dropped) and is present only when `valid` is true.
+ */
+export interface RealmArchiveValidationResult {
+  /** True when the candidate is a well-formed supported archive. */
+  readonly valid: boolean;
+  /** Single human-readable failure reason when `valid` is false. */
+  readonly error?: string;
+  /** Machine-readable failure class. */
+  readonly code?: 'ERR_ARCHIVE_FORMAT' | 'ERR_ARCHIVE_VERSION' | 'ERR_ARCHIVE_INVALID' | 'ERR_ARCHIVE_UNPARSEABLE';
+  /** Normalized envelope, present only when `valid` is true. */
+  readonly envelope?: RealmArchiveEnvelope;
 }
 
 // ============================================================================
@@ -2513,6 +2709,742 @@ function inspectSandboxState(state: unknown): ValidationResult {
       )
     ) as unknown as SandboxPersistedState
   };
+}
+
+// ============================================================================
+// Realm Archive Validation, Serialization & Redaction (D0b, ticket 3fe5221)
+// ============================================================================
+
+/** Credential-shaped query parameter names dropped from archived endpoint URLs. */
+const ARCHIVE_CREDENTIAL_QUERY_PARAMS = new Set([
+  'key',
+  'api_key',
+  'apikey',
+  'token',
+  'access_token',
+  'secret',
+  'client_secret',
+  'password',
+  'passwd',
+  'sig',
+  'signature',
+  'credential'
+]);
+
+/**
+ * Structural check for one archive object member.
+ *
+ * @param value - Candidate value.
+ * @returns True for a non-null, non-array object.
+ */
+function isArchiveRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+/**
+ * Structural check for a non-empty string.
+ *
+ * @param value - Candidate value.
+ * @returns True for a string with non-whitespace content.
+ */
+function isArchiveNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+/**
+ * Structural check for an array of strings.
+ *
+ * @param value - Candidate value.
+ * @returns True for a string array.
+ */
+function isArchiveStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === 'string');
+}
+
+/**
+ * Builds a failed validation result.
+ *
+ * @param code - Failure class.
+ * @param error - Human-readable reason.
+ * @returns Failed result.
+ */
+function archiveValidationFailure(
+  code: RealmArchiveValidationResult['code'],
+  error: string
+): RealmArchiveValidationResult {
+  return { valid: false, code, error };
+}
+
+/**
+ * Validates a persisted realm extension attachment.
+ *
+ * @param value - Candidate attachment.
+ * @param label - Failure label.
+ * @returns Error message, or `null` when valid.
+ */
+function archiveAttachmentError(value: unknown, label: string): string | null {
+  if (!isArchiveRecord(value)) return `${label} must be an object`;
+  if (!isArchiveNonEmptyString(value.extensionId)) return `${label}.extensionId must be a non-empty string`;
+  if (value.toolSelection !== 'all' && !isArchiveStringArray(value.toolSelection)) {
+    return `${label}.toolSelection must be 'all' or a string array`;
+  }
+  if (value.status !== 'active' && value.status !== 'conflict' && value.status !== 'unavailable') {
+    return `${label}.status must be active|conflict|unavailable`;
+  }
+  if (typeof value.approvedAt !== 'string') return `${label}.approvedAt must be a string`;
+  if (value.approvedBy !== 'operator') return `${label}.approvedBy must be 'operator'`;
+  return null;
+}
+
+/**
+ * Validates a persisted realm launch-provenance block.
+ *
+ * @param value - Candidate provenance.
+ * @param label - Failure label.
+ * @returns Error message, or `null` when valid.
+ */
+function archiveProvenanceError(value: unknown, label: string): string | null {
+  if (!isArchiveRecord(value)) return `${label} must be an object`;
+  if (!isArchiveNonEmptyString(value.templateId)) return `${label}.templateId must be a non-empty string`;
+  if (!isArchiveNonEmptyString(value.templateVersion)) return `${label}.templateVersion must be a non-empty string`;
+  if (value.packageDigest !== undefined && typeof value.packageDigest !== 'string') {
+    return `${label}.packageDigest must be a string when present`;
+  }
+  if (!isArchiveRecord(value.inputHashes)) return `${label}.inputHashes must be an object`;
+  for (const key of Object.keys(value.inputHashes)) {
+    if (typeof value.inputHashes[key] !== 'string') return `${label}.inputHashes['${key}'] must be a string`;
+  }
+  if (!isArchiveStringArray(value.seedPaths)) return `${label}.seedPaths must be a string array`;
+  if (typeof value.launchedAt !== 'string') return `${label}.launchedAt must be a string`;
+  if (value.resolvedTools !== undefined) {
+    if (!isArchiveRecord(value.resolvedTools)) return `${label}.resolvedTools must be an object when present`;
+    for (const key of Object.keys(value.resolvedTools)) {
+      if (typeof value.resolvedTools[key] !== 'string') return `${label}.resolvedTools['${key}'] must be a string`;
+    }
+  }
+  if (value.missingExtensions !== undefined && !isArchiveStringArray(value.missingExtensions)) {
+    return `${label}.missingExtensions must be a string array when present`;
+  }
+  return null;
+}
+
+/**
+ * Validates a persisted realm record projection.
+ *
+ * @param value - Candidate realm record.
+ * @returns Error message, or `null` when valid.
+ */
+function archiveRealmRecordError(value: unknown): string | null {
+  if (!isArchiveRecord(value)) return 'realm must be an object';
+  if (!isArchiveNonEmptyString(value.id)) return "realm.id must be a non-empty string";
+  if (!isArchiveNonEmptyString(value.name)) return "realm.name must be a non-empty string";
+  if (typeof value.createdAt !== 'number' || !Number.isFinite(value.createdAt)) {
+    return 'realm.createdAt must be a finite number';
+  }
+  for (const field of ['description', 'color', 'templateId'] as const) {
+    if (value[field] !== undefined && typeof value[field] !== 'string') {
+      return `realm.${field} must be a string when present`;
+    }
+  }
+  if (value.instance !== undefined) {
+    const provenanceError = archiveProvenanceError(value.instance, 'realm.instance');
+    if (provenanceError) return provenanceError;
+  }
+  if (value.extensions !== undefined) {
+    if (!Array.isArray(value.extensions)) return 'realm.extensions must be an array when present';
+    for (let index = 0; index < value.extensions.length; index += 1) {
+      const attachmentError = archiveAttachmentError(value.extensions[index], `realm.extensions[${index}]`);
+      if (attachmentError) return attachmentError;
+    }
+  }
+  return null;
+}
+
+/**
+ * Validates one serialized member snapshot (active or recycled) at the archive
+ * boundary. Deliberately shallow where the entity contract owns deep shape
+ * normalization (`Agent.fromSnapshot` canonicalizes on import); the archive
+ * gate fails closed on the identity fields, history array, and lifecycle
+ * claims.
+ *
+ * @param value - Candidate member snapshot.
+ * @param recycled - Whether the entry must carry recycle metadata.
+ * @param label - Failure label.
+ * @returns Error message, or `null` when valid.
+ */
+function archiveMemberError(value: unknown, recycled: boolean, label: string): string | null {
+  if (!isArchiveRecord(value)) return `${label} must be an object`;
+  if (!isArchiveNonEmptyString(value.id)) return `${label}.id must be a non-empty string`;
+  if (!isArchiveRecord(value.config)) return `${label}.config must be an object`;
+  if (!Array.isArray(value.history)) return `${label}.history must be an array`;
+  if (value.redoStack !== undefined && value.redoStack !== null && !Array.isArray(value.redoStack)) {
+    return `${label}.redoStack must be an array when present`;
+  }
+  if (value.pendingPrecalls !== undefined && value.pendingPrecalls !== null && !Array.isArray(value.pendingPrecalls)) {
+    return `${label}.pendingPrecalls must be an array when present`;
+  }
+  if (recycled) {
+    if (!isArchiveNonEmptyString(value.recycledAt)) return `${label}.recycledAt must be a non-empty string`;
+    if (typeof value.recycleReason !== 'string') return `${label}.recycleReason must be a string`;
+  }
+  return null;
+}
+
+/**
+ * Validates one message envelope at the archive boundary.
+ *
+ * @param value - Candidate envelope.
+ * @param label - Failure label.
+ * @returns Error message, or `null` when valid.
+ */
+function archiveEnvelopeError(value: unknown, label: string): string | null {
+  if (!isArchiveRecord(value)) return `${label} must be an object`;
+  const hasId = isArchiveNonEmptyString(value.id);
+  const hasMessageId = isArchiveNonEmptyString(value.messageId);
+  if (!hasId && !hasMessageId) return `${label} must carry a non-empty id/messageId`;
+  if (typeof value.from !== 'string') return `${label}.from must be a string`;
+  if (typeof value.to !== 'string') return `${label}.to must be a string`;
+  return null;
+}
+
+/**
+ * Validates one message-envelope dictionary.
+ *
+ * @param value - Candidate dictionary.
+ * @param label - Failure label.
+ * @returns Error message, or `null` when valid.
+ */
+function archiveEnvelopeMapError(value: unknown, label: string): string | null {
+  if (!isArchiveRecord(value)) return `${label} must be an object map`;
+  for (const key of Object.keys(value)) {
+    const list = value[key];
+    if (!Array.isArray(list)) return `${label}['${key}'] must be an array`;
+    for (let index = 0; index < list.length; index += 1) {
+      const envelopeError = archiveEnvelopeError(list[index], `${label}['${key}'][${index}]`);
+      if (envelopeError) return envelopeError;
+    }
+  }
+  return null;
+}
+
+/**
+ * Validates one scheduled-timer record at the archive boundary.
+ *
+ * @param value - Candidate schedule.
+ * @param label - Failure label.
+ * @returns Error message, or `null` when valid.
+ */
+function archiveScheduleError(value: unknown, label: string): string | null {
+  if (!isArchiveRecord(value)) return `${label} must be an object`;
+  if (!isArchiveNonEmptyString(value.id)) return `${label}.id must be a non-empty string`;
+  if (!isArchiveNonEmptyString(value.agentId)) return `${label}.agentId must be a non-empty string`;
+  if (typeof value.nextRunAt !== 'number' || !Number.isFinite(value.nextRunAt)) {
+    return `${label}.nextRunAt must be a finite number`;
+  }
+  if (value.agentRef !== undefined && typeof value.agentRef !== 'string') {
+    return `${label}.agentRef must be a string when present`;
+  }
+  return null;
+}
+
+/**
+ * Validates one clock partition snapshot at the archive boundary.
+ *
+ * @param value - Candidate clock snapshot.
+ * @param label - Failure label.
+ * @returns Error message, or `null` when valid.
+ */
+function archiveClockError(value: unknown, label: string): string | null {
+  if (!isArchiveRecord(value)) return `${label} must be an object`;
+  if (typeof value.totalSeconds !== 'number' || !Number.isFinite(value.totalSeconds)) {
+    return `${label}.totalSeconds must be a finite number`;
+  }
+  if (typeof value.date !== 'string' || !value.date.trim()) return `${label}.date must be a non-empty string`;
+  return null;
+}
+
+/**
+ * Validates one world-event record at the archive boundary.
+ *
+ * @param value - Candidate event.
+ * @param label - Failure label.
+ * @returns Error message, or `null` when valid.
+ */
+function archiveEventError(value: unknown, label: string): string | null {
+  if (!isArchiveRecord(value)) return `${label} must be an object`;
+  if (!isArchiveNonEmptyString(value.id)) return `${label}.id must be a non-empty string`;
+  return null;
+}
+
+/**
+ * Validates one VirtualFS file record at the archive boundary.
+ *
+ * @param value - Candidate file record.
+ * @param label - Failure label.
+ * @returns Error message, or `null` when valid.
+ */
+function archiveFileError(value: unknown, label: string): string | null {
+  if (!isArchiveRecord(value)) return `${label} must be an object`;
+  if (!isArchiveNonEmptyString(value.path)) return `${label}.path must be a non-empty string`;
+  if (typeof value.content !== 'string') return `${label}.content must be a string`;
+  return null;
+}
+
+/**
+ * Validates one VirtualFS file dictionary.
+ *
+ * @param value - Candidate dictionary.
+ * @param label - Failure label.
+ * @returns Error message, or `null` when valid.
+ */
+function archiveFileMapError(value: unknown, label: string): string | null {
+  if (!isArchiveRecord(value)) return `${label} must be an object map`;
+  for (const key of Object.keys(value)) {
+    const fileError = archiveFileError(value[key], `${label}['${key}']`);
+    if (fileError) return fileError;
+  }
+  return null;
+}
+
+/**
+ * Shape and prototype-pollution inspection for {@link validateRealmArchive}.
+ * Rebuilds a canonical-field envelope (unknown input fields are dropped) and
+ * rejects malformed sections fail-closed.
+ *
+ * @param value - Raw candidate archive.
+ * @returns Validation result with the normalized envelope on success.
+ */
+function inspectRealmArchive(value: unknown): RealmArchiveValidationResult {
+  if (!isArchiveRecord(value)) {
+    return archiveValidationFailure('ERR_ARCHIVE_INVALID', 'Archive must be a non-null object');
+  }
+  if (deepHasPrototypePollution(value)) {
+    return archiveValidationFailure('ERR_ARCHIVE_INVALID', 'Archive rejected (prototype pollution key detected)');
+  }
+  if (value.format !== REALM_ARCHIVE_FORMAT) {
+    return archiveValidationFailure(
+      'ERR_ARCHIVE_FORMAT',
+      `Unsupported archive format '${String(value.format)}' (expected '${REALM_ARCHIVE_FORMAT}')`
+    );
+  }
+  if (value.formatVersion !== REALM_ARCHIVE_FORMAT_VERSION) {
+    return archiveValidationFailure(
+      'ERR_ARCHIVE_VERSION',
+      `Unsupported archive formatVersion '${String(value.formatVersion)}' (expected ${REALM_ARCHIVE_FORMAT_VERSION})`
+    );
+  }
+  if (!isArchiveNonEmptyString(value.archiveId)) {
+    return archiveValidationFailure('ERR_ARCHIVE_INVALID', 'archiveId must be a non-empty string');
+  }
+  if (!isArchiveNonEmptyString(value.exportedAt)) {
+    return archiveValidationFailure('ERR_ARCHIVE_INVALID', 'exportedAt must be a non-empty string');
+  }
+  if (!isArchiveNonEmptyString(value.persistenceVersion)) {
+    return archiveValidationFailure('ERR_ARCHIVE_INVALID', 'persistenceVersion must be a non-empty string');
+  }
+  if (!isArchiveRecord(value.source) || !isArchiveNonEmptyString(value.source.realmId)) {
+    return archiveValidationFailure('ERR_ARCHIVE_INVALID', 'source.realmId must be a non-empty string');
+  }
+  const realmError = archiveRealmRecordError(value.realm);
+  if (realmError) return archiveValidationFailure('ERR_ARCHIVE_INVALID', realmError);
+
+  // Template (optional, omitted when absent).
+  let template: RealmArchiveTemplate | undefined;
+  if (value.template !== undefined && value.template !== null) {
+    const candidate = value.template;
+    if (!isArchiveRecord(candidate)
+      || !isArchiveNonEmptyString(candidate.id)
+      || !isArchiveNonEmptyString(candidate.version)
+      || !isArchiveNonEmptyString(candidate.payload)) {
+      return archiveValidationFailure('ERR_ARCHIVE_INVALID', 'template must carry non-empty id/version/payload strings');
+    }
+    template = { id: candidate.id, version: candidate.version, payload: candidate.payload };
+  }
+
+  // Saved payloads (optional).
+  let savedPayloads: RealmArchiveSavedPayload[] | undefined;
+  if (value.savedPayloads !== undefined && value.savedPayloads !== null) {
+    if (!Array.isArray(value.savedPayloads)) {
+      return archiveValidationFailure('ERR_ARCHIVE_INVALID', 'savedPayloads must be an array when present');
+    }
+    const normalized: PersistedSavedInstancePayload[] = [];
+    for (let index = 0; index < value.savedPayloads.length; index += 1) {
+      const entry = value.savedPayloads[index];
+      if (!isArchiveRecord(entry)
+        || !isArchiveNonEmptyString(entry.id)
+        || !isArchiveNonEmptyString(entry.name)
+        || !isArchiveNonEmptyString(entry.templateId)
+        || !isArchiveNonEmptyString(entry.templateVersion)
+        || !isArchiveNonEmptyString(entry.savedAt)
+        || !isArchiveRecord(entry.payload)) {
+        return archiveValidationFailure(
+          'ERR_ARCHIVE_INVALID',
+          `savedPayloads[${index}] must carry non-empty id/name/templateId/templateVersion/savedAt and a payload object`
+        );
+      }
+      normalized.push({
+        id: entry.id,
+        name: entry.name,
+        templateId: entry.templateId,
+        templateVersion: entry.templateVersion,
+        savedAt: entry.savedAt,
+        payload: entry.payload
+      });
+    }
+    savedPayloads = normalized;
+  }
+
+  // Members.
+  if (!isArchiveRecord(value.members)) {
+    return archiveValidationFailure('ERR_ARCHIVE_INVALID', 'members must be an object');
+  }
+  const activeEntries = value.members.active;
+  const recycledEntries = value.members.recycled;
+  if (!Array.isArray(activeEntries)) return archiveValidationFailure('ERR_ARCHIVE_INVALID', 'members.active must be an array');
+  if (!Array.isArray(recycledEntries)) return archiveValidationFailure('ERR_ARCHIVE_INVALID', 'members.recycled must be an array');
+  for (let index = 0; index < activeEntries.length; index += 1) {
+    const memberError = archiveMemberError(activeEntries[index], false, `members.active[${index}]`);
+    if (memberError) return archiveValidationFailure('ERR_ARCHIVE_INVALID', memberError);
+  }
+  for (let index = 0; index < recycledEntries.length; index += 1) {
+    const memberError = archiveMemberError(recycledEntries[index], true, `members.recycled[${index}]`);
+    if (memberError) return archiveValidationFailure('ERR_ARCHIVE_INVALID', memberError);
+  }
+
+  // Authority (descriptive).
+  if (!isArchiveRecord(value.authority)) {
+    return archiveValidationFailure('ERR_ARCHIVE_INVALID', 'authority must be an object');
+  }
+  if (!Array.isArray(value.authority.hostGrants)) {
+    return archiveValidationFailure('ERR_ARCHIVE_INVALID', 'authority.hostGrants must be an array');
+  }
+  const hostGrants: RealmArchiveAuthorityHostGrant[] = [];
+  for (let index = 0; index < value.authority.hostGrants.length; index += 1) {
+    const grant = value.authority.hostGrants[index];
+    if (!isArchiveRecord(grant)
+      || !isArchiveNonEmptyString(grant.authorityId)
+      || !isArchiveNonEmptyString(grant.memberId)) {
+      return archiveValidationFailure(
+        'ERR_ARCHIVE_INVALID',
+        `authority.hostGrants[${index}] must carry non-empty authorityId/memberId strings`
+      );
+    }
+    hostGrants.push({ authorityId: grant.authorityId, memberId: grant.memberId });
+  }
+  if (!isArchiveRecord(value.authority.members)) {
+    return archiveValidationFailure('ERR_ARCHIVE_INVALID', 'authority.members must be an object');
+  }
+  const authorityMembers: Record<string, RealmArchiveAuthorityMemberProjection> = {};
+  for (const memberId of Object.keys(value.authority.members)) {
+    if (!memberId.trim()) return archiveValidationFailure('ERR_ARCHIVE_INVALID', 'authority.members carries an empty member id');
+    const projection = value.authority.members[memberId];
+    if (!isArchiveRecord(projection)) {
+      return archiveValidationFailure('ERR_ARCHIVE_INVALID', `authority.members['${memberId}'] must be an object`);
+    }
+    if (typeof projection.kind !== 'string'
+      || typeof projection.visibility !== 'string'
+      || typeof projection.privileged !== 'boolean'
+      || typeof projection.realmBypass !== 'boolean'
+      || !isArchiveStringArray(projection.allow)
+      || !isArchiveStringArray(projection.extensions)) {
+      return archiveValidationFailure(
+        'ERR_ARCHIVE_INVALID',
+        `authority.members['${memberId}'] must carry kind/visibility strings, privileged/realmBypass booleans, and allow/extensions string arrays`
+      );
+    }
+    authorityMembers[memberId] = {
+      kind: projection.kind,
+      visibility: projection.visibility,
+      privileged: projection.privileged,
+      allow: [...projection.allow],
+      extensions: [...projection.extensions],
+      realmBypass: projection.realmBypass
+    };
+  }
+
+  // Messaging.
+  if (!isArchiveRecord(value.messaging)) {
+    return archiveValidationFailure('ERR_ARCHIVE_INVALID', 'messaging must be an object');
+  }
+  const activeQueuesError = archiveEnvelopeMapError(value.messaging.activeQueues, 'messaging.activeQueues');
+  if (activeQueuesError) return archiveValidationFailure('ERR_ARCHIVE_INVALID', activeQueuesError);
+  const archivesError = archiveEnvelopeMapError(value.messaging.archives, 'messaging.archives');
+  if (archivesError) return archiveValidationFailure('ERR_ARCHIVE_INVALID', archivesError);
+  if (!isArchiveStringArray(value.messaging.registeredAgents)) {
+    return archiveValidationFailure('ERR_ARCHIVE_INVALID', 'messaging.registeredAgents must be a string array');
+  }
+  if (!isArchiveStringArray(value.messaging.terminatedAgents)) {
+    return archiveValidationFailure('ERR_ARCHIVE_INVALID', 'messaging.terminatedAgents must be a string array');
+  }
+  if (!Array.isArray(value.messaging.auditLog)) {
+    return archiveValidationFailure('ERR_ARCHIVE_INVALID', 'messaging.auditLog must be an array');
+  }
+  for (let index = 0; index < value.messaging.auditLog.length; index += 1) {
+    const envelopeError = archiveEnvelopeError(value.messaging.auditLog[index], `messaging.auditLog[${index}]`);
+    if (envelopeError) return archiveValidationFailure('ERR_ARCHIVE_INVALID', envelopeError);
+  }
+
+  // Schedules.
+  if (!Array.isArray(value.schedules)) {
+    return archiveValidationFailure('ERR_ARCHIVE_INVALID', 'schedules must be an array');
+  }
+  for (let index = 0; index < value.schedules.length; index += 1) {
+    const scheduleError = archiveScheduleError(value.schedules[index], `schedules[${index}]`);
+    if (scheduleError) return archiveValidationFailure('ERR_ARCHIVE_INVALID', scheduleError);
+  }
+
+  // World clock.
+  if (!isArchiveRecord(value.worldClock)) {
+    return archiveValidationFailure('ERR_ARCHIVE_INVALID', 'worldClock must be an object');
+  }
+  const globalClockError = archiveClockError(value.worldClock.global, 'worldClock.global');
+  if (globalClockError) return archiveValidationFailure('ERR_ARCHIVE_INVALID', globalClockError);
+  if (!isArchiveRecord(value.worldClock.clocks)) {
+    return archiveValidationFailure('ERR_ARCHIVE_INVALID', 'worldClock.clocks must be an object');
+  }
+  for (const partition of Object.keys(value.worldClock.clocks)) {
+    const clockError = archiveClockError(value.worldClock.clocks[partition], `worldClock.clocks['${partition}']`);
+    if (clockError) return archiveValidationFailure('ERR_ARCHIVE_INVALID', clockError);
+  }
+  if (!isArchiveRecord(value.worldClock.events)) {
+    return archiveValidationFailure('ERR_ARCHIVE_INVALID', 'worldClock.events must be an object');
+  }
+  for (const partition of Object.keys(value.worldClock.events)) {
+    const eventList = value.worldClock.events[partition];
+    if (!Array.isArray(eventList)) {
+      return archiveValidationFailure('ERR_ARCHIVE_INVALID', `worldClock.events['${partition}'] must be an array`);
+    }
+    for (let index = 0; index < eventList.length; index += 1) {
+      const eventError = archiveEventError(eventList[index], `worldClock.events['${partition}'][${index}]`);
+      if (eventError) return archiveValidationFailure('ERR_ARCHIVE_INVALID', eventError);
+    }
+  }
+
+  // VFS.
+  if (!isArchiveRecord(value.vfs)) {
+    return archiveValidationFailure('ERR_ARCHIVE_INVALID', 'vfs must be an object');
+  }
+  const realmGlobalError = archiveFileMapError(value.vfs.realmGlobal, 'vfs.realmGlobal');
+  if (realmGlobalError) return archiveValidationFailure('ERR_ARCHIVE_INVALID', realmGlobalError);
+  if (!isArchiveRecord(value.vfs.members)) {
+    return archiveValidationFailure('ERR_ARCHIVE_INVALID', 'vfs.members must be an object');
+  }
+  for (const workspaceKey of Object.keys(value.vfs.members)) {
+    if (!workspaceKey.trim()) return archiveValidationFailure('ERR_ARCHIVE_INVALID', 'vfs.members carries an empty workspace key');
+    const memberFilesError = archiveFileMapError(value.vfs.members[workspaceKey], `vfs.members['${workspaceKey}']`);
+    if (memberFilesError) return archiveValidationFailure('ERR_ARCHIVE_INVALID', memberFilesError);
+  }
+
+  // Warnings (optional).
+  let warnings: string[] | undefined;
+  if (value.warnings !== undefined && value.warnings !== null) {
+    if (!isArchiveStringArray(value.warnings)) {
+      return archiveValidationFailure('ERR_ARCHIVE_INVALID', 'warnings must be a string array when present');
+    }
+    warnings = [...value.warnings];
+  }
+
+  const envelope: RealmArchiveEnvelope = {
+    format: REALM_ARCHIVE_FORMAT,
+    formatVersion: REALM_ARCHIVE_FORMAT_VERSION,
+    archiveId: value.archiveId,
+    exportedAt: value.exportedAt,
+    persistenceVersion: value.persistenceVersion,
+    source: { realmId: value.source.realmId },
+    realm: value.realm as unknown as PersistedRealmRecord,
+    ...(template ? { template } : {}),
+    ...(savedPayloads ? { savedPayloads } : {}),
+    members: {
+      active: activeEntries as unknown as SerializedAgent[],
+      recycled: recycledEntries as unknown as SerializedRecycledAgent[]
+    },
+    authority: { hostGrants, members: authorityMembers },
+    messaging: {
+      activeQueues: value.messaging.activeQueues as unknown as Record<string, MessageEnvelope[]>,
+      archives: value.messaging.archives as unknown as Record<string, MessageEnvelope[]>,
+      registeredAgents: [...value.messaging.registeredAgents],
+      terminatedAgents: [...value.messaging.terminatedAgents],
+      auditLog: value.messaging.auditLog as unknown as MessageEnvelope[]
+    },
+    schedules: value.schedules as unknown as SerializedScheduledTimer[],
+    worldClock: {
+      global: value.worldClock.global as unknown as PartitionClockSnapshot,
+      clocks: value.worldClock.clocks as unknown as Record<string, PartitionClockSnapshot>,
+      events: value.worldClock.events as unknown as Record<string, WorldEvent[]>
+    },
+    vfs: {
+      realmGlobal: value.vfs.realmGlobal as unknown as Record<string, VirtualFsPersistedFile>,
+      members: value.vfs.members as unknown as Record<string, Record<string, VirtualFsPersistedFile>>
+    },
+    ...(warnings ? { warnings } : {})
+  };
+  return { valid: true, envelope };
+}
+
+/**
+ * Validates a candidate `RealmArchiveEnvelope` fail-closed: unknown
+ * `format`/`formatVersion` values reject (no best-effort parse), malformed
+ * sections reject, prototype-pollution keys reject, and unknown input fields
+ * are dropped from the normalized envelope. Never throws.
+ *
+ * @param value - Raw candidate archive.
+ * @returns Validation result with the normalized envelope on success.
+ *
+ * @example
+ * ```typescript
+ * const result = validateRealmArchive(JSON.parse(text));
+ * if (result.valid && result.envelope) {
+ *   console.log(result.envelope.source.realmId);
+ * }
+ * ```
+ */
+export function validateRealmArchive(value: unknown): RealmArchiveValidationResult {
+  try {
+    return inspectRealmArchive(value);
+  } catch (err) {
+    const thrown = err && typeof err === 'object' ? err as { message?: unknown } : null;
+    const message = (typeof thrown?.message === 'string' && thrown.message)
+      ? thrown.message
+      : 'unexpected inspection failure';
+    return archiveValidationFailure('ERR_ARCHIVE_INVALID', `Archive inspection failed: ${message}`);
+  }
+}
+
+/**
+ * Parses canonical archive JSON text and validates it fail-closed.
+ *
+ * @param text - Archive JSON text.
+ * @returns Validation result with the normalized envelope on success.
+ */
+export function parseRealmArchive(text: string): RealmArchiveValidationResult {
+  if (typeof text !== 'string' || !text.trim()) {
+    return archiveValidationFailure('ERR_ARCHIVE_UNPARSEABLE', 'Archive text must be a non-empty string');
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return archiveValidationFailure('ERR_ARCHIVE_UNPARSEABLE', 'Archive text is not valid JSON');
+  }
+  return validateRealmArchive(parsed);
+}
+
+/**
+ * Serializes a normalized archive envelope to canonical JSON text (recursively
+ * sorted keys, no insignificant whitespace) via the realm-catalog canonical
+ * stringifier, so re-exporting the same envelope is byte-stable.
+ *
+ * @param envelope - Normalized archive envelope.
+ * @returns Canonical archive JSON text.
+ */
+export function serializeRealmArchive(envelope: RealmArchiveEnvelope): string {
+  return canonicalJsonStringify(envelope);
+}
+
+/**
+ * Builds the canonical download filename for one archive:
+ * `<realm-slug>-realm-<archiveId8>.realm.json`.
+ *
+ * @param realmName - Realm display name (slugified).
+ * @param archiveId - Archive id (first 8 sanitized characters are used).
+ * @returns Canonical `.realm.json` filename.
+ */
+export function buildRealmArchiveFilename(realmName: string, archiveId: string): string {
+  const slug = (typeof realmName === 'string' ? realmName : '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48) || 'realm';
+  const idPart = (typeof archiveId === 'string' ? archiveId : '')
+    .replace(/[^a-zA-Z0-9]/g, '')
+    .slice(0, 8) || 'archive';
+  return `${slug}-realm-${idPart}.realm.json`;
+}
+
+/**
+ * Tests whether a model-config endpoint URL may leave the host inside an
+ * archive: it must parse as an absolute `http:`/`https:` URL with no userinfo
+ * and no credential-shaped query parameter (`key`/`token`/`secret`/
+ * `password`/`sig`-family names). Endpoint references are retained by the
+ * snapshot design; credentials embedded in them are archive-only drops.
+ *
+ * @param url - Candidate endpoint reference.
+ * @returns True when the URL is safe to archive.
+ */
+export function isSafeRealmArchiveEndpointUrl(url: unknown): boolean {
+  if (typeof url !== 'string' || !url.trim()) return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+  if (parsed.username || parsed.password) return false;
+  for (const name of parsed.searchParams.keys()) {
+    const lower = name.toLowerCase();
+    if (ARCHIVE_CREDENTIAL_QUERY_PARAMS.has(lower)
+      || lower.includes('secret')
+      || lower.includes('token')
+      || lower.includes('password')
+      || lower.includes('apikey')
+      || lower.includes('api_key')
+      || lower.endsWith('key')
+      || lower === 'sig') {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Applies the archive-only config redaction to a serialized member snapshot:
+ * drops the model-config `keyId` credential reference and any endpoint URL
+ * carrying userinfo or credential-shaped query parameters. The snapshot strip
+ * set already removed secret material and caller-asserted authority.
+ *
+ * @param snapshot - Sanitized serialized member snapshot.
+ * @returns A copy with archive-only redactions applied.
+ * @internal
+ */
+function redactRealmArchiveAgentSnapshot(snapshot: SerializedAgent): SerializedAgent {
+  const rawConfig = snapshot.config as unknown as Record<string, unknown> | undefined;
+  if (!isArchiveRecord(rawConfig)) return snapshot;
+  const config: Record<string, unknown> = { ...rawConfig };
+  delete config.keyId;
+  const modelConfig = config.modelConfig;
+  if (isArchiveRecord(modelConfig)) {
+    const redactedModelConfig: Record<string, unknown> = { ...modelConfig };
+    delete redactedModelConfig.keyId;
+    if ('url' in redactedModelConfig && !isSafeRealmArchiveEndpointUrl(redactedModelConfig.url)) {
+      delete redactedModelConfig.url;
+    }
+    config.modelConfig = redactedModelConfig;
+  }
+  return { ...snapshot, config: config as unknown as SerializedAgent['config'] };
+}
+
+/**
+ * Serializes one live active agent for the realm archive: the existing
+ * credential/authority-stripped entity snapshot plus the archive-only drops
+ * (model-config `keyId`, credential-shaped endpoint URLs).
+ *
+ * @param agent - Live agent entity.
+ * @returns Sanitized, archive-redacted member snapshot.
+ */
+export function serializeRealmArchiveAgent(agent: Agent): SerializedAgent {
+  return redactRealmArchiveAgentSnapshot(serializeAgentSnapshot(agent, false));
+}
+
+/**
+ * Serializes one live recycled agent for the realm archive (same redaction as
+ * {@link serializeRealmArchiveAgent}, with the recycle-bin metadata required).
+ *
+ * @param agent - Live recycled agent entity.
+ * @returns Sanitized, archive-redacted recycled member snapshot.
+ */
+export function serializeRealmArchiveRecycledAgent(agent: Agent): SerializedRecycledAgent {
+  return redactRealmArchiveAgentSnapshot(serializeAgentSnapshot(agent, true)) as SerializedRecycledAgent;
 }
 
 /**
