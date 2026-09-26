@@ -54,7 +54,7 @@
  * @invariant Template registry honesty: `importRealmTemplate`/`deleteRealmTemplate` mutate the effective catalog and persist the snapshot synchronously; a failed write (quota/unavailable storage) rolls the mutation back and surfaces the typed `ERR_STORE_TEMPLATE_PERSIST_FAILED`, so the registry is never silently in-memory-only. Imports are capped at 2 MiB per bundle and 3 MiB total (`ERR_STORE_TEMPLATE_TOO_LARGE`), persisted as canonical transport payloads, and re-parsed/re-capped fail-closed on hydration without ever rewriting persisted bytes. `previewRealmTemplateImport` runs the identical parse → cap → label pipeline with zero side effects (`dry_run`), so preview and import can never disagree.
  * @invariant Publishing surface: the store is the host-side realm publishing composition root — it exposes the frozen `RealmPublishingPort` (real import path, effective-catalog resolution, session candidate store) to the store-owned runtime; pending instance payloads are session-only and cleared by a reset; approved template authorities are applied under the operator principal as ordinary registry grants (`metaAuthorityGrants`, canonical identity keys, hydration re-applied) and a `templateAuthorityTrust` record auto-approves only exact declared matches at a later launch. A template declaring an authority id unknown to this host fails the launch closed (`ERR_TEMPLATE_AUTHORITY_UNSUPPORTED`), approvals beyond declarations and malformed approvals are rejected (`ERR_STORE_INVALID_PARAMS`), and grant-free/trust-free snapshots keep every existing field and byte.
  * @invariant Realm launch resolution: a provider-bearing template launches — the retired providers gate no longer refuses it — and its requested extensions plus `<providerId>::<serverToolName>` references resolve against the global install registry and the Realm's attachments: installed-and-approved requests attach under the operator principal, unresolved requests ride the receipt's missing-extension disclosure and `instance.missingExtensions`, resolved tools are recorded as `instance.resolvedTools` (sanitized call name → extension id), and an attached payload/package (or the operator-assembled explicit inputs) is still validated against the effective template contract — including the pinned version — before the Realm record exists, so launch mismatches only with the explicit `allowVersionMismatch` confirmation, which rides the receipt as a warning.
- * @invariant Extension surface: the store is the extension composition root — global install records live in one injected registry persisted additively as `extensions`, realm attachments ride the realm records, install/remove/attach/detach validate and emit `extension_installed`/`extension_removed`/`extension_attached`/`extension_detached` audit events on the runtime stream, `removeExtension` refuses an extension any Realm still attaches, a tampered snapshot attachment for an unknown extension hydrates as `unavailable`, and nothing ever connects or grants runtime authorization from these records.
+ * @invariant Extension surface: the store is the extension composition root — global install records live in one injected registry persisted additively as `extensions`, realm attachments ride the realm records, install/remove/attach/detach validate and emit `extension_installed`/`extension_removed`/`extension_attached`/`extension_detached` audit events on the runtime stream, `removeExtension` refuses an extension any Realm still attaches, an `active` attachment for an unknown extension degrades to `unavailable` and returns to `active` once the extension is installed again while a `conflict` attachment is never rewritten by the heal, and nothing ever connects or grants runtime authorization from these records.
  * @decision Instance provenance is hashes, paths, and resolved tool ids only: a successful template launch records `RealmRecord.instance` with the authored `templateVersion`, the canonical payload digest (`payloadDigest` over the attached payload, when one was attached), per-input hashes over each supplied value's canonical tagged JSON, the placement paths the launch actually wrote, `launchedAt`, the resolved extension tools (`resolvedTools`: sanitized call name → extension id) and the unresolved requested extension ids (`missingExtensions`); raw input values, package content, and credentials never reach the record
  * @decision The store is the extension composition root: it builds one install registry over a `{ load, save }` adapter backed by the sandbox snapshot (`extensions`), seeds it from the persisted field before construction, reconciles hydration through the registry's validated `reconcile` path, and exposes install/remove (global) plus attach/detach (realm) methods that validate against installed records and schedule the existing debounced save; realm attachments are realm-local `RealmRecord.extensions` entries, so realm deletion, rollback, and persistence carry them without a parallel store map
  * @decision `launchRealmFromTemplate` extension approvals mirror the Wave U authority approvals: `extensionApprovals` entries must match a declared template request exactly, absent approval is a decline, only installed-and-approved requests attach (an approval of an uninstalled request attaches nothing and stays disclosed), attachments are written only on a fully successful launch with the operator approval stamp and the realm-level `'all'` selection, and no extension grant is passed to the runtime from this wave
@@ -3437,6 +3437,16 @@ export class SandboxStore {
         save: (records) => {
           this.#extensionRecords = records.map((record) => cloneExtensionInstallRecord(record));
           this.#scheduleAutoSave();
+          // In-session attachment heal: every registry mutation (install,
+          // remove, reconcile — the raw registry surface included) passes
+          // through this persistence seam, so an `unavailable` attachment
+          // returns to `active` as soon as its extension is installed again,
+          // while a `conflict` attachment is never rewritten. Hydration is
+          // excluded here because the hydrate pass heals explicitly after the
+          // realm topology is reconciled.
+          if (!this.#hydrating) {
+            this.#healRealmExtensionAttachments();
+          }
         }
       }
     });
@@ -7498,12 +7508,13 @@ export class SandboxStore {
       }
 
       // Instance provenance (Wave T decision 4): recorded on the Realm record
-      // after a fully successful launch — hashes and paths only, never raw
-      // values. `seedPaths` records the placement destination paths this launch
-      // actually wrote; a skipped seed records none. The payload digest covers
-      // the attached payload (operator-assembled inputs carry no digest), and
-      // `inputHashes` hash each supplied value's canonical tagged JSON.
-      // `resolvedTools` stays reserved.
+      // after a fully successful launch — hashes, paths, and resolved tool ids
+      // only, never raw values. `seedPaths` records the placement destination
+      // paths this launch actually wrote; a skipped seed records none. The
+      // payload digest covers the attached payload (operator-assembled inputs
+      // carry no digest), `inputHashes` hash each supplied value's canonical
+      // tagged JSON, and the launch extension resolution writes
+      // `resolvedTools`/`missingExtensions` below when they are non-empty.
       const seedPaths: string[] = [];
       for (const group of seedWrites) {
         for (const path of group.writtenPaths) {
@@ -9976,14 +9987,16 @@ export class SandboxStore {
   }
 
   /**
-   * Heals the realm-attachment topology after hydration: an attachment whose
-   * extension carries no install record degrades to `unavailable` (the
-   * attachment and its approval stamp are never dropped), and an `unavailable`
-   * attachment whose extension is installed again returns to `active`. A
-   * `conflict` attachment is left untouched — conflict resolution belongs to
-   * catalog-time work. Runs in memory only: the hydration suppression guard
-   * keeps the debounced autosave inert, so persisted bytes are never rewritten
-   * here.
+   * Heals the realm-attachment topology: an `active` attachment whose extension
+   * carries no install record degrades to `unavailable` (the attachment and its
+   * approval stamp are never dropped), and an `unavailable` attachment whose
+   * extension is installed returns to `active`. A `conflict` attachment is
+   * never rewritten in either direction — conflict resolution belongs to
+   * catalog-time work. The sweep runs after hydration and after every
+   * in-session registry mutation (the install/reconcile paths flow through the
+   * registry's persistence seam); during hydration the suppression guard keeps
+   * the debounced autosave inert, so persisted bytes are never rewritten by the
+   * hydration pass.
    */
   #healRealmExtensionAttachments(): void {
     for (const realm of this.#realmRegistry.listRealms()) {
@@ -9992,7 +10005,7 @@ export class SandboxStore {
       let changed = false;
       const healed = attachments.map((attachment) => {
         const installed = this.#extensionRegistry.getExtension(attachment.extensionId) !== null;
-        if (!installed && attachment.status !== 'unavailable') {
+        if (!installed && attachment.status === 'active') {
           changed = true;
           return Object.freeze({ ...attachment, status: 'unavailable' as const });
         }
