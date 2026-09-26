@@ -21,6 +21,7 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 ## Invariants
 
 - Frozen catalog: every descriptor, schema, alias map, and descriptor array is `Object.freeze`d; `TOOL_REGISTRY` is built once from `ALL_TOOL_DESCRIPTORS` as a null-prototype lookup table and frozen, with no registration or mutation path.
+- Catalog reflection (M5a): the three canonical read-only reflection tools (`list_tools`, `list_tool_presets`, `describe_preset`) are ordinary members of `ALL_TOOL_DESCRIPTORS`/`TOOL_REGISTRY` (innate, `precall` family); `list_tools` enumerates the canonical registry slice only and never an authority meta tool or extension call name, and the preset surfaces read the frozen `TOOL_PRESETS` catalog.
 - Authority meta tools: `AUTHORITY_TOOL_REGISTRY` carries every explicit-grant-only authority tool (the Wave U publishing pair and the M3 realm-admin pair `inspect_realm`/`update_realm`; the remaining meta-plane phases append theirs), each declaring the exact authority id (`@template:authority`/`@hydration:authority`/`@realm:inspect`/`@realm:edit`/…) its invocation requires; they are not members of `ALL_TOOL_DESCRIPTORS`/`TOOL_REGISTRY`, their schemas are exposed only through `getAuthorityToolSchemas()` for callers holding the matching exact id (with `getAuthorityToolDescriptors()` as the describe-merge source), and the wildcard `'*'`/`privileged` never satisfy them. The M2 `inspect_agent`/`update_agent` surfaces are the deliberate exception: they are **canonical** ordinary tools (manager preset) whose parental tier is inherent and whose meta tier is enforced registry-side by the lifecycle manager, so no `requiredAuthority` gate applies.
 - Fail-closed precalls: `batch_precall` denies any call whose name does not canonically resolve to a `PRECALL_ALLOWLIST` member, so unresolved or non-allowlisted names never reach the executor.
 
@@ -29,7 +30,7 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 - Identity-only caller scope: invocation, lifecycle, and scheduler handlers forward only the dispatcher-bound subject id plus the identity-port principal; per-call caller identity, privilege flags, and role aliases are never read
 - `invoke_agent` pins recursion depth from the trusted bound `currentDepth`, never from a per-call `depth` key
 - VFS and messaging sanitizers strip caller-supplied identity and mailbox-routing keys from the fresh sanitized parameter copy
-- Realm/authority meta tools stay outside the canonical taxonomy (38 names) so no wildcard, preset, or `toolProfile` selector can expose or authorize them; descriptors resolve exclusively through `AUTHORITY_TOOL_REGISTRY`, and the dispatcher consults the caller's frozen authority descriptor for the exact explicit authority. `inspect_agent`/`update_agent` are ordinary canonical tools by design (M2): their schemas are preset-authorized, and the parental/meta verdict is enforced registry-side per target.
+- Realm/authority meta tools stay outside the canonical taxonomy (41 names) so no wildcard, preset, or `toolProfile` selector can expose or authorize them; descriptors resolve exclusively through `AUTHORITY_TOOL_REGISTRY`, and the dispatcher consults the caller's frozen authority descriptor for the exact explicit authority. `inspect_agent`/`update_agent` are ordinary canonical tools by design (M2): their schemas are preset-authorized, and the parental/meta verdict is enforced registry-side per target.
 
 ## Surface
 
@@ -154,8 +155,8 @@ export const AUTHORITY_TOOL_REGISTRY: Readonly<Record<string, AuthorityToolDescr
 export interface AuthorityToolDescriptor {
     readonly authority: string;
     readonly description: string;
-    // Warning: (ae-forgotten-export) The symbol "ToolParams_9" needs to be exported by the entry point index.d.ts
-    readonly handler: (params: ToolParams_9, context: ExecutionContext) => unknown;
+    // Warning: (ae-forgotten-export) The symbol "ToolParams_10" needs to be exported by the entry point index.d.ts
+    readonly handler: (params: ToolParams_10, context: ExecutionContext) => unknown;
     readonly name: string;
     readonly paramAliasMap: Readonly<Record<string, string>>;
     readonly sanitize: (rawArgs?: unknown) => Record<string, unknown>;
@@ -441,6 +442,86 @@ export const cancelScheduleDescriptor: Readonly<{
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
     handler: (params: ToolParams_6 | string, context: ExecutionContext) => Promise<unknown>;
 }>;
+
+// @public
+export const CATALOG_TOOL_DESCRIPTION_MAX_CHARS = 160;
+
+// @public
+export const catalogToolDescriptors: readonly (Readonly<{
+    name: "list_tools";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {};
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: (rawArgs?: unknown) => ToolParams_9;
+    handler: (params: ToolParams_9, context: ExecutionContext) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | {
+        success: boolean;
+        count: number;
+        tools: {
+            name: string;
+            family: string;
+            mutating: boolean;
+            description: string;
+        }[];
+    }>;
+}> | Readonly<{
+    name: "list_tool_presets";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {};
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: (rawArgs?: unknown) => ToolParams_9;
+    handler: (params: ToolParams_9) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | Readonly<{
+        success: true;
+        count: number;
+        presets: readonly Readonly<{
+            id: string;
+            count: number;
+        }>[];
+    }>>;
+}> | Readonly<{
+    name: "describe_preset";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {
+            preset: {
+                type: string;
+                description: string;
+            };
+        };
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: (rawArgs?: unknown) => ToolParams_9;
+    handler: (params: ToolParams_9) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | Readonly<{
+        success: true;
+        preset: string;
+        count: number;
+        members: readonly string[];
+    }>>;
+}>)[];
 
 // @public
 export const clockToolDescriptors: readonly (Readonly<{
@@ -796,6 +877,35 @@ export const deleteFileDescriptor: Readonly<{
 }>;
 
 // @public
+export const describe_preset: Readonly<{
+    name: "describe_preset";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {
+            preset: {
+                type: string;
+                description: string;
+            };
+        };
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: (rawArgs?: unknown) => ToolParams_9;
+    handler: (params: ToolParams_9) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | Readonly<{
+        success: true;
+        preset: string;
+        count: number;
+        members: readonly string[];
+    }>>;
+}>;
+
+// @public
 export const describe_tool: Readonly<{
     name: "describe_tool";
     description: "Retrieve documentation, schema, and parameter specifications for a sandbox tool from the registry.";
@@ -836,6 +946,64 @@ export const describe_tool: Readonly<{
         schema?: undefined;
         parameters?: undefined;
     }>;
+}>;
+
+// @public
+export const describePreset: Readonly<{
+    name: "describe_preset";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {
+            preset: {
+                type: string;
+                description: string;
+            };
+        };
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: (rawArgs?: unknown) => ToolParams_9;
+    handler: (params: ToolParams_9) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | Readonly<{
+        success: true;
+        preset: string;
+        count: number;
+        members: readonly string[];
+    }>>;
+}>;
+
+// @public
+export const describePresetDescriptor: Readonly<{
+    name: "describe_preset";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {
+            preset: {
+                type: string;
+                description: string;
+            };
+        };
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: (rawArgs?: unknown) => ToolParams_9;
+    handler: (params: ToolParams_9) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | Readonly<{
+        success: true;
+        preset: string;
+        count: number;
+        members: readonly string[];
+    }>>;
 }>;
 
 // @public
@@ -1570,7 +1738,7 @@ export const import_realm_template: Readonly<{
         dryrun: "dry_run";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_9, context: ExecutionContext) => Partial<PublishingFailure> | {
+    handler: (params: ToolParams_10, context: ExecutionContext) => Partial<PublishingFailure> | {
         success: boolean;
         tool: "import_realm_template";
         templateId: string;
@@ -1635,7 +1803,7 @@ export const importRealmTemplate: Readonly<{
         dryrun: "dry_run";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_9, context: ExecutionContext) => Partial<PublishingFailure> | {
+    handler: (params: ToolParams_10, context: ExecutionContext) => Partial<PublishingFailure> | {
         success: boolean;
         tool: "import_realm_template";
         templateId: string;
@@ -1700,7 +1868,7 @@ export const importRealmTemplateDescriptor: Readonly<{
         dryrun: "dry_run";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_9, context: ExecutionContext) => Partial<PublishingFailure> | {
+    handler: (params: ToolParams_10, context: ExecutionContext) => Partial<PublishingFailure> | {
         success: boolean;
         tool: "import_realm_template";
         templateId: string;
@@ -2863,6 +3031,60 @@ export const list_schedules: Readonly<{
 }>;
 
 // @public
+export const list_tool_presets: Readonly<{
+    name: "list_tool_presets";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {};
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: (rawArgs?: unknown) => ToolParams_9;
+    handler: (params: ToolParams_9) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | Readonly<{
+        success: true;
+        count: number;
+        presets: readonly Readonly<{
+            id: string;
+            count: number;
+        }>[];
+    }>>;
+}>;
+
+// @public
+export const list_tools: Readonly<{
+    name: "list_tools";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {};
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: (rawArgs?: unknown) => ToolParams_9;
+    handler: (params: ToolParams_9, context: ExecutionContext) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | {
+        success: boolean;
+        count: number;
+        tools: {
+            name: string;
+            family: string;
+            mutating: boolean;
+            description: string;
+        }[];
+    }>;
+}>;
+
+// @public
 export const listAgents: Readonly<{
     name: "list_agents";
     description: "List active agents in the sandbox runtime visible to the calling agent, with optional status and role filtering. Each entry carries the effective tool policy the agent can invoke.";
@@ -3132,6 +3354,114 @@ export const listSchedulesDescriptor: Readonly<{
     paramAliasMap: Readonly<{}>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
     handler: (params: ToolParams_6, context: ExecutionContext) => Promise<unknown>;
+}>;
+
+// @public
+export const listToolPresets: Readonly<{
+    name: "list_tool_presets";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {};
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: (rawArgs?: unknown) => ToolParams_9;
+    handler: (params: ToolParams_9) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | Readonly<{
+        success: true;
+        count: number;
+        presets: readonly Readonly<{
+            id: string;
+            count: number;
+        }>[];
+    }>>;
+}>;
+
+// @public
+export const listToolPresetsDescriptor: Readonly<{
+    name: "list_tool_presets";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {};
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: (rawArgs?: unknown) => ToolParams_9;
+    handler: (params: ToolParams_9) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | Readonly<{
+        success: true;
+        count: number;
+        presets: readonly Readonly<{
+            id: string;
+            count: number;
+        }>[];
+    }>>;
+}>;
+
+// @public
+export const listTools: Readonly<{
+    name: "list_tools";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {};
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: (rawArgs?: unknown) => ToolParams_9;
+    handler: (params: ToolParams_9, context: ExecutionContext) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | {
+        success: boolean;
+        count: number;
+        tools: {
+            name: string;
+            family: string;
+            mutating: boolean;
+            description: string;
+        }[];
+    }>;
+}>;
+
+// @public
+export const listToolsDescriptor: Readonly<{
+    name: "list_tools";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {};
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: (rawArgs?: unknown) => ToolParams_9;
+    handler: (params: ToolParams_9, context: ExecutionContext) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | {
+        success: boolean;
+        count: number;
+        tools: {
+            name: string;
+            family: string;
+            mutating: boolean;
+            description: string;
+        }[];
+    }>;
 }>;
 
 // @public
@@ -5000,7 +5330,7 @@ export const submit_hydration_package: Readonly<{
         dryrun: "dry_run";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_9, context: ExecutionContext) => Partial<PublishingFailure> | {
+    handler: (params: ToolParams_10, context: ExecutionContext) => Partial<PublishingFailure> | {
         success: boolean;
         tool: "submit_hydration_package";
         templateId: string;
@@ -5062,7 +5392,7 @@ export const submitHydrationPackage: Readonly<{
         dryrun: "dry_run";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_9, context: ExecutionContext) => Partial<PublishingFailure> | {
+    handler: (params: ToolParams_10, context: ExecutionContext) => Partial<PublishingFailure> | {
         success: boolean;
         tool: "submit_hydration_package";
         templateId: string;
@@ -5124,7 +5454,7 @@ export const submitHydrationPackageDescriptor: Readonly<{
         dryrun: "dry_run";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_9, context: ExecutionContext) => Partial<PublishingFailure> | {
+    handler: (params: ToolParams_10, context: ExecutionContext) => Partial<PublishingFailure> | {
         success: boolean;
         tool: "submit_hydration_package";
         templateId: string;
@@ -7202,6 +7532,7 @@ export const writeJsonDescriptor: Readonly<{
 
 // Warnings were encountered during analysis:
 //
+// <declarations>/tools/descriptors/catalogTools.d.ts:302:5 - (ae-forgotten-export) The symbol "ToolParams_9" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/clockTools.d.ts:439:5 - (ae-forgotten-export) The symbol "ToolParams_7" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/invocationTools.d.ts:465:5 - (ae-forgotten-export) The symbol "ToolParams_5" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/lifecycleTools.d.ts:481:5 - (ae-forgotten-export) The symbol "ToolParams_3" needs to be exported by the entry point index.d.ts
@@ -7227,7 +7558,7 @@ export const writeJsonDescriptor: Readonly<{
 
 ### `ALL_TOOL_DESCRIPTORS` — variable
 
-Array of all 38 Canonical Tool Descriptors
+Array of all 41 Canonical Tool Descriptors
 
 ### `attach_extension` — variable
 
@@ -7295,6 +7626,14 @@ camelCase alias of `cancelScheduleDescriptor`.
 
 Args: `task_id` (required). Delegates to `context.lifecyclePort.cancelSchedule()` with the bound caller scope and throws when that service is missing.
 
+### `CATALOG_TOOL_DESCRIPTION_MAX_CHARS` — variable
+
+Per-entry description bound for `list_tools`: each listed tool's LLM-facing description is truncated to this many characters (with a single trailing `…` when cut), so the full canonical listing stays serialization-bounded. The complete description remains available through `describe_tool`.
+
+### `catalogToolDescriptors` — variable
+
+Array of the three M5a canonical catalog-reflection descriptors, appended to the canonical `ALL_TOOL_DESCRIPTORS` catalog by `tools/descriptors/index.ts`.
+
 ### `clockToolDescriptors` — variable
 
 Array of all Clock Tool Descriptors
@@ -7327,9 +7666,21 @@ camelCase alias of `deleteFileDescriptor`.
 
 Args: `file_path` (required), optional `recursive`. Delegates to `context.virtualFs.deleteFile()` and throws when that service is missing.
 
+### `describe_preset` — variable
+
+snake_case alias of `describePresetDescriptor`.
+
 ### `describe_tool` — variable
 
 snake_case alias of `describeToolDescriptor`.
+
+### `describePreset` — variable
+
+camelCase alias of `describePresetDescriptor`.
+
+### `describePresetDescriptor` — variable
+
+`describe_preset` descriptor — canonical read-only expansion of one generated capability preset into its exact frozen members (the wildcard `all` preset reports `['*']`). Unknown ids fail closed as malformed.
 
 ### `describeTool` — variable
 
@@ -7595,6 +7946,14 @@ snake_case alias of `listInboxDescriptor`.
 
 snake_case alias of `listSchedulesDescriptor`.
 
+### `list_tool_presets` — variable
+
+snake_case alias of `listToolPresetsDescriptor`.
+
+### `list_tools` — variable
+
+snake_case alias of `listToolsDescriptor`.
+
 ### `listAgents` — variable
 
 camelCase alias of `listAgentsDescriptor`.
@@ -7646,6 +8005,22 @@ camelCase alias of `listSchedulesDescriptor`.
 `list_schedules` descriptor — list active, pending, and triggered schedules and timers.
 
 Declares no parameters; delegates to `context.lifecyclePort.listSchedules({}, scope)` and throws when that service is missing.
+
+### `listToolPresets` — variable
+
+camelCase alias of `listToolPresetsDescriptor`.
+
+### `listToolPresetsDescriptor` — variable
+
+`list_tool_presets` descriptor — canonical read-only listing of the generated Wave 1 capability presets: each preset id with its member count. The catalog is read from the frozen `TOOL_PRESETS` source, never a literal.
+
+### `listTools` — variable
+
+camelCase alias of `listToolsDescriptor`.
+
+### `listToolsDescriptor` — variable
+
+`list_tools` descriptor — canonical read-only enumeration of the baked tool catalog. Returns every canonical descriptor (never an authority meta tool or extension call name) with its family, mutation class, and a bounded one-line description; no schemas, configuration, histories, or allowlists.
 
 ### `messagingToolDescriptors` — variable
 
@@ -7987,10 +8362,10 @@ Args: `file_path` (required), exactly one of inline `data` or file-sourced `data
 
 ## Doc coverage
 
-- Top-level exports: 150
-- Declarations (exports + members): 157
-- Documented declarations: 157 / 157 (100%)
+- Top-level exports: 161
+- Declarations (exports + members): 168
+- Documented declarations: 168 / 168 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
-- Referenced but not exported (`ae-forgotten-export`): `AgentUpdateReceipt`, `ExecutionContext`, `ExtensionAttachReceipt`, `ExtensionsInspectReceipt`, `JsonSchemaDraft07`, `PublicAgentDescriptor`, `PublishingFailure`, `RealmInspectReceipt`, `RealmUpdateReceipt`, `sanitizeMetaUpdateParams`, `sanitizeRealmAdminUpdateParams`, `ToolDescriptor`, `ToolParams`, `ToolParams_2`, `ToolParams_3`, `ToolParams_4`, `ToolParams_5`, `ToolParams_6`, `ToolParams_7`, `ToolParams_8`, `ToolParams_9`, `UndoTurnPortResult`
+- Referenced but not exported (`ae-forgotten-export`): `AgentUpdateReceipt`, `ExecutionContext`, `ExtensionAttachReceipt`, `ExtensionsInspectReceipt`, `JsonSchemaDraft07`, `PublicAgentDescriptor`, `PublishingFailure`, `RealmInspectReceipt`, `RealmUpdateReceipt`, `sanitizeMetaUpdateParams`, `sanitizeRealmAdminUpdateParams`, `ToolDescriptor`, `ToolParams`, `ToolParams_10`, `ToolParams_2`, `ToolParams_3`, `ToolParams_4`, `ToolParams_5`, `ToolParams_6`, `ToolParams_7`, `ToolParams_8`, `ToolParams_9`, `UndoTurnPortResult`
 - Unresolved `{@link}` targets (`ae-unresolved-link`): 8 (policy `none`; see `scripts/api_reports.mjs`)
