@@ -1388,7 +1388,7 @@ templateBundleVersion({ template: DEMO_TEMPLATE, files: {} });
 
 Reports whether a template declares capability needs: non-empty `toolContract.requirements` or non-empty `providers`.
 
-The launch gate uses this to fail closed with `ERR_TEMPLATE_PROVIDERS_UNSUPPORTED` until the providers wave lands, while import, parse, validation, and review all succeed. The helper is a pure shape query — the shape itself is validated by `validateTemplateV1()`/`parseTemplateBundleV1()`.
+A pure shape query, and it has no gate caller: the retired `ERR_TEMPLATE_PROVIDERS_UNSUPPORTED` launch gate no longer exists, and the store resolves every requested extension against the global install registry and the Realm's attachments (unresolved requests ride the launch receipt's missing-extension disclosure). The shape itself is validated by `validateTemplateV1()`/`validateTemplate()`; malformed declarations are simply not reported here.
 
 #### Parameters
 

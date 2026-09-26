@@ -111,9 +111,9 @@ The canonical snake_case tool name, or `null` when the input is not a non-empty 
 
 ### `isReservedToolCallName` — function
 
-Reports whether a candidate tool call name is already reserved by the baked or publishing tool surface: a name is reserved when it resolves through the tool alias map (canonical names, documented aliases, the aggregate `subagent_management` selector, and the publishing meta-tool spellings) or equals a frozen baked/publishing descriptor name.
+Reports whether a candidate tool call name is already reserved by the baked or publishing tool surface, or is a prototype-chain property name: a name is reserved when it resolves through the tool alias map (canonical names, documented aliases, the aggregate `subagent_management` selector, and the publishing meta-tool spellings), equals a frozen baked/publishing descriptor name, or is one of `__proto__`, `constructor`, `prototype`.
 
-Derived requirement and extension call names must be unreserved, so a template-derived call can never shadow — or be routed as — a baked, selector, or publishing tool. The equality clause is a belt-and-suspenders check that holds even if an alias entry is ever dropped.
+Derived requirement and extension call names must be unreserved, so a template-derived call can never shadow — or be routed as — a baked, selector, or publishing tool, and can never key a dynamic projection record through the prototype chain (`acme::__proto__` derives `__proto__` and fails closed with the rest). The equality clause is a belt-and-suspenders check that holds even if an alias entry is ever dropped.
 
 #### Parameters
 
@@ -130,6 +130,7 @@ import { isReservedToolCallName } from './tools/normalizers/index.ts';
 
 isReservedToolCallName('read_file'); // true
 isReservedToolCallName('import_realm_template'); // true
+isReservedToolCallName('__proto__'); // true
 isReservedToolCallName('acme_scoring_similarity'); // false
 ```
 

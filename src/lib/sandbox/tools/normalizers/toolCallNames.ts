@@ -17,6 +17,17 @@ const RESERVED_TOOL_DESCRIPTOR_NAMES: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Prototype-chain property names that are forever reserved as tool call
+ * names. A derived call name keys dynamic projection and dispatch records
+ * (tool plans, allowlists, resolved-tool maps), so a name that reads or writes
+ * through `Object.prototype` must never be admitted: assigning `__proto__`
+ * invokes the inherited accessor and silently reroutes the value instead of
+ * storing it, while `constructor`/`prototype` reads fall through to inherited
+ * members. Module-private and never mutated after initialization.
+ */
+const PROTOTYPE_PROPERTY_NAMES: ReadonlySet<string> = new Set(['__proto__', 'constructor', 'prototype']);
+
+/**
  * Derives the model-facing tool call name from a capability id or a
  * server-side tool name: every character outside `[A-Za-z0-9_]` becomes `_` —
  * per character, with no collapsing, case folding, or trimming, so the
@@ -47,14 +58,17 @@ export function deriveToolCallName(capabilityId: string): string {
 
 /**
  * Reports whether a candidate tool call name is already reserved by the baked
- * or publishing tool surface: a name is reserved when it resolves through the
- * tool alias map (canonical names, documented aliases, the aggregate
- * `subagent_management` selector, and the publishing meta-tool spellings) or
- * equals a frozen baked/publishing descriptor name.
+ * or publishing tool surface, or is a prototype-chain property name: a name is
+ * reserved when it resolves through the tool alias map (canonical names,
+ * documented aliases, the aggregate `subagent_management` selector, and the
+ * publishing meta-tool spellings), equals a frozen baked/publishing descriptor
+ * name, or is one of `__proto__`, `constructor`, `prototype`.
  *
  * Derived requirement and extension call names must be unreserved, so a
  * template-derived call can never shadow — or be routed as — a baked, selector,
- * or publishing tool. The equality clause is a belt-and-suspenders check that
+ * or publishing tool, and can never key a dynamic projection record through
+ * the prototype chain (`acme::__proto__` derives `__proto__` and fails closed
+ * with the rest). The equality clause is a belt-and-suspenders check that
  * holds even if an alias entry is ever dropped.
  *
  * @param candidate - Candidate model-facing call name
@@ -66,9 +80,12 @@ export function deriveToolCallName(capabilityId: string): string {
  *
  * isReservedToolCallName('read_file'); // true
  * isReservedToolCallName('import_realm_template'); // true
+ * isReservedToolCallName('__proto__'); // true
  * isReservedToolCallName('acme_scoring_similarity'); // false
  * ```
  */
 export function isReservedToolCallName(candidate: string): boolean {
-  return RESERVED_TOOL_DESCRIPTOR_NAMES.has(candidate) || getCanonToolName(candidate) !== null;
+  return PROTOTYPE_PROPERTY_NAMES.has(candidate)
+    || RESERVED_TOOL_DESCRIPTOR_NAMES.has(candidate)
+    || getCanonToolName(candidate) !== null;
 }

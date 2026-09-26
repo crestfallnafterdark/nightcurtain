@@ -982,10 +982,13 @@ export function validateToolRequirement(candidate: unknown, label: string): Real
  * every requirement id derives its call name (`deriveToolCallName`) and fails
  * closed on either collision:
  * - two ids deriving the same call name (`a.b` + `a_b` → `a_b`), and
- * - a derived call name reserved by the baked/publishing surface
- *   (`isReservedToolCallName`: canonical names, aliases, the selector, and
- *   publishing spellings — `read.file` → `read_file`,
- *   `import.realm.template` → `import_realm_template`).
+ * - a derived call name reserved by the baked/publishing surface or by the
+ *   prototype vocabulary (`isReservedToolCallName`: canonical names, aliases,
+ *   the selector, publishing spellings, and `__proto__`/`constructor`/
+ *   `prototype` — `read.file` → `read_file`,
+ *   `import.realm.template` → `import_realm_template`; a requirement id
+ *   exactly equal to a prototype name is already rejected as a reserved
+ *   property name).
  *
  * A requirement id equal to the wildcard `'*'` is rejected outright — the
  * wildcard is reserved, so a requirement can never shadow or masquerade as it.
@@ -1122,7 +1125,10 @@ function validateProviderMcp(candidate: Record<string, unknown>, label: string):
  *
  * Each entry is a concrete extension request: an MCP server identity plus
  * transport (or a pack identity); the deprecated `provides`/`authRef` MCP
- * subfields are accepted for compatibility but never resolved here.
+ * subfields are accepted for compatibility but never resolved here. Declared
+ * ids are unique within one template — a duplicate id (same kind or across
+ * kinds, since `publisher/name` is a legal MCP id too) fails closed and names
+ * the id, instead of the retired silent first-wins dedup (P2.1b).
  *
  * @param candidate - Candidate provider list
  * @param label - Human-readable label used in error messages
@@ -1139,13 +1145,18 @@ export function validateProviders(candidate: unknown, label: string): ReadonlySe
     if (!isPlainRecord(provider)) {
       throw new Error(`${providerLabel} must be an object`);
     }
+    let id: string;
     if (provider.kind === 'pack') {
-      ids.add(validateProviderPack(provider, providerLabel).id);
+      id = validateProviderPack(provider, providerLabel).id;
     } else if (provider.kind === 'mcp') {
-      ids.add(validateProviderMcp(provider, providerLabel).id);
+      id = validateProviderMcp(provider, providerLabel).id;
     } else {
       throw new Error(`${providerLabel} kind must be 'pack' or 'mcp'`);
     }
+    if (ids.has(id)) {
+      throw new Error(`${label} carries duplicate provider id '${id}'`);
+    }
+    ids.add(id);
   });
   return ids;
 }
@@ -1179,11 +1190,13 @@ export function createToolGrantContext(
  * Reports whether a template declares capability needs: non-empty
  * `toolContract.requirements` or non-empty `providers`.
  *
- * The launch gate uses this to fail closed with
- * `ERR_TEMPLATE_PROVIDERS_UNSUPPORTED` until the providers wave lands, while
- * import, parse, validation, and review all succeed. The helper is a pure
- * shape query — the shape itself is validated by
- * `validateTemplateV1()`/`parseTemplateBundleV1()`.
+ * A pure shape query, and it has no gate caller: the retired
+ * `ERR_TEMPLATE_PROVIDERS_UNSUPPORTED` launch gate no longer exists, and the
+ * store resolves every requested extension against the global install registry
+ * and the Realm's attachments (unresolved requests ride the launch receipt's
+ * missing-extension disclosure). The shape itself is validated by
+ * `validateTemplateV1()`/`validateTemplate()`; malformed declarations are
+ * simply not reported here.
  *
  * @param template - Template of either format (or `null`/`undefined`) to inspect
  * @returns `true` when the template requests providers or capability requirements
