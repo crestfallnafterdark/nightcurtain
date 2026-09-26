@@ -1,3 +1,15 @@
+/**
+ * Live-test contract (ticket 62ed108, decision A30): the Prem enclave subtests
+ * below make real network calls (completion, streaming, model listing), so they
+ * run only when `PREM_LIVE_TESTS=1` is set explicitly. By default the suite is
+ * offline-deterministic — every live subtest is recorded as a TAP skip with the
+ * shared reason below — while the mocked contract subtests stay always-on.
+ *
+ * Run the live subtests (requires PREM_TEST_API_KEY / PREM_API_KEY, e.g. via
+ * the gitignored .env.local):
+ *
+ *   PREM_LIVE_TESTS=1 timeout 180 node tests/unit/prem_provider_test.js
+ */
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import '../test_env.js';
@@ -7,6 +19,14 @@ import { InferenceError, PremProvider, withRetry } from '../../src/lib/sandbox/i
 loadEnvFiles();
 
 const PREM_KEY = process.env.PREM_TEST_API_KEY || process.env.PREM_API_KEY;
+
+/**
+ * Live-subtest gate (ticket 62ed108, decision A30): default off so the battery
+ * never turns red on an upstream Prem incident; set `PREM_LIVE_TESTS=1` to run
+ * the network subtests.
+ */
+const PREM_LIVE = process.env.PREM_LIVE_TESTS === '1';
+const PREM_LIVE_SKIP_REASON = 'live Prem subtest disabled — set PREM_LIVE_TESTS=1';
 
 const sampleTools = [
   {
@@ -50,7 +70,7 @@ test('PremProvider exhaustive unit test suite', async (t) => {
     assert.equal(balance.balance, null);
   });
 
-  await t.test('4. listModels() queries https://gateway.prem.io/rvenc/models and returns chat models', async () => {
+  await t.test('4. listModels() queries https://gateway.prem.io/rvenc/models and returns chat models', { skip: !PREM_LIVE && PREM_LIVE_SKIP_REASON }, async () => {
     const models = await withRetry(() => provider.listModels(), { maxRetries: 3 });
     assert.ok(Array.isArray(models) && models.length > 0);
 
@@ -78,7 +98,7 @@ test('PremProvider exhaustive unit test suite', async (t) => {
     assert.equal(model.config.reasoningEffort, 'high');
   });
 
-  await t.test('6. model.complete() executes confidential enclave completion', async () => {
+  await t.test('6. model.complete() executes confidential enclave completion', { skip: !PREM_LIVE && PREM_LIVE_SKIP_REASON }, async () => {
     const model = provider.createModel(modelId, { maxTokens: 120, temperature: 0.1 });
     const result = await withRetry(() => model.complete({
       messages: [{ role: 'user', content: 'Say PREM_OK' }]
@@ -91,7 +111,7 @@ test('PremProvider exhaustive unit test suite', async (t) => {
     assert.match(combined, /PREM_OK/, 'Should contain PREM_OK');
   });
 
-  await t.test('7. model.complete() with tools triggers tool calling', async () => {
+  await t.test('7. model.complete() with tools triggers tool calling', { skip: !PREM_LIVE && PREM_LIVE_SKIP_REASON }, async () => {
     const model = provider.createModel(modelId, { maxTokens: 200, temperature: 0.1 });
     const result = await withRetry(() => model.complete({
       messages: [{ role: 'user', content: 'Check system status for enclave using get_system_status.' }],
@@ -106,7 +126,7 @@ test('PremProvider exhaustive unit test suite', async (t) => {
     assert.ok(tc.args && typeof tc.args === 'object');
   });
 
-  await t.test('8. model.stream() streams chunks and emits terminal finish chunk', async () => {
+  await t.test('8. model.stream() streams chunks and emits terminal finish chunk', { skip: !PREM_LIVE && PREM_LIVE_SKIP_REASON }, async () => {
     const model = provider.createModel(modelId, { maxTokens: 120, temperature: 0.1 });
     const chunks = [];
 
@@ -151,7 +171,7 @@ test('PremProvider exhaustive unit test suite', async (t) => {
     assert.strictEqual(client1, client2, 'Expected p1 and p2 to share identical singleton RvencClient reference');
   });
 
-  await t.test('11. Vault Integration: PremProvider resolves credentials dynamically from CredentialVault', async () => {
+  await t.test('11. Vault Integration: PremProvider resolves credentials dynamically from CredentialVault', { skip: !PREM_LIVE && PREM_LIVE_SKIP_REASON }, async () => {
     const testVault = {
       credentials: new Map([
         ['cred_prem_vault_test', {
