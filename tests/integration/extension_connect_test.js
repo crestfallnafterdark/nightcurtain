@@ -1056,3 +1056,52 @@ test('16. the attachment toolSelection narrows the catalog-driven universe befor
     sharedLocalStorage.clear();
   }
 });
+
+// ============================================================================
+// 18. M3 realm ceiling edits against the live catalog (ticket 094de1b)
+// ============================================================================
+
+test('18. [M3] setExtensionToolSelection validates against the live catalog and reauthorizes idle members', async () => {
+  const fixture = await createMcpFixtureServer({ tools: FIXTURE_TOOLS_A });
+  const { runtime, store, events, unsubscribe } = createHarness();
+  try {
+    installMcp(store, 'm3-selection-ext', fixture);
+    store.attachExtension(GENERIC_REALM_ID, 'm3-selection-ext', { toolSelection: 'all' });
+    await store.connectExtension('m3-selection-ext');
+    await store.launchAgent({
+      id: 'm3-selection-member',
+      name: 'Selection member',
+      role: 'observer',
+      realmId: GENERIC_REALM_ID,
+      allowedTools: [],
+      extensionTools: ['shared_tool']
+    });
+    const identityPort = runtime.createAgentIdentityPort();
+    const grantsOf = (id) => [...identityPort.getAgentIdentity(id, { realmId: GENERIC_REALM_ID }).authority.extensions];
+    assert.deepStrictEqual(grantsOf('m3-selection-member'), ['shared_tool']);
+
+    assert.throws(
+      () => store.setExtensionToolSelection(GENERIC_REALM_ID, 'm3-selection-ext', ['not_a_live_tool']),
+      /live catalog|unknown/i,
+      'a name outside the live catalog fails closed'
+    );
+    assert.deepStrictEqual(grantsOf('m3-selection-member'), ['shared_tool'], 'unchanged after the refusal');
+
+    const updated = store.setExtensionToolSelection(GENERIC_REALM_ID, 'm3-selection-ext', ['alpha_only']);
+    assert.deepStrictEqual([...updated.extensions[0].toolSelection], ['alpha_only']);
+    assert.deepStrictEqual(
+      grantsOf('m3-selection-member'),
+      [],
+      'the idle member is reauthorized synchronously against the new ceiling'
+    );
+    const audit = events.find((event) => event.type === 'extension_tool_selection_updated');
+    assert.ok(audit, 'the ceiling change is audited');
+    assert.equal(audit.payload.extensionId, 'm3-selection-ext');
+    assert.equal(audit.payload.source, 'operator');
+  } finally {
+    unsubscribe();
+    store.destroy();
+    await fixture.close();
+    sharedLocalStorage.clear();
+  }
+});
