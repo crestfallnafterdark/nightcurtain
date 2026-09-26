@@ -5265,3 +5265,126 @@ test('64. an install-free snapshot omits the additive fields, and a reset drops 
     sharedLocalStorage.clear();
   }
 });
+
+// ============================================================================
+// 65. Extension wave: a conflict attachment is never healed (P2.2 verifier F1)
+// ============================================================================
+
+test('65. a conflict attachment stays conflict through hydration and through a later install', () => {
+  sharedLocalStorage.clear();
+  let hydrated = null;
+
+  try {
+    const seed = createSandboxStore({ autoBootstrapDirector: false, autoHydrate: false });
+    seed.saveToStorage();
+    seed.destroy();
+
+    const raw = JSON.parse(sharedLocalStorage.getItem('ai_storyteller_sandbox_state_v1'));
+    raw.realms = [
+      { id: GENERIC_REALM_ID, name: 'Generic', createdAt: 1 },
+      {
+        id: 'realm_conflict',
+        name: 'Conflict Realm',
+        createdAt: 2,
+        extensions: [
+          {
+            extensionId: 'conflict-ext',
+            toolSelection: 'all',
+            status: 'conflict',
+            approvedAt: '2026-01-01T00:00:00.000Z',
+            approvedBy: 'operator'
+          }
+        ]
+      }
+    ];
+    sharedLocalStorage.setItem('ai_storyteller_sandbox_state_v1', JSON.stringify(raw));
+
+    hydrated = createSandboxStore({ autoBootstrapDirector: false, autoHydrate: true });
+    assert.deepStrictEqual(
+      hydrated.getRealm('realm_conflict').extensions.map((entry) => entry.status),
+      ['conflict'],
+      'hydration must not degrade a conflict attachment to unavailable'
+    );
+
+    hydrated.installExtension({
+      id: 'conflict-ext',
+      kind: 'pack',
+      transportHint: { kind: 'pack', source: 'npm:@acme/conflict' }
+    });
+    assert.deepStrictEqual(
+      hydrated.getRealm('realm_conflict').extensions.map((entry) => entry.status),
+      ['conflict'],
+      'a later install must not flip a conflict attachment to active'
+    );
+  } finally {
+    if (hydrated) hydrated.destroy();
+    sharedLocalStorage.clear();
+  }
+});
+
+// ============================================================================
+// 66. Extension wave: an unavailable attachment heals in-session (F2)
+// ============================================================================
+
+test('66. an unavailable attachment heals to active in-session after installExtension and resolves', () => {
+  sharedLocalStorage.clear();
+  let hydrated = null;
+
+  try {
+    const seed = createSandboxStore({ autoBootstrapDirector: false, autoHydrate: false });
+    seed.saveToStorage();
+    seed.destroy();
+
+    const raw = JSON.parse(sharedLocalStorage.getItem('ai_storyteller_sandbox_state_v1'));
+    raw.realms = [
+      { id: GENERIC_REALM_ID, name: 'Generic', createdAt: 1 },
+      {
+        id: 'realm_ghost',
+        name: 'Ghost Realm',
+        createdAt: 2,
+        extensions: [
+          {
+            extensionId: 'ghost-ext',
+            toolSelection: 'all',
+            status: 'active',
+            approvedAt: '2026-01-01T00:00:00.000Z',
+            approvedBy: 'operator'
+          }
+        ]
+      }
+    ];
+    sharedLocalStorage.setItem('ai_storyteller_sandbox_state_v1', JSON.stringify(raw));
+
+    hydrated = createSandboxStore({ autoBootstrapDirector: false, autoHydrate: true });
+    assert.deepStrictEqual(
+      hydrated.getRealm('realm_ghost').extensions.map((entry) => entry.status),
+      ['unavailable'],
+      'an active attachment for an unknown install hydrates as unavailable'
+    );
+
+    hydrated.installExtension({
+      id: 'ghost-ext',
+      kind: 'pack',
+      transportHint: { kind: 'pack', source: 'npm:@acme/ghost' }
+    });
+    assert.deepStrictEqual(
+      hydrated.getRealm('realm_ghost').extensions.map((entry) => entry.status),
+      ['active'],
+      'a successful install heals the unavailable attachment in-session'
+    );
+
+    const resolution = hydrated.getExtensionRegistry().resolve(
+      { requests: [{ id: 'ghost-ext', kind: 'pack' }], toolReferences: ['ghost-ext::docs.search'] },
+      hydrated.listRealmExtensions('realm_ghost')
+    );
+    assert.deepStrictEqual(
+      resolution.resolvedTools,
+      { docs_search: 'ghost-ext' },
+      'the healed in-session attachment resolves its declared tool reference'
+    );
+    assert.deepStrictEqual(resolution.missingExtensions, [], 'no missing extension after the in-session heal');
+  } finally {
+    if (hydrated) hydrated.destroy();
+    sharedLocalStorage.clear();
+  }
+});
