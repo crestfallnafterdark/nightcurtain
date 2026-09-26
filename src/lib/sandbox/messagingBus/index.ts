@@ -1642,6 +1642,44 @@ function isInternalPrincipalCandidate(candidate: unknown): boolean {
 }
 
 /**
+ * Decodes the realm-local bare id carried by a canonical runtime registration
+ * key (`realm:<realmId>:<agentId>` for Realm-bound registrations,
+ * `system:<agentId>` for the bootstrap-only system scope; both segments
+ * percent-encoded by the runtime's single owner `createAgentIdentityKey`).
+ *
+ * Memo-independent projection fallback (ticket 1754637): after hydration the
+ * in-memory registration memo is gone and the active-only identity port cannot
+ * resolve a recycled registration, so a canonical key known only from the
+ * snapshot's terminated/recycled set must still project its bare id on
+ * agent-visible denials and listings. Non-canonical identifiers (host keys,
+ * legacy bare refs, malformed keys) decode to `null` and pass through
+ * untouched.
+ *
+ * @param ref - Candidate registration identifier.
+ * @returns The decoded bare agent id, or `null` when the ref is not a
+ *   well-formed canonical identity key.
+ */
+function decodeCanonicalRegistrationId(ref: string): string | null {
+  if (typeof ref !== 'string' || ref === '') return null;
+  try {
+    if (ref.startsWith('system:')) {
+      const agentId = decodeURIComponent(ref.slice('system:'.length));
+      return agentId || null;
+    }
+    if (!ref.startsWith('realm:')) return null;
+    const rest = ref.slice('realm:'.length);
+    const separator = rest.indexOf(':');
+    if (separator <= 0) return null;
+    const realmId = decodeURIComponent(rest.slice(0, separator));
+    const agentId = decodeURIComponent(rest.slice(separator + 1));
+    if (!realmId) return null;
+    return agentId || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Layer 0 Core Foundation Primitive: Pure FIFO MessagingBus & Mailbox Store.
  *
  * Governs isolated per-agent mailboxes with strict FIFO dequeue-on-read semantics,
@@ -1709,7 +1747,9 @@ export class MessagingBus {
    * Bare-id memo for opaque registration identifiers (Wave I, ticket
    * d57cbc1): captured while the identity port still resolves the registration
    * (launch, termination) so agent-facing listings project the bare id even
-   * after the agent leaves the active registry. Internal only.
+   * after the agent leaves the active registry. Internal only; canonical
+   * runtime keys additionally project through the format decode after
+   * hydration (ticket 1754637), when the memo is not part of the snapshot.
    */
   #registrationIds: Map<string, string> = new Map();
 
@@ -2329,23 +2369,25 @@ export class MessagingBus {
 
   /**
    * Projects an opaque ref to the bare id an agent may see: a canonical key
-   * resolves to its projection `id`; a bare ref (or an unresolved/unknown key)
-   * stays verbatim so legacy surfaces are byte-compatible.
+   * resolves to its projection `id` (live port, then the launch/termination
+   * memo, then the canonical-key decode); a bare ref (or an unresolved,
+   * non-canonical key) stays verbatim so legacy surfaces are byte-compatible.
    *
    * @param ref - Candidate ref (bare id, canonical key, or legacy identifier).
    * @returns Bare agent id when the port resolves one, else the ref.
    */
   #bareIdForRef(ref: string | null | undefined): string {
     if (!ref || typeof ref !== 'string') return ref || '';
-    const projection = this.#identityByKey(ref) || this.#identityByRef(ref);
-    const id = projection ? readMetadataString(projection.id) : undefined;
-    return id || ref;
+    return this.#bareIdForRegistration(ref);
   }
 
   /**
-   * Resolves a registered identifier to the bare id surfaced by listings.
-   * Canonical keys project to their bare id (the live port first, then the
-   * launch/termination memo); legacy identifiers pass through.
+   * Resolves a registered identifier to the bare id surfaced by listings and
+   * denials. Canonical keys project to their bare id (the live port first,
+   * then the launch/termination memo, then — after hydration, when the
+   * active-only port can no longer resolve a recycled registration and the
+   * memo is gone — the canonical key decode; ticket 1754637); legacy
+   * identifiers pass through.
    *
    * @param registrationRef - Identifier received at registration time.
    * @returns Bare agent id (or the identifier when no projection resolves).
@@ -2353,7 +2395,10 @@ export class MessagingBus {
   #bareIdForRegistration(registrationRef: string): string {
     const projection = this.#identityByKey(registrationRef) || this.#identityByRef(registrationRef);
     const id = projection ? readMetadataString(projection.id) : undefined;
-    return id || this.#registrationIds.get(registrationRef) || registrationRef;
+    return id
+      || this.#registrationIds.get(registrationRef)
+      || decodeCanonicalRegistrationId(registrationRef)
+      || registrationRef;
   }
 
   /**
@@ -4043,7 +4088,10 @@ export class MessagingBus {
     let recipientSurfaceId = recipient;
     if (recipient !== 'all') {
       const recipientResolution = this.#resolveRecipient(recipient, senderScope);
-      recipientSurfaceId = recipientResolution.id || recipient;
+      // Project the denial/inline surface id to the bare id: after hydration a
+      // recycled-only canonical target must never echo its canonical key
+      // (ticket 1754637).
+      recipientSurfaceId = this.#bareIdForRef(recipientResolution.id || recipient);
       const recipientMailboxKey = recipientResolution.mailboxKey || recipient;
       const deliverable = recipientResolution.kind === 'resolved' &&
         this.#registeredAgents.has(recipientMailboxKey) &&
