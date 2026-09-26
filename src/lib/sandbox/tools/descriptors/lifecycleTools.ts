@@ -187,26 +187,38 @@ interface AmbiguityAwareIdentityPort {
 }
 
 /**
- * Reports whether a bound caller subject is a realm-ambiguous bare id with no
- * trusted identity channel (Wave I, ticket d57cbc1; I2-V F1).
+ * Reports whether a bound caller subject cannot be resolved to a trusted
+ * registration and must therefore fail closed on the launch path (Wave I,
+ * ticket d57cbc1; I2-V F1/R3, ticket 376e37f).
  *
- * An ambiguous bare id cannot name exactly one registration: the trusted
- * canonical `callerKey` is absent and the bound realm scope (if any) resolved
- * no projection, while the identity port enumerates more than one live
- * registration for the subject. Such a caller must fail closed on the launch
- * path rather than degrade to an anonymous host launch. Dispatchers without an
- * enumerating identity port (host/test constructions) keep their legacy
- * behavior; the check is read-only and never widens authority.
+ * Two refusal states share the uniform permission denial:
+ * - **No trusted identity channel** (ticket 376e37f, R3): the dispatcher bound
+ *   a caller id but no usable identity port (descriptor-less host/test
+ *   construction). There is no registry to prove the caller registered, nor
+ *   to prove the id unambiguous, so a launch would degrade to the anonymous
+ *   host path — the wrong realm, no confinement gate, no SEC-2 clamp. Refuse
+ *   rather than fall through.
+ * - **Realm-ambiguous bare id** (ticket d57cbc1, F1): the trusted canonical
+ *   `callerKey` is absent and the bound realm scope (if any) resolved no
+ *   projection, while the identity port enumerates more than one live
+ *   registration for the subject.
+ *
+ * A dispatcher-pinned canonical `callerKey` is an exact identity channel and
+ * is exempt; an unbound (anonymous) dispatcher keeps its legacy host
+ * semantics. The check is read-only and never widens authority.
  *
  * @param context - Optional trusted execution context
- * @returns True when the bound caller is a realm-ambiguous bare id
+ * @returns True when the bound caller must fail closed on the launch path
  */
 function isBoundCallerAmbiguous(context: ExecutionContext): boolean {
   const callerAgentId = resolveCallerAgentId(context);
   if (!callerAgentId) return false;
   if (resolvePinnedCallerKey(context)) return false;
   const identityPort = context?.identityPort;
-  if (!identityPort || typeof identityPort.getAgentIdentity !== 'function') return false;
+  // No trusted identity channel at all (ticket 376e37f): the bound caller can
+  // be neither resolved realm-exactly nor proven unambiguous, so the launch
+  // must refuse instead of degrading to an anonymous host launch.
+  if (!identityPort || typeof identityPort.getAgentIdentity !== 'function') return true;
   try {
     if (identityPort.getAgentIdentity(callerAgentId, resolveBoundRealmScope(context))) return false;
     const enumerator = identityPort as unknown as AmbiguityAwareIdentityPort;
@@ -742,11 +754,12 @@ export const spawnAgentDescriptor = Object.freeze({
         code: TOOL_SYSTEM_ERROR_CODES.INVALID_ARGUMENTS
       }, warnings);
     }
-    // Fail closed on a realm-ambiguous keyless bound caller (Wave I, ticket
-    // d57cbc1; I2-V F1): without a trusted canonical key or a resolving realm
-    // scope the caller cannot be attributed, and an unattributed launch would
-    // fall through to the anonymous host path (wrong realm, no confinement, no
-    // SEC-2 clamp). The refusal carries the uniform permission-denied shape.
+    // Fail closed on a bound caller without a trusted identity channel (Wave
+    // I, ticket d57cbc1; I2-V F1/R3, ticket 376e37f): without a canonical key,
+    // a usable identity port, or a resolving realm scope the caller cannot be
+    // attributed, and an unattributed launch would fall through to the
+    // anonymous host path (wrong realm, no confinement, no SEC-2 clamp). The
+    // refusal carries the uniform permission-denied shape.
     if (isBoundCallerAmbiguous(context)) {
       return withSpawnWarnings({
         success: false,
