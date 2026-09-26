@@ -24,7 +24,7 @@ flowchart TD
         VFS["VirtualFS (Multi-Tenant Workspaces, JSON Pointers, Paginated Listing)"]
         BUS["MessagingBus (Pub/Sub Inboxes, Deduplicated Envelopes, Archive Store)"]
         CLK["WorldClock (Discrete Time Progression, Scheduled Alarm Triggers)"]
-        DISP["ToolDispatcher (35 Tools Contract, Fail-Closed Security Gating, Type Coercion)"]
+        DISP["ToolDispatcher (36 Tools Contract, Fail-Closed Security Gating, Type Coercion)"]
         RT["AgentRuntime (State Machine, Turn Execution Loop, History Compaction)"]
     end
 
@@ -113,7 +113,7 @@ stateDiagram-v2
 ---
 
 ### 2.4 `ToolDispatcher` & Security Gating
-The [`ToolDispatcher`](../../src/lib/sandbox/toolDefinitions/index.ts) is the fail-closed authorization gateway governing all 35 canonical tools.
+The [`ToolDispatcher`](../../src/lib/sandbox/toolDefinitions/index.ts) is the fail-closed authorization gateway governing all 36 canonical tools.
 
 ```mermaid
 flowchart TD
@@ -133,7 +133,7 @@ flowchart TD
 #### Canonical Tool Presets Matrix:
 | Preset Name | Tool Count | Permitted Capabilities | Restrictions |
 |---|---|---|---|
-| `all` / `*` | 35 | Full unconstrained access to all tools | Reserved for privileged Director / Admin |
+| `all` / `*` | 36 | Full unconstrained access to all tools | Reserved for privileged Director / Admin |
 | `manager` | 31 | File read/write/patch, messaging, subagent lifecycle/invocation, scheduling | Restricted from system clock overrides and sudo escalations |
 | `collaborator`| 25 | File read/write, messaging, inbox operations, precalls | Cannot spawn agents or modify global configurations |
 | `readonly_collaborator` | 14 | Read-only VFS + inbox/mail verbs, `send_message`, precalls | No file writes, deletes, patches, or subagent/scheduler capabilities |

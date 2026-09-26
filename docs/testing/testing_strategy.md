@@ -19,11 +19,11 @@ graph TD
     end
 
     subgraph L2["Tier 2: Zero-Mock Subsystem Integration (node --test)"]
-        INT["51 Integration Suites (tests/integration/)<br/>• Real VirtualFS, MessagingBus, WorldClock, AgentRuntime<br/>• Preset Binding & Credential Vault Workflows<br/>• Precall Pipeline & Tool Security Gating Verification<br/>• Concurrency & State Persistence Fault Injection"]
+        INT["52 Integration Suites (tests/integration/)<br/>• Real VirtualFS, MessagingBus, WorldClock, AgentRuntime<br/>• Preset Binding & Credential Vault Workflows<br/>• Precall Pipeline & Tool Security Gating Verification<br/>• Concurrency & State Persistence Fault Injection"]
     end
 
     subgraph L1["Tier 1: Atomic Unit & Contract Testing (node --test)"]
-        UNIT["55 Unit Suites (tests/unit/)<br/>• Pure Functions & Algorithms<br/>• DeepSeek Reasoning Hygiene (INV-REASONING-STRING)<br/>• JSON Pointers, Parsers, Preset Catalog, LoRA Tags<br/>• Module Contracts & Provider Adapters"]
+        UNIT["56 Unit Suites (tests/unit/)<br/>• Pure Functions & Algorithms<br/>• DeepSeek Reasoning Hygiene (INV-REASONING-STRING)<br/>• JSON Pointers, Parsers, Preset Catalog, LoRA Tags<br/>• Module Contracts & Provider Adapters"]
     end
 
     L1 --> L2
@@ -101,7 +101,7 @@ The master runner executes all Unit and Integration suites in strict sub-process
 // Sample output format from tests/runner.js:
 // ======================================================================
 //   AGENTIC SANDBOX STUDIO MASTER TEST SUITE RUNNER
-//   Total Suites: 107 (56 Unit, 51 Integration)
+//   Total Suites: 108 (56 Unit, 52 Integration)
 // ======================================================================
 //   [Unit       ] deepseek_provider_test.js                  ✔ PASS (42ms)
 //   [Unit       ] deepseek_reasoning_hygiene_test.js         ✔ PASS (18ms)
@@ -109,7 +109,7 @@ The master runner executes all Unit and Integration suites in strict sub-process
 //   [Integration] tool_contract_security_gating_test.js      ✔ PASS (115ms)
 //   [Integration] mail_injection_precall_pipeline_test.js    ✔ PASS (188ms)
 // ======================================================================
-//   Suites:       107 passed, 107 total
+//   Suites:       108 passed, 108 total
 //   Failed:       0 failed
 //   Duration:     3.42s
 // ======================================================================
@@ -126,7 +126,7 @@ All Node-based test suites import [`tests/test_env.js`](../../tests/test_env.js)
 
 ## 4. Test Suite Inventory & Classification
 
-The project includes **107 native test suites** (56 unit, 51 integration) and **10 browser E2E specs**:
+The project includes **108 native test suites** (56 unit, 52 integration) and **10 browser E2E specs**:
 
 > **Canonical inventory.** This chapter is the single source of truth for test-suite counts and per-file listings; [`unit_and_integration.md`](unit_and_integration.md) cross-links here instead of duplicating it.
 
@@ -242,6 +242,7 @@ The project includes **107 native test suites** (56 unit, 51 integration) and **
 | [`undo_redo_draft_resilience_test.js`](../../tests/integration/undo_redo_draft_resilience_test.js) | `AgentRuntime` + `SandboxStore` | Undo/redo dual stacks, per-agent draft persistence, non-destructive error observability. |
 | [`virtual_fs_messaging_integrity_test.js`](../../tests/integration/virtual_fs_messaging_integrity_test.js) | `VirtualFS` + `MessagingBus` + `InvocationEngine` | Cross-workspace data integrity, wait determinism, invocation robustness. |
 | [`virtual_fs_pagination_test.js`](../../tests/integration/virtual_fs_pagination_test.js) | `VirtualFS` + `toolDefinitions` | readFile offset/line slicing, alias coercion, pagination metadata. |
+| [`wait_for_agent_test.js`](../../tests/integration/wait_for_agent_test.js) | `AgentRuntime` + `ToolDispatcher` + `MessagingBus` + `InvocationEngine` | wait/notify completion primitives: settle / immediate-quiescent / timeout-partial wait with bounded output; one-shot INVOCATION wake with no mailbox envelope; busy-queue; killed-watcher drop; auth matrix + realm confinement (ticket 17b5c47). |
 | [`wait_for_invocation_auth_test.js`](../../tests/integration/wait_for_invocation_auth_test.js) | `ToolDispatcher` + `AgentRuntime` + `InvocationEngine` | Tool-path await auth: invoker/target/bypass allowed, unrelated/anonymous denied, forged scope claims inert. |
 | [`world_clock_persistence_test.js`](../../tests/integration/world_clock_persistence_test.js) | `WorldClock` + `SandboxStore` + persistence | Clock advancement, event registration, persistence across reloads. |
 
@@ -279,8 +280,8 @@ sequenceDiagram
     G1-->>Dev: Gate 1 Passed (0 lint / sync errors)
 
     Dev->>G2: npm test (tests/runner.js)
-    Note over G2: Executes 107 suites (56 Unit, 51 Integration) under 120s timeout
-    G2-->>Dev: Gate 2 Passed (107/107 passed, 0 failures)
+    Note over G2: Executes 108 suites (56 Unit, 52 Integration) under 120s timeout
+    G2-->>Dev: Gate 2 Passed (108/108 passed, 0 failures)
 
     Dev->>G3: npm run build (vite build)
     Note over G3: Compiles Svelte 5 runes, WASM modules, top-level awaits
