@@ -1003,7 +1003,7 @@ export const get_current_time: Readonly<{
 // @public
 export const get_inbox: Readonly<{
     name: "get_inbox";
-    description: "Retrieve all unread messages from the calling agent's inbox, with option to mark as read.";
+    description: "Retrieve unread messages from the calling agent's inbox. Returns header summaries with short content previews by default; set mark_as_read to true to retrieve full message contents and mark them as read.";
     schema: Readonly<{
         type: "object";
         properties: {
@@ -1118,7 +1118,7 @@ export const getCurrentTimeDescriptor: Readonly<{
 // @public
 export const getInbox: Readonly<{
     name: "get_inbox";
-    description: "Retrieve all unread messages from the calling agent's inbox, with option to mark as read.";
+    description: "Retrieve unread messages from the calling agent's inbox. Returns header summaries with short content previews by default; set mark_as_read to true to retrieve full message contents and mark them as read.";
     schema: Readonly<{
         type: "object";
         properties: {
@@ -1143,7 +1143,7 @@ export const getInbox: Readonly<{
 // @public
 export const getInboxDescriptor: Readonly<{
     name: "get_inbox";
-    description: "Retrieve all unread messages from the calling agent's inbox, with option to mark as read.";
+    description: "Retrieve unread messages from the calling agent's inbox. Returns header summaries with short content previews by default; set mark_as_read to true to retrieve full message contents and mark them as read.";
     schema: Readonly<{
         type: "object";
         properties: {
@@ -2817,7 +2817,7 @@ export const messagingToolDescriptors: readonly (Readonly<{
     handler: (params: ToolParams_2, context: ExecutionContext) => Promise<unknown>;
 }> | Readonly<{
     name: "get_inbox";
-    description: "Retrieve all unread messages from the calling agent's inbox, with option to mark as read.";
+    description: "Retrieve unread messages from the calling agent's inbox. Returns header summaries with short content previews by default; set mark_as_read to true to retrieve full message contents and mark them as read.";
     schema: Readonly<{
         type: "object";
         properties: {
@@ -5891,7 +5891,7 @@ export const writeJsonDescriptor: Readonly<{
 // <declarations>/tools/descriptors/lifecycleTools.d.ts:451:5 - (ae-forgotten-export) The symbol "ToolParams_3" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/lifecycleTools.d.ts:885:5 - (ae-forgotten-export) The symbol "PublicAgentDescriptor" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/lifecycleTools.d.ts:919:5 - (ae-forgotten-export) The symbol "UndoTurnPortResult" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/messagingTools.d.ts:821:5 - (ae-forgotten-export) The symbol "ToolParams_2" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/messagingTools.d.ts:823:5 - (ae-forgotten-export) The symbol "ToolParams_2" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/precallTools.d.ts:136:5 - (ae-forgotten-export) The symbol "ToolParams_7" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/precallTools.d.ts:136:5 - (ae-forgotten-export) The symbol "ExecutionContext" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/realmTools.d.ts:262:5 - (ae-forgotten-export) The symbol "ToolParams_8" needs to be exported by the entry point index.d.ts
@@ -6049,7 +6049,7 @@ camelCase alias of `getInboxDescriptor`.
 
 `get_inbox` descriptor — retrieve unread messages for the bound caller.
 
-Args: optional `mark_as_read`. Prefers `context.messagingBus.getInbox()` and otherwise composes `drainInbox()`/`listInbox()`; returns `{success, deliveryNote, count, messages}` and throws when `messagingBus` is missing.
+Args: optional `mark_as_read`. Prefers `context.messagingBus.getInbox()` and otherwise composes `drainInbox()`/`listInbox()`; the header-only mode returns bounded headers/previews (never full message bodies) and says so, while the mark-as-read mode drains the caller's canonical partition and returns full envelopes. Returns `{success, deliveryNote, count, messages}` and throws when `messagingBus` is missing.
 
 ### `getPublishingToolSchemas` — function
 

@@ -1,7 +1,7 @@
 # Testing Strategy, Quality Assurance & Verification Architecture
 
 **Status:** CANONICAL
-**Last verified: 2026-09-24**
+**Last verified: 2026-09-26**
 
 > **Authoritative Technical Standard for Agentic Sandbox Studio Test Engineering**  
 > *Target Systems: Multi-Agent Sandbox Studio, AgentRuntime, VirtualFS, MessagingBus, ToolDispatcher, preset catalog & credential vault*
@@ -19,7 +19,7 @@ graph TD
     end
 
     subgraph L2["Tier 2: Zero-Mock Subsystem Integration (node --test)"]
-        INT["50 Integration Suites (tests/integration/)<br/>• Real VirtualFS, MessagingBus, WorldClock, AgentRuntime<br/>• Preset Binding & Credential Vault Workflows<br/>• Precall Pipeline & Tool Security Gating Verification<br/>• Concurrency & State Persistence Fault Injection"]
+        INT["51 Integration Suites (tests/integration/)<br/>• Real VirtualFS, MessagingBus, WorldClock, AgentRuntime<br/>• Preset Binding & Credential Vault Workflows<br/>• Precall Pipeline & Tool Security Gating Verification<br/>• Concurrency & State Persistence Fault Injection"]
     end
 
     subgraph L1["Tier 1: Atomic Unit & Contract Testing (node --test)"]
@@ -101,7 +101,7 @@ The master runner executes all Unit and Integration suites in strict sub-process
 // Sample output format from tests/runner.js:
 // ======================================================================
 //   AGENTIC SANDBOX STUDIO MASTER TEST SUITE RUNNER
-//   Total Suites: 105 (55 Unit, 50 Integration)
+//   Total Suites: 106 (55 Unit, 51 Integration)
 // ======================================================================
 //   [Unit       ] deepseek_provider_test.js                  ✔ PASS (42ms)
 //   [Unit       ] deepseek_reasoning_hygiene_test.js         ✔ PASS (18ms)
@@ -109,7 +109,7 @@ The master runner executes all Unit and Integration suites in strict sub-process
 //   [Integration] tool_contract_security_gating_test.js      ✔ PASS (115ms)
 //   [Integration] mail_injection_precall_pipeline_test.js    ✔ PASS (188ms)
 // ======================================================================
-//   Suites:       105 passed, 105 total
+//   Suites:       106 passed, 106 total
 //   Failed:       0 failed
 //   Duration:     3.42s
 // ======================================================================
@@ -126,7 +126,7 @@ All Node-based test suites import [`tests/test_env.js`](../../tests/test_env.js)
 
 ## 4. Test Suite Inventory & Classification
 
-The project includes **105 native test suites** (55 unit, 50 integration) and **10 browser E2E specs**:
+The project includes **106 native test suites** (55 unit, 51 integration) and **10 browser E2E specs**:
 
 > **Canonical inventory.** This chapter is the single source of truth for test-suite counts and per-file listings; [`unit_and_integration.md`](unit_and_integration.md) cross-links here instead of duplicating it.
 
@@ -234,6 +234,7 @@ The project includes **105 native test suites** (55 unit, 50 integration) and **
 | [`timer_rewire_after_restore_test.js`](../../tests/integration/timer_rewire_after_restore_test.js) | `AgentRuntime` + `MessagingBus` | Listener lifecycle across `reset()` and `importSnapshot()`. |
 | [`tool_compaction_hygiene_test.js`](../../tests/integration/tool_compaction_hygiene_test.js) | `runtime/messageHygiene/toolCompaction` + `AgentRuntime` | Active-turn content retention, historical tombstone compaction (`evicted_from_history`). |
 | [`tool_contract_security_gating_test.js`](../../tests/integration/tool_contract_security_gating_test.js) | `ToolDispatcher` + `VirtualFS` + `WorldClock` | 35 canonical tools + explicit-only publishing tools, fail-closed security gating, preset resolution, aliases. |
+| [`tool_mailbox_realm_resolution_test.js`](../../tests/integration/tool_mailbox_realm_resolution_test.js) | `ToolDispatcher` + `AgentRuntime` + `MessagingBus` | Realm-exact mailbox verbs through realm-bound dispatchers (same bare id in two realms), truthful header-only `get_inbox` copy, mark/drain receipts matching post-state (tickets 5b5fe63, 636ca85). |
 | [`tool_schemas_security_test.js`](../../tests/integration/tool_schemas_security_test.js) | `src/lib/sandbox/toolDefinitions/` + alias normalizers | JSON Schema Draft-07 conformance, whitelisting, injection immunity. |
 | [`trigger_queue_test.js`](../../tests/integration/trigger_queue_test.js) | `TriggerQueue` + `AgentRuntime` | Asynchronous trigger deduplication, debounce execution, concurrency limits. |
 | [`turn_completion_resilience_test.js`](../../tests/integration/turn_completion_resilience_test.js) | `AgentRuntime` + `toolDefinitions` + persistence | Summary carrier, intentional completion, precall revalidation, fault containment. |
@@ -277,8 +278,8 @@ sequenceDiagram
     G1-->>Dev: Gate 1 Passed (0 lint / sync errors)
 
     Dev->>G2: npm test (tests/runner.js)
-    Note over G2: Executes 105 suites (55 Unit, 50 Integration) under 120s timeout
-    G2-->>Dev: Gate 2 Passed (105/105 passed, 0 failures)
+    Note over G2: Executes 106 suites (55 Unit, 51 Integration) under 120s timeout
+    G2-->>Dev: Gate 2 Passed (106/106 passed, 0 failures)
 
     Dev->>G3: npm run build (vite build)
     Note over G3: Compiles Svelte 5 runes, WASM modules, top-level awaits
