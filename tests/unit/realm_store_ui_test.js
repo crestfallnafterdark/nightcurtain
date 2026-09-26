@@ -61,6 +61,14 @@ import {
   safeRealmColor
 } from '../../src/lib/components/sandbox/realmGroups.ts';
 import {
+  buildRealmManagerEntries,
+  describeRealmManagerError,
+  filterRealmManagerEntries,
+  resolveRealmAttachToolSelection,
+  resolveRealmManagerSelection,
+  selectRealmFsPartitionViews
+} from '../../src/lib/components/sandbox/realmManagerHelpers.ts';
+import {
   applyAgentExtensionSelectorToggle,
   applyAgentExtensionToolToggle,
   buildAgentExtensionTuningProjection,
@@ -2153,4 +2161,198 @@ test('27. the attach-editor ceiling model keeps state-accurate copy per selectio
   // Missing/invalid options read as no selection (structural guard).
   const bare = describeRealmAttachCeilingEditor();
   assert.deepStrictEqual([bare.state, bare.showLiveCatalog, bare.catalogNames], ['no-selection', false, []]);
+});
+
+// ============================================================================
+// 28-31. Realm manager redesign (ticket ca33e1b): the master–detail models
+//     behind `RealmSettingsModal.svelte` and its subcomponents
+// ============================================================================
+
+test('28. the manager master list counts members with engine trim semantics and carries the missing badge', () => {
+  const realms = [
+    { id: GENERIC_REALM_ID, name: 'Generic', createdAt: 1 },
+    {
+      id: 'r1',
+      name: 'Story Realm',
+      description: 'Operator note',
+      color: '#88aaff',
+      createdAt: 2,
+      instance: {
+        templateId: 'ui-template',
+        templateVersion: 'sha256:abc',
+        launchedAt: '2026-09-21T12:34:56.000Z',
+        missingExtensions: ['acme-docs', '']
+      }
+    },
+    { id: 'r2', name: '', color: 'url(evil)', createdAt: 3 }
+  ];
+  const active = [
+    agent('a', 'r1'),
+    agent('padded', ' r1 '),
+    agent('g', GENERIC_REALM_ID),
+    agent('blank', '   '),
+    agent('orphan', 'realm_deleted')
+  ];
+  const recycled = [agent('r1-recycled', 'r1')];
+
+  const entries = buildRealmManagerEntries(realms, active, recycled);
+  assert.deepStrictEqual(entries.map((entry) => entry.id), [GENERIC_REALM_ID, 'r1', 'r2'], 'registry order is preserved');
+
+  const story = entries[1];
+  assert.strictEqual(story.activeMembers, 2, 'a padded hydrated membership counts for its trimmed realm (7368e98)');
+  assert.strictEqual(story.recycledMembers, 1);
+  assert.strictEqual(story.memberCount, 3);
+  assert.strictEqual(story.missingExtensionCount, 1, 'blank recorded ids never render a badge');
+  assert.strictEqual(story.color, '#88aaff');
+  assert.strictEqual(story.description, 'Operator note');
+
+  assert.strictEqual(
+    entries[0].activeMembers,
+    1,
+    'the Generic count mirrors the deletion selector: explicit memberships only, so a padded/explicit member is not double-counted'
+  );
+  assert.deepStrictEqual(
+    entries.flatMap((entry) => entry.memberCount).reduce((total, count) => total + count, 0),
+    4,
+    'the counts equal the deletion plan of the registered realms (3 active + 1 recycled); unregistered/absent memberships belong to no registered realm record'
+  );
+
+  const blankNamed = entries[2];
+  assert.strictEqual(blankNamed.name, 'r2', 'a blank name falls back to the id');
+  assert.strictEqual(blankNamed.color, null, 'an unsafe accent color never reaches the list');
+  assert.strictEqual(blankNamed.missingExtensionCount, 0, 'a bare templateId is not launch provenance');
+
+  assert.deepStrictEqual(buildRealmManagerEntries(null, null, null), [], 'malformed input stays safe');
+  assert.deepStrictEqual(buildRealmManagerEntries([], [agent('x')], []), []);
+  assert.deepStrictEqual(
+    buildRealmManagerEntries([{ id: '   ', name: 'Blank id' }, null, {}], [], []),
+    [],
+    'records without a usable id are skipped'
+  );
+});
+
+test('29. the manager search filters name/id/description and the selection fallback never empties the detail', () => {
+  const realms = [
+    { id: 'r1', name: 'Story Realm', description: 'Primary narrative', createdAt: 1 },
+    { id: 'r2', name: 'Scratch', createdAt: 2 },
+    { id: 'r3', name: 'Empty', createdAt: 3 }
+  ];
+  const entries = buildRealmManagerEntries(realms, [], []);
+
+  assert.deepStrictEqual(filterRealmManagerEntries(entries, 'story').map((entry) => entry.id), ['r1']);
+  assert.deepStrictEqual(filterRealmManagerEntries(entries, 'R2').map((entry) => entry.id), ['r2'], 'ids match case-insensitively');
+  assert.deepStrictEqual(filterRealmManagerEntries(entries, 'narrative').map((entry) => entry.id), ['r1'], 'descriptions are searchable');
+  assert.deepStrictEqual(filterRealmManagerEntries(entries, '  ').map((entry) => entry.id), ['r1', 'r2', 'r3'], 'a blank query returns everything');
+  assert.deepStrictEqual(filterRealmManagerEntries(entries, 42).map((entry) => entry.id), ['r1', 'r2', 'r3'], 'a non-string query returns everything');
+  assert.deepStrictEqual(filterRealmManagerEntries(entries, 'zzz'), []);
+  assert.deepStrictEqual(filterRealmManagerEntries(null, 'x'), []);
+
+  assert.strictEqual(resolveRealmManagerSelection(realms, 'r2', 'r1'), 'r2', 'an explicit operator choice wins');
+  assert.strictEqual(resolveRealmManagerSelection(realms, 'ghost', 'r1'), 'r1', 'a stale choice falls through to the prop');
+  assert.strictEqual(resolveRealmManagerSelection(realms, '', 'r1'), 'r1');
+  assert.strictEqual(resolveRealmManagerSelection(realms, null, null), 'r1', 'without a choice the first registry record is selected');
+  assert.strictEqual(resolveRealmManagerSelection(realms, 'ghost', 'ghost'), 'r1', 'two stale ids still fall through');
+  assert.strictEqual(resolveRealmManagerSelection([], 'r1', 'r1'), '', 'an empty registry selects nothing');
+  assert.strictEqual(resolveRealmManagerSelection(null, 'r1', null), '');
+});
+
+test('30. the attach-editor resolver mirrors its visible state, and error copy names the operator principal', () => {
+  const catalog = ['docs_search', 'similarity', 'summarize'];
+  assert.deepStrictEqual(
+    resolveRealmAttachToolSelection({ catalogNames: catalog, checkedNames: [...catalog] }),
+    { ok: true, toolSelection: 'all' },
+    'every live catalog name checked records the all marker'
+  );
+  assert.deepStrictEqual(
+    resolveRealmAttachToolSelection({ catalogNames: catalog, checkedNames: ['similarity'] }),
+    { ok: true, toolSelection: ['similarity'] },
+    'a strict subset records exactly those names'
+  );
+  assert.deepStrictEqual(
+    resolveRealmAttachToolSelection({ catalogNames: catalog, checkedNames: ['summarize', 'docs_search'] }),
+    { ok: true, toolSelection: ['docs_search', 'summarize'] },
+    'the recorded list follows catalog order, never click order'
+  );
+  const noneChecked = resolveRealmAttachToolSelection({ catalogNames: catalog, checkedNames: [] });
+  assert.strictEqual(noneChecked.ok, false);
+  assert.match(noneChecked.error, /Select at least one live catalog tool/);
+
+  assert.deepStrictEqual(
+    resolveRealmAttachToolSelection({ catalogNames: [], checkedNames: [], mode: 'custom', customText: ' docs_search , , similarity ' }),
+    { ok: true, toolSelection: ['docs_search', 'similarity'] },
+    'the no-catalog custom mode parses and trims the comma-separated names'
+  );
+  const emptyCustom = resolveRealmAttachToolSelection({ catalogNames: [], checkedNames: [], mode: 'custom', customText: ' , ' });
+  assert.strictEqual(emptyCustom.ok, false);
+  assert.match(emptyCustom.error, /List at least one sanitized call name/);
+  assert.deepStrictEqual(
+    resolveRealmAttachToolSelection({ catalogNames: [], checkedNames: [], mode: 'all', customText: 'ignored' }),
+    { ok: true, toolSelection: 'all' }
+  );
+  assert.deepStrictEqual(resolveRealmAttachToolSelection(), { ok: true, toolSelection: 'all' }, 'no editor state records all tools');
+
+  assert.match(
+    describeRealmManagerError(new Error('PERMISSION_DENIED: operator principal required'), 'fallback'),
+    /operator \(Director\) principal is required/
+  );
+  assert.strictEqual(describeRealmManagerError(new Error('ERR_STORE_REALM_NOT_EMPTY'), 'fallback'), 'ERR_STORE_REALM_NOT_EMPTY');
+  assert.strictEqual(describeRealmManagerError(null, 'fallback'), 'fallback');
+  assert.strictEqual(describeRealmManagerError(new Error(''), 'fallback'), 'fallback');
+});
+
+test('31. the workspace card shows one Realm\'s partitions, and a real store feeds the manager list', async () => {
+  const partitions = [
+    { key: 'global', label: 'global', realmId: null, realmName: null, kind: 'global', fileCount: 9 },
+    { key: 'realm:r1:scout', label: 'Realm One · scout', realmId: 'r1', realmName: 'Realm One', kind: 'agent', fileCount: 2 },
+    { key: 'realm:r1:global', label: 'Realm One · global', realmId: 'r1', realmName: 'Realm One', kind: 'realm-global', fileCount: 3 },
+    { key: 'realm:r1:alex', label: 'Realm One · alex', realmId: 'r1', realmName: 'Realm One', kind: 'agent', fileCount: 1 },
+    { key: 'realm:r2:global', label: 'Realm Two · global', realmId: 'r2', realmName: 'Realm Two', kind: 'realm-global', fileCount: 0 },
+    { key: 'writer-persisted', label: 'writer-persisted', realmId: null, realmName: null, kind: 'workspace', fileCount: 4 }
+  ];
+
+  const realmOne = selectRealmFsPartitionViews(partitions, 'r1');
+  assert.deepStrictEqual(
+    realmOne.map((view) => view.key),
+    ['realm:r1:global', 'realm:r1:alex', 'realm:r1:scout'],
+    'realm-global sorts first, then member workspaces by label; other realms never leak in'
+  );
+  assert.deepStrictEqual(realmOne.map((view) => view.kindLabel), ['Realm workspace', 'Member workspace', 'Member workspace']);
+  assert.deepStrictEqual(realmOne.map((view) => view.fileCount), [3, 1, 2], 'counts carry through, never recomputed from the label');
+  assert.deepStrictEqual(selectRealmFsPartitionViews(partitions, 'r2').map((view) => view.key), ['realm:r2:global']);
+  assert.deepStrictEqual(selectRealmFsPartitionViews(partitions, ''), []);
+  assert.deepStrictEqual(selectRealmFsPartitionViews(null, 'r1'), []);
+
+  sharedLocalStorage.clear();
+  const store = createSandboxStore({ autoBootstrapDirector: false, autoHydrate: false });
+  try {
+    const receipt = await store.launchRealmFromTemplate(DEMO_TEMPLATE.id, { name: 'Manager Realm' });
+    const realmId = receipt.realm.id;
+    const entries = buildRealmManagerEntries(store.realms, store.agents, store.recycleBin);
+    const managerEntry = entries.find((entry) => entry.id === realmId);
+    assert.ok(managerEntry, 'the launched Realm renders in the manager list');
+    assert.strictEqual(
+      managerEntry.activeMembers,
+      store.agents.filter((candidate) => resolveAgentRealmId(candidate) === realmId).length,
+      'the list count agrees with the engine trim semantics on real store snapshots'
+    );
+    assert.strictEqual(managerEntry.recycledMembers, 0);
+    assert.strictEqual(managerEntry.missingExtensionCount, 0);
+
+    const views = selectRealmFsPartitionViews(store.fsWorkspacePartitions, realmId);
+    const realmGlobal = views.find((view) => view.kind === 'realm-global');
+    assert.ok(realmGlobal, 'the launched Realm exposes its realm-global partition');
+    assert.match(realmGlobal.label, /Manager Realm · global/);
+    assert.strictEqual(
+      views.length,
+      store.fsWorkspacePartitions.filter((partition) => partition.realmId === realmId).length,
+      'the workspace card shows exactly this Realm\'s partitions'
+    );
+    for (const view of views) {
+      assert.equal(typeof view.fileCount, 'number');
+      assert.ok(['realm-global', 'agent'].includes(view.kind));
+    }
+  } finally {
+    store.destroy();
+    sharedLocalStorage.clear();
+  }
 });
