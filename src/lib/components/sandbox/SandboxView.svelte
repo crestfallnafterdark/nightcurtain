@@ -21,6 +21,13 @@
     safeRealmColor,
     selectPinnedDirector
   } from './realmGroups.ts';
+  import { buildExtensionLabelMap, describeRealmExtensionLiveIndicator } from './extensionUiHelpers.ts';
+
+  // Display labels for the realm-card live-extension indicator.
+  let realmExtensionLabels = $derived.by(() => {
+    void sandboxStore.extensionConnections;
+    return buildExtensionLabelMap(sandboxStore.listExtensions());
+  });
 
   let showLauncherModal = $state(false);
   let showSettingsModal = $state(false);
@@ -361,6 +368,11 @@
             {#each realmGroups as group (group.key)}
             {@const realm = group.realm}
             {@const extensionIndicator = describeRealmExtensionIndicator(realm)}
+            {@const liveIndicator = describeRealmExtensionLiveIndicator({
+              attachments: realm ? realm.extensions : [],
+              connections: sandboxStore.extensionConnections,
+              labels: realmExtensionLabels
+            })}
             <section class="realm-group" class:synthetic={realm === null}>
               <div class="realm-group-header">
                 <button
@@ -385,6 +397,15 @@
                       aria-label={extensionIndicator.title}
                     >
                       ⚠ {extensionIndicator.count}
+                    </span>
+                  {/if}
+                  {#if liveIndicator.visible}
+                    <span
+                      class="realm-live-badge font-mono"
+                      title={liveIndicator.title}
+                      aria-label={liveIndicator.title}
+                    >
+                      ● {liveIndicator.label}
                     </span>
                   {/if}
                   <span class="realm-member-count font-mono">{group.agents.length}</span>
@@ -925,6 +946,20 @@
     border-radius: 4px;
     padding: 0.05rem 0.35rem;
     flex-shrink: 0;
+  }
+
+  .realm-live-badge {
+    font-size: 0.66rem;
+    color: #34d399;
+    background: rgba(52, 211, 153, 0.1);
+    border: 1px solid rgba(52, 211, 153, 0.35);
+    border-radius: 4px;
+    padding: 0.05rem 0.35rem;
+    flex-shrink: 0;
+    max-width: 12rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .btn-realm-edit {

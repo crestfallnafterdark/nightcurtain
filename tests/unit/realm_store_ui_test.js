@@ -55,11 +55,24 @@ import {
   safeRealmColor
 } from '../../src/lib/components/sandbox/realmGroups.ts';
 import {
+  applyAgentExtensionSelectorToggle,
   applyAgentExtensionToolToggle,
   buildAgentExtensionTuningProjection,
+  buildAgentLiveExtensionTuningProjection,
+  buildExtensionCatalogFidelityView,
+  buildExtensionConnectionView,
+  buildExtensionConnectionViews,
   buildMissingExtensionFlowViews,
+  buildRealmAttachmentCeilingView,
+  buildRealmExtensionAttachmentViews,
   buildRealmExtensionRequestViews,
-  describeExtensionRemovalError
+  describeExtensionCatalogDrift,
+  describeExtensionConnectionError,
+  describeExtensionConnectionStatus,
+  describeExtensionRemovalError,
+  describeRealmExtensionLiveIndicator,
+  EXTENSION_THIRD_PARTY_LABEL,
+  formatExtensionConnectionTimestamp
 } from '../../src/lib/components/sandbox/extensionUiHelpers.ts';
 import {
   buildRealmProvenanceView,
@@ -1614,4 +1627,404 @@ test('22. the per-agent extension tuning projection mirrors the store universe a
     store.destroy();
     sharedLocalStorage.clear();
   }
+});
+
+// ============================================================================
+// 23-26. Live extension surfaces (P3.4)
+// ============================================================================
+
+/**
+ * Builds one global install-record fixture.
+ *
+ * @param {object} [overrides] - Record field overrides.
+ * @returns {object} Structural install record.
+ */
+function extensionInstallFixture(overrides = {}) {
+  return {
+    id: 'acme-scoring',
+    kind: 'mcp',
+    displayName: 'Acme Scoring',
+    transportHint: { kind: 'http', url: 'http://127.0.0.1:8791/mcp' },
+    status: 'installed',
+    installSource: 'operator',
+    createdAt: 1758900000000,
+    ...overrides
+  };
+}
+
+/**
+ * Builds one realm attachment fixture.
+ *
+ * @param {object} [overrides] - Attachment field overrides.
+ * @returns {object} Structural attachment record.
+ */
+function extensionAttachmentFixture(overrides = {}) {
+  return {
+    extensionId: 'acme-scoring',
+    toolSelection: 'all',
+    status: 'active',
+    approvedAt: '2026-09-26T12:00:00.000Z',
+    approvedBy: 'operator',
+    ...overrides
+  };
+}
+
+/**
+ * Builds one live connection projection fixture with a two-tool catalog:
+ * `similarity` is clean, `flagged` carries benign metadata plus one semantic
+ * constraint (`pattern`).
+ *
+ * @param {object} [overrides] - Projection field overrides.
+ * @returns {object} Structural connection projection.
+ */
+function extensionConnectionFixture(overrides = {}) {
+  return {
+    extensionId: 'acme-scoring',
+    status: 'connected',
+    serverInfo: { name: 'acme-mcp', version: '1.2.3' },
+    protocolVersion: '2025-06-18',
+    catalog: {
+      similarity: {
+        extensionId: 'acme-scoring',
+        serverToolName: 'similarity',
+        inputSchema: {
+          type: 'object',
+          properties: { q: { type: 'string', description: 'q' } },
+          required: ['q'],
+          additionalProperties: false
+        }
+      },
+      flagged: {
+        extensionId: 'acme-scoring',
+        serverToolName: 'flagged',
+        inputSchema: {
+          type: 'object',
+          title: 'Flag',
+          properties: { p: { type: 'string', pattern: '^x', description: 'p' } },
+          additionalProperties: false
+        }
+      }
+    },
+    shadows: [{ callName: 'dup', serverToolName: 'dup.two' }],
+    conflicts: [],
+    drift: null,
+    error: null,
+    connectedAt: 1758900000000,
+    discoveredAt: 1758900060000,
+    digest: 'sha256:abc',
+    ...overrides
+  };
+}
+
+test('23. connection views project status, server identity, catalog, fidelity, drift, and controls', () => {
+  const record = extensionInstallFixture();
+  assert.strictEqual(EXTENSION_THIRD_PARTY_LABEL, 'third-party — classification unknown');
+
+  // Status vocabulary: disconnected carries no chip; every live state does.
+  assert.deepStrictEqual(
+    [describeExtensionConnectionStatus('disconnected').chip, describeExtensionConnectionStatus('disconnected').label],
+    [false, 'Not connected']
+  );
+  assert.strictEqual(describeExtensionConnectionStatus('connected').chip, true);
+  assert.match(describeExtensionConnectionStatus('conflict').description, /call names first/);
+
+  // Error projection: typed code + fixed safe message + key=value details.
+  const networkError = describeExtensionConnectionError({
+    code: 'ERR_MCP_NETWORK',
+    details: { kind: 'TypeError', retryable: true }
+  });
+  assert.strictEqual(networkError.code, 'ERR_MCP_NETWORK');
+  assert.match(networkError.message, /network or CORS/);
+  assert.deepStrictEqual(networkError.details, ['kind=TypeError', 'retryable=true']);
+  assert.match(describeExtensionConnectionError({ code: 'ERR_CUSTOM' }).message, /typed code/);
+
+  // Drift projection discloses the change classes.
+  const drift = describeExtensionCatalogDrift({
+    added: ['sse'], removed: ['old'], changed: ['similarity'], shadowedAdded: ['dup'],
+    shadowedRemoved: [], reordered: true,
+    digests: { previous: 'sha256:old', next: 'sha256:new' }
+  });
+  assert.strictEqual(drift.visible, true);
+  assert.strictEqual(drift.summary, '+1 added · -1 removed · ~1 changed · +1 shadowed · order changed');
+  assert.strictEqual(describeExtensionCatalogDrift(null).visible, false);
+
+  // Connected view: identity, controls, catalog count/digest, fidelity, drift.
+  const connection = extensionConnectionFixture({
+    drift: {
+      added: ['sse'], removed: [], changed: [], shadowedAdded: [], shadowedRemoved: [],
+      reordered: false, digests: { previous: 'sha256:old', next: 'sha256:new' }
+    }
+  });
+  const view = buildExtensionConnectionView(record, connection);
+  assert.strictEqual(view.status.label, 'Connected');
+  assert.deepStrictEqual(
+    [view.canConnect, view.canDisconnect, view.canReconnect, view.controlsHint],
+    [false, true, true, '']
+  );
+  assert.deepStrictEqual(
+    [view.serverName, view.serverVersion, view.protocolVersion],
+    ['acme-mcp', '1.2.3', '2025-06-18']
+  );
+  assert.deepStrictEqual([view.toolCount, view.digest], [2, 'sha256:abc']);
+  assert.deepStrictEqual(view.shadows.map((shadow) => shadow.callName), ['dup']);
+  assert.strictEqual(view.drift.visible, true);
+  assert.match(formatExtensionConnectionTimestamp(1758900000000), /^\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC$/);
+  assert.match(view.connectedAt, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC$/);
+  assert.strictEqual(formatExtensionConnectionTimestamp('nope'), '');
+  assert.strictEqual(view.thirdPartyLabel, EXTENSION_THIRD_PARTY_LABEL);
+
+  // Fidelity: the metadata-only `title` drop is additive; the `pattern` drop
+  // is semantic — 1 of 2 tools semantic is exactly half, so `projected`.
+  assert.deepStrictEqual(
+    [view.fidelity.state, view.fidelity.badge, view.fidelity.total, view.fidelity.warned, view.fidelity.refused],
+    ['projected', 'projected schemas', 2, 1, 0]
+  );
+  assert.ok(view.fidelity.warnings.some((warning) => (
+    warning.callName === 'flagged' && warning.code === 'metadata-dropped' && warning.path === '#/title'
+  )));
+  assert.ok(view.fidelity.warnings.some((warning) => (
+    warning.callName === 'flagged' && warning.code === 'keyword-dropped' && warning.path === '#/properties/p/pattern'
+  )));
+
+  // Degraded when more than half the tools need semantic projection.
+  const degraded = buildExtensionCatalogFidelityView(extensionConnectionFixture({
+    catalog: {
+      a: { extensionId: 'acme-scoring', serverToolName: 'a', inputSchema: { type: 'object', properties: { p: { type: 'string', pattern: '^x', description: 'p' } }, additionalProperties: false } },
+      b: { extensionId: 'acme-scoring', serverToolName: 'b', inputSchema: { type: 'object', properties: { p: { type: 'string', pattern: '^y', description: 'p' } }, additionalProperties: false } }
+    }
+  }));
+  assert.deepStrictEqual([degraded.state, degraded.badge, degraded.total, degraded.refused], ['degraded', 'degraded schema fidelity', 2, 0]);
+
+  // Disconnected: no live chip, no catalog, connect applies.
+  const offline = buildExtensionConnectionView(record, null);
+  assert.deepStrictEqual(
+    [offline.status.chip, offline.toolCount, offline.fidelity, offline.canConnect, offline.canDisconnect],
+    [false, 0, null, true, false]
+  );
+  assert.match(offline.status.label, /Not connected/);
+
+  // stdio/pack records never offer connect controls.
+  const stdio = buildExtensionConnectionView(
+    extensionInstallFixture({ transportHint: { kind: 'stdio', command: 'npx' } }),
+    null
+  );
+  assert.strictEqual(stdio.canConnect, false);
+  assert.match(stdio.controlsHint, /host-only/);
+  const pack = buildExtensionConnectionView(extensionInstallFixture({ kind: 'pack', transportHint: { kind: 'pack', source: 'acme/pack' } }), null);
+  assert.strictEqual(pack.canConnect, false);
+  assert.match(pack.controlsHint, /Tool packs/);
+
+  // A connection error keeps the view's safe typed disclosure.
+  const failed = buildExtensionConnectionView(record, extensionConnectionFixture({
+    status: 'error',
+    catalog: null,
+    serverInfo: null,
+    protocolVersion: null,
+    digest: null,
+    error: { code: 'ERR_MCP_TIMEOUT' }
+  }));
+  assert.deepStrictEqual([failed.status.label, failed.error.code], ['Error', 'ERR_MCP_TIMEOUT']);
+  assert.deepStrictEqual([failed.canConnect, failed.canDisconnect, failed.canReconnect], [true, true, true]);
+
+  // The list projection follows install order and joins by id.
+  const views = buildExtensionConnectionViews({
+    installs: [record, extensionInstallFixture({ id: 'acme-docs', displayName: 'Acme Docs' })],
+    connections: [connection]
+  });
+  assert.deepStrictEqual(views.map((entry) => [entry.extensionId, entry.status.label]), [
+    ['acme-scoring', 'Connected'],
+    ['acme-docs', 'Not connected']
+  ]);
+});
+
+test('24. Realm attachment views reflect live state, ceiling, and conflict winners', () => {
+  const scoring = extensionAttachmentFixture({ toolSelection: ['similarity'] });
+  const ceiling = buildRealmAttachmentCeilingView(scoring, extensionConnectionFixture());
+  assert.deepStrictEqual(
+    [ceiling.mode, ceiling.hasLiveCatalog, ceiling.effectiveNames, ceiling.excludedNames],
+    ['selection', true, ['similarity'], ['flagged']],
+    'the realm selection caps the live catalog contribution'
+  );
+  assert.match(ceiling.summary, /1 of 2 live tools selected/);
+  assert.match(ceiling.summary, /1 excluded by the Realm ceiling/);
+
+  const allCeiling = buildRealmAttachmentCeilingView(extensionAttachmentFixture(), null);
+  assert.deepStrictEqual(
+    [allCeiling.mode, allCeiling.hasLiveCatalog, allCeiling.effectiveNames],
+    ['all', false, []]
+  );
+  assert.match(allCeiling.summary, /no live catalog yet/);
+
+  const conflictConnection = extensionConnectionFixture({
+    status: 'conflict',
+    conflicts: [{ callName: 'similarity', otherExtensionId: 'zzz-winner' }]
+  });
+  const views = buildRealmExtensionAttachmentViews({
+    attachments: [
+      scoring,
+      extensionAttachmentFixture({ extensionId: 'acme-docs' }),
+      extensionAttachmentFixture({ extensionId: 'gone', status: 'unavailable' })
+    ],
+    connections: [conflictConnection],
+    installs: [extensionInstallFixture(), extensionInstallFixture({ id: 'acme-docs' }), extensionInstallFixture({ id: 'gone' })],
+    labels: { 'zzz-winner': 'Winner Server' }
+  });
+  assert.deepStrictEqual(views.map((entry) => [entry.extensionId, entry.state, entry.stateLabel]), [
+    ['acme-scoring', 'conflict', 'Conflict'],
+    ['acme-docs', 'active', 'Active'],
+    ['gone', 'unavailable', 'Unavailable']
+  ]);
+  assert.deepStrictEqual(views[0].conflicts, [{ callName: 'similarity', otherExtensionId: 'zzz-winner', otherLabel: 'Winner Server' }]);
+  assert.deepStrictEqual([views[0].canDisconnect, views[0].canReconnect], [true, true]);
+  assert.match(views[1].stateDescription, /not connected/);
+  assert.deepStrictEqual([views[1].toolCount, views[1].fidelity ?? null], [0, null]);
+
+  const liveView = buildRealmExtensionAttachmentViews({
+    attachments: [extensionAttachmentFixture()],
+    connections: [extensionConnectionFixture()],
+    installs: [extensionInstallFixture()]
+  })[0];
+  assert.deepStrictEqual([liveView.state, liveView.live.label, liveView.toolCount, liveView.digest], ['active', 'Connected', 2, 'sha256:abc']);
+  assert.strictEqual(liveView.label, 'Acme Scoring');
+});
+
+test('25. the live agent tuning projection mirrors the store universe and narrows by the ceiling', () => {
+  const attachments = [
+    extensionAttachmentFixture(),
+    extensionAttachmentFixture({ extensionId: 'acme-docs', toolSelection: ['docs_search'] })
+  ];
+  const connections = [
+    extensionConnectionFixture(),
+    extensionConnectionFixture({ extensionId: 'acme-docs', status: 'conflict', conflicts: [{ callName: 'docs_search', otherExtensionId: 'zzz' }] })
+  ];
+  const projection = buildAgentLiveExtensionTuningProjection({
+    resolvedTools: { similarity: 'acme-scoring', ghost_call: 'ghost' },
+    attachments,
+    connections,
+    selector: 'all',
+    extensionLabels: { 'acme-scoring': 'Acme Scoring', 'acme-docs': 'Acme Docs' }
+  });
+  assert.deepStrictEqual(
+    projection.options.map((option) => [option.callName, option.extensionId, option.enabled, option.source]),
+    [
+      ['similarity', 'acme-scoring', true, 'resolved'],
+      ['flagged', 'acme-scoring', true, 'catalog']
+    ],
+    'persisted names come first, live catalog names follow, inactive/absent extensions drop'
+  );
+  assert.deepStrictEqual([projection.totalCount, projection.selectedCount, projection.hasTools, projection.label], [2, 2, true, 'All realm extension tools (ceiling)']);
+  assert.match(projection.ceilingHint, /ceiling/);
+  assert.deepStrictEqual(
+    projection.unavailableAttachments.map((entry) => [entry.extensionId, entry.reason]),
+    [['acme-docs', 'conflict']],
+    'an attachment without a live conflict-free catalog is marked unavailable'
+  );
+  assert.deepStrictEqual(projection.callNames, ['similarity', 'flagged']);
+
+  // A restricted selector can only narrow the ceiling: unknown names are
+  // dropped from the toggle universe and stay disabled.
+  const subset = buildAgentLiveExtensionTuningProjection({
+    resolvedTools: { similarity: 'acme-scoring' },
+    attachments,
+    connections,
+    selector: ['docs_search', 'flagged']
+  });
+  assert.deepStrictEqual(
+    subset.options.map((option) => [option.callName, option.enabled]),
+    [['similarity', false], ['flagged', true]]
+  );
+  assert.strictEqual(subset.label, '1 of 2 tools');
+  const toggled = applyAgentExtensionSelectorToggle('all', 'flagged', false, projection.callNames);
+  assert.deepStrictEqual(toggled, ['similarity']);
+  assert.strictEqual(applyAgentExtensionSelectorToggle(toggled, 'flagged', true, projection.callNames), 'all');
+  assert.deepStrictEqual(applyAgentExtensionSelectorToggle('all', 'docs_search', false, projection.callNames), 'all');
+
+  // The attachment ceiling caps the live contribution.
+  const capped = buildAgentLiveExtensionTuningProjection({
+    resolvedTools: null,
+    attachments: [extensionAttachmentFixture({ toolSelection: ['similarity'] })],
+    connections: [extensionConnectionFixture()],
+    selector: 'all'
+  });
+  assert.deepStrictEqual(capped.callNames, ['similarity'], 'a connect never widens the realm selection');
+
+  // Not-connected marker carries guidance; no attachments means no universe.
+  const idle = buildAgentLiveExtensionTuningProjection({
+    resolvedTools: null,
+    attachments: [extensionAttachmentFixture()],
+    connections: [],
+    selector: 'all'
+  });
+  assert.deepStrictEqual([idle.totalCount, idle.hasTools, idle.label], [0, false, 'No extension tools available in this Realm.']);
+  assert.deepStrictEqual(idle.unavailableAttachments.map((entry) => entry.reason), ['not-connected']);
+  assert.deepStrictEqual(
+    buildAgentLiveExtensionTuningProjection({ resolvedTools: null, attachments: null, connections: null }).options,
+    []
+  );
+});
+
+test('26. review disclosures carry third-party labels, live fidelity, and realm-card live state', () => {
+  const template = {
+    id: 'ui-template',
+    name: 'UI Template',
+    description: '',
+    formatVersion: 2,
+    providers: [
+      { kind: 'mcp', id: 'acme-scoring', transport: { kind: 'http', url: 'http://127.0.0.1:8791/mcp' } }
+    ],
+    agents: []
+  };
+  const installs = [extensionInstallFixture()];
+  const attachments = [extensionAttachmentFixture()];
+
+  // Connected: third-party label, live count, and fidelity badge render; no
+  // "not connected" disclosure.
+  const connectedViews = buildRealmExtensionRequestViews(template, installs, attachments, [extensionConnectionFixture()]);
+  const connected = connectedViews.requests[0];
+  assert.strictEqual(connected.thirdPartyLabel, EXTENSION_THIRD_PARTY_LABEL);
+  assert.deepStrictEqual([connected.connected, connected.liveToolCount, connected.fidelityBadge, connected.disclosure], [true, 2, 'projected schemas', '']);
+
+  // Installed but not connected: explicit requested-but-not-connected copy.
+  const idle = buildRealmExtensionRequestViews(template, installs, attachments, []).requests[0];
+  assert.strictEqual(idle.connected, false);
+  assert.match(idle.disclosure, /not connected/);
+
+  // Failed connection: the typed code is disclosed.
+  const failed = buildRealmExtensionRequestViews(template, installs, attachments, [
+    extensionConnectionFixture({ status: 'error', catalog: null, error: { code: 'ERR_MCP_AUTH' } })
+  ]).requests[0];
+  assert.match(failed.disclosure, /ERR_MCP_AUTH/);
+
+  // Realm-card live indicator: live/conflict/idle split + third-party tooltip.
+  const indicator = describeRealmExtensionLiveIndicator({
+    attachments: [
+      extensionAttachmentFixture(),
+      extensionAttachmentFixture({ extensionId: 'acme-docs' }),
+      extensionAttachmentFixture({ extensionId: 'acme-extra' }),
+      extensionAttachmentFixture({ extensionId: 'acme-idle' })
+    ],
+    connections: [
+      extensionConnectionFixture(),
+      extensionConnectionFixture({ extensionId: 'acme-docs' }),
+      extensionConnectionFixture({ extensionId: 'acme-extra', status: 'conflict', conflicts: [{ callName: 'x', otherExtensionId: 'zzz' }] })
+    ],
+    labels: { 'acme-docs': 'Acme Docs' }
+  });
+  assert.deepStrictEqual(
+    [indicator.visible, indicator.connectedCount, indicator.conflictCount, indicator.notConnectedCount],
+    [true, 2, 1, 1]
+  );
+  assert.strictEqual(indicator.label, '2 live · 1 conflict · 1 not connected');
+  assert.match(indicator.title, /third-party — classification unknown/);
+  assert.match(indicator.title, /Acme Docs/);
+  assert.strictEqual(describeRealmExtensionLiveIndicator({ attachments: [], connections: [extensionConnectionFixture()] }).visible, false);
+
+  // Missing-flow rows carry the third-party label too.
+  const flow = buildMissingExtensionFlowViews({
+    missingExtensionIds: ['acme-scoring'],
+    template,
+    installs: [],
+    attachments: []
+  });
+  assert.strictEqual(flow[0].thirdPartyLabel, EXTENSION_THIRD_PARTY_LABEL);
 });

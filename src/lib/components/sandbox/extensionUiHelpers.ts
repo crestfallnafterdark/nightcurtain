@@ -1,8 +1,10 @@
 /**
- * Extension management UI helpers (extension wave, P2.3): the pure projections
+ * Extension management UI helpers (extension wave): the pure projections
  * behind the global extensions settings tab, the Realm attachment editor, the
- * missing-tools install/attach flow, and the launcher/review extension
- * disclosure.
+ * missing-tools install/attach flow, the launcher/review extension disclosure,
+ * and the P3.4 live connection surfaces (status chips, catalog count/digest,
+ * fidelity badges, shadows/conflicts/drift/error disclosures, realm-level
+ * ceiling views, and the live agent tool-scope universe).
  *
  * Resolution is never re-derived here: templates' requested extensions and
  * `<providerId>::<serverToolName>` references resolve through the real
@@ -13,11 +15,32 @@
  * transport compatibility, reserved ids, non-empty fields) so the dialog fails
  * inline before the store's typed rejection.
  *
+ * Live connection views are pure functions of the store's
+ * `extensionConnections` projection (session-only, never persisted): the
+ * helpers only read the frozen projections and never dial, install, or attach.
+ * Fidelity badges classify schemas through the real projector
+ * (`projectExtensionInputSchema` + `summarizeExtensionSchemaFidelity`), so the
+ * disclosure can never disagree with the execution pipeline's synthesis.
+ *
  * Nothing here connects, installs, or attaches: every projection is a pure
  * function of its arguments and every action is performed by the operator
  * through the component calling the store.
  */
 
+import {
+  projectExtensionInputSchema,
+  summarizeExtensionSchemaFidelity
+} from '../../sandbox/tools/extensionTools/index.ts';
+import type { ExtensionSchemaFidelitySummary } from '../../sandbox/tools/extensionTools/index.ts';
+import type {
+  ExtensionConnectionProjection,
+  ExtensionConnectionStatus
+} from '../../sandbox/sandboxStore/index.svelte.ts';
+import type {
+  ExtensionCatalogDiff,
+  ExtensionCatalogConflict,
+  ExtensionCatalogShadow
+} from '../../sandbox/extensionRegistry/index.ts';
 import {
   deriveToolCallName
 } from '../../sandbox/realmCatalog/index.ts';
@@ -263,6 +286,23 @@ export interface RealmExtensionRequestView {
   readonly state: RealmExtensionResolutionState;
   /** Whether the state is currently missing its tools. */
   readonly missing: boolean;
+  /** Third-party trust label rendered wherever the request is reviewed. */
+  readonly thirdPartyLabel: string;
+  /** Live connection status (`'disconnected'` when no live session exists). */
+  readonly connectionStatus: ExtensionConnectionStatus | 'disconnected';
+  /** Whether a conflict-free live catalog currently exists. */
+  readonly connected: boolean;
+  /** Live catalog tool count (`0` when no catalog). */
+  readonly liveToolCount: number;
+  /** Fidelity badge of the live catalog (`''` when clean or no catalog). */
+  readonly fidelityBadge: string;
+  /** Fidelity state of the live catalog (`''` when no catalog). */
+  readonly fidelityState: 'clean' | 'projected' | 'degraded' | '';
+  /**
+   * Requested-but-not-connected / conflict / failure disclosure (`''` when
+   * connected, not installed, or nothing actionable).
+   */
+  readonly disclosure: string;
 }
 
 /**
@@ -284,11 +324,14 @@ export interface RealmExtensionRequestViews {
 /**
  * Builds the requested-extension views for one template: declared requests,
  * install-record metadata, Realm attachment, and the live resolution state
- * computed by the real `extensionRegistry` resolution.
+ * computed by the real `extensionRegistry` resolution, plus the live
+ * connection disclosure (status, catalog fidelity, requested-but-not-connected
+ * copy) when connection projections are supplied.
  *
  * @param template - Template whose `providers` are projected.
  * @param installs - Global install records (the store's `listExtensions()`).
  * @param attachments - Realm attachments (`[]` for a pre-launch review).
+ * @param connections - Live connection projections (`[]` for a pre-launch review).
  * @returns The projection; an inconsistent resolution input fails inline.
  *
  * @example
@@ -300,7 +343,8 @@ export interface RealmExtensionRequestViews {
 export function buildRealmExtensionRequestViews(
   template: RealmTemplate | null | undefined,
   installs: readonly ExtensionInstallRecord[],
-  attachments: readonly RealmExtensionAttachment[] = []
+  attachments: readonly RealmExtensionAttachment[] = [],
+  connections: readonly ExtensionConnectionProjection[] = []
 ): RealmExtensionRequestViews {
   const requests = collectRealmExtensionRequests(template);
   if (requests.length === 0) {
@@ -326,11 +370,39 @@ export function buildRealmExtensionRequestViews(
 
   const installsById = new Map(installs.map((record) => [record.id, record] as const));
   const attachmentsById = new Map(attachments.map((attachment) => [attachment.extensionId, attachment] as const));
+  const connectionsById = new Map<string, ExtensionConnectionProjection>();
+  for (const connection of Array.isArray(connections) ? connections : []) {
+    if (connection && typeof connection.extensionId === 'string' && !connectionsById.has(connection.extensionId)) {
+      connectionsById.set(connection.extensionId, connection);
+    }
+  }
   const views: RealmExtensionRequestView[] = requests.map((request) => {
     const record = installsById.get(request.id) ?? null;
     const attachment = attachmentsById.get(request.id) ?? null;
     const state = resolutionStateFor(record !== null, attachment);
     const hint = record ? record.transportHint : request.transportHint;
+    const connection = record !== null ? connectionsById.get(request.id) ?? null : null;
+    const connectionStatus: ExtensionConnectionStatus | 'disconnected' = connection ? connection.status : 'disconnected';
+    const connected = connection !== null && connection.status === 'connected' && connection.catalog !== null
+      && (connection.conflicts?.length ?? 0) === 0;
+    const fidelity = connected ? buildExtensionCatalogFidelityView(connection) : null;
+    let disclosure = '';
+    if (record !== null) {
+      if (connection === null) {
+        disclosure = attachment !== null
+          ? 'Installed and attached, but not connected — its tools stay unavailable until an operator connects it (Sandbox Settings → Extensions).'
+          : 'Installed but not attached — approve/attach it in this Realm to enable its tools.';
+      } else if (connection.status === 'conflict') {
+        disclosure = 'Live catalog conflicts with an earlier extension — resolve it (disconnect or reconnect) before its tools activate.';
+      } else if (connection.status === 'connecting') {
+        disclosure = 'Connection in flight — the catalog appears when discovery completes.';
+      } else if (connection.status === 'error') {
+        const code = describeExtensionConnectionError(connection.error).code;
+        disclosure = `The last connection attempt failed (${code}). Reconnect from Sandbox Settings → Extensions.`;
+      } else if (!connected) {
+        disclosure = 'The live catalog is not active for this attachment — resolve the conflict before its tools activate.';
+      }
+    }
     return {
       id: request.id,
       kind: request.kind,
@@ -345,7 +417,14 @@ export function buildRealmExtensionRequestViews(
       credentialId: record && typeof record.credentialId === 'string' ? record.credentialId : '',
       attachment,
       state,
-      missing: isRealmExtensionStateMissing(state)
+      missing: isRealmExtensionStateMissing(state),
+      thirdPartyLabel: EXTENSION_THIRD_PARTY_LABEL,
+      connectionStatus,
+      connected,
+      liveToolCount: connected && connection && connection.catalog ? Object.keys(connection.catalog).length : 0,
+      fidelityBadge: fidelity ? fidelity.badge : '',
+      fidelityState: fidelity ? fidelity.state : '',
+      disclosure
     };
   });
   return {
@@ -533,6 +612,8 @@ export interface MissingExtensionFlowView {
   readonly canInstall: boolean;
   /** Whether the attach action applies (installed, no active attachment). */
   readonly canAttach: boolean;
+  /** Third-party trust label rendered wherever the row is reviewed. */
+  readonly thirdPartyLabel: string;
   /** Install-dialog draft prefilled from the template request (or the install record when re-installing). */
   readonly installPrefill: ExtensionInstallDraft;
 }
@@ -637,6 +718,7 @@ export function buildMissingExtensionFlowViews(options: {
       installed,
       canInstall: !installed,
       canAttach: installed && attachment === null && state !== 'active',
+      thirdPartyLabel: EXTENSION_THIRD_PARTY_LABEL,
       installPrefill
     });
   }
@@ -1264,22 +1346,1061 @@ export function applyAgentExtensionToolToggle(
   resolvedTools?: Readonly<Record<string, string>> | null,
   attachments?: readonly RealmExtensionAttachment[] | null
 ): 'all' | readonly string[] {
+  return applyAgentExtensionSelectorToggle(
+    selector,
+    callName,
+    enabled,
+    tuningUniverse(resolvedTools, attachments)
+  );
+}
+
+/**
+ * Core selector-toggle rule over an explicit universe: enabling every name
+ * collapses to `'all'`, any other state is an explicit list in universe order,
+ * and an unknown name or a no-op toggle returns the normalized selector
+ * unchanged. The universe order is the display/grant order the caller computes
+ * (P3.4 passes the live realm universe so a restricted selector can only
+ * narrow the realm-level ceiling).
+ *
+ * @param selector - Current selector (unknown values normalize to `'all'`).
+ * @param callName - Tool call name being toggled.
+ * @param enabled - Requested state.
+ * @param universe - Names the selector may cover, in display order.
+ * @returns The next selector value (`'all'` or a frozen explicit list).
+ *
+ * @example
+ * ```typescript
+ * applyAgentExtensionSelectorToggle('all', 'echo', false, ['echo', 'sse']);
+ * // => ['sse']
+ * ```
+ */
+export function applyAgentExtensionSelectorToggle(
+  selector: unknown,
+  callName: unknown,
+  enabled: unknown,
+  universe: readonly string[] | null | undefined
+): 'all' | readonly string[] {
   const current = normalizeTuningSelector(selector);
-  const universe = tuningUniverse(resolvedTools, attachments);
-  if (typeof callName !== 'string' || !callName || !universe.includes(callName)) {
+  const names: string[] = [];
+  for (const name of Array.isArray(universe) ? universe : []) {
+    if (typeof name === 'string' && name && !names.includes(name)) names.push(name);
+  }
+  if (typeof callName !== 'string' || !callName || !names.includes(callName)) {
     return current;
   }
-  const selected = current === 'all' ? new Set(universe) : new Set(current);
+  const selected = current === 'all' ? new Set(names) : new Set(current);
   if (enabled === true) selected.add(callName);
   else selected.delete(callName);
-  if (selected.size === universe.length) {
-    // Every resolved tool enabled (including the empty universe) is the
-    // documented `'all'` default.
+  if (selected.size === names.length) {
+    // Every name enabled (including the empty universe) is the documented
+    // `'all'` default.
     return 'all';
   }
   const next: string[] = [];
-  for (const name of universe) {
+  for (const name of names) {
     if (selected.has(name)) next.push(name);
   }
   return Object.freeze(next);
+}
+
+// ============================================================================
+// Live extension connections (extension wave, P3.4)
+// ============================================================================
+
+/**
+ * Builds the id → display-label map the extension surfaces render (`Name`
+ * when the record declares one, else the raw id). Display-only: the map never
+ * carries transport or credential data.
+ *
+ * @param installs - Global install records (null-safe).
+ * @returns Frozen label map.
+ *
+ * @example
+ * ```typescript
+ * buildExtensionLabelMap(sandboxStore.listExtensions())['acme-scoring'];
+ * ```
+ */
+export function buildExtensionLabelMap(
+  installs: readonly ExtensionInstallRecord[] | null | undefined
+): Readonly<Record<string, string>> {
+  const labels: Record<string, string> = {};
+  for (const record of Array.isArray(installs) ? installs : []) {
+    if (!record || typeof record.id !== 'string' || !record.id) continue;
+    labels[record.id] = typeof record.displayName === 'string' && record.displayName
+      ? record.displayName
+      : record.id;
+  }
+  return Object.freeze(labels);
+}
+
+/**
+ * Third-party trust label rendered wherever extension-provided tool metadata is
+ * surfaced (extensions research §A.5: "third-party — classification unknown").
+ */
+export const EXTENSION_THIRD_PARTY_LABEL = 'third-party \u2014 classification unknown';
+
+/**
+ * Display view of one live (or absent) connection status.
+ */
+export interface ExtensionConnectionStatusView {
+  /** Connection status, or `'disconnected'` when no live entry exists. */
+  readonly state: ExtensionConnectionStatus | 'disconnected';
+  /** Short chip label. */
+  readonly label: string;
+  /** Plain-language explanation. */
+  readonly description: string;
+  /** Whether the surfaces render a live status chip (`false` when disconnected). */
+  readonly chip: boolean;
+}
+
+/**
+ * Describes one live connection status for the settings/realm chips.
+ *
+ * @param status - Connection status (unknown values read as `'disconnected'`).
+ * @returns The chip label plus explanation.
+ *
+ * @example
+ * ```typescript
+ * describeExtensionConnectionStatus('conflict').label; // 'Conflict'
+ * ```
+ */
+export function describeExtensionConnectionStatus(status: unknown): ExtensionConnectionStatusView {
+  if (status === 'connecting') {
+    return {
+      state: 'connecting',
+      label: 'Connecting',
+      description: 'Handshake and catalog discovery are in flight.',
+      chip: true
+    };
+  }
+  if (status === 'connected') {
+    return {
+      state: 'connected',
+      label: 'Connected',
+      description: 'Live, conflict-free catalog: its tools can be granted where the Realm attaches it.',
+      chip: true
+    };
+  }
+  if (status === 'conflict') {
+    return {
+      state: 'conflict',
+      label: 'Conflict',
+      description: 'Another extension claimed one of its call names first — none of its tools activate until the conflict clears.',
+      chip: true
+    };
+  }
+  if (status === 'error') {
+    return {
+      state: 'error',
+      label: 'Error',
+      description: 'The last connection attempt failed; the typed code below is the safe failure projection.',
+      chip: true
+    };
+  }
+  return {
+    state: 'disconnected',
+    label: 'Not connected',
+    description: 'No live session — nothing is dialed until you connect.',
+    chip: false
+  };
+}
+
+/**
+ * Renders one epoch-millisecond connection timestamp for display.
+ *
+ * @param value - Epoch milliseconds (unknown values read as `''`).
+ * @returns `YYYY-MM-DD HH:MM UTC`, or an empty string for malformed values.
+ */
+export function formatExtensionConnectionTimestamp(value: unknown): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '';
+  const iso = new Date(value).toISOString();
+  return `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
+}
+
+/**
+ * Secret-free error projection of a failed connection attempt.
+ */
+export interface ExtensionConnectionErrorView {
+  /** Typed `ERR_MCP_*` / `ERR_EXTENSION_*` / store code. */
+  readonly code: string;
+  /** Safe plain-language explanation (never server or credential text). */
+  readonly message: string;
+  /** Safe machine-readable context rendered as `key=value` lines (`[]` when none). */
+  readonly details: readonly string[];
+}
+
+/**
+ * Fixed safe explanations per typed connection-failure code. Unknown codes
+ * fall back to the typed code alone; message text from the failure is never
+ * rendered (the store's projection is already secret-free and this keeps the
+ * surface conservative).
+ */
+const CONNECTION_ERROR_MESSAGES: Readonly<Record<string, string>> = Object.freeze({
+  ERR_MCP_TRANSPORT_UNSUPPORTED: 'The transport kind is not supported by this client.',
+  ERR_MCP_PLAINTEXT_CREDENTIAL: 'A credential was refused for a plaintext endpoint.',
+  ERR_MCP_AUTH: 'The endpoint rejected the request as unauthorized.',
+  ERR_MCP_PROTOCOL: 'The endpoint returned a protocol-level error.',
+  ERR_MCP_TIMEOUT: 'The request exceeded its timeout budget.',
+  ERR_MCP_CANCELLED: 'The request was cancelled.',
+  ERR_MCP_NETWORK: 'The transport failed (network or CORS).',
+  ERR_MCP_INVALID_RESPONSE: 'The endpoint returned a response that could not be consumed.',
+  ERR_STORE_EXTENSION_NOT_CONNECTABLE: 'This extension carries no connectable transport.',
+  ERR_STORE_EXTENSION_TRANSPORT_UNSUPPORTED: 'stdio is a host-only transport and cannot be connected from the browser.',
+  ERR_STORE_EXTENSION_INVALID_ENDPOINT: 'The server URL is not absolute, or the approved URL no longer matches the transport URL.',
+  ERR_STORE_EXTENSION_PLAINTEXT_CREDENTIAL: 'The bound credential cannot be sent over a plaintext endpoint.',
+  ERR_STORE_EXTENSION_CREDENTIAL_UNRESOLVED: 'The bound credential no longer resolves in the vault.',
+  ERR_STORE_EXTENSION_CONNECT_FAILED: 'The connection failed before a catalog could be discovered.',
+  ERR_EXTENSION_INVALID_CATALOG: 'The discovered catalog was malformed; the whole catalog failed closed.'
+});
+
+/**
+ * Formats one safe error-detail value for display (strings capped).
+ *
+ * @param value - Detail value.
+ * @returns A display string.
+ */
+function formatConnectionErrorDetail(value: unknown): string {
+  if (value === null || value === undefined) return String(value);
+  if (typeof value === 'string') return value.length > 120 ? `${value.slice(0, 120)}\u2026` : value;
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') return String(value);
+  try {
+    const text = JSON.stringify(value);
+    if (typeof text !== 'string') return typeof value;
+    return text.length > 120 ? `${text.slice(0, 120)}\u2026` : text;
+  } catch {
+    return typeof value;
+  }
+}
+
+/**
+ * Describes one failed-connection projection as the typed store code plus a
+ * safe message and any safe machine details. Never renders failure text from
+ * the wire; render this instead of an error object.
+ *
+ * @param error - `ExtensionConnectionError` projection (unknown shapes read as a generic failure).
+ * @returns The typed code, safe message, and formatted details.
+ *
+ * @example
+ * ```typescript
+ * describeExtensionConnectionError(connection.error).code; // 'ERR_MCP_NETWORK'
+ * ```
+ */
+export function describeExtensionConnectionError(error: unknown): ExtensionConnectionErrorView {
+  const shape = error && typeof error === 'object' && !Array.isArray(error)
+    ? (error as Record<string, unknown>)
+    : {};
+  const code = typeof shape.code === 'string' && shape.code
+    ? shape.code
+    : 'ERR_STORE_EXTENSION_CONNECT_FAILED';
+  const message = CONNECTION_ERROR_MESSAGES[code]
+    ?? 'The connection attempt failed; the typed code below is the safe failure projection.';
+  const detailsRecord = shape.details && typeof shape.details === 'object' && !Array.isArray(shape.details)
+    ? (shape.details as Record<string, unknown>)
+    : null;
+  const details = detailsRecord
+    ? Object.keys(detailsRecord).map((key) => `${key}=${formatConnectionErrorDetail(detailsRecord[key])}`)
+    : [];
+  return Object.freeze({ code, message, details: Object.freeze(details) });
+}
+
+/**
+ * Display view of one reconnect drift disclosure.
+ */
+export interface ExtensionCatalogDriftView {
+  /** Whether any catalog change was recorded. */
+  readonly visible: boolean;
+  /** Compact one-line summary (`+1 added · -2 removed`, `no catalog changes`). */
+  readonly summary: string;
+  /** Newly added call names (new-catalog order). */
+  readonly added: readonly string[];
+  /** Removed call names (previous-catalog order). */
+  readonly removed: readonly string[];
+  /** Common call names whose tool facts changed (new-catalog order). */
+  readonly changed: readonly string[];
+  /** Intra-server shadow call names present only in the new catalog. */
+  readonly shadowedAdded: readonly string[];
+  /** Intra-server shadow call names present only in the previous catalog. */
+  readonly shadowedRemoved: readonly string[];
+  /** Whether the relative order of the common call names changed. */
+  readonly reordered: boolean;
+  /** Previous catalog digest (`''` when there was none). */
+  readonly previousDigest: string;
+  /** New catalog digest (`''` when absent). */
+  readonly nextDigest: string;
+}
+
+/**
+ * Projects one `ExtensionCatalogDiff` (a reconnect drift record) into the
+ * disclosure a surface renders.
+ *
+ * @param drift - Drift record from the live connection projection (null-safe).
+ * @returns The drift view; `visible: false` when nothing changed.
+ */
+export function describeExtensionCatalogDrift(drift: ExtensionCatalogDiff | null | undefined): ExtensionCatalogDriftView {
+  const list = (value: unknown): string[] => (
+    Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0) : []
+  );
+  const record = drift && typeof drift === 'object' ? drift : null;
+  const added = list(record?.added);
+  const removed = list(record?.removed);
+  const changed = list(record?.changed);
+  const shadowedAdded = list(record?.shadowedAdded);
+  const shadowedRemoved = list(record?.shadowedRemoved);
+  const reordered = record?.reordered === true;
+  const digests = record && record.digests && typeof record.digests === 'object' ? record.digests : null;
+  const previousDigest = digests && typeof digests.previous === 'string' ? digests.previous : '';
+  const nextDigest = digests && typeof digests.next === 'string' ? digests.next : '';
+  const visible = added.length > 0 || removed.length > 0 || changed.length > 0
+    || shadowedAdded.length > 0 || shadowedRemoved.length > 0 || reordered;
+  const parts: string[] = [];
+  if (added.length > 0) parts.push(`+${added.length} added`);
+  if (removed.length > 0) parts.push(`-${removed.length} removed`);
+  if (changed.length > 0) parts.push(`~${changed.length} changed`);
+  if (shadowedAdded.length > 0) parts.push(`+${shadowedAdded.length} shadowed`);
+  if (shadowedRemoved.length > 0) parts.push(`-${shadowedRemoved.length} shadows cleared`);
+  if (reordered) parts.push('order changed');
+  return Object.freeze({
+    visible,
+    summary: parts.length > 0 ? parts.join(' \u00b7 ') : 'No catalog changes.',
+    added: Object.freeze(added),
+    removed: Object.freeze(removed),
+    changed: Object.freeze(changed),
+    shadowedAdded: Object.freeze(shadowedAdded),
+    shadowedRemoved: Object.freeze(shadowedRemoved),
+    reordered,
+    previousDigest,
+    nextDigest
+  });
+}
+
+/**
+ * One warned projected tool as disclosed in the fidelity details popover
+ * (code + path only; never schema text).
+ */
+export interface ExtensionFidelityWarningView {
+  /** Sanitized model-facing call name. */
+  readonly callName: string;
+  /** Stable projection warning code. */
+  readonly code: string;
+  /** `#`-rooted JSON Pointer the warning applies to. */
+  readonly path: string;
+}
+
+/**
+ * One refused projected tool as disclosed in the fidelity details popover.
+ */
+export interface ExtensionFidelityRefusalView {
+  /** Sanitized model-facing call name. */
+  readonly callName: string;
+  /** Stable refusal code. */
+  readonly code: string;
+  /** `#`-rooted JSON Pointer, when known (`''` otherwise). */
+  readonly path: string;
+}
+
+/**
+ * Fidelity disclosure of one live catalog: the badge state plus the warned and
+ * refused tools behind it.
+ */
+export interface ExtensionCatalogFidelityView {
+  /** Fidelity state from `summarizeExtensionSchemaFidelity`. */
+  readonly state: 'clean' | 'projected' | 'degraded';
+  /** Projected tools summarized. */
+  readonly total: number;
+  /** Tools carrying at least one recorded warning. */
+  readonly warned: number;
+  /** Refused projections. */
+  readonly refused: number;
+  /** Badge text (`''` when clean, `projected schemas`, `degraded schema fidelity`). */
+  readonly badge: string;
+  /** One-line summary for the catalog row. */
+  readonly summary: string;
+  /** Warned tools (code + path only) in catalog order. */
+  readonly warnings: readonly ExtensionFidelityWarningView[];
+  /** Refused tools in catalog order. */
+  readonly refusals: readonly ExtensionFidelityRefusalView[];
+}
+
+/**
+ * Builds the fidelity disclosure of one live connection's catalog by running
+ * the real projector (`projectExtensionInputSchema`) over every cataloged
+ * input schema and summarizing with the real
+ * `summarizeExtensionSchemaFidelity`, so the badge thresholds can never
+ * disagree with the execution pipeline.
+ *
+ * @param connection - Live connection projection (null-safe).
+ * @returns The fidelity view, or `null` when no catalog was discovered.
+ *
+ * @example
+ * ```typescript
+ * buildExtensionCatalogFidelityView(sandboxStore.getExtensionConnection('acme'))?.badge;
+ * // 'projected schemas'
+ * ```
+ */
+export function buildExtensionCatalogFidelityView(
+  connection: ExtensionConnectionProjection | null | undefined
+): ExtensionCatalogFidelityView | null {
+  const catalog = connection && connection.catalog ? connection.catalog : null;
+  if (!catalog) return null;
+  const toolNames = Object.keys(catalog);
+  const projections = toolNames.map((callName) => {
+    const entry = catalog[callName];
+    return projectExtensionInputSchema(entry ? entry.inputSchema : undefined);
+  });
+  const summary: ExtensionSchemaFidelitySummary = summarizeExtensionSchemaFidelity(projections);
+  const warnings: ExtensionFidelityWarningView[] = [];
+  const refusals: ExtensionFidelityRefusalView[] = [];
+  for (let index = 0; index < projections.length; index += 1) {
+    const callName = toolNames[index];
+    const projection = projections[index];
+    if (projection.status === 'refused') {
+      refusals.push(Object.freeze({
+        callName,
+        code: projection.refusal.code,
+        path: typeof projection.refusal.path === 'string' ? projection.refusal.path : ''
+      }));
+      continue;
+    }
+    for (const warning of projection.warnings) {
+      warnings.push(Object.freeze({ callName, code: warning.code, path: warning.path }));
+    }
+  }
+  const badge = summary.state === 'degraded'
+    ? 'degraded schema fidelity'
+    : summary.state === 'projected' ? 'projected schemas' : '';
+  const summaryText = summary.state === 'clean'
+    ? `All ${summary.total} tool schema${summary.total === 1 ? '' : 's'} project cleanly.`
+    : summary.state === 'degraded'
+      ? `${summary.warned} of ${summary.total} tool schemas needed projection; ${summary.refused} refused.`
+      : `${summary.warned} of ${summary.total} tool schemas needed normalization (additive).`;
+  return Object.freeze({
+    state: summary.state,
+    total: summary.total,
+    warned: summary.warned,
+    refused: summary.refused,
+    badge,
+    summary: summaryText,
+    warnings: Object.freeze(warnings),
+    refusals: Object.freeze(refusals)
+  });
+}
+
+/**
+ * Complete display projection of one installed extension plus its live
+ * connection (if any): controls, live status, server identity, catalog
+ * count/digest, fidelity, shadows/conflicts/drift, and the safe error.
+ */
+export interface ExtensionConnectionView {
+  /** Host-unique extension id. */
+  readonly extensionId: string;
+  /** Display label (record display name, else the id). */
+  readonly label: string;
+  /** Extension kind. */
+  readonly kind: 'mcp' | 'pack';
+  /** Transport hint summary. */
+  readonly transportSummary: string;
+  /** Third-party trust label for the surface. */
+  readonly thirdPartyLabel: string;
+  /** Live (or absent) status. */
+  readonly status: ExtensionConnectionStatusView;
+  /** Whether Connect applies (an `http` MCP record with no live session, or after an error). */
+  readonly canConnect: boolean;
+  /** Whether Disconnect applies (a live entry exists). */
+  readonly canDisconnect: boolean;
+  /** Whether Reconnect applies (an `http` MCP record with a live entry). */
+  readonly canReconnect: boolean;
+  /** Why some controls are unavailable (`''` when all applicable controls render). */
+  readonly controlsHint: string;
+  /** Server name from the handshake (`''` before/without a session). */
+  readonly serverName: string;
+  /** Server version from the handshake (`''` before/without a session). */
+  readonly serverVersion: string;
+  /** Negotiated protocol revision (`''` before/without a session). */
+  readonly protocolVersion: string;
+  /** Catalog tool count (`0` when no catalog). */
+  readonly toolCount: number;
+  /** Catalog digest (`''` when no catalog). */
+  readonly digest: string;
+  /** Fidelity disclosure, or `null` when no catalog. */
+  readonly fidelity: ExtensionCatalogFidelityView | null;
+  /** Intra-server shadowed tools. */
+  readonly shadows: readonly ExtensionCatalogShadow[];
+  /** Extension↔extension conflicts of the last arbitration. */
+  readonly conflicts: readonly ExtensionCatalogConflict[];
+  /** Reconnect drift disclosure, or `null` when none was computed. */
+  readonly drift: ExtensionCatalogDriftView | null;
+  /** Failed-connection safe projection, or `null`. */
+  readonly error: ExtensionConnectionErrorView | null;
+  /** Formatted connection timestamp (`''` when none). */
+  readonly connectedAt: string;
+  /** Formatted discovery timestamp (`''` when none). */
+  readonly discoveredAt: string;
+}
+
+/**
+ * Builds the display projection of one install record plus its live
+ * connection. The catalog is only read while the connection is live:
+ * a disconnected extension shows no tools.
+ *
+ * @param record - Global install record.
+ * @param connection - Live connection projection for the record, or `null`/`undefined`.
+ * @returns Frozen display view.
+ *
+ * @example
+ * ```typescript
+ * const view = buildExtensionConnectionView(record, sandboxStore.getExtensionConnection(record.id));
+ * view.canConnect; // true while no live session exists
+ * ```
+ */
+export function buildExtensionConnectionView(
+  record: ExtensionInstallRecord,
+  connection: ExtensionConnectionProjection | null | undefined
+): ExtensionConnectionView {
+  const live = connection && typeof connection === 'object' ? connection : null;
+  const isPack = record.kind === 'pack';
+  const isStdio = !isPack && record.transportHint.kind === 'stdio';
+  const isHttp = !isPack && record.transportHint.kind === 'http';
+  const status = describeExtensionConnectionStatus(live ? live.status : 'disconnected');
+  // "A disconnected extension shows no tools": catalog data is only surfaced
+  // while a live entry exists (an errored entry keeps its error disclosure).
+  const catalog = live && live.catalog ? live.catalog : null;
+  const toolCount = catalog ? Object.keys(catalog).length : 0;
+  const digest = live && typeof live.digest === 'string' ? live.digest : '';
+  const fidelity = buildExtensionCatalogFidelityView(live);
+  const shadows = live && Array.isArray(live.shadows) ? live.shadows : [];
+  const conflicts = live && Array.isArray(live.conflicts) ? live.conflicts : [];
+  const serverInfo = live && live.serverInfo && typeof live.serverInfo === 'object' ? live.serverInfo : null;
+  const controlsHint = isPack
+    ? 'Tool packs carry no connectable transport — they are host-installed.'
+    : isStdio ? 'stdio is host-only: this browser session can record the declaration but cannot connect it.' : '';
+  return Object.freeze({
+    extensionId: record.id,
+    label: typeof record.displayName === 'string' && record.displayName ? record.displayName : record.id,
+    kind: record.kind,
+    transportSummary: describeExtensionTransportHint(record.transportHint),
+    thirdPartyLabel: EXTENSION_THIRD_PARTY_LABEL,
+    status,
+    canConnect: isHttp && (live === null || live.status === 'error'),
+    canDisconnect: live !== null,
+    canReconnect: isHttp && live !== null,
+    controlsHint,
+    serverName: serverInfo && typeof serverInfo.name === 'string' ? serverInfo.name : '',
+    serverVersion: serverInfo && typeof serverInfo.version === 'string' ? serverInfo.version : '',
+    protocolVersion: live && typeof live.protocolVersion === 'string' ? live.protocolVersion : '',
+    toolCount,
+    digest,
+    fidelity,
+    shadows: Object.freeze([...shadows]),
+    conflicts: Object.freeze([...conflicts]),
+    drift: live ? describeExtensionCatalogDrift(live.drift) : null,
+    error: live && live.error ? describeExtensionConnectionError(live.error) : null,
+    connectedAt: live ? formatExtensionConnectionTimestamp(live.connectedAt) : '',
+    discoveredAt: live ? formatExtensionConnectionTimestamp(live.discoveredAt) : ''
+  });
+}
+
+/**
+ * Builds the display projections of every install record in registry order.
+ *
+ * @param options - Install records, live connection projections, and optional display labels.
+ * @returns Frozen views in install-record order.
+ */
+export function buildExtensionConnectionViews(options: {
+  readonly installs: readonly ExtensionInstallRecord[];
+  readonly connections?: readonly ExtensionConnectionProjection[] | null;
+  readonly labels?: Readonly<Record<string, string>> | null;
+}): readonly ExtensionConnectionView[] {
+  const connections = Array.isArray(options.connections) ? options.connections : [];
+  const byId = new Map<string, ExtensionConnectionProjection>();
+  for (const connection of connections) {
+    if (connection && typeof connection.extensionId === 'string' && !byId.has(connection.extensionId)) {
+      byId.set(connection.extensionId, connection);
+    }
+  }
+  return Object.freeze(
+    options.installs.map((record) => buildExtensionConnectionView(record, byId.get(record.id) ?? null))
+  );
+}
+
+/**
+ * Realm-level ceiling view of one attachment: the attachment's tool selection
+ * intersected with the live conflict-free catalog (P3.3 F1 semantics).
+ */
+export interface RealmAttachmentCeilingView {
+  /** Realm selection mode. */
+  readonly mode: 'all' | 'selection';
+  /** Explicitly selected call names (`[]` when the mode is `all`). */
+  readonly selectedNames: readonly string[];
+  /** Live conflict-free catalog call names (capped by nothing; `[]` when no catalog). */
+  readonly liveNames: readonly string[];
+  /** Effective names the Realm may grant: live catalog ∩ selection (`all` keeps the catalog). */
+  readonly effectiveNames: readonly string[];
+  /** Live catalog names the attachment selection excludes. */
+  readonly excludedNames: readonly string[];
+  /** Whether a live conflict-free catalog currently exists. */
+  readonly hasLiveCatalog: boolean;
+  /** One-line display summary of the ceiling. */
+  readonly summary: string;
+}
+
+/**
+ * Builds the realm-level ceiling view of one attachment: `toolSelection` caps
+ * the live catalog contribution (`'all'` keeps every live name, an explicit
+ * list keeps the intersection), so a connect can never widen the Realm's
+ * selection and per-agent selectors can only narrow it further.
+ *
+ * @param attachment - Realm attachment record.
+ * @param connection - Live connection projection, or `null`/`undefined`.
+ * @returns Frozen ceiling view.
+ *
+ * @example
+ * ```typescript
+ * buildRealmAttachmentCeilingView(attachment, connection).effectiveNames;
+ * ```
+ */
+export function buildRealmAttachmentCeilingView(
+  attachment: RealmExtensionAttachment,
+  connection: ExtensionConnectionProjection | null | undefined
+): RealmAttachmentCeilingView {
+  const rawSelection = attachment.toolSelection;
+  const mode: 'all' | 'selection' = rawSelection === 'all' ? 'all' : 'selection';
+  const selectedNames: readonly string[] = mode === 'all'
+    ? Object.freeze([])
+    : Object.freeze((Array.isArray(rawSelection) ? rawSelection : [])
+      .filter((name): name is string => typeof name === 'string' && name.length > 0));
+  const live = connection && connection.status === 'connected' && connection.catalog && (connection.conflicts?.length ?? 0) === 0
+    ? connection
+    : null;
+  const liveNames: string[] = live && live.catalog ? Object.keys(live.catalog) : [];
+  const effectiveNames = mode === 'all'
+    ? Object.freeze([...liveNames])
+    : Object.freeze(liveNames.filter((name) => selectedNames.includes(name)));
+  const excludedNames = mode === 'selection'
+    ? Object.freeze(liveNames.filter((name) => !selectedNames.includes(name)))
+    : Object.freeze([]) as readonly string[];
+  const summary = liveNames.length === 0
+    ? (mode === 'all'
+      ? 'All tools — no live catalog yet (connect the extension to see it).'
+      : `${selectedNames.length} selected call name${selectedNames.length === 1 ? '' : 's'} — no live catalog yet.`)
+    : (mode === 'all'
+      ? `All ${liveNames.length} live catalog tool${liveNames.length === 1 ? '' : 's'}.`
+      : `${effectiveNames.length} of ${liveNames.length} live tool${liveNames.length === 1 ? '' : 's'} selected${excludedNames.length > 0 ? ` (${excludedNames.length} excluded by the Realm ceiling)` : ''}.`);
+  return Object.freeze({
+    mode,
+    selectedNames: Object.freeze([...selectedNames]),
+    liveNames: Object.freeze([...liveNames]),
+    effectiveNames,
+    excludedNames,
+    hasLiveCatalog: liveNames.length > 0,
+    summary
+  });
+}
+
+/**
+ * One extension↔extension conflict with the winning extension's display label.
+ */
+export interface RealmExtensionConflictView {
+  /** Contested call name. */
+  readonly callName: string;
+  /** Earlier extension that keeps the call name. */
+  readonly otherExtensionId: string;
+  /** Display label of the winning extension. */
+  readonly otherLabel: string;
+}
+
+/**
+ * Complete display projection of one Realm attachment with its live state.
+ */
+export interface RealmExtensionAttachmentView {
+  /** Attached extension id. */
+  readonly extensionId: string;
+  /** Display label (install display name, else the id). */
+  readonly label: string;
+  /** Attachment record. */
+  readonly attachment: RealmExtensionAttachment;
+  /** Live resolution state: `active` (attached; connection may be absent), `conflict`, or `unavailable`. */
+  readonly state: 'active' | 'conflict' | 'unavailable';
+  /** Short state label. */
+  readonly stateLabel: string;
+  /** Plain-language state explanation reflecting the live connection. */
+  readonly stateDescription: string;
+  /** Live (or absent) connection status. */
+  readonly live: ExtensionConnectionStatusView;
+  /** Live catalog tool count (`0` when no catalog). */
+  readonly toolCount: number;
+  /** Live catalog digest (`''` when no catalog). */
+  readonly digest: string;
+  /** Realm-level ceiling view. */
+  readonly ceiling: RealmAttachmentCeilingView;
+  /** Conflicts against earlier extensions with winner labels. */
+  readonly conflicts: readonly RealmExtensionConflictView[];
+  /** Whether the Disconnect resolution action applies. */
+  readonly canDisconnect: boolean;
+  /** Whether the Reconnect resolution action applies. */
+  readonly canReconnect: boolean;
+  /** Formatted connection timestamp (`''` when none). */
+  readonly connectedAt: string;
+  /** Formatted discovery timestamp (`''` when none). */
+  readonly discoveredAt: string;
+}
+
+/**
+ * Builds every attachment view of one Realm: live status, ceiling, conflicts
+ * with winner labels, and the disconnect/reconnect resolution actions.
+ *
+ * @param options - Realm attachments, live connections, install records, and optional labels.
+ * @returns Frozen views in attachment order.
+ */
+export function buildRealmExtensionAttachmentViews(options: {
+  readonly attachments: readonly RealmExtensionAttachment[];
+  readonly connections?: readonly ExtensionConnectionProjection[] | null;
+  readonly installs?: readonly ExtensionInstallRecord[] | null;
+  readonly labels?: Readonly<Record<string, string>> | null;
+}): readonly RealmExtensionAttachmentView[] {
+  const connections = Array.isArray(options.connections) ? options.connections : [];
+  const installs = Array.isArray(options.installs) ? options.installs : [];
+  const labels = options.labels && typeof options.labels === 'object' ? options.labels : {};
+  const connectionById = new Map<string, ExtensionConnectionProjection>();
+  for (const connection of connections) {
+    if (connection && typeof connection.extensionId === 'string' && !connectionById.has(connection.extensionId)) {
+      connectionById.set(connection.extensionId, connection);
+    }
+  }
+  const viewLabel = (extensionId: string): string => {
+    if (typeof labels[extensionId] === 'string' && labels[extensionId]) return labels[extensionId];
+    const record = installs.find((candidate) => candidate.id === extensionId) ?? null;
+    return record && typeof record.displayName === 'string' && record.displayName ? record.displayName : extensionId;
+  };
+  return Object.freeze(options.attachments.map((attachment) => {
+    const connection = connectionById.get(attachment.extensionId) ?? null;
+    const live = describeExtensionConnectionStatus(connection ? connection.status : 'disconnected');
+    const conflicts = connection && Array.isArray(connection.conflicts) ? connection.conflicts : [];
+    const conflict = attachment.status === 'conflict' || (connection !== null && connection.status === 'conflict');
+    const state: 'active' | 'conflict' | 'unavailable' = conflict
+      ? 'conflict'
+      : attachment.status === 'unavailable' ? 'unavailable' : 'active';
+    const stateLabel = state === 'conflict' ? 'Conflict' : state === 'unavailable' ? 'Unavailable' : 'Active';
+    const stateDescription = state === 'conflict'
+      ? 'A call-name conflict with another live extension — the conflicting names stay inactive until the operator disconnects or reconnects the winner/loser.'
+      : state === 'unavailable'
+        ? 'The extension is not currently installed or usable, so its tools stay unavailable.'
+        : connection && connection.status === 'connected'
+          ? 'Attached and connected: the Realm grants the ceiling (live catalog ∩ selection) to its members.'
+          : 'Attached and accepted, but not connected — its tools are unavailable until an operator connects it.';
+    const catalog = connection && connection.status === 'connected' && connection.catalog ? connection.catalog : null;
+    return Object.freeze({
+      extensionId: attachment.extensionId,
+      label: viewLabel(attachment.extensionId),
+      attachment,
+      state,
+      stateLabel,
+      stateDescription,
+      live,
+      toolCount: catalog ? Object.keys(catalog).length : 0,
+      digest: connection && typeof connection.digest === 'string' ? connection.digest : '',
+      ceiling: buildRealmAttachmentCeilingView(attachment, connection),
+      conflicts: Object.freeze(conflicts.map((entry) => Object.freeze({
+        callName: entry.callName,
+        otherExtensionId: entry.otherExtensionId,
+        otherLabel: viewLabel(entry.otherExtensionId)
+      }))),
+      canDisconnect: connection !== null,
+      canReconnect: connection !== null,
+      connectedAt: connection ? formatExtensionConnectionTimestamp(connection.connectedAt) : '',
+      discoveredAt: connection ? formatExtensionConnectionTimestamp(connection.discoveredAt) : ''
+    });
+  }));
+}
+
+/**
+ * One unavailable (no live catalog) attachment of the agent tool-scope panel.
+ */
+export interface AgentLiveExtensionUnavailableView {
+  /** Attached extension id. */
+  readonly extensionId: string;
+  /** Display label. */
+  readonly label: string;
+  /** Why the attachment contributes no live tools. */
+  readonly reason: 'not-connected' | 'connecting' | 'conflict' | 'error' | 'unavailable';
+  /** Plain-language explanation. */
+  readonly message: string;
+}
+
+/**
+ * One selectable tool of the live agent scope panel.
+ */
+export interface AgentLiveExtensionToolOption {
+  /** Sanitized model-facing call name. */
+  readonly callName: string;
+  /** Extension id that provides the tool. */
+  readonly extensionId: string;
+  /** Display label of the providing extension. */
+  readonly extensionLabel: string;
+  /** Whether the agent's current selector grants this tool. */
+  readonly enabled: boolean;
+  /** Where the name entered the universe: launch resolution or the live catalog. */
+  readonly source: 'resolved' | 'catalog';
+}
+
+/**
+ * Live per-agent extension tool-scope projection: the Realm's grant universe
+ * under P3.3 F1 semantics (persisted resolved names plus each active
+ * attachment's live conflict-free catalog capped by its `toolSelection`),
+ * with per-attachment unavailable markers.
+ */
+export interface AgentLiveExtensionTuningProjection {
+  /** Normalized selector the projection was built from (`'all'` default). */
+  readonly selector: 'all' | readonly string[];
+  /** Selectable tools in grant-universe order. */
+  readonly options: readonly AgentLiveExtensionToolOption[];
+  /** Every universe call name in order (the toggle universe). */
+  readonly callNames: readonly string[];
+  /** Count of universe tools. */
+  readonly totalCount: number;
+  /** Count of currently enabled tools. */
+  readonly selectedCount: number;
+  /** Whether every universe tool is enabled. */
+  readonly allSelected: boolean;
+  /** Whether the Realm exposes any extension tools. */
+  readonly hasTools: boolean;
+  /** Compact status label for the toggle header. */
+  readonly label: string;
+  /** Realm-level ceiling explanation rendered under the header. */
+  readonly ceilingHint: string;
+  /** Persisted (launch-resolved) names in the universe. */
+  readonly resolvedCount: number;
+  /** Live catalog names in the universe. */
+  readonly liveCount: number;
+  /** Active attachments whose catalog is not live, with the reason. */
+  readonly unavailableAttachments: readonly AgentLiveExtensionUnavailableView[];
+}
+
+/**
+ * Builds the live per-agent extension tool-scope projection from the Realm's
+ * attachments, the store's live connection projections, the persisted
+ * `resolvedTools` provenance, and the agent's selector.
+ *
+ * The universe mirrors the store's grant resolution exactly: persisted
+ * resolved names first (active attachments only), then each active
+ * attachment's live conflict-free catalog in connection order, capped by the
+ * attachment's `toolSelection` (the realm-level ceiling). A restricted agent
+ * selector therefore cannot widen past the ceiling — its options come from
+ * this universe only.
+ *
+ * @param options - Realm provenance/attachments, live connections, selector, and display labels.
+ * @returns Frozen tuning projection (empty when the Realm exposes no tools).
+ */
+export function buildAgentLiveExtensionTuningProjection(options: {
+  readonly resolvedTools?: Readonly<Record<string, string>> | null;
+  readonly attachments?: readonly RealmExtensionAttachment[] | null;
+  readonly connections?: readonly ExtensionConnectionProjection[] | null;
+  readonly selector?: unknown;
+  readonly extensionLabels?: Readonly<Record<string, string>> | null;
+} = {}): AgentLiveExtensionTuningProjection {
+  const attachments = Array.isArray(options.attachments) ? options.attachments : [];
+  const connections = Array.isArray(options.connections) ? options.connections : [];
+  const labels = options.extensionLabels && typeof options.extensionLabels === 'object'
+    ? options.extensionLabels
+    : {};
+  const labelOf = (extensionId: string): string => (
+    typeof labels[extensionId] === 'string' && labels[extensionId] ? labels[extensionId] : extensionId
+  );
+  const activeIds = new Set<string>();
+  const selectionById = new Map<string, 'all' | readonly string[]>();
+  for (const attachment of attachments) {
+    if (!attachment || typeof attachment.extensionId !== 'string' || attachment.status !== 'active') continue;
+    activeIds.add(attachment.extensionId);
+    selectionById.set(
+      attachment.extensionId,
+      attachment.toolSelection === 'all'
+        ? 'all'
+        : Object.freeze(Array.isArray(attachment.toolSelection)
+          ? attachment.toolSelection.filter((name): name is string => typeof name === 'string' && name.length > 0)
+          : [])
+    );
+  }
+  const universe = new Map<string, { extensionId: string; source: 'resolved' | 'catalog' }>();
+  const resolvedTools = options.resolvedTools && typeof options.resolvedTools === 'object' ? options.resolvedTools : null;
+  if (resolvedTools) {
+    for (const callName of Object.keys(resolvedTools)) {
+      const extensionId = resolvedTools[callName];
+      if (typeof extensionId !== 'string' || !activeIds.has(extensionId)) continue;
+      if (!universe.has(callName)) universe.set(callName, { extensionId, source: 'resolved' });
+    }
+  }
+  for (const connection of connections) {
+    if (!connection || typeof connection.extensionId !== 'string') continue;
+    if (connection.status !== 'connected' || (connection.conflicts?.length ?? 0) > 0) continue;
+    const selection = selectionById.get(connection.extensionId);
+    if (selection === undefined || !connection.catalog) continue;
+    for (const callName of Object.keys(connection.catalog)) {
+      if (selection !== 'all' && !selection.includes(callName)) continue;
+      if (!universe.has(callName)) universe.set(callName, { extensionId: connection.extensionId, source: 'catalog' });
+    }
+  }
+  const selector = normalizeTuningSelector(options.selector);
+  const callNames = Object.freeze([...universe.keys()]);
+  const selectedSet = selector === 'all' ? new Set(callNames) : new Set(selector);
+  const optionViews = callNames.map((callName) => {
+    const entry = universe.get(callName);
+    const extensionId = entry ? entry.extensionId : '';
+    return Object.freeze({
+      callName,
+      extensionId,
+      extensionLabel: labelOf(extensionId),
+      enabled: selectedSet.has(callName),
+      source: entry ? entry.source : 'catalog'
+    });
+  });
+  const selectedCount = optionViews.filter((option) => option.enabled).length;
+  const totalCount = optionViews.length;
+  const allSelected = totalCount > 0 && selectedCount === totalCount;
+  const unavailableAttachments: AgentLiveExtensionUnavailableView[] = [];
+  const connectionById = new Map<string, ExtensionConnectionProjection>();
+  for (const connection of connections) {
+    if (connection && typeof connection.extensionId === 'string' && !connectionById.has(connection.extensionId)) {
+      connectionById.set(connection.extensionId, connection);
+    }
+  }
+  for (const attachment of attachments) {
+    if (!attachment || typeof attachment.extensionId !== 'string') continue;
+    if (attachment.status !== 'active') {
+      unavailableAttachments.push(Object.freeze({
+        extensionId: attachment.extensionId,
+        label: labelOf(attachment.extensionId),
+        reason: 'unavailable',
+        message: 'The attachment is not active in this Realm.'
+      }));
+      continue;
+    }
+    const connection = connectionById.get(attachment.extensionId) ?? null;
+    if (connection && connection.status === 'connected' && connection.catalog) continue;
+    const reason: AgentLiveExtensionUnavailableView['reason'] = !connection
+      ? 'not-connected'
+      : connection.status === 'connecting' ? 'connecting'
+        : connection.status === 'conflict' ? 'conflict'
+          : connection.status === 'error' ? 'error' : 'not-connected';
+    const message = reason === 'connecting'
+      ? 'Connection in flight; the catalog appears once discovery completes.'
+      : reason === 'conflict'
+        ? 'Catalog conflict with an earlier extension; resolve it before its tools activate.'
+        : reason === 'error'
+          ? 'The last connection attempt failed; reconnect from Sandbox Settings → Extensions.'
+          : 'Not connected — its tools are unavailable until an operator connects it.';
+    unavailableAttachments.push(Object.freeze({
+      extensionId: attachment.extensionId,
+      label: labelOf(attachment.extensionId),
+      reason,
+      message
+    }));
+  }
+  const label = totalCount === 0
+    ? 'No extension tools available in this Realm.'
+    : allSelected ? 'All realm extension tools (ceiling)'
+      : selectedCount === 0 ? 'No extension tools' : `${selectedCount} of ${totalCount} tools`;
+  return Object.freeze({
+    selector,
+    options: Object.freeze(optionViews),
+    callNames,
+    totalCount,
+    selectedCount,
+    allSelected,
+    hasTools: totalCount > 0,
+    label,
+    ceilingHint: 'The Realm attachment selection is the ceiling — per-agent scopes can only narrow it further.',
+    resolvedCount: optionViews.filter((option) => option.source === 'resolved').length,
+    liveCount: optionViews.filter((option) => option.source === 'catalog').length,
+    unavailableAttachments: Object.freeze(unavailableAttachments)
+  });
+}
+
+/**
+ * Live realm-card indicator: how many of a Realm's attached extensions
+ * currently expose a conflict-free catalog, and how many are not connected.
+ */
+export interface RealmExtensionLiveIndicator {
+  /** Whether the indicator renders (the Realm attaches at least one extension). */
+  readonly visible: boolean;
+  /** Attachments with a live conflict-free catalog. */
+  readonly connectedCount: number;
+  /** Attachments whose live connection lost a call-name race. */
+  readonly conflictCount: number;
+  /** Active attachments without a live conflict-free catalog. */
+  readonly notConnectedCount: number;
+  /** Third-party trust label for the tooltip. */
+  readonly thirdPartyLabel: string;
+  /** Compact badge text (`2 live`, `1 live · 1 conflict`, `1 attached · not connected`). */
+  readonly label: string;
+  /** Tooltip naming the live and not-connected extensions. */
+  readonly title: string;
+}
+
+/**
+ * Builds the Realm-card live indicator from the Realm's attachments and the
+ * store's live connection projections. Descriptive only: it never connects,
+ * attaches, or re-resolves anything.
+ *
+ * @param options - Realm attachments, live connections, and optional display labels.
+ * @returns The live indicator; hidden when the Realm attaches nothing.
+ */
+export function describeRealmExtensionLiveIndicator(options: {
+  readonly attachments?: readonly RealmExtensionAttachment[] | null;
+  readonly connections?: readonly ExtensionConnectionProjection[] | null;
+  readonly labels?: Readonly<Record<string, string>> | null;
+}): RealmExtensionLiveIndicator {
+  const attachments = Array.isArray(options.attachments) ? options.attachments : [];
+  const connections = Array.isArray(options.connections) ? options.connections : [];
+  const labels = options.labels && typeof options.labels === 'object' ? options.labels : {};
+  const labelOf = (extensionId: string): string => (
+    typeof labels[extensionId] === 'string' && labels[extensionId] ? labels[extensionId] : extensionId
+  );
+  const active = attachments.filter((attachment) => attachment && attachment.status === 'active');
+  if (active.length === 0) {
+    return {
+      visible: false,
+      connectedCount: 0,
+      conflictCount: 0,
+      notConnectedCount: 0,
+      thirdPartyLabel: EXTENSION_THIRD_PARTY_LABEL,
+      label: '',
+      title: ''
+    };
+  }
+  const connectionById = new Map<string, ExtensionConnectionProjection>();
+  for (const connection of connections) {
+    if (connection && typeof connection.extensionId === 'string' && !connectionById.has(connection.extensionId)) {
+      connectionById.set(connection.extensionId, connection);
+    }
+  }
+  const live: string[] = [];
+  const conflicted: string[] = [];
+  const idle: string[] = [];
+  for (const attachment of active) {
+    const connection = connectionById.get(attachment.extensionId) ?? null;
+    if (connection && connection.status === 'connected' && connection.catalog) {
+      live.push(labelOf(attachment.extensionId));
+    } else if (connection && connection.status === 'conflict') {
+      conflicted.push(labelOf(attachment.extensionId));
+    } else {
+      idle.push(labelOf(attachment.extensionId));
+    }
+  }
+  const parts: string[] = [];
+  if (live.length > 0) parts.push(`${live.length} live`);
+  if (conflicted.length > 0) parts.push(`${conflicted.length} conflict`);
+  if (idle.length > 0) parts.push(`${idle.length} not connected`);
+  const details: string[] = [`${EXTENSION_THIRD_PARTY_LABEL}.`];
+  if (live.length > 0) details.push(`Live: ${live.join(', ')}.`);
+  if (conflicted.length > 0) details.push(`Conflict: ${conflicted.join(', ')}.`);
+  if (idle.length > 0) details.push(`Not connected: ${idle.join(', ')}.`);
+  details.push('Open Realm settings to manage connections and attachments.');
+  return Object.freeze({
+    visible: true,
+    connectedCount: live.length,
+    conflictCount: conflicted.length,
+    notConnectedCount: idle.length,
+    thirdPartyLabel: EXTENSION_THIRD_PARTY_LABEL,
+    label: parts.join(' \u00b7 '),
+    title: details.join(' ')
+  });
 }

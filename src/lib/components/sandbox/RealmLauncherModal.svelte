@@ -319,8 +319,17 @@
     return sandboxStore.listExtensions();
   });
 
-  /** Requested extensions with their pre-launch resolution state (no Realm attachments exist yet). */
-  let extensionRequests = $derived(buildRealmExtensionRequestViews(selectedTemplate, installedExtensions));
+  /**
+   * Requested extensions with their pre-launch resolution state (no Realm
+   * attachments exist yet) plus the live connection disclosure (status,
+   * third-party label, catalog fidelity, requested-but-not-connected copy).
+   */
+  let extensionRequests = $derived(buildRealmExtensionRequestViews(
+    selectedTemplate,
+    installedExtensions,
+    [],
+    sandboxStore.extensionConnections
+  ));
 
   /** Per-agent `<providerId>::<serverToolName>` references with their resolution state. */
   let extensionReferences = $derived(buildRealmExtensionReferenceViews(selectedTemplate, installedExtensions));
@@ -2539,11 +2548,23 @@
                           <span class="extension-request-name font-mono">{request.id}</span>
                           <span class="kind-chip font-mono">{request.kind}</span>
                           <span class="status-chip state-{stateView.state} font-mono">{stateView.label}</span>
+                          {#if request.connected}
+                            <span class="live-chip live-connected font-mono">connected · {request.liveToolCount} tools</span>
+                          {:else if request.installed && request.connectionStatus !== 'disconnected'}
+                            <span class="live-chip live-{request.connectionStatus} font-mono">{request.connectionStatus}</span>
+                          {/if}
+                          {#if request.fidelityBadge}
+                            <span class="fidelity-chip font-mono">{request.fidelityBadge}</span>
+                          {/if}
                           {#if request.installed && request.installSource === 'template-assist'}
                             <span class="source-chip font-mono">template-assist</span>
                           {/if}
+                          <span class="third-party-chip font-mono">{request.thirdPartyLabel}</span>
                         </div>
                         <span class="extension-request-detail">{stateView.description}</span>
+                        {#if request.disclosure}
+                          <span class="extension-request-disclosure">{request.disclosure}</span>
+                        {/if}
                         {#if request.declaredTransportSummary}
                           <span class="extension-request-transport font-mono">{request.declaredTransportSummary}</span>
                         {/if}
@@ -2665,6 +2686,7 @@
                       <span class="missing-name">{view.displayName || view.extensionId}</span>
                       <span class="kind-chip font-mono">{view.kind}</span>
                       <span class="status-chip state-{stateView.state} font-mono">{stateView.label}</span>
+                      <span class="third-party-chip font-mono">{view.thirdPartyLabel}</span>
                     </div>
                     <span class="missing-note">{stateView.description}</span>
                     {#if view.transportHintSummary}
@@ -4520,6 +4542,48 @@
     color: #f59e0b;
     border-color: rgba(245, 158, 11, 0.4);
     background: rgba(245, 158, 11, 0.1);
+  }
+
+  .live-chip,
+  .fidelity-chip,
+  .third-party-chip {
+    font-size: 0.64rem;
+    border-radius: 4px;
+    padding: 0.08rem 0.36rem;
+    border: 1px solid var(--border-color);
+    color: var(--text-muted);
+    background: var(--bg-base);
+  }
+
+  .live-chip.live-connected {
+    color: #34d399;
+    border-color: rgba(52, 211, 153, 0.4);
+    background: rgba(52, 211, 153, 0.1);
+  }
+
+  .live-chip.live-connecting {
+    color: #fbbf24;
+    border-color: rgba(251, 191, 36, 0.4);
+    background: rgba(251, 191, 36, 0.1);
+  }
+
+  .live-chip.live-conflict,
+  .live-chip.live-error {
+    color: #f87171;
+    border-color: var(--accent-danger-border);
+    background: var(--accent-danger-subtle);
+  }
+
+  .fidelity-chip {
+    color: #fbbf24;
+    border-color: rgba(251, 191, 36, 0.4);
+    background: rgba(251, 191, 36, 0.1);
+  }
+
+  .extension-request-disclosure {
+    font-size: 0.72rem;
+    line-height: 1.4;
+    color: #f59e0b;
   }
 
   .extension-references summary {

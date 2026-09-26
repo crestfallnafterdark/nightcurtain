@@ -6,7 +6,8 @@
  * escalates to degraded fidelity when more than half of the tools needed a
  * semantic projection or any tool was refused. Purely additive normalization
  * (missing `additionalProperties`/descriptions, recorded as
- * `additional-properties-defaulted`/`description-defaulted`) counts as a
+ * `additional-properties-defaulted`/`description-defaulted`, and benign
+ * metadata annotation drops recorded as `metadata-dropped`) counts as a
  * recorded warning but never as semantic projection, matching the ecosystem
  * survey's "additive normalization, not loss" classification.
  */
@@ -38,7 +39,8 @@ export interface ExtensionSchemaFidelitySummary {
  */
 const ADDITIVE_NORMALIZATION_WARNING_CODES: ReadonlySet<string> = new Set([
   EXTENSION_SCHEMA_WARNING_CODES.ADDITIONAL_PROPERTIES_DEFAULTED,
-  EXTENSION_SCHEMA_WARNING_CODES.DESCRIPTION_DEFAULTED
+  EXTENSION_SCHEMA_WARNING_CODES.DESCRIPTION_DEFAULTED,
+  EXTENSION_SCHEMA_WARNING_CODES.METADATA_DROPPED
 ]);
 
 /**

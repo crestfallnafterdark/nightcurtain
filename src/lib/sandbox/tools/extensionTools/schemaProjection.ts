@@ -29,6 +29,9 @@
  * - `union-widened` — a multi-branch union was widened to a looser shape.
  * - `allof-merged` — `allOf` branches were shallow-merged (later wins).
  * - `keyword-dropped` — an unsupported keyword/value was omitted.
+ * - `metadata-dropped` — a benign JSON-Schema annotation (a title or other
+ *   non-validation metadata keyword) was omitted; recorded additively because
+ *   the survey classifies these as normalization, not loss.
  * - `additional-properties-defaulted` — a missing `additionalProperties` was
  *   defaulted to `false` because properties were declared.
  * - `description-defaulted` — a named property's missing/blank description was
@@ -59,6 +62,8 @@ export const EXTENSION_SCHEMA_WARNING_CODES: Readonly<{
   readonly ALLOF_MERGED: 'allof-merged';
   /** An unsupported keyword, keyword value, or malformed entry was dropped. */
   readonly KEYWORD_DROPPED: 'keyword-dropped';
+  /** A benign JSON-Schema annotation was dropped (normalization, never loss). */
+  readonly METADATA_DROPPED: 'metadata-dropped';
   /** A missing `additionalProperties` was defaulted to `false` because properties were present. */
   readonly ADDITIONAL_PROPERTIES_DEFAULTED: 'additional-properties-defaulted';
   /** A missing or blank description was replaced with the synthesized default. */
@@ -72,6 +77,7 @@ export const EXTENSION_SCHEMA_WARNING_CODES: Readonly<{
   UNION_WIDENED: 'union-widened',
   ALLOF_MERGED: 'allof-merged',
   KEYWORD_DROPPED: 'keyword-dropped',
+  METADATA_DROPPED: 'metadata-dropped',
   ADDITIONAL_PROPERTIES_DEFAULTED: 'additional-properties-defaulted',
   DESCRIPTION_DEFAULTED: 'description-defaulted',
   FREEFORM_OBJECT: 'freeform-object'
@@ -302,6 +308,23 @@ const SUPPORTED_NODE_KEYS: ReadonlySet<string> = new Set([
 /** Keys consumed by the dereference pass and never copied to output. */
 const REFERENCE_KEYS: ReadonlySet<string> = new Set(['$ref', '$defs', 'definitions']);
 
+/**
+ * Benign JSON-Schema annotations the model-facing dialect does not carry.
+ * Dropping one of these is additive normalization, not semantic loss (the
+ * ecosystem survey's "additive normalization, not loss" bucket): none of them
+ * constrains an argument value, so they are recorded as `metadata-dropped` and
+ * never push a catalog toward the degraded fidelity state.
+ */
+const METADATA_ANNOTATION_KEYS: ReadonlySet<string> = new Set([
+  'title',
+  '$schema',
+  '$id',
+  '$comment',
+  'default',
+  'examples',
+  'deprecated'
+]);
+
 /** Mutable projection node used internally; deep-frozen at the boundary. */
 interface MutableSchemaNode {
   type?: string | string[];
@@ -450,6 +473,27 @@ function addFreeformWarning(ctx: ProjectionContext, path: string): void {
   if (ctx.freeformWarned) return;
   ctx.freeformWarned = true;
   addWarning(ctx, EXTENSION_SCHEMA_WARNING_CODES.FREEFORM_OBJECT, path);
+}
+
+/**
+ * Records one dropped keyword with its classification: benign annotations
+ * (`title`, `$schema`, `$id`, `$comment`, `default`, `examples`, `deprecated`)
+ * are `metadata-dropped` — dropped exactly as before, but recorded as additive
+ * normalization rather than semantic projection — while every other drop stays
+ * `keyword-dropped`.
+ *
+ * @param ctx - Projection context.
+ * @param path - `#`-rooted JSON Pointer of the dropped keyword's node.
+ * @param key - Dropped keyword name.
+ */
+function addDroppedKeywordWarning(ctx: ProjectionContext, path: string, key: string): void {
+  addWarning(
+    ctx,
+    METADATA_ANNOTATION_KEYS.has(key)
+      ? EXTENSION_SCHEMA_WARNING_CODES.METADATA_DROPPED
+      : EXTENSION_SCHEMA_WARNING_CODES.KEYWORD_DROPPED,
+    joinSchemaPath(path, key)
+  );
 }
 
 /**
@@ -776,7 +820,7 @@ function projectPlainNode(
 
   for (const key of Object.keys(raw)) {
     if (SUPPORTED_NODE_KEYS.has(key) || REFERENCE_KEYS.has(key)) continue;
-    addWarning(ctx, EXTENSION_SCHEMA_WARNING_CODES.KEYWORD_DROPPED, joinSchemaPath(path, key));
+    addDroppedKeywordWarning(ctx, path, key);
   }
 
   if (isRoot && node.properties === undefined) {
@@ -832,7 +876,7 @@ function applyRawSiblingsToNode(
       node.type = merged.length === 1 ? merged[0] : merged;
       continue;
     }
-    addWarning(ctx, EXTENSION_SCHEMA_WARNING_CODES.KEYWORD_DROPPED, joinSchemaPath(path, key));
+    addDroppedKeywordWarning(ctx, path, key);
   }
 }
 
@@ -1198,7 +1242,10 @@ function freezeWarnings(warnings: ExtensionSchemaWarning[]): readonly ExtensionS
  *    property merging; an untyped branch widens to an unconstrained value.
  * 4. `allOf` shallow-merges with later keys winning (conflicting `type`
  *    tokens union).
- * 5. Every other keyword is dropped with a warning, except the supported
+ * 5. Every other keyword is dropped with a warning — benign annotations
+ *    (`title`/`$schema`/`$id`/`$comment`/`default`/`examples`/`deprecated`)
+ *    as additive `metadata-dropped`, everything else as semantic
+ *    `keyword-dropped` — except the supported
  *    `type`/`description`/`enum`/`items`/`properties`/`required`/
  *    `additionalProperties`/`format` set and the consumed `$defs`/
  *    `definitions`/`$ref` keys.

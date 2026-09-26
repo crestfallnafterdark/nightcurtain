@@ -9,8 +9,10 @@
     buildMetaAuthorityToggleState
   } from './realmReviewHelpers.ts';
   import {
-    applyAgentExtensionToolToggle,
-    buildAgentExtensionTuningProjection
+    applyAgentExtensionSelectorToggle,
+    buildAgentLiveExtensionTuningProjection,
+    buildExtensionLabelMap,
+    EXTENSION_THIRD_PARTY_LABEL
   } from './extensionUiHelpers.ts';
   import { resolveAgentRealmId } from './realmGroups.ts';
   import {
@@ -396,37 +398,32 @@
   });
 
   let extensionTuning = $derived.by(() => {
-    const labels = {};
-    for (const record of sandboxStore.listExtensions()) {
-      if (!record || typeof record.id !== 'string') continue;
-      labels[record.id] = typeof record.displayName === 'string' && record.displayName
-        ? record.displayName
-        : record.id;
-    }
-    return buildAgentExtensionTuningProjection({
+    void sandboxStore.extensionConnections;
+    return buildAgentLiveExtensionTuningProjection({
       resolvedTools: agentRealmRecord?.instance?.resolvedTools ?? null,
       attachments: agentRealmRecord?.extensions ?? null,
+      connections: sandboxStore.extensionConnections,
       selector: agent?.config?.extensionTools,
-      extensionLabels: labels
+      extensionLabels: buildExtensionLabelMap(sandboxStore.listExtensions())
     });
   });
 
   /**
    * Applies one extension tool toggle for the selected agent: the helper
-   * computes the next selector (every tool enabled collapses to `'all'`), and
-   * the store persists it and reauthorizes at the next safe state.
+   * computes the next selector over the Realm's live ceiling universe (every
+   * tool enabled collapses to `'all'`), and the store persists it and
+   * reauthorizes at the next safe state.
    *
    * @param {string} callName - Sanitized extension tool call name.
    * @param {boolean} enabled - Requested state.
    */
   function handleExtensionToolToggle(callName, enabled) {
     if (!agent || !agentKey) return;
-    const next = applyAgentExtensionToolToggle(
+    const next = applyAgentExtensionSelectorToggle(
       extensionTuning.selector,
       callName,
       enabled,
-      agentRealmRecord?.instance?.resolvedTools ?? null,
-      agentRealmRecord?.extensions ?? null
+      extensionTuning.callNames
     );
     applyAgentUpdate('extension-tools', { extensionTools: next }, 'Extension scope saved');
   }
@@ -927,10 +924,12 @@
               </div>
 
               <span class="policy-desc">
-                Third-party tools resolved from this Realm's attached extensions. Sudo and the wildcard
-                never imply them — each call is authorized only by exact membership. Changes apply at the
-                agent's next safe state (never mid-turn).
+                {EXTENSION_THIRD_PARTY_LABEL}. Tools come from this Realm's attached extensions: persisted launch
+                resolution plus each attachment's live, conflict-free catalog capped by the realm-level selection.
+                Sudo and the wildcard never imply them — each call is authorized only by exact membership. Changes
+                apply at the agent's next safe state (never mid-turn).
               </span>
+              <span class="field-hint">{extensionTuning.ceilingHint}</span>
 
               {#if extensionTuning.hasTools}
                 <div class="tool-presets-list">
@@ -946,6 +945,7 @@
                         <div class="policy-title-row">
                           <span class="policy-title font-mono">{option.callName}</span>
                           <span class="authority-id">{option.extensionLabel}</span>
+                          <span class="source-chip font-mono">{option.source === 'catalog' ? 'live catalog' : 'launch-resolved'}</span>
                         </div>
                       </div>
                     </label>
@@ -955,17 +955,32 @@
                   <button type="button" class="preset-item-card" onclick={handleExtensionScopeReset}>
                     <div class="preset-item-info">
                       <div class="preset-name-row">
-                        <span class="preset-item-name">Grant all resolved extension tools</span>
+                        <span class="preset-item-name">Grant all realm extension tools (ceiling)</span>
                       </div>
-                      <span class="preset-item-desc">Reset the per-agent scope to the default (all tools of the Realm's attached extensions).</span>
+                      <span class="preset-item-desc">Reset the per-agent scope to the default — every tool the Realm's attachments expose, never past the realm-level ceiling.</span>
                     </div>
                   </button>
                 </div>
               {:else}
                 <span class="field-hint">
-                  No extension tools are resolved for this Realm yet. Install and attach extensions from Sandbox
-                  Settings, then launch or rehydrate a template that references them.
+                  No extension tools are available in this Realm yet. Install and attach extensions from Sandbox
+                  Settings, then connect them to light up their catalogs.
                 </span>
+              {/if}
+
+              {#if extensionTuning.unavailableAttachments.length > 0}
+                <div class="unavailable-attachments">
+                  <span class="unavailable-title">Attachments without a live catalog ({extensionTuning.unavailableAttachments.length})</span>
+                  <ul class="unavailable-list">
+                    {#each extensionTuning.unavailableAttachments as entry (entry.extensionId)}
+                      <li class="unavailable-row">
+                        <span class="unavailable-name">{entry.label}</span>
+                        <span class="unavailable-status font-mono">{entry.reason}</span>
+                        <span class="unavailable-message">{entry.message}</span>
+                      </li>
+                    {/each}
+                  </ul>
+                </div>
               {/if}
             </section>
           </div>
@@ -1515,6 +1530,58 @@
     font-size: 0.75rem;
     color: var(--text-muted, #94a3b8);
     line-height: 1.4;
+  }
+
+  .source-chip {
+    font-size: 0.62rem;
+    padding: 0.06rem 0.32rem;
+    border-radius: 4px;
+    border: 1px solid var(--border-color, #334155);
+    color: var(--text-muted, #94a3b8);
+  }
+
+  .unavailable-attachments {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    border: 1px solid rgba(245, 158, 11, 0.35);
+    border-radius: 6px;
+    padding: 0.45rem 0.6rem;
+    background: rgba(245, 158, 11, 0.06);
+  }
+
+  .unavailable-title {
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: #f59e0b;
+  }
+
+  .unavailable-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+
+  .unavailable-row {
+    display: flex;
+    align-items: baseline;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+    font-size: 0.72rem;
+    color: var(--text-muted, #94a3b8);
+  }
+
+  .unavailable-name {
+    color: var(--text-secondary, #cbd5e1);
+    font-weight: 600;
+  }
+
+  .unavailable-status {
+    font-size: 0.64rem;
+    color: #f59e0b;
   }
 
   /* Tool Presets List */

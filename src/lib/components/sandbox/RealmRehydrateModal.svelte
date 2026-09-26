@@ -43,8 +43,10 @@
   import { realmPayloadLibrary } from './realmPayloadLibrary.ts';
   import { parseRealmPayloadFileText } from './realmReviewHelpers.ts';
   import {
+    buildExtensionCatalogFidelityView,
     buildMissingExtensionFlowViews,
-    describeRealmExtensionState
+    describeRealmExtensionState,
+    EXTENSION_THIRD_PARTY_LABEL
   } from './extensionUiHelpers.ts';
 
   let { realmId = null, onclose = () => {} } = $props();
@@ -91,6 +93,27 @@
       installs: sandboxStore.listExtensions(),
       attachments: sandboxStore.listRealmExtensions(realm.id)
     }).filter((view) => view.state !== 'active');
+  });
+
+  /**
+   * Recorded resolved tools enriched with the live catalog state of the
+   * providing extension (tool count + schema-fidelity badge), so the review
+   * discloses projected/degraded fidelity wherever the Realm approves tools.
+   * Display-only: reading the frozen connection projections never connects.
+   */
+  let resolvedToolViews = $derived.by(() => {
+    const connections = sandboxStore.extensionConnections;
+    return provenanceDetail.resolvedTools.map((tool) => {
+      const connection = connections.find((entry) => entry.extensionId === tool.extensionId) ?? null;
+      const live = Boolean(connection && connection.status === 'connected' && connection.catalog);
+      const fidelity = live ? buildExtensionCatalogFidelityView(connection) : null;
+      return {
+        ...tool,
+        live,
+        liveToolCount: live && connection && connection.catalog ? Object.keys(connection.catalog).length : 0,
+        fidelityBadge: fidelity ? fidelity.badge : ''
+      };
+    });
   });
 
   // ---- Mode -----------------------------------------------------------------
@@ -453,11 +476,18 @@
           {#if provenanceDetail.resolvedTools.length > 0}
             <details class="provenance-details">
               <summary>Resolved extension tools ({provenanceDetail.resolvedTools.length})</summary>
+              <p class="provenance-note">{EXTENSION_THIRD_PARTY_LABEL} — names, descriptions, and schemas come from the extension server.</p>
               <ul class="detail-list">
-                {#each provenanceDetail.resolvedTools as tool (tool.callName)}
+                {#each resolvedToolViews as tool (tool.callName)}
                   <li class="detail-row">
                     <span class="detail-label font-mono">{tool.callName}</span>
                     <span class="detail-value font-mono">{tool.extensionId}</span>
+                    {#if tool.live}
+                      <span class="live-mini font-mono">live · {tool.liveToolCount} tools</span>
+                    {/if}
+                    {#if tool.fidelityBadge}
+                      <span class="fidelity-mini font-mono">{tool.fidelityBadge}</span>
+                    {/if}
                   </li>
                 {/each}
               </ul>
@@ -841,6 +871,16 @@
 
   .detail-value {
     word-break: break-all;
+  }
+
+  .live-mini {
+    font-size: 0.64rem;
+    color: #34d399;
+  }
+
+  .fidelity-mini {
+    font-size: 0.64rem;
+    color: #fbbf24;
   }
 
   .missing-extensions {

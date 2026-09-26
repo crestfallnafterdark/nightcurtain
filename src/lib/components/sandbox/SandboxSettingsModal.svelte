@@ -4,6 +4,7 @@
   import { getDefaultModelId, getProviderCapabilities } from '../../sandbox/modelConfig/index.ts';
   import { discoverModels, discoverRoutes } from './modelDiscovery.ts';
   import ExtensionInstallDialog from './ExtensionInstallDialog.svelte';
+  import ExtensionConnectionPanel from './ExtensionConnectionPanel.svelte';
   import { describeExtensionRemovalError, describeExtensionTransportHint } from './extensionUiHelpers.ts';
 
   let { onclose = () => {} } = $props();
@@ -458,6 +459,16 @@
   let installedExtensions = $derived.by(() => {
     void extensionsRevision;
     return store.listExtensions();
+  });
+
+  /** Display labels for conflict/disclosure rows (id → name). */
+  let extensionLabels = $derived.by(() => {
+    void extensionsRevision;
+    const labels = {};
+    for (const record of installedExtensions) {
+      labels[record.id] = record.displayName || record.id;
+    }
+    return labels;
   });
 
   /**
@@ -1088,8 +1099,9 @@
 
         <p class="extensions-note">
           Global install records only: installing stores the extension identity and non-secret metadata (transport
-          hint, optional approved URL, optional vault credential id). Nothing connects, and a Realm accepts an
-          extension's tools only after it is attached there (Realm Manager → Extensions).
+          hint, optional approved URL, optional vault credential id). Connections are operator-initiated only —
+          nothing connects at load, hydration, or launch — and a Realm accepts an extension's tools only after it is
+          attached there (Realm Manager → Extensions).
         </p>
 
         {#if extensionStatus.msg}
@@ -1110,6 +1122,7 @@
         {:else}
           <div class="extension-list">
             {#each installedExtensions as record (record.id)}
+              {@const connection = store.extensionConnections.find((entry) => entry.extensionId === record.id) ?? null}
               <div class="extension-card">
                 <div class="extension-info">
                   <div class="extension-title-row">
@@ -1133,6 +1146,12 @@
                     {/if}
                     <span>installed {formatExtensionTimestamp(record.createdAt)}</span>
                   </div>
+                  <ExtensionConnectionPanel
+                    {record}
+                    {connection}
+                    labels={extensionLabels}
+                    onstatus={(msg) => (extensionStatus = { ok: true, msg })}
+                  />
                 </div>
                 <div class="extension-actions">
                   <button

@@ -6,7 +6,8 @@
  *  1. Projection policy matrix: clean schemas; additive defaults; free-form
  *     objects; missing/null roots; Notion-style `$defs`+`oneOf`+string
  *     fallback; Sentry-style nullable `anyOf`; reference cycles; union
- *     widening; `allOf` merging; unknown-keyword drops; refusals (non-object
+ *     widening; `allOf` merging; unknown-keyword drops; benign metadata
+ *     annotation drops (`metadata-dropped`, additive); refusals (non-object
  *     and malformed roots, unresolvable references, depth/reference budgets).
  *  2. Prototype-key hygiene and deterministic, deeply frozen outputs.
  *  3. Descriptor synthesis: frozen descriptors, description pass-through and
@@ -255,7 +256,7 @@ test('6. Sentry-style nullable anyOf and nullable type arrays unwrap', () => {
   assert.strictEqual(anyOfProjection.status, 'projected');
   const pairs = warningPairs(anyOfProjection);
   assert.ok(pairs.includes(`${EXTENSION_SCHEMA_WARNING_CODES.NULLABLE_UNWRAPPED}@#/properties/regionUrl`));
-  assert.ok(pairs.includes(`${EXTENSION_SCHEMA_WARNING_CODES.KEYWORD_DROPPED}@#/properties/regionUrl/default`));
+  assert.ok(pairs.includes(`${EXTENSION_SCHEMA_WARNING_CODES.METADATA_DROPPED}@#/properties/regionUrl/default`));
   assert.strictEqual(anyOfProjection.schema.properties.regionUrl.type, 'string');
   assert.strictEqual(anyOfProjection.schema.properties.regionUrl.description, 'Region URL override');
 
@@ -367,11 +368,11 @@ test('10. unsupported keywords drop with a pointer path', () => {
   assert.strictEqual(projection.status, 'projected');
   const pairs = new Set(warningPairs(projection));
   for (const expected of [
-    'keyword-dropped@#/title',
-    'keyword-dropped@#/$schema',
+    'metadata-dropped@#/title',
+    'metadata-dropped@#/$schema',
     'keyword-dropped@#/properties/query/pattern',
     'keyword-dropped@#/properties/query/minLength',
-    'keyword-dropped@#/properties/query/default',
+    'metadata-dropped@#/properties/query/default',
     'keyword-dropped@#/properties/query/format',
     'keyword-dropped@#/properties/filter/patternProperties',
     'keyword-dropped@#/properties/filter/if',
@@ -777,4 +778,126 @@ test('26. the fail-closed missing-port receipt is frozen', async () => {
   const receipt = await descriptor.handler({}, {});
   assert.strictEqual(receipt.success, false);
   assert.ok(Object.isFrozen(receipt), 'fail-closed receipts must be as frozen as mapped receipts');
+});
+
+// ============================================================================
+// 27-28. O2 fidelity precision: benign metadata annotations (P3.4)
+// ============================================================================
+
+test('27. benign metadata annotations drop as `metadata-dropped`, constraints stay `keyword-dropped`', () => {
+  // The full annotation set, at the root, on a named property, and nested in
+  // an array item: every annotation classifies as benign metadata.
+  const projection = projectExtensionInputSchema({
+    type: 'object',
+    title: 'Root title',
+    $schema: 'http://json-schema.org/draft-07/schema#',
+    $id: 'https://example.com/schema.json',
+    $comment: 'generated',
+    default: { q: 'seed' },
+    examples: [{ q: 'x' }],
+    deprecated: true,
+    properties: {
+      q: {
+        type: 'string',
+        title: 'Query title',
+        $comment: 'per-property comment',
+        default: 'x',
+        examples: ['a', 'b'],
+        deprecated: false,
+        description: 'q'
+      },
+      tags: {
+        type: 'array',
+        items: { type: 'string', title: 'Tag title', default: 't', description: 'tag' },
+        description: 'tags'
+      }
+    },
+    additionalProperties: false
+  });
+  assert.strictEqual(projection.status, 'projected');
+  const pairs = new Set(warningPairs(projection));
+  for (const expected of [
+    'metadata-dropped@#/title',
+    'metadata-dropped@#/$schema',
+    'metadata-dropped@#/$id',
+    'metadata-dropped@#/$comment',
+    'metadata-dropped@#/default',
+    'metadata-dropped@#/examples',
+    'metadata-dropped@#/deprecated',
+    'metadata-dropped@#/properties/q/title',
+    'metadata-dropped@#/properties/q/$comment',
+    'metadata-dropped@#/properties/q/default',
+    'metadata-dropped@#/properties/q/examples',
+    'metadata-dropped@#/properties/q/deprecated',
+    'metadata-dropped@#/properties/tags/items/title',
+    'metadata-dropped@#/properties/tags/items/default'
+  ]) {
+    assert.ok(pairs.has(expected), `expected warning '${expected}'`);
+  }
+  assert.strictEqual(
+    [...pairs].some((pair) => pair.startsWith(`${EXTENSION_SCHEMA_WARNING_CODES.KEYWORD_DROPPED}@`)),
+    false,
+    'the annotation-only schema records no semantic drop'
+  );
+  assert.strictEqual(EXTENSION_SCHEMA_WARNING_CODES.METADATA_DROPPED, 'metadata-dropped');
+
+  // Real constraints and unknown keywords keep the semantic classification.
+  const constrained = projectExtensionInputSchema({
+    type: 'object',
+    properties: {
+      q: { type: 'string', pattern: '^x', minLength: 1, format: 'fancy', default: 'x', description: 'q' }
+    },
+    additionalProperties: false
+  });
+  const constrainedPairs = new Set(warningPairs(constrained));
+  for (const expected of [
+    'keyword-dropped@#/properties/q/pattern',
+    'keyword-dropped@#/properties/q/minLength',
+    'keyword-dropped@#/properties/q/format',
+    'metadata-dropped@#/properties/q/default'
+  ]) {
+    assert.ok(constrainedPairs.has(expected), `expected warning '${expected}'`);
+  }
+});
+
+test('28. metadata-only drops never degrade fidelity; semantic drops and refusals keep the thresholds', () => {
+  const metadataOnly = () => projectExtensionInputSchema({
+    type: 'object',
+    title: 'T',
+    $schema: 'http://json-schema.org/draft-07/schema#',
+    properties: { q: { type: 'string', title: 'Q', default: 'x', description: 'q' } },
+    additionalProperties: false
+  });
+  const additiveOnly = () => projectExtensionInputSchema({
+    type: 'object',
+    properties: { q: { type: 'string' } }
+  });
+  const semantic = () => projectExtensionInputSchema({
+    type: 'object',
+    properties: { q: { type: 'string', pattern: '^x', description: 'q' } },
+    additionalProperties: false
+  });
+
+  // A catalog whose ONLY drops are benign metadata stays `projected` — even
+  // when every tool carries them (>half would have degraded as semantic).
+  const metadataCatalog = summarizeExtensionSchemaFidelity([metadataOnly(), metadataOnly(), metadataOnly()]);
+  assert.deepStrictEqual(metadataCatalog, { state: 'projected', total: 3, warned: 3, refused: 0 });
+
+  const mixedAdditive = summarizeExtensionSchemaFidelity([metadataOnly(), additiveOnly()]);
+  assert.strictEqual(mixedAdditive.state, 'projected');
+
+  // A semantic drop still counts as semantic: >50% degrades, an exact half does not.
+  assert.strictEqual(
+    summarizeExtensionSchemaFidelity([semantic(), semantic(), additiveOnly()]).state,
+    'degraded'
+  );
+  assert.strictEqual(
+    summarizeExtensionSchemaFidelity([semantic(), semantic(), additiveOnly(), metadataOnly()]).state,
+    'projected',
+    'an exact 50% semantic share stays projected'
+  );
+
+  // Refusal behavior is unchanged.
+  const refused = projectExtensionInputSchema({ type: 'string' });
+  assert.strictEqual(summarizeExtensionSchemaFidelity([metadataOnly(), refused]).state, 'degraded');
 });

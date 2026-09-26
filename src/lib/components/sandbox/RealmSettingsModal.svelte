@@ -26,9 +26,13 @@
   import { describeRealmDeletion, safeRealmColor } from './realmGroups.ts';
   import ExtensionInstallDialog from './ExtensionInstallDialog.svelte';
   import {
+    buildExtensionLabelMap,
     buildMissingExtensionFlowViews,
+    buildRealmExtensionAttachmentViews,
     describeExtensionAttachError,
-    describeRealmExtensionState
+    describeExtensionConnectionError,
+    describeRealmExtensionState,
+    EXTENSION_THIRD_PARTY_LABEL
   } from './extensionUiHelpers.ts';
 
   let { onclose = () => {}, realmId = null, onlaunchtemplate = () => {}, onrehydrate = () => {} } = $props();
@@ -94,6 +98,7 @@
   let attachExtensionId = $state('');
   let attachSelectionMode = $state('all');
   let attachSelectionText = $state('');
+  let attachCheckedNames = $state(/** @type {string[]} */([]));
   let installAssist = $state(/** @type {import('./extensionUiHelpers.ts').MissingExtensionFlowView | null} */(null));
 
   let installedExtensions = $derived.by(() => {
@@ -105,6 +110,31 @@
     void extensionsRevision;
     const realm = selectedRealm;
     return realm ? sandboxStore.listRealmExtensions(realm.id) : [];
+  });
+
+  /** Display labels for attachment/conflict rows (id → name). */
+  let extensionLabels = $derived.by(() => {
+    void extensionsRevision;
+    return buildExtensionLabelMap(installedExtensions);
+  });
+
+  /** Live attachment views (state, ceiling, conflicts, resolution actions). */
+  let attachmentViews = $derived.by(() => {
+    void extensionsRevision;
+    return buildRealmExtensionAttachmentViews({
+      attachments: realmAttachments,
+      connections: sandboxStore.extensionConnections,
+      installs: installedExtensions,
+      labels: extensionLabels
+    });
+  });
+
+  /** Live conflict-free catalog names of the extension picked in the attach editor. */
+  let attachCatalogNames = $derived.by(() => {
+    if (!attachExtensionId) return [];
+    const connection = sandboxStore.extensionConnections.find((entry) => entry.extensionId === attachExtensionId) ?? null;
+    if (!connection || connection.status !== 'connected' || !connection.catalog) return [];
+    return Object.keys(connection.catalog);
   });
 
   let attachableExtensions = $derived(
@@ -142,18 +172,6 @@
   }
 
   /**
-   * Renders one attachment's realm-level tool selection.
-   *
-   * @param {{ toolSelection: 'all' | readonly string[] }} attachment - Realm attachment.
-   * @returns {string} Display summary.
-   */
-  function describeToolSelection(attachment) {
-    if (!attachment || attachment.toolSelection === 'all') return 'all tools';
-    const names = attachment.toolSelection;
-    return `${names.length} call name${names.length === 1 ? '' : 's'}: ${names.join(', ')}`;
-  }
-
-  /**
    * Attaches one globally installed extension to the selected Realm with the
    * operator-chosen tool selection. Nothing connects.
    *
@@ -176,23 +194,89 @@
     }
   }
 
-  /** Attaches the extension picked in the attach editor with its selection. */
+  /** Clears the inline extension status banner. */
+  function clearExtensionMessages() {
+    extensionStatus = { ok: true, msg: '' };
+  }
+
+  /** Reseeds the ceiling editor when the attach selection changes. */
+  function handleAttachSelectionChange() {
+    clearExtensionMessages();
+    attachCheckedNames = [...attachCatalogNames];
+    attachSelectionMode = 'all';
+    attachSelectionText = '';
+  }
+
+  /**
+   * Attaches the extension picked in the attach editor with its realm-level
+   * ceiling: the live catalog names the operator checked (all checked is the
+   * `'all'` selection), or the typed sanitized call names when no live
+   * catalog exists yet.
+   */
   function handleAttachExtension() {
     if (!attachExtensionId) {
       extensionStatus = { ok: false, msg: 'Choose an installed extension to attach.' };
       return;
     }
-    const toolSelection = attachSelectionMode === 'custom'
-      ? attachSelectionText.split(',').map((entry) => entry.trim()).filter((entry) => entry.length > 0)
-      : 'all';
-    if (toolSelection !== 'all' && toolSelection.length === 0) {
-      extensionStatus = { ok: false, msg: 'List at least one sanitized call name, or use the "all tools" selection.' };
-      return;
+    let toolSelection;
+    if (attachCatalogNames.length > 0) {
+      if (attachCheckedNames.length === 0) {
+        extensionStatus = { ok: false, msg: 'Select at least one live catalog tool, or keep every tool selected.' };
+        return;
+      }
+      toolSelection = attachCheckedNames.length < attachCatalogNames.length
+        ? attachCatalogNames.filter((name) => attachCheckedNames.includes(name))
+        : 'all';
+    } else if (attachSelectionMode === 'custom') {
+      toolSelection = attachSelectionText.split(',').map((entry) => entry.trim()).filter((entry) => entry.length > 0);
+      if (toolSelection.length === 0) {
+        extensionStatus = { ok: false, msg: 'List at least one sanitized call name, or use the "all tools" selection.' };
+        return;
+      }
+    } else {
+      toolSelection = 'all';
     }
     attachToSelectedRealm(attachExtensionId, toolSelection);
     attachExtensionId = '';
     attachSelectionMode = 'all';
     attachSelectionText = '';
+    attachCheckedNames = [];
+  }
+
+  /**
+   * Disconnects one attached extension's live session (the attachment stays).
+   * This is the operator resolution action for a catalog conflict.
+   *
+   * @param {string} extensionId - Extension id.
+   */
+  async function handleDisconnectExtension(extensionId) {
+    extensionStatus = { ok: true, msg: '' };
+    try {
+      await sandboxStore.disconnectExtension(extensionId);
+      extensionsRevision += 1;
+      extensionStatus = { ok: true, msg: `Disconnected "${extensionLabel(extensionId)}". The attachment stays; its tools are unavailable until reconnected.` };
+    } catch (err) {
+      const failure = describeExtensionConnectionError(err);
+      extensionStatus = { ok: false, msg: `${failure.code}: ${failure.message}` };
+    }
+  }
+
+  /**
+   * Reconnects one attached extension's live session (re-discovery + drift
+   * disclosure; grants update at the next safe state).
+   *
+   * @param {string} extensionId - Extension id.
+   */
+  async function handleReconnectExtension(extensionId) {
+    extensionStatus = { ok: true, msg: '' };
+    try {
+      await sandboxStore.reconnectExtension(extensionId);
+      extensionsRevision += 1;
+      extensionStatus = { ok: true, msg: `Reconnected "${extensionLabel(extensionId)}". Any catalog drift is disclosed on the attachment row.` };
+    } catch (err) {
+      const failure = describeExtensionConnectionError(err);
+      extensionStatus = { ok: false, msg: `${failure.code}: ${failure.message}` };
+    }
   }
 
   /**
@@ -254,6 +338,7 @@
     attachExtensionId = '';
     attachSelectionMode = 'all';
     attachSelectionText = '';
+    attachCheckedNames = [];
     installAssist = null;
     extensionStatus = { ok: true, msg: '' };
   });
@@ -609,30 +694,63 @@
             <p class="members-empty">No extensions attached to this Realm yet.</p>
           {:else}
             <ul class="attachment-list">
-              {#each realmAttachments as attachment (attachment.extensionId)}
-                {@const stateView = describeRealmExtensionState(attachment.status)}
+              {#each attachmentViews as view (view.extensionId)}
                 <li class="attachment-row">
                   <div class="attachment-info">
                     <div class="attachment-title-row">
-                      <span class="attachment-name">{extensionLabel(attachment.extensionId)}</span>
-                      <span class="attachment-id font-mono">{attachment.extensionId}</span>
-                      <span class="status-chip state-{stateView.state} font-mono">{stateView.label}</span>
+                      <span class="attachment-name">{view.label}</span>
+                      <span class="attachment-id font-mono">{view.extensionId}</span>
+                      <span class="status-chip state-{view.state} font-mono">{view.stateLabel}</span>
+                      {#if view.live.chip}
+                        <span class="live-chip live-{view.live.state} font-mono">{view.live.label}</span>
+                      {/if}
+                      <span class="third-party-chip font-mono">{EXTENSION_THIRD_PARTY_LABEL}</span>
                     </div>
-                    <span class="attachment-selection font-mono">{describeToolSelection(attachment)}</span>
+                    <span class="attachment-selection font-mono">{view.ceiling.summary}</span>
                     <span class="attachment-note">
-                      {stateView.description}
-                      {#if stateView.state === 'unavailable'}
+                      {view.stateDescription}
+                      {#if view.state === 'unavailable'}
                         It returns to active once the extension is installed again.
-                      {:else if stateView.state === 'conflict'}
-                        Conflict resolution is catalog-time work (P3).
                       {/if}
                     </span>
+                    {#if view.toolCount > 0}
+                      <span class="attachment-live-meta font-mono">
+                        {view.toolCount} live tool{view.toolCount === 1 ? '' : 's'}{view.digest ? ` · ${view.digest}` : ''}{view.connectedAt ? ` · connected ${view.connectedAt}` : ''}
+                      </span>
+                    {/if}
+                    {#if view.conflicts.length > 0}
+                      <span class="attachment-conflicts font-mono">
+                        conflicts:
+                        {view.conflicts.map((conflict) => `${conflict.callName} ↔ ${conflict.otherLabel}`).join(', ')}
+                        — disconnect one side or reconnect to re-arbitrate
+                      </span>
+                    {/if}
                   </div>
                   <div class="attachment-actions">
+                    {#if view.canReconnect}
+                      <button
+                        type="button"
+                        class="btn-secondary btn-xs"
+                        onclick={() => handleReconnectExtension(view.extensionId)}
+                        title="Reconnect the live session (re-discovery + drift disclosure)"
+                      >
+                        Reconnect
+                      </button>
+                    {/if}
+                    {#if view.canDisconnect}
+                      <button
+                        type="button"
+                        class="btn-secondary btn-xs"
+                        onclick={() => handleDisconnectExtension(view.extensionId)}
+                        title="Disconnect the live session (the attachment stays)"
+                      >
+                        Disconnect
+                      </button>
+                    {/if}
                     <button
                       type="button"
                       class="btn-secondary btn-xs"
-                      onclick={() => handleDetachExtension(attachment.extensionId)}
+                      onclick={() => handleDetachExtension(view.extensionId)}
                       title="Detach from this Realm (the global install stays)"
                     >
                       Detach
@@ -647,7 +765,7 @@
             <div class="attach-grid">
               <div class="form-group grow">
                 <label for="realm-attach-extension">Attach an installed extension</label>
-                <select id="realm-attach-extension" class="select-field" bind:value={attachExtensionId} onchange={clearMessages}>
+                <select id="realm-attach-extension" class="select-field" bind:value={attachExtensionId} onchange={handleAttachSelectionChange}>
                   <option value="">Choose an extension…</option>
                   {#each attachableExtensions as record (record.id)}
                     <option value={record.id}>{record.displayName || record.id} ({record.kind})</option>
@@ -658,28 +776,65 @@
                 {/if}
               </div>
               <div class="form-group grow">
-                <span class="field-label">Tool selection</span>
-                <div class="selection-modes">
-                  <label class="mode-option" class:active={attachSelectionMode === 'all'}>
-                    <input type="radio" bind:group={attachSelectionMode} value="all" />
-                    <span>All tools</span>
-                  </label>
-                  <label class="mode-option" class:active={attachSelectionMode === 'custom'}>
-                    <input type="radio" bind:group={attachSelectionMode} value="custom" />
-                    <span>Only specific call names</span>
-                  </label>
-                </div>
-                {#if attachSelectionMode === 'custom'}
-                  <input
-                    type="text"
-                    class="input-field font-mono"
-                    placeholder="docs_search, similarity"
-                    bind:value={attachSelectionText}
-                    oninput={clearMessages}
-                  />
+                <span class="field-label">Realm-level ceiling (tool selection)</span>
+                {#if attachCatalogNames.length > 0}
+                  <div class="ceiling-tool-list">
+                    <label class="ceiling-tool-row">
+                      <input
+                        type="checkbox"
+                        checked={attachCheckedNames.length === attachCatalogNames.length}
+                        onchange={(event) => (attachCheckedNames = event.currentTarget.checked ? [...attachCatalogNames] : [])}
+                      />
+                      <span>All {attachCatalogNames.length} live catalog tools</span>
+                    </label>
+                    {#each attachCatalogNames as callName (callName)}
+                      <label class="ceiling-tool-row">
+                        <input
+                          type="checkbox"
+                          checked={attachCheckedNames.includes(callName)}
+                          onchange={(event) => {
+                            const next = new Set(attachCheckedNames);
+                            if (event.currentTarget.checked) next.add(callName);
+                            else next.delete(callName);
+                            attachCheckedNames = attachCatalogNames.filter((name) => next.has(name));
+                          }}
+                        />
+                        <span class="font-mono">{callName}</span>
+                      </label>
+                    {/each}
+                  </div>
                   <span class="attach-empty-hint">
-                    Sanitized model-facing call names (the derived form), comma-separated.
+                    The Realm ceiling caps the live catalog: unchecked tools are never granted here, and per-agent
+                    scopes can only narrow further.
                   </span>
+                {:else}
+                  <div class="selection-modes">
+                    <label class="mode-option" class:active={attachSelectionMode === 'all'}>
+                      <input type="radio" bind:group={attachSelectionMode} value="all" />
+                      <span>All tools</span>
+                    </label>
+                    <label class="mode-option" class:active={attachSelectionMode === 'custom'}>
+                      <input type="radio" bind:group={attachSelectionMode} value="custom" />
+                      <span>Only specific call names</span>
+                    </label>
+                  </div>
+                  {#if attachSelectionMode === 'custom'}
+                    <input
+                      type="text"
+                      class="input-field font-mono"
+                      placeholder="docs_search, similarity"
+                      bind:value={attachSelectionText}
+                      oninput={clearExtensionMessages}
+                    />
+                    <span class="attach-empty-hint">
+                      Sanitized model-facing call names (the derived form), comma-separated. No live catalog is
+                      connected yet, so names are recorded as the ceiling for a later connect.
+                    </span>
+                  {:else}
+                    <span class="attach-empty-hint">
+                      No live catalog is connected yet — the ceiling stays "all tools" until a connect.
+                    </span>
+                  {/if}
                 {/if}
               </div>
             </div>
@@ -718,6 +873,7 @@
                       <span class="missing-name">{view.displayName || view.extensionId}</span>
                       <span class="kind-chip font-mono">{view.kind}</span>
                       <span class="status-chip state-{stateView.state} font-mono">{stateView.label}</span>
+                      <span class="third-party-chip font-mono">{view.thirdPartyLabel}</span>
                     </div>
                     <span class="missing-note">{stateView.description}</span>
                     {#if view.transportHintSummary}
@@ -1269,6 +1425,75 @@
     color: #f59e0b;
     border-color: rgba(245, 158, 11, 0.4);
     background: rgba(245, 158, 11, 0.1);
+  }
+
+  .live-chip,
+  .third-party-chip {
+    font-size: 0.64rem;
+    border-radius: 4px;
+    padding: 0.08rem 0.36rem;
+    border: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    background: var(--bg-base);
+  }
+
+  .live-chip.live-connected {
+    color: #34d399;
+    border-color: rgba(52, 211, 153, 0.4);
+    background: rgba(52, 211, 153, 0.1);
+  }
+
+  .live-chip.live-connecting {
+    color: #fbbf24;
+    border-color: rgba(251, 191, 36, 0.4);
+    background: rgba(251, 191, 36, 0.1);
+  }
+
+  .live-chip.live-conflict,
+  .live-chip.live-error {
+    color: #f87171;
+    border-color: var(--accent-danger-border, rgba(239, 68, 68, 0.4));
+    background: var(--accent-danger-subtle, rgba(239, 68, 68, 0.08));
+  }
+
+  .third-party-chip {
+    color: var(--text-muted);
+    border-color: var(--border-subtle);
+  }
+
+  .attachment-live-meta,
+  .attachment-conflicts {
+    font-size: 0.68rem;
+    color: var(--text-secondary);
+    word-break: break-all;
+  }
+
+  .attachment-conflicts {
+    color: #f87171;
+  }
+
+  .ceiling-tool-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    max-height: 11rem;
+    overflow-y: auto;
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    padding: 0.4rem 0.5rem;
+    background: var(--bg-secondary);
+  }
+
+  .ceiling-tool-row {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.76rem;
+    color: var(--text-secondary);
+  }
+
+  .ceiling-tool-row input {
+    accent-color: var(--accent-primary);
   }
 
   .attachment-actions,
