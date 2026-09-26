@@ -41,6 +41,11 @@ import { GENERIC_REALM_ID as UI_GENERIC_REALM_ID } from '../../src/lib/component
 import { AgentRuntime, createAgentIdentityKey } from '../../src/lib/sandbox/runtime/index.ts';
 import { AGENT_STATES } from '../../src/lib/sandbox/runtime/agentLifecycle/index.ts';
 import {
+  SAVED_INSTANCE_PAYLOAD_MAX_BYTES,
+  SAVED_INSTANCE_PAYLOAD_MAX_ENTRIES,
+  hasPersistedState
+} from '../../src/lib/sandbox/sandboxPersistence/index.ts';
+import {
   AGENT_AUTHORITIES,
   BAKED_TEMPLATE_BUNDLES,
   DEMO_TEMPLATE,
@@ -232,6 +237,8 @@ test('1. Strict Export Whitelist & Constant Types', () => {
       'ERR_STORE_EXTENSION_TRANSPORT_UNSUPPORTED',
       'ERR_STORE_INVALID_PARAMS',
       'ERR_STORE_NO_AGENT_SELECTED',
+      'ERR_STORE_PAYLOAD_LIBRARY_FULL',
+      'ERR_STORE_PAYLOAD_LIBRARY_TOO_LARGE',
       'ERR_STORE_REALM_DELETE_FAILED',
       'ERR_STORE_REALM_LAUNCH_FAILED',
       'ERR_STORE_REALM_NOT_EMPTY',
@@ -6208,6 +6215,266 @@ test('79. [be7714b] approval entries are closed-shape: unknown keys are rejected
     );
     assert.strictEqual(store.realms.length, realmsBefore, 'a refused approval creates no realm record');
   } finally {
+    store.destroy();
+    sharedLocalStorage.clear();
+  }
+});
+
+// ============================================================================
+// 80–81. Saved hydration-payload library persistence (ticket 81d8267)
+// ============================================================================
+
+/** Builds one authored hydration payload for the saved-payload store tests. */
+function savedInstancePayloadValue(label) {
+  return {
+    formatVersion: 2,
+    templateId: 'session_zero',
+    templateVersion: 'sha256:saved',
+    inputs: { assignment: { text: label } }
+  };
+}
+
+test('80. [81d8267] the store saved-payload API digests, bounds, and clears entries', async () => {
+  drainPendingAutosaves();
+  sharedLocalStorage.clear();
+  const store = createSandboxStore({ autoBootstrapDirector: false, autoHydrate: false });
+  try {
+    let notifications = 0;
+    const unsubscribe = store.subscribeSavedInstancePayloads(() => { notifications += 1; });
+
+    const payload = savedInstancePayloadValue('Act 1');
+    const saved = store.saveInstancePayload({
+      name: ' Act 1 ',
+      templateId: 'session_zero',
+      templateVersion: 'sha256:saved',
+      payload
+    });
+    assert.strictEqual(saved.id, 'saved_payload_1', 'ids follow the session format');
+    assert.strictEqual(saved.name, 'Act 1', 'the name is trimmed');
+    assert.strictEqual(saved.digest, payloadDigest(payload), 'the digest is the catalog canonical digest');
+    assert.match(saved.savedAt, /^\d{4}-\d{2}-\d{2}T/, 'savedAt is an ISO timestamp');
+    assert.strictEqual(notifications, 1, 'a save notifies subscribers');
+    assert.strictEqual(store.listSavedInstancePayloads().length, 1);
+    assert.strictEqual(store.getSavedInstancePayload(saved.id).name, 'Act 1');
+    assert.strictEqual(store.getSavedInstancePayload('missing'), null);
+    assert.strictEqual(store.getSavedInstancePayload(''), null);
+
+    // Malformed drafts fail closed with the declared store code.
+    for (const draft of [
+      null,
+      {},
+      { name: '  ', templateId: 'session_zero', templateVersion: 'sha256:saved', payload },
+      { name: 'X', templateId: '', templateVersion: 'sha256:saved', payload },
+      { name: 'X', templateId: 'session_zero', templateVersion: '', payload },
+      { name: 'X', templateId: 'session_zero', templateVersion: 'sha256:saved', payload: null },
+      { name: 'X', templateId: 'session_zero', templateVersion: 'sha256:saved', payload: [] },
+      { name: 'X', templateId: 'session_zero', templateVersion: 'sha256:saved', payload: { bad: () => {} } }
+    ]) {
+      assert.throws(
+        () => store.saveInstancePayload(draft),
+        (err) => err.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_INVALID_PARAMS,
+        `must reject ${JSON.stringify(draft)}`
+      );
+    }
+    assert.throws(
+      () => store.saveInstancePayload({
+        name: 'act 1',
+        templateId: 'session_zero',
+        templateVersion: 'sha256:saved',
+        payload
+      }),
+      /already saved/,
+      'duplicate names are refused case-insensitively'
+    );
+    assert.strictEqual(store.listSavedInstancePayloads().length, 1, 'rejected saves never mutate the library');
+
+    // The per-entry byte cap fails closed with its own code.
+    assert.throws(
+      () => store.saveInstancePayload({
+        name: 'Bloat',
+        templateId: 'session_zero',
+        templateVersion: 'sha256:saved',
+        payload: {
+          formatVersion: 2,
+          templateId: 'session_zero',
+          templateVersion: 'sha256:saved',
+          inputs: { bloat: { text: 'x'.repeat(SAVED_INSTANCE_PAYLOAD_MAX_BYTES + 1024) } }
+        }
+      }),
+      (err) => err.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_PAYLOAD_LIBRARY_TOO_LARGE,
+      'an oversize payload is refused before anything is stored'
+    );
+    assert.strictEqual(store.listSavedInstancePayloads().length, 1);
+
+    // The entry cap fails closed; deleting one frees a slot.
+    for (let index = store.listSavedInstancePayloads().length; index < SAVED_INSTANCE_PAYLOAD_MAX_ENTRIES; index += 1) {
+      store.saveInstancePayload({
+        name: `Act ${index + 1}`,
+        templateId: 'session_zero',
+        templateVersion: 'sha256:saved',
+        payload: savedInstancePayloadValue(`Act ${index + 1}`)
+      });
+    }
+    assert.strictEqual(store.listSavedInstancePayloads().length, SAVED_INSTANCE_PAYLOAD_MAX_ENTRIES);
+    assert.throws(
+      () => store.saveInstancePayload({
+        name: 'Overflow',
+        templateId: 'session_zero',
+        templateVersion: 'sha256:saved',
+        payload: savedInstancePayloadValue('Overflow')
+      }),
+      (err) => err.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_PAYLOAD_LIBRARY_FULL,
+      'the entry cap is enforced with its own code'
+    );
+    assert.strictEqual(store.deleteSavedInstancePayload('missing'), false);
+    assert.strictEqual(store.deleteSavedInstancePayload(saved.id), true);
+    assert.strictEqual(store.listSavedInstancePayloads().length, SAVED_INSTANCE_PAYLOAD_MAX_ENTRIES - 1);
+    store.saveInstancePayload({
+      name: 'Overflow',
+      templateId: 'session_zero',
+      templateVersion: 'sha256:saved',
+      payload: savedInstancePayloadValue('Overflow')
+    });
+    assert.strictEqual(store.listSavedInstancePayloads().length, SAVED_INSTANCE_PAYLOAD_MAX_ENTRIES);
+
+    // Clearing empties the library and notifies once.
+    const notificationsBeforeClear = notifications;
+    store.clearSavedInstancePayloads();
+    assert.strictEqual(store.listSavedInstancePayloads().length, 0);
+    assert.strictEqual(notifications, notificationsBeforeClear + 1);
+    store.clearSavedInstancePayloads();
+    assert.strictEqual(notifications, notificationsBeforeClear + 1, 'an empty clear is a no-op');
+
+    unsubscribe();
+    const notificationsAfterUnsubscribe = notifications;
+    store.saveInstancePayload({
+      name: 'After unsubscribe',
+      templateId: 'session_zero',
+      templateVersion: 'sha256:saved',
+      payload: savedInstancePayloadValue('After unsubscribe')
+    });
+    assert.strictEqual(notifications, notificationsAfterUnsubscribe, 'unsubscribed listeners never fire');
+  } finally {
+    store.destroy();
+    sharedLocalStorage.clear();
+  }
+});
+
+test('81. [81d8267] the saved-payload library round-trips through storage with snapshot-authoritative hydration and reset semantics', async () => {
+  drainPendingAutosaves();
+  sharedLocalStorage.clear();
+
+  const store = createSandboxStore({ autoBootstrapDirector: false, autoHydrate: false });
+  const first = store.saveInstancePayload({
+    name: 'Act 1',
+    templateId: 'session_zero',
+    templateVersion: 'sha256:saved',
+    payload: savedInstancePayloadValue('Act 1')
+  });
+  const second = store.saveInstancePayload({
+    name: 'Act 2',
+    templateId: 'session_zero',
+    templateVersion: 'sha256:saved',
+    payload: savedInstancePayloadValue('Act 2')
+  });
+  assert.strictEqual(store.saveToStorage(), true);
+
+  // A fresh auto-hydrating store restores the entries verbatim.
+  const reloaded = createSandboxStore({ autoBootstrapDirector: false, autoHydrate: true });
+  try {
+    assert.deepStrictEqual(
+      reloaded.listSavedInstancePayloads().map((entry) => entry.id),
+      [first.id, second.id],
+      'the saved library hydrates in save order'
+    );
+    const restored = reloaded.getSavedInstancePayload(first.id);
+    assert.strictEqual(restored.name, 'Act 1');
+    assert.strictEqual(restored.templateId, 'session_zero');
+    assert.strictEqual(restored.templateVersion, 'sha256:saved');
+    assert.strictEqual(restored.savedAt, first.savedAt, 'the save timestamp round-trips');
+    assert.strictEqual(restored.digest, first.digest, 'the digest is recomputed identically');
+    assert.deepStrictEqual(restored.payload, first.payload, 'the authored payload round-trips');
+
+    // The id counter continues past the restored ids, so a new save cannot collide.
+    const third = reloaded.saveInstancePayload({
+      name: 'Act 3',
+      templateId: 'session_zero',
+      templateVersion: 'sha256:saved',
+      payload: savedInstancePayloadValue('Act 3')
+    });
+    assert.strictEqual(new Set([first.id, second.id, third.id]).size, 3, 'new ids never collide with restored ids');
+    assert.strictEqual(reloaded.getSavedInstancePayload(third.id).name, 'Act 3');
+    assert.strictEqual(reloaded.saveToStorage(), true, 'the third entry is persisted before the prune check');
+
+    // Snapshot authority: a re-hydration replaces the in-memory library with
+    // the persisted bytes (the in-memory-only entry is pruned).
+    reloaded.saveInstancePayload({
+      name: 'In memory only',
+      templateId: 'session_zero',
+      templateVersion: 'sha256:saved',
+      payload: savedInstancePayloadValue('In memory only')
+    });
+    assert.strictEqual(reloaded.listSavedInstancePayloads().length, 4);
+    assert.strictEqual(reloaded.hydrateFromStorage(), true);
+    assert.deepStrictEqual(
+      reloaded.listSavedInstancePayloads().map((entry) => entry.id),
+      [first.id, second.id, third.id],
+      'hydration is snapshot-authoritative: unpersisted entries are pruned'
+    );
+
+    // A reset clears the library and the next serialized snapshot omits the field.
+    reloaded.reset();
+    assert.strictEqual(reloaded.listSavedInstancePayloads().length, 0, 'reset clears the saved payloads');
+    assert.strictEqual(
+      reloaded.serialize().savedInstancePayloads,
+      undefined,
+      'a cleared library omits the persisted field'
+    );
+    assert.strictEqual(
+      reloaded.saveInstancePayload({ name: 'After reset', templateId: 'session_zero', templateVersion: 'sha256:saved', payload: savedInstancePayloadValue('After reset') }).id,
+      'saved_payload_1',
+      'the id counter resets with the library'
+    );
+
+    // A factory reset clears the library and persisted bytes.
+    reloaded.factoryReset();
+    assert.strictEqual(reloaded.listSavedInstancePayloads().length, 0);
+    assert.strictEqual(hasPersistedState(), false, 'factory reset clears the persisted snapshot');
+  } finally {
+    reloaded.destroy();
+  }
+
+  // Legacy snapshots without the field hydrate an empty library.
+  drainPendingAutosaves();
+  sharedLocalStorage.clear();
+  const legacySnapshot = {
+    version: '1.0.0',
+    timestamp: Date.now(),
+    activeAgentId: null,
+    activeFsWorkspace: 'global',
+    activeTab: 'inspector',
+    agents: [],
+    recycleBin: [],
+    virtualFs: {},
+    messagingBus: { auditLog: [], activeQueues: {}, archives: {}, registeredAgents: {}, terminatedAgents: [] },
+    scheduledTimers: [],
+    worldClock: null,
+    agentDraftInputs: {}
+  };
+  const seededRaw = JSON.stringify(legacySnapshot);
+  sharedLocalStorage.setItem('ai_storyteller_sandbox_state_v1', seededRaw);
+
+  const legacyStore = createSandboxStore({ autoBootstrapDirector: false, autoHydrate: true });
+  try {
+    assert.deepStrictEqual(legacyStore.listSavedInstancePayloads(), [], 'a legacy snapshot hydrates an empty library');
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    assert.strictEqual(
+      sharedLocalStorage.getItem('ai_storyteller_sandbox_state_v1'),
+      seededRaw,
+      'legacy hydration never rewrites persisted bytes'
+    );
+  } finally {
+    legacyStore.destroy();
     store.destroy();
     sharedLocalStorage.clear();
   }

@@ -28,9 +28,11 @@ import {
   resetSaveLockQueue,
   loadSandboxState,
   clearSandboxState,
+  hasPersistedState,
   serializeRuntimeEnvironment,
   restoreRuntimeEnvironment
 } from '../../src/lib/sandbox/sandboxPersistence/index.ts';
+import { payloadDigest } from '../../src/lib/sandbox/realmCatalog/index.ts';
 import { SandboxStore } from '../../src/lib/sandbox/sandboxStore/index.svelte.ts';
 import { resolve } from 'node:path';
 import { execSync } from 'node:child_process';
@@ -443,11 +445,66 @@ await test('[AC-EPIC10-07] RuntimeScheduler generates unique monotonic timer IDs
 });
 
 // ------------------------------------------------------------------
+// [AC-EPIC10-09] Saved hydration-payload library persistence (ticket 81d8267)
+// ------------------------------------------------------------------
+console.log('\n--- [AC-EPIC10-09] Saved Hydration-Payload Library Persistence ---');
+
+await test('[AC-EPIC10-09] the saved payload library round-trips through storage and clears on factory reset', async () => {
+  clearSandboxState();
+
+  const store = new SandboxStore({ autoBootstrapDirector: false, autoHydrate: false });
+  const payload = {
+    formatVersion: 2,
+    templateId: 'session_zero',
+    templateVersion: 'sha256:epic10',
+    inputs: { assignment: { text: 'Persist the operator payload.' } }
+  };
+  const saved = store.saveInstancePayload({
+    name: 'Epic 10 payload',
+    templateId: 'session_zero',
+    templateVersion: 'sha256:epic10',
+    payload
+  });
+  assert.equal(saved.digest, payloadDigest(payload), 'the store digest is the canonical payload digest');
+  assert.equal(store.saveToStorage(), true, 'the saved library reaches LocalStorage');
+  store.destroy();
+
+  const reloaded = new SandboxStore({ autoBootstrapDirector: false, autoHydrate: true });
+  assert.equal(reloaded.listSavedInstancePayloads().length, 1, 'the library hydrates from storage');
+  const restored = reloaded.getSavedInstancePayload(saved.id);
+  assert.ok(restored, 'the saved entry resolves by its persisted id');
+  assert.deepEqual(restored.payload, payload, 'the authored payload round-trips byte-equal');
+  assert.equal(restored.digest, saved.digest);
+  assert.equal(restored.name, 'Epic 10 payload');
+
+  // A legacy-style snapshot without the field hydrates an empty library.
+  const legacy = { ...reloaded.serialize() };
+  delete legacy.savedInstancePayloads;
+  assert.equal(saveSandboxState(legacy), true);
+  reloaded.destroy();
+
+  const legacyStore = new SandboxStore({ autoBootstrapDirector: false, autoHydrate: true });
+  assert.equal(legacyStore.listSavedInstancePayloads().length, 0, 'a snapshot without the field hydrates empty');
+  legacyStore.factoryReset();
+  assert.equal(legacyStore.listSavedInstancePayloads().length, 0);
+  assert.equal(hasPersistedState(), false, 'a factory reset clears the persisted snapshot');
+  legacyStore.destroy();
+
+  clearSandboxState();
+});
+
+// ------------------------------------------------------------------
 // [AC-EPIC10-08] Verification & Zero-Mock QA
 // ------------------------------------------------------------------
 console.log('\n--- [AC-EPIC10-08] Verification & Zero-Mock QA ---');
 
 await test('[AC-EPIC10-08] Clean production build verification', () => {
+  // The build is single-flight across parallel lanes: the lead runs the full
+  // battery without this opt-out; a lane run skips the nested build here.
+  if (process.env.EPIC10_SKIP_BUILD === '1') {
+    console.log('    [QA-SKIP] production build verification skipped (EPIC10_SKIP_BUILD=1)');
+    return;
+  }
   const buildOutput = execSync('npm run build', { encoding: 'utf8' });
   assert(buildOutput.includes('vite v') || buildOutput.includes('built in') || buildOutput.includes('✓'), 'Build must succeed cleanly');
 });

@@ -1,20 +1,32 @@
 /**
- * Session-scoped saved-payload library (ticket 874182b candidate lifecycle).
+ * Saved-payload library facade (ticket 874182b; persistence ticket 81d8267).
  *
  * The library names, lists, attaches, downloads, and deletes operator-held
- * hydration payloads for the current session. It is a plain module store (no
- * DOM, no runes) so both the launcher and the Realm Manager's rehydrate flow
- * read the same entries, and `createRealmPayloadLibrary()` returns isolated
- * instances for zero-mock tests. Payload digests are the catalog's canonical
- * `payloadDigest`, so a saved row and its download agree with launch provenance.
+ * hydration payloads. It is a plain module (no DOM, no runes) so both the
+ * launcher and the Realm Manager's rehydrate flow read the same entries, and
+ * `createRealmPayloadLibrary()` keeps returning isolated instances for
+ * zero-mock tests. Payload digests are the catalog's canonical
+ * `payloadDigest`, so a saved row and its download agree with launch
+ * provenance.
  *
- * Persistence boundary: entries are session-only by design. Persisting them
- * across reloads requires an additive snapshot field and a store surface; that
- * interface is proposed to the program lead (ticket 874182b) rather than
- * invented here, so the library never writes storage it does not own.
+ * Two call forms share one `RealmPayloadLibrary` contract:
+ * - `createRealmPayloadLibrary()` — an isolated session-only library (the
+ *   original behavior; entries live until the instance is dropped).
+ * - `createRealmPayloadLibrary(backend)` — every operation delegates to the
+ *   backend. The module-level `realmPayloadLibrary` singleton delegates to the
+ *   application `sandboxStore`, so saved payloads persist across reloads
+ *   through the snapshot's additive `savedInstancePayloads` field; the
+ *   store-backed form throws the store's coded errors (for example
+ *   `ERR_STORE_INVALID_PARAMS`), while the session-only factory keeps
+ *   `ERR_REALM_PAYLOAD_LIBRARY`.
+ *
+ * The facade computes the display summary (`inputSummary`) from the authored
+ * payload on read, so the store never needs the UI helper.
  */
 
 import { payloadDigest } from '../../sandbox/realmCatalog/index.ts';
+import { getSandboxStore } from '../../sandbox/sandboxStore/index.svelte.ts';
+import type { SavedInstancePayload } from '../../sandbox/sandboxStore/index.svelte.ts';
 import { describeRealmPayloadInputs, validateRealmSavedPayloadName } from './realmHydrationHelpers.ts';
 
 /**
@@ -62,7 +74,7 @@ export interface RealmPayloadLibrary {
    *
    * @param draft - Name, template id/version, and authored payload.
    * @returns The frozen saved entry.
-   * @throws Error with code `'ERR_REALM_PAYLOAD_LIBRARY'` for a blank/duplicate name, a non-object payload, or an undigestible value.
+   * @throws Error with code `'ERR_REALM_PAYLOAD_LIBRARY'` for a blank/duplicate name, a non-object payload, or an undigestible value (the session-only factory); a store-backed library surfaces the store's coded errors instead.
    */
   saveRealmPayload(draft: RealmSavedPayloadDraft): RealmSavedPayload;
   /**
@@ -94,6 +106,51 @@ export interface RealmPayloadLibrary {
    * @returns Unsubscribe function.
    */
   subscribe(listener: () => void): () => void;
+}
+
+/**
+ * Persistence backend accepted by the factory: the store's saved-payload
+ * surface. `SandboxStore` satisfies this interface structurally, and the
+ * module-level library wires it to the application singleton lazily (each call
+ * resolves `getSandboxStore()`).
+ */
+export interface RealmPayloadLibraryBackend {
+  /**
+   * Saves one named payload into the backend library.
+   *
+   * @param draft - Name, template id/version, and authored payload.
+   * @returns The stored entry.
+   */
+  saveInstancePayload(draft: RealmSavedPayloadDraft): SavedInstancePayload;
+  /**
+   * Lists the stored entries in save order.
+   *
+   * @returns The stored entries.
+   */
+  listSavedInstancePayloads(): readonly SavedInstancePayload[];
+  /**
+   * Resolves one stored entry by id.
+   *
+   * @param id - Entry id.
+   * @returns The entry, or `null` when absent.
+   */
+  getSavedInstancePayload(id: string): SavedInstancePayload | null;
+  /**
+   * Deletes one stored entry by id.
+   *
+   * @param id - Entry id.
+   * @returns `true` when an entry was removed.
+   */
+  deleteSavedInstancePayload(id: string): boolean;
+  /** Removes every stored entry. */
+  clearSavedInstancePayloads(): void;
+  /**
+   * Subscribes to backend library mutations.
+   *
+   * @param listener - Called after every backend mutation.
+   * @returns Unsubscribe function.
+   */
+  subscribeSavedInstancePayloads(listener: () => void): () => void;
 }
 
 /** Coded failure raised by the saved-payload library. */
@@ -152,18 +209,13 @@ function freezePayload(payload: unknown): Readonly<Record<string, unknown>> {
 }
 
 /**
- * Creates one isolated saved-payload library (session-scoped, no persistence).
+ * Builds one isolated in-memory backend holding the session-only library
+ * behavior of the original implementation (validate, digest, freeze, notify).
  *
- * @returns The library surface.
- *
- * @example
- * ```typescript
- * const library = createRealmPayloadLibrary();
- * library.saveRealmPayload({ name: 'Act 1', templateId: 'session_zero', templateVersion: pin, payload }).digest;
- * ```
+ * @returns The in-memory backend.
  */
-export function createRealmPayloadLibrary(): RealmPayloadLibrary {
-  const entries: RealmSavedPayload[] = [];
+function createInMemorySavedPayloadBackend(): RealmPayloadLibraryBackend {
+  const entries: SavedInstancePayload[] = [];
   const listeners = new Set<() => void>();
   let counter = 0;
 
@@ -178,7 +230,7 @@ export function createRealmPayloadLibrary(): RealmPayloadLibrary {
   };
 
   return {
-    saveRealmPayload(draft: RealmSavedPayloadDraft): RealmSavedPayload {
+    saveInstancePayload(draft: RealmSavedPayloadDraft): SavedInstancePayload {
       if (!draft || typeof draft !== 'object') {
         throw libraryError('Saving a payload requires a draft object.');
       }
@@ -205,13 +257,12 @@ export function createRealmPayloadLibrary(): RealmPayloadLibrary {
       }
       const payload = freezePayload(draft.payload);
       counter += 1;
-      const entry: RealmSavedPayload = Object.freeze({
+      const entry: SavedInstancePayload = Object.freeze({
         id: `saved_payload_${counter}`,
         name: nameCheck.name,
         templateId,
         templateVersion,
         digest,
-        inputSummary: describeRealmPayloadInputs(payload),
         payload,
         savedAt: new Date().toISOString()
       });
@@ -220,16 +271,16 @@ export function createRealmPayloadLibrary(): RealmPayloadLibrary {
       return entry;
     },
 
-    listRealmSavedPayloads(): readonly RealmSavedPayload[] {
+    listSavedInstancePayloads(): readonly SavedInstancePayload[] {
       return Object.freeze([...entries]);
     },
 
-    getRealmSavedPayload(id: string): RealmSavedPayload | null {
+    getSavedInstancePayload(id: string): SavedInstancePayload | null {
       if (typeof id !== 'string' || id.length === 0) return null;
       return entries.find((entry) => entry.id === id) ?? null;
     },
 
-    deleteRealmSavedPayload(id: string): boolean {
+    deleteSavedInstancePayload(id: string): boolean {
       if (typeof id !== 'string' || id.length === 0) return false;
       const index = entries.findIndex((entry) => entry.id === id);
       if (index < 0) return false;
@@ -238,13 +289,13 @@ export function createRealmPayloadLibrary(): RealmPayloadLibrary {
       return true;
     },
 
-    clearRealmSavedPayloads(): void {
+    clearSavedInstancePayloads(): void {
       if (entries.length === 0) return;
       entries.length = 0;
       notify();
     },
 
-    subscribe(listener: () => void): () => void {
+    subscribeSavedInstancePayloads(listener: () => void): () => void {
       if (typeof listener !== 'function') return () => {};
       listeners.add(listener);
       return () => {
@@ -255,7 +306,85 @@ export function createRealmPayloadLibrary(): RealmPayloadLibrary {
 }
 
 /**
- * Process-wide saved-payload library shared by the launcher and the Realm
- * Manager's rehydrate flow (session-only).
+ * Adapts one persistence backend to the `RealmPayloadLibrary` façade: entries
+ * pass through verbatim and the display-only `inputSummary` is derived from
+ * the authored payload on read.
+ *
+ * @param backend - Backend implementing the store's saved-payload surface.
+ * @returns The library surface.
  */
-export const realmPayloadLibrary: RealmPayloadLibrary = createRealmPayloadLibrary();
+function adaptBackend(backend: RealmPayloadLibraryBackend): RealmPayloadLibrary {
+  const toEntry = (record: SavedInstancePayload): RealmSavedPayload => Object.freeze({
+    id: record.id,
+    name: record.name,
+    templateId: record.templateId,
+    templateVersion: record.templateVersion,
+    digest: record.digest,
+    inputSummary: describeRealmPayloadInputs(record.payload),
+    payload: record.payload,
+    savedAt: record.savedAt
+  });
+
+  return {
+    saveRealmPayload(draft: RealmSavedPayloadDraft): RealmSavedPayload {
+      return toEntry(backend.saveInstancePayload(draft));
+    },
+
+    listRealmSavedPayloads(): readonly RealmSavedPayload[] {
+      return Object.freeze(backend.listSavedInstancePayloads().map(toEntry));
+    },
+
+    getRealmSavedPayload(id: string): RealmSavedPayload | null {
+      const record = backend.getSavedInstancePayload(id);
+      return record ? toEntry(record) : null;
+    },
+
+    deleteRealmSavedPayload(id: string): boolean {
+      return backend.deleteSavedInstancePayload(id);
+    },
+
+    clearRealmSavedPayloads(): void {
+      backend.clearSavedInstancePayloads();
+    },
+
+    subscribe(listener: () => void): () => void {
+      if (typeof listener !== 'function') return () => {};
+      return backend.subscribeSavedInstancePayloads(listener);
+    }
+  };
+}
+
+/**
+ * Creates one saved-payload library over the requested backend, or one
+ * isolated session-only library when no backend is given.
+ *
+ * @param backend - Optional persistence backend (a `SandboxStore` satisfies it structurally).
+ * @returns The library surface.
+ *
+ * @example
+ * ```typescript
+ * const scratch = createRealmPayloadLibrary();
+ * scratch.saveRealmPayload({ name: 'Act 1', templateId: 'session_zero', templateVersion: pin, payload }).digest;
+ *
+ * // Persisted form: delegates to the application store.
+ * const persisted = createRealmPayloadLibrary(sandboxStore);
+ * ```
+ */
+export function createRealmPayloadLibrary(backend?: RealmPayloadLibraryBackend | null): RealmPayloadLibrary {
+  return adaptBackend(backend ?? createInMemorySavedPayloadBackend());
+}
+
+/**
+ * Process-wide saved-payload library shared by the launcher and the Realm
+ * Manager's rehydrate flow. It delegates lazily to the application
+ * `sandboxStore`, so entries persist across reloads through the snapshot's
+ * additive `savedInstancePayloads` field.
+ */
+export const realmPayloadLibrary: RealmPayloadLibrary = createRealmPayloadLibrary({
+  saveInstancePayload: (draft) => getSandboxStore().saveInstancePayload(draft),
+  listSavedInstancePayloads: () => getSandboxStore().listSavedInstancePayloads(),
+  getSavedInstancePayload: (id) => getSandboxStore().getSavedInstancePayload(id),
+  deleteSavedInstancePayload: (id) => getSandboxStore().deleteSavedInstancePayload(id),
+  clearSavedInstancePayloads: () => getSandboxStore().clearSavedInstancePayloads(),
+  subscribeSavedInstancePayloads: (listener) => getSandboxStore().subscribeSavedInstancePayloads(listener)
+});

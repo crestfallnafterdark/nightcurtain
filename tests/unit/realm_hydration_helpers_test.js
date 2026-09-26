@@ -43,6 +43,7 @@ import {
   validateRealmSavedPayloadName
 } from '../../src/lib/components/sandbox/realmHydrationHelpers.ts';
 import { createRealmPayloadLibrary } from '../../src/lib/components/sandbox/realmPayloadLibrary.ts';
+import { createSandboxStore } from '../../src/lib/sandbox/sandboxStore/index.svelte.ts';
 
 const SESSION_BUNDLE = getBakedTemplateBundle('session_zero');
 const SESSION_TEMPLATE = SESSION_BUNDLE.template;
@@ -459,4 +460,48 @@ test('the rehydrate plan matches the launch materialization agent ids', () => {
   assert.equal(plan.ok, true);
   assert.equal(plan.writes.length, 1);
   assert.equal(plan.writes[0].files[0].path, 'handoff/README.md');
+});
+
+test('a store-backed saved-payload library delegates to the store and keeps the facade contract', () => {
+  const store = createSandboxStore({ autoBootstrapDirector: false, autoHydrate: false });
+  try {
+    const library = createRealmPayloadLibrary(store);
+    let notifications = 0;
+    const unsubscribe = library.subscribe(() => { notifications += 1; });
+
+    const payload = sessionPayload();
+    const saved = library.saveRealmPayload({
+      name: 'Act 1',
+      templateId: 'session_zero',
+      templateVersion: SESSION_VERSION,
+      payload
+    });
+    assert.equal(saved.digest, payloadDigest(payload), 'the facade still exposes the canonical digest');
+    assert.equal(saved.inputSummary, '1 input', 'the facade derives the input summary from the authored payload');
+    assert.equal(store.listSavedInstancePayloads().length, 1, 'the save lands in the store-backed library');
+    assert.equal(library.listRealmSavedPayloads()[0].id, saved.id);
+    assert.equal(library.getRealmSavedPayload(saved.id)?.name, 'Act 1');
+    assert.equal(library.getRealmSavedPayload('missing'), null);
+
+    // A direct store mutation notifies facade subscribers too.
+    store.saveInstancePayload({
+      name: 'Act 2',
+      templateId: 'session_zero',
+      templateVersion: SESSION_VERSION,
+      payload: sessionPayload({ target_template: { text: 'demo_target' } })
+    });
+    assert.equal(notifications, 2, 'store mutations reach facade subscribers');
+    assert.equal(library.listRealmSavedPayloads().length, 2);
+
+    // Delete and clear delegate to the store as well.
+    assert.equal(library.deleteRealmSavedPayload(saved.id), true);
+    assert.equal(library.deleteRealmSavedPayload(saved.id), false);
+    assert.equal(store.listSavedInstancePayloads().length, 1);
+    library.clearRealmSavedPayloads();
+    assert.equal(store.listSavedInstancePayloads().length, 0, 'clearing the facade clears the store library');
+    assert.equal(notifications, 4);
+    unsubscribe();
+  } finally {
+    store.destroy();
+  }
 });

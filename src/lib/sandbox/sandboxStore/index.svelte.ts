@@ -48,6 +48,7 @@
  * @decision The store's operator principal is the runtime's host operator principal (`runtime.getOperatorPrincipal()`, exact-reference validated): every operator-scoped store action — runtime lifecycle/scheduler calls, substrate calls, and manual-send attribution — carries that principal, never an agent id or a director descriptor, so operator actions work with zero agents and never depend on the director's lifecycle
  * @decision `realmBypass` is a user-facing operator grant: `grantRealmBypass`/`revokeRealmBypass` validate the agent id, delegate to the runtime under the operator principal, and schedule the debounced save; targeting is additive — a canonical identity key or a realm-exact `{ realmId }` scope addresses the exact same-id registration (composed to the canonical key store-side), while a bare id keeps the unique-match rule and fails closed on ambiguity; the active grant list persists as the additive top-level snapshot field `realmBypassGrants` — canonical identity keys emitted by the lifecycle listing, so a scoped grant on a same-id pair round-trips realm-exactly — and is re-applied at hydration, after the agents are registered, through `restoreRealmBypassGrants`, which drops unknown/recycled refs fail-closed and still hydrates legacy bare-id snapshots through unique-match (an ambiguous bare id is skipped, never duplicated across realms); grant-free snapshots keep every existing field and byte
  * @decision Publishing grants and trust: `grantTemplateAuthority`/`revokeTemplateAuthority`/`grantHydrationAuthority`/`revokeHydrationAuthority` are operator actions delegating to the runtime under the store principal and persist additively as `metaAuthorityGrants` (canonical identity keys per authority; hydration re-applies through `restoreMetaAuthorityGrants`, unknown/recycled refs skipped). `launchRealmFromTemplate` validates every approval against the template's declared pairs before any side effect, applies approved grants under the operator principal, and — only on a fully successful launch with `trustAuthorities: true` — persists the effective approved declared set as `templateAuthorityTrust`; later launches auto-approve exact matches only, `clearTemplateAuthorityTrust` removes the override without revoking already-applied grants, and pending instance payloads stay session-only
+ * @decision Saved hydration-payload library (ticket 81d8267): the store owns the operator's named authored payloads — `saveInstancePayload`/`listSavedInstancePayloads`/`getSavedInstancePayload`/`deleteSavedInstancePayload`/`clearSavedInstancePayloads` validate fail-closed (`ERR_STORE_INVALID_PARAMS`, `ERR_STORE_PAYLOAD_LIBRARY_FULL` at the entry cap, `ERR_STORE_PAYLOAD_LIBRARY_TOO_LARGE` at the byte cap), freeze an isolated payload copy, digest it with the catalog's canonical `payloadDigest`, and persist additively as `savedInstancePayloads` (field omitted when empty; payloads re-validate only at attach). Hydration is snapshot-authoritative (malformed entries dropped, legacy snapshots without the field hydrate empty, the id counter seeds past restored numeric suffixes, and the suppression guard never rewrites persisted bytes); reset/factory-reset clears the library and its field
  * @decision `seedRealm` writes validated files through the operator-context VFS surface into the target member's resolved private workspace (or `realm:<realmId>:global` when no target), rejects traversal, reserved workspace targets, the reserved `global`/`public` seed path roots (rejected, never re-rooted, so the legacy VirtualFS prefix routing can never divert a write into the ungrouped shared workspace under a receipt that names the selected one), and empty or duplicate file lists before the first write, and delivers the directive as an operator-attributed mailbox message (the non-agent `'human'` label routes through the host operator principal by exact reference) that requires an explicit member target — never a realm-wide fan-out
  * @decision Seed targets resolve realm-scoped: a named member target is an ACTIVE member of the requested Realm by `(realmId, agentId)` — a same-literal-id registration in another Realm is never selected (only it yields the historical membership error) — and the write addresses that exact registration's private storage key (explicit pin, canonical identity key, or legacy bare id) while the directive addresses its canonical mailbox; receipt labels stay realm-opaque/bare
  * @decision Seed-target membership compares under the store trim semantics: the target lookup resolves a padded hydrated `config.realmId` to the same realm the grouping and `deleteRealm` resolve, a same-id registration in another Realm stays excluded (ambiguous registrations never fall back to a bare ghost workspace when an identity port exists), and the canonical write key is re-normalized to the resolved (trimmed) realm's identity while explicit pins stay verbatim
@@ -163,8 +164,8 @@ import type {
   ExtensionToolDescriptor,
   ExtensionToolExecutionRequest
 } from '../tools/extensionTools/index.ts';
-import { createDebouncedSave, saveSandboxState, loadSandboxState, clearSandboxState, hasPersistedState, serializeRuntimeEnvironment, restoreRuntimeEnvironment } from '../sandboxPersistence/index.ts';
-import type { DebouncedSaveCoordinator, PersistedImportedRealmTemplate, SandboxPersistedState } from '../sandboxPersistence/index.ts';
+import { createDebouncedSave, saveSandboxState, loadSandboxState, clearSandboxState, hasPersistedState, serializeRuntimeEnvironment, restoreRuntimeEnvironment, SAVED_INSTANCE_PAYLOAD_MAX_BYTES, SAVED_INSTANCE_PAYLOAD_MAX_ENTRIES } from '../sandboxPersistence/index.ts';
+import type { DebouncedSaveCoordinator, PersistedImportedRealmTemplate, PersistedSavedInstancePayload, SandboxPersistedState } from '../sandboxPersistence/index.ts';
 import { downloadSingleFile, downloadFilesSeparately, downloadFolderAsArchive, processUploadedFiles } from '../fsDownloadUtils/index.ts';
 import type { ArchiveDownloadReceipt, BatchDownloadFailure, CreateArchiveOptions, DownloadReceipt, ProcessUploadOptions } from '../fsDownloadUtils/index.ts';
 
@@ -239,6 +240,8 @@ type AuthorityGrantSnapshot = SandboxPersistedState & {
  * - `ERR_STORE_EXTENSION_PLAINTEXT_CREDENTIAL`: `connectExtension` targeted a `credentialId`-bearing record on a non-`https:` endpoint — refused before any vault read or network activity.
  * - `ERR_STORE_EXTENSION_CREDENTIAL_UNRESOLVED`: `connectExtension` targeted a `credentialId` the vault cannot resolve (deleted/unknown id) — fail closed, no network activity.
  * - `ERR_STORE_EXTENSION_CONNECT_FAILED`: the error code of an unclassified operational connection failure (a classified MCP client failure keeps its own `ERR_MCP_*` code); never thrown by the pre-connection gates.
+ * - `ERR_STORE_PAYLOAD_LIBRARY_FULL`: `saveInstancePayload` targeted a library already holding `SAVED_INSTANCE_PAYLOAD_MAX_ENTRIES` entries; delete one before saving another.
+ * - `ERR_STORE_PAYLOAD_LIBRARY_TOO_LARGE`: `saveInstancePayload` targeted a payload whose serialized size exceeds `SAVED_INSTANCE_PAYLOAD_MAX_BYTES`.
  * 
  * @example
  * ```typescript
@@ -282,6 +285,8 @@ export const SANDBOX_STORE_ERROR_CODES: {
   readonly ERR_STORE_EXTENSION_PLAINTEXT_CREDENTIAL: 'ERR_STORE_EXTENSION_PLAINTEXT_CREDENTIAL';
   readonly ERR_STORE_EXTENSION_CREDENTIAL_UNRESOLVED: 'ERR_STORE_EXTENSION_CREDENTIAL_UNRESOLVED';
   readonly ERR_STORE_EXTENSION_CONNECT_FAILED: 'ERR_STORE_EXTENSION_CONNECT_FAILED';
+  readonly ERR_STORE_PAYLOAD_LIBRARY_FULL: 'ERR_STORE_PAYLOAD_LIBRARY_FULL';
+  readonly ERR_STORE_PAYLOAD_LIBRARY_TOO_LARGE: 'ERR_STORE_PAYLOAD_LIBRARY_TOO_LARGE';
 } = Object.freeze({
   ERR_STORE_AGENT_NOT_FOUND: 'ERR_STORE_AGENT_NOT_FOUND',
   ERR_STORE_NO_AGENT_SELECTED: 'ERR_STORE_NO_AGENT_SELECTED',
@@ -305,7 +310,9 @@ export const SANDBOX_STORE_ERROR_CODES: {
   ERR_STORE_EXTENSION_INVALID_ENDPOINT: 'ERR_STORE_EXTENSION_INVALID_ENDPOINT',
   ERR_STORE_EXTENSION_PLAINTEXT_CREDENTIAL: 'ERR_STORE_EXTENSION_PLAINTEXT_CREDENTIAL',
   ERR_STORE_EXTENSION_CREDENTIAL_UNRESOLVED: 'ERR_STORE_EXTENSION_CREDENTIAL_UNRESOLVED',
-  ERR_STORE_EXTENSION_CONNECT_FAILED: 'ERR_STORE_EXTENSION_CONNECT_FAILED'
+  ERR_STORE_EXTENSION_CONNECT_FAILED: 'ERR_STORE_EXTENSION_CONNECT_FAILED',
+  ERR_STORE_PAYLOAD_LIBRARY_FULL: 'ERR_STORE_PAYLOAD_LIBRARY_FULL',
+  ERR_STORE_PAYLOAD_LIBRARY_TOO_LARGE: 'ERR_STORE_PAYLOAD_LIBRARY_TOO_LARGE'
 });
 
 /**
@@ -1393,6 +1400,45 @@ export interface RealmTemplateImportReceipt {
    * import receipts omit the field so their wire shape is unchanged.
    */
   readonly dryRun?: true;
+}
+
+/**
+ * Draft accepted by `SandboxStore.saveInstancePayload()` (ticket 81d8267):
+ * the operator-supplied name plus the authored payload envelope and the
+ * template binding it was validated against.
+ */
+export interface SavedInstancePayloadDraft {
+  /** Operator-chosen display name (non-empty, unique per library, case-insensitive). */
+  readonly name: string;
+  /** Template id the payload targets. */
+  readonly templateId: string;
+  /** Effective template version the payload validated against (`sha256:<hex>`). */
+  readonly templateVersion: string;
+  /** Authored format-v2 payload value (plain finite JSON object). */
+  readonly payload: unknown;
+}
+
+/**
+ * One frozen entry of the store's saved hydration-payload library (ticket
+ * 81d8267). The payload is descriptive data: it is persisted additively in the
+ * snapshot (`savedInstancePayloads`) and re-validated against the effective
+ * template contract only when a launch attaches it.
+ */
+export interface SavedInstancePayload {
+  /** Stable library id (`saved_payload_<n>`), unique within the library. */
+  readonly id: string;
+  /** Operator-chosen display name (trimmed). */
+  readonly name: string;
+  /** Template id the payload targets. */
+  readonly templateId: string;
+  /** Effective template version the payload validated against (`sha256:<hex>`). */
+  readonly templateVersion: string;
+  /** Canonical `payloadDigest` of the authored payload. */
+  readonly digest: string;
+  /** The authored payload value (frozen, caller-mutation-isolated copy). */
+  readonly payload: Readonly<Record<string, unknown>>;
+  /** ISO-8601 save timestamp. */
+  readonly savedAt: string;
 }
 
 /**
@@ -3046,6 +3092,45 @@ function codedStoreError(code: SandboxStoreErrorCode, message: string): CodedErr
 }
 
 /**
+ * Copies an authored saved payload into a frozen plain record (ticket
+ * 81d8267): one level of `inputs` entries and their `files` arrays is copied
+ * so later caller mutation cannot alter the stored bytes. The caller has
+ * already digested the value, so only plain JSON data reaches this copy; the
+ * component-side library facade keeps its own equivalent copy for the
+ * session-only branch (sandbox modules never import component helpers).
+ *
+ * @param payload - Authored payload object that passed `payloadDigest`.
+ * @returns Frozen plain payload.
+ */
+function freezeSavedInstancePayloadValue(payload: Record<string, unknown>): Readonly<Record<string, unknown>> {
+  const inputs = payload.inputs && typeof payload.inputs === 'object' && !Array.isArray(payload.inputs)
+    ? (payload.inputs as Record<string, unknown>)
+    : null;
+  const copiedInputs: Record<string, unknown> = {};
+  if (inputs) {
+    for (const [inputId, value] of Object.entries(inputs)) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        copiedInputs[inputId] = value;
+        continue;
+      }
+      const entry = value as Record<string, unknown>;
+      copiedInputs[inputId] = Array.isArray(entry.files)
+        ? {
+            ...entry,
+            files: Object.freeze(entry.files.map((file) => (
+              file && typeof file === 'object' ? Object.freeze({ ...(file as Record<string, unknown>) }) : file
+            )))
+          }
+        : { ...entry };
+    }
+  }
+  return Object.freeze({
+    ...payload,
+    ...(inputs ? { inputs: Object.freeze(copiedInputs) } : {})
+  });
+}
+
+/**
  * Renders the missing-extension disclosure warnings for a launch receipt, in
  * declared request order: a not-installed request points at the install flow,
  * a not-attached request points at the attach approval.
@@ -3905,6 +3990,26 @@ export class SandboxStore {
   #templateAuthorityTrust: Map<string, Map<string, readonly string[]>> = new Map();
 
   /**
+   * Persisted saved hydration-payload library (ticket 81d8267): the operator's
+   * named authored payloads, restored from and emitted into the additive
+   * snapshot field `savedInstancePayloads`. Bounded by
+   * `SAVED_INSTANCE_PAYLOAD_MAX_ENTRIES` and `SAVED_INSTANCE_PAYLOAD_MAX_BYTES`;
+   * payloads stay descriptive data and are re-validated only when a launch
+   * attaches them.
+   */
+  #savedInstancePayloads: SavedInstancePayload[] = [];
+
+  /**
+   * Monotonic counter backing the `saved_payload_<n>` library ids. Hydration
+   * seeds it past the highest persisted numeric suffix so new saves can never
+   * collide with restored entries; a reset restores it to zero.
+   */
+  #savedInstancePayloadCounter = 0;
+
+  /** Saved-payload library mutation listeners (the UI facade forwards these). */
+  #savedInstancePayloadListeners: Set<() => void> = new Set();
+
+  /**
    * Frozen Wave U host publishing port (ticket 2518510) seeded into the
    * store-owned runtime and exposed through {@link getRealmPublishingPort}.
    */
@@ -4023,6 +4128,15 @@ export class SandboxStore {
         }
       }
     });
+
+    // Saved hydration-payload library (ticket 81d8267): seed the in-memory
+    // library from the persisted session before any consumer reads it. Only an
+    // auto-hydrating store touches storage here; the later hydrate pass
+    // replaces the library with the same snapshot-authoritative set. Seeding
+    // never schedules a save (hydration stays storage-read-only).
+    if (shouldAutoHydrate) {
+      this.#loadPersistedSavedInstancePayloadFields();
+    }
 
     // Late-bound identity bridge: substrates the store constructs resolve agent
     // authority through the runtime registry once the runtime exists (MOD-21
@@ -8768,6 +8882,161 @@ export class SandboxStore {
   }
 
   /**
+   * Saves one named payload into the persisted hydration-payload library
+   * (ticket 81d8267).
+   *
+   * The draft is validated fail-closed (`ERR_STORE_INVALID_PARAMS`) and the
+   * entry is persisted through the existing debounced snapshot save as the
+   * additive `savedInstancePayloads` field. The saved bytes are an isolated
+   * frozen copy; the payload itself is re-validated against the effective
+   * template contract only when a launch attaches it — never here.
+   *
+   * @param draft - Name, template id/version, and authored payload.
+   * @returns The frozen saved entry.
+   * @throws {@link SANDBOX_STORE_ERROR_CODES.ERR_STORE_INVALID_PARAMS} When the draft is malformed, the name is blank or duplicate, or the payload is not digestible.
+   * @throws {@link SANDBOX_STORE_ERROR_CODES.ERR_STORE_PAYLOAD_LIBRARY_TOO_LARGE} When the serialized payload exceeds `SAVED_INSTANCE_PAYLOAD_MAX_BYTES`.
+   * @throws {@link SANDBOX_STORE_ERROR_CODES.ERR_STORE_PAYLOAD_LIBRARY_FULL} When the library already holds `SAVED_INSTANCE_PAYLOAD_MAX_ENTRIES` entries.
+   *
+   * @example
+   * ```typescript
+   * const entry = sandboxStore.saveInstancePayload({
+   *   name: 'Act 1',
+   *   templateId: 'session_zero',
+   *   templateVersion: version,
+   *   payload
+   * });
+   * ```
+   */
+  saveInstancePayload(draft: SavedInstancePayloadDraft): SavedInstancePayload {
+    if (!draft || typeof draft !== 'object' || Array.isArray(draft)) {
+      throw invalidRealmParams('Saving a payload requires a draft object.');
+    }
+    const name = typeof draft.name === 'string' ? draft.name.trim() : '';
+    if (!name) {
+      throw invalidRealmParams('Name the payload before saving it.');
+    }
+    if (this.#savedInstancePayloads.some((entry) => entry.name.toLowerCase() === name.toLowerCase())) {
+      throw invalidRealmParams(`A payload named "${name}" is already saved — pick another name.`);
+    }
+    const templateId = typeof draft.templateId === 'string' ? draft.templateId.trim() : '';
+    if (!templateId) {
+      throw invalidRealmParams('The payload must name the template it targets.');
+    }
+    const templateVersion = typeof draft.templateVersion === 'string' ? draft.templateVersion.trim() : '';
+    if (!templateVersion) {
+      throw invalidRealmParams('The payload must carry the template version it was validated against.');
+    }
+    const payload = draft.payload;
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      throw invalidRealmParams('The payload must be a canonical authored payload object.');
+    }
+    let digest: string;
+    let serializedBytes: number;
+    try {
+      digest = payloadDigest(payload);
+      const serialized = JSON.stringify(payload);
+      serializedBytes = utf8ByteLength(typeof serialized === 'string' ? serialized : '');
+    } catch (error) {
+      throw invalidRealmParams(
+        error instanceof Error && error.message ? error.message : 'The payload could not be digested.'
+      );
+    }
+    if (serializedBytes > SAVED_INSTANCE_PAYLOAD_MAX_BYTES) {
+      throw codedStoreError(
+        SANDBOX_STORE_ERROR_CODES.ERR_STORE_PAYLOAD_LIBRARY_TOO_LARGE,
+        `The payload serializes to ${serializedBytes} bytes and exceeds the ${SAVED_INSTANCE_PAYLOAD_MAX_BYTES}-byte saved-payload cap.`
+      );
+    }
+    if (this.#savedInstancePayloads.length >= SAVED_INSTANCE_PAYLOAD_MAX_ENTRIES) {
+      throw codedStoreError(
+        SANDBOX_STORE_ERROR_CODES.ERR_STORE_PAYLOAD_LIBRARY_FULL,
+        `The saved-payload library already holds the maximum of ${SAVED_INSTANCE_PAYLOAD_MAX_ENTRIES} payloads — delete one before saving another.`
+      );
+    }
+    this.#savedInstancePayloadCounter += 1;
+    const entry: SavedInstancePayload = Object.freeze({
+      id: `saved_payload_${this.#savedInstancePayloadCounter}`,
+      name,
+      templateId,
+      templateVersion,
+      digest,
+      payload: freezeSavedInstancePayloadValue(payload as Record<string, unknown>),
+      savedAt: new Date().toISOString()
+    });
+    this.#savedInstancePayloads.push(entry);
+    this.#notifySavedInstancePayloads();
+    this.#scheduleAutoSave();
+    return entry;
+  }
+
+  /**
+   * Lists the persisted saved hydration payloads in save order (ticket
+   * 81d8267).
+   *
+   * @returns Frozen saved entries, oldest first.
+   */
+  listSavedInstancePayloads(): readonly SavedInstancePayload[] {
+    return Object.freeze([...this.#savedInstancePayloads]);
+  }
+
+  /**
+   * Resolves one saved hydration payload by id (ticket 81d8267).
+   *
+   * @param id - Entry id.
+   * @returns The frozen entry, or `null` when absent.
+   */
+  getSavedInstancePayload(id: string): SavedInstancePayload | null {
+    if (typeof id !== 'string' || id.length === 0) return null;
+    return this.#savedInstancePayloads.find((entry) => entry.id === id) ?? null;
+  }
+
+  /**
+   * Deletes one saved hydration payload by id (ticket 81d8267). The deletion
+   * is persisted through the existing debounced snapshot save.
+   *
+   * @param id - Entry id.
+   * @returns `true` when an entry was removed; `false` otherwise.
+   */
+  deleteSavedInstancePayload(id: string): boolean {
+    if (typeof id !== 'string' || id.length === 0) return false;
+    const index = this.#savedInstancePayloads.findIndex((entry) => entry.id === id);
+    if (index < 0) return false;
+    this.#savedInstancePayloads.splice(index, 1);
+    this.#notifySavedInstancePayloads();
+    this.#scheduleAutoSave();
+    return true;
+  }
+
+  /**
+   * Removes every saved hydration payload (ticket 81d8267). An empty library
+   * is a no-op; a non-empty clear persists through the existing debounced
+   * snapshot save, so the field is omitted from the next snapshot.
+   */
+  clearSavedInstancePayloads(): void {
+    if (this.#savedInstancePayloads.length === 0) return;
+    this.#savedInstancePayloads = [];
+    this.#notifySavedInstancePayloads();
+    this.#scheduleAutoSave();
+  }
+
+  /**
+   * Subscribes to saved-payload library mutations (ticket 81d8267).
+   *
+   * Listeners fire after save, delete, clear, and after a hydration/reset
+   * pass replaced the library. A failing listener never blocks a mutation.
+   *
+   * @param listener - Called after every library mutation.
+   * @returns Unsubscribe function.
+   */
+  subscribeSavedInstancePayloads(listener: () => void): () => void {
+    if (typeof listener !== 'function') return () => {};
+    this.#savedInstancePayloadListeners.add(listener);
+    return () => {
+      this.#savedInstancePayloadListeners.delete(listener);
+    };
+  }
+
+  /**
    * Returns the frozen Wave U host publishing port (ticket 2518510).
    *
    * The port is the store's host-side implementation over the real Wave T
@@ -9992,6 +10261,10 @@ export class SandboxStore {
    * own attachments; both are omitted when empty, so install-free and legacy
    * snapshots keep every existing field and byte.
    *
+   * Ticket 81d8267: the saved hydration-payload library rides the additive
+   * `savedInstancePayloads` field, omitted when empty, so a library-free
+   * session keeps every existing field and byte.
+   *
    * @returns `SandboxPersistedState` ready for LocalStorage or JSON export.
    * 
    * @example
@@ -10014,7 +10287,19 @@ export class SandboxStore {
       customPresets: this.#customPresets.map((preset) => cloneModelPreset(preset)),
       realms: this.#realmRecords.map((realm) => cloneRealmRecord(realm)),
       extensions: this.#extensionRegistry.listExtensions().map((record) => cloneExtensionInstallRecord(record)),
-      importedRealmTemplates: this.#serializeRealmTemplateImports()
+      importedRealmTemplates: this.#serializeRealmTemplateImports(),
+      // Ticket 81d8267: the operator's saved-payload library rides the
+      // additive `savedInstancePayloads` field (persistence copies it, caps
+      // it, and omits it when empty, so a saved-free session keeps every
+      // existing field and byte).
+      savedInstancePayloads: this.#savedInstancePayloads.map((entry) => ({
+        id: entry.id,
+        name: entry.name,
+        templateId: entry.templateId,
+        templateVersion: entry.templateVersion,
+        savedAt: entry.savedAt,
+        payload: entry.payload
+      }))
     });
     let withAdditions: AuthorityGrantSnapshot = snapshot;
     const grants = this.#runtime.listRealmBypassGrants();
@@ -10121,6 +10406,7 @@ export class SandboxStore {
         this.#extensionSweepBlocked.clear();
         this.#pendingRegistrationSweep.clear();
         this.#storeLaunchGrantedKeys.clear();
+        this.#restoreSavedInstancePayloads(null);
         this.#syncAgents();
         this.#syncRecycleBin();
         this.#syncMessages();
@@ -10145,6 +10431,11 @@ export class SandboxStore {
       // effective launch catalog in memory; hydration never rewrites the bytes
       // it read (the suppression guard keeps autosave inert).
       this.#reconcileRealmTemplateImports(persistedState);
+      // Ticket 81d8267: the persisted saved-payload library is
+      // snapshot-authoritative — restored verbatim (re-digested, malformed
+      // entries dropped) or emptied by a legacy snapshot without the field.
+      // The suppression guard keeps autosave inert here too.
+      this.#restoreSavedInstancePayloads(persistedState);
       // H1: capture the persisted capability selectors as data BEFORE restore;
       // the runtime withholds them from the hydrated configs, so the store is
       // the only layer that can hand them back through the gated operator path.
@@ -10345,6 +10636,10 @@ export class SandboxStore {
     // payloads and every per-template trust record.
     this.#pendingInstancePayloads.clear();
     this.#templateAuthorityTrust.clear();
+    // Ticket 81d8267: a reset drops the persisted saved-payload library too
+    // (the counter returns to zero, so the next save starts a fresh session
+    // numbering).
+    this.#restoreSavedInstancePayloads(null);
     // H1: a reset drops the captured hydration grants and the last heal report.
     this.#capabilityHealGrants = [];
     this.capabilityHealReport = null;
@@ -11315,6 +11610,110 @@ export class SandboxStore {
       payload: Object.freeze({ ...(payload as Record<string, unknown>) }),
       resolvedAt
     }));
+  }
+
+  /**
+   * Seeds the saved hydration-payload library from persisted storage before
+   * any consumer reads it (ticket 81d8267). Only an auto-hydrating store reads
+   * storage here; absent or unreadable state leaves the empty library
+   * unchanged. The recovery notice is raised here because the later hydrate
+   * pass observes the already-quarantined entry.
+   */
+  #loadPersistedSavedInstancePayloadFields(): void {
+    try {
+      const persisted = loadSandboxState({
+        onRecovery: (info) => {
+          this.hydrationNotice = {
+            message: 'Saved session could not be loaded — starting fresh',
+            at: Date.now(),
+            reason: info?.reason || 'unreadable'
+          };
+        }
+      });
+      if (!persisted) return;
+      this.#restoreSavedInstancePayloads(persisted);
+    } catch {
+      // Library seeding is best-effort; the empty library stays usable.
+    }
+  }
+
+  /**
+   * Rebuilds the in-memory saved-payload library from a persisted snapshot, or
+   * clears it when `persisted` is `null` (ticket 81d8267). The snapshot is
+   * authoritative: entries absent from it are pruned, and a legacy snapshot
+   * without the field hydrates empty.
+   *
+   * Every candidate is re-checked defensively (own-property read, non-empty
+   * string fields, plain-object payload, unique id and case-insensitive
+   * unique name) and re-digested; a candidate that fails any check — or whose
+   * payload is not plain finite JSON data — is dropped fail-closed, so a
+   * hostile or corrupt snapshot can never widen or poison the library. The id
+   * counter is seeded past the highest persisted `saved_payload_<n>` suffix so
+   * later saves cannot collide with restored entries.
+   *
+   * @param persisted - Snapshot whose library wins, or null to drop every entry.
+   */
+  #restoreSavedInstancePayloads(persisted: SandboxPersistedState | null): void {
+    const restored: SavedInstancePayload[] = [];
+    const seenIds = new Set<string>();
+    const seenNames = new Set<string>();
+    let maxCounter = 0;
+    const source = persisted && Object.prototype.hasOwnProperty.call(persisted, 'savedInstancePayloads')
+      ? persisted.savedInstancePayloads
+      : undefined;
+    if (Array.isArray(source)) {
+      for (const candidate of source) {
+        if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
+        const record = candidate as PersistedSavedInstancePayload;
+        const id = typeof record.id === 'string' ? record.id.trim() : '';
+        const name = typeof record.name === 'string' ? record.name.trim() : '';
+        const templateId = typeof record.templateId === 'string' ? record.templateId.trim() : '';
+        const templateVersion = typeof record.templateVersion === 'string' ? record.templateVersion.trim() : '';
+        const savedAt = typeof record.savedAt === 'string' ? record.savedAt.trim() : '';
+        const payload = record.payload;
+        if (!id || !name || !templateId || !templateVersion || !savedAt) continue;
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) continue;
+        if (seenIds.has(id) || seenNames.has(name.toLowerCase())) continue;
+        let digest: string;
+        try {
+          digest = payloadDigest(payload);
+        } catch {
+          continue; // Not plain JSON data: drop the entry, keep the library.
+        }
+        seenIds.add(id);
+        seenNames.add(name.toLowerCase());
+        const counterMatch = /^saved_payload_(\d+)$/.exec(id);
+        if (counterMatch) {
+          maxCounter = Math.max(maxCounter, Number.parseInt(counterMatch[1], 10));
+        }
+        restored.push(Object.freeze({
+          id,
+          name,
+          templateId,
+          templateVersion,
+          digest,
+          payload: freezeSavedInstancePayloadValue(payload as Record<string, unknown>),
+          savedAt
+        }));
+      }
+    }
+    this.#savedInstancePayloads = restored.slice(0, SAVED_INSTANCE_PAYLOAD_MAX_ENTRIES);
+    this.#savedInstancePayloadCounter = maxCounter;
+    this.#notifySavedInstancePayloads();
+  }
+
+  /**
+   * Notifies every saved-payload library listener (ticket 81d8267). A failing
+   * listener never blocks a mutation.
+   */
+  #notifySavedInstancePayloads(): void {
+    for (const listener of [...this.#savedInstancePayloadListeners]) {
+      try {
+        listener();
+      } catch {
+        // A failing listener never blocks a library mutation.
+      }
+    }
   }
 
   /**

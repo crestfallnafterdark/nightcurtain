@@ -30,6 +30,7 @@
  * @decision Additive MOD-20 topology fields `activePresetId`/`customPresets` round-trip as plain data: serialization emits them from session metadata, validation drops structurally invalid values instead of failing the snapshot, and legacy snapshots without the fields load byte-compatibly
  * @decision Additive realm-registry field `realms` round-trips as plain data: serialization emits only the canonical record fields from session metadata, validation drops structurally invalid entries instead of failing the snapshot, and legacy snapshots without the field load byte-compatibly with an empty registry
  * @decision Additive authority fields `metaAuthorityGrants`/`templateAuthorityTrust` round-trip as plain data emitted from session metadata only when non-empty (legacy snapshots stay byte-identical) and are strictly validated fail-closed: malformed shapes reject the snapshot, proto-pollution keys are rejected by the recursive scan, and hydration never derives authority from either field — grants are re-applied through the composition root's lifecycle-gated restore (unknown/recycled refs skipped) and trust only auto-approves exact declared matches at a later launch
+ * @decision Additive saved hydration-payload library field `savedInstancePayloads` round-trips as plain data emitted from session metadata only when non-empty (legacy snapshots stay byte-identical): malformed, duplicate-id, and oversize entries are dropped individually, the entry list is capped, payloads are never validated as launch contracts at load (only at attach), and hydration replaces the in-memory library with the persisted set (absent field → empty)
  * @decision Persistence does not re-wire runtime timer listeners on restore; the `MessagingBus` timer-listener lifecycle is owned by `AgentRuntime`
  */
 
@@ -80,6 +81,22 @@ export const SANDBOX_PERSISTENCE_VERSION = '1.0.0' as const;
  * ```
  */
 export { SANDBOX_STATE_STORAGE_KEY } from './localStorage.ts';
+
+/**
+ * Maximum number of saved hydration payloads one snapshot may carry (ticket
+ * 81d8267). The store refuses a save at the cap (`ERR_STORE_PAYLOAD_LIBRARY_FULL`)
+ * so operator work is never silently evicted, and snapshot validation
+ * truncates a hostile or corrupt list to its first cap entries.
+ */
+export const SAVED_INSTANCE_PAYLOAD_MAX_ENTRIES: number = 50;
+
+/**
+ * Serialized byte cap for one saved hydration payload (ticket 81d8267): the
+ * UTF-8 length of the payload's JSON text may not exceed 2 MiB, so a saved
+ * library cannot crowd the shared localStorage snapshot quota. Oversize
+ * payloads are refused at save time and dropped individually on load.
+ */
+export const SAVED_INSTANCE_PAYLOAD_MAX_BYTES: number = 2 * 1024 * 1024;
 
 /**
  * Frozen dictionary of standardized persistence error codes for programmatic
@@ -267,6 +284,32 @@ export interface PersistedImportedRealmTemplate {
 }
 
 /**
+ * Structural shape of one saved hydration payload carried by the persisted
+ * snapshot (ticket 81d8267). Deliberately type-local: persistence never
+ * imports the `sandboxStore` module (the store owns library semantics), so the
+ * shape is declared here as plain data. The payload is the operator-authored
+ * format-v2 package value; it is descriptive data only — payloads are
+ * re-validated against the effective template contract at attach time, never
+ * at load. Additive optional snapshot data: absent while the library is empty
+ * (legacy snapshots load byte-compatibly), and structurally invalid,
+ * duplicate-id, or oversize entries are dropped during validation.
+ */
+export interface PersistedSavedInstancePayload {
+  /** Stable library id under which the payload is listed. */
+  readonly id: string;
+  /** Operator-chosen display name. */
+  readonly name: string;
+  /** Template id the payload targets. */
+  readonly templateId: string;
+  /** Effective template version the payload validated against (`sha256:<hex>`). */
+  readonly templateVersion: string;
+  /** ISO-8601 save timestamp. */
+  readonly savedAt: string;
+  /** Authored format-v2 payload value (plain JSON data, bounded by the byte cap). */
+  readonly payload: Readonly<Record<string, unknown>>;
+}
+
+/**
  * Structural shape of one extension transport hint carried by a persisted
  * install record: `{ kind: 'http', url }`, `{ kind: 'stdio', command, args? }`,
  * or `{ kind: 'pack', source }`. Declared here as plain data so a registry
@@ -397,6 +440,14 @@ export interface SessionMetadata {
    * hydration.
    */
   readonly importedRealmTemplates?: readonly PersistedImportedRealmTemplate[];
+  /**
+   * Saved hydration-payload library captured from the composition root's
+   * store library (ticket 81d8267). Additive optional field: absent while the
+   * library is empty (legacy snapshots load byte-compatibly), invalid entries
+   * are dropped on validation, and hydration replaces the in-memory library
+   * with the persisted set (an absent field hydrates empty).
+   */
+  readonly savedInstancePayloads?: readonly PersistedSavedInstancePayload[];
 }
 
 /**
@@ -909,6 +960,15 @@ export interface SandboxPersistedState {
    * matches at a later launch).
    */
   readonly templateAuthorityTrust?: PersistedTemplateAuthorityTrust;
+  /**
+   * Saved hydration-payload library (additive optional field, ticket 81d8267):
+   * operator-named authored payloads persisted from the store's library.
+   * Absent while the library is empty, so legacy snapshots stay byte-identical;
+   * malformed, duplicate-id, and oversize entries are dropped and the list is
+   * capped during validation, and payloads are re-validated only at attach,
+   * never at load.
+   */
+  readonly savedInstancePayloads?: readonly PersistedSavedInstancePayload[];
 }
 
 // ============================================================================
@@ -1432,6 +1492,117 @@ function serializeImportedRealmTemplate(
 }
 
 /**
+ * UTF-8 byte length of one saved payload's JSON text. Returns `null` when the
+ * value does not serialize (cyclic or otherwise hostile), which the caller
+ * treats as a malformed entry.
+ *
+ * @param payload - Candidate authored payload value.
+ * @returns The serialized byte length, or `null` when it cannot be measured.
+ */
+function savedPayloadSerializedBytes(payload: unknown): number | null {
+  let text: string;
+  try {
+    const serialized = JSON.stringify(payload);
+    if (typeof serialized !== 'string') return null;
+    text = serialized;
+  } catch {
+    return null;
+  }
+  let bytes = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const code = text.charCodeAt(index);
+    if (code < 0x80) {
+      bytes += 1;
+    } else if (code < 0x800) {
+      bytes += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff) {
+      bytes += 4;
+      index += 1;
+    } else {
+      bytes += 3;
+    }
+  }
+  return bytes;
+}
+
+/**
+ * Structural and size check for one persisted saved-payload entry (ticket
+ * 81d8267): non-empty string `id`/`name`/`templateId`/`templateVersion`/
+ * `savedAt`, a plain-object `payload` (never an array), and a serialized
+ * payload within `SAVED_INSTANCE_PAYLOAD_MAX_BYTES`. Entries failing any check
+ * are dropped individually by validation.
+ *
+ * @param value - Candidate saved-payload entry.
+ * @returns True when the entry round-trips as a saved-payload record.
+ */
+function isPersistedSavedInstancePayload(value: unknown): value is PersistedSavedInstancePayload {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const entry = value as Record<string, unknown>;
+  for (const field of ['id', 'name', 'templateId', 'templateVersion', 'savedAt'] as const) {
+    if (typeof entry[field] !== 'string' || !(entry[field] as string).trim()) return false;
+  }
+  const payload = entry.payload;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
+  const bytes = savedPayloadSerializedBytes(payload);
+  return bytes !== null && bytes <= SAVED_INSTANCE_PAYLOAD_MAX_BYTES;
+}
+
+/**
+ * Copies one saved-payload entry into its persisted form: the canonical fields
+ * verbatim, with a fresh JSON clone of the authored payload so a store
+ * reference is never aliased.
+ *
+ * @param entry - Structurally valid saved-payload entry.
+ * @returns Plain JSON-serializable saved-payload record.
+ */
+function serializeSavedInstancePayload(
+  entry: PersistedSavedInstancePayload
+): PersistedSavedInstancePayload {
+  return {
+    id: entry.id,
+    name: entry.name,
+    templateId: entry.templateId,
+    templateVersion: entry.templateVersion,
+    savedAt: entry.savedAt,
+    payload: JSON.parse(JSON.stringify(entry.payload)) as Record<string, unknown>
+  };
+}
+
+/**
+ * Normalizes the additive saved-payload library field of an already
+ * structurally valid snapshot (ticket 81d8267): invalid, duplicate-id, and
+ * overflow entries are dropped individually (first occurrence wins, the list
+ * keeps its first `SAVED_INSTANCE_PAYLOAD_MAX_ENTRIES`), an absent or `null`
+ * value is preserved verbatim, and a defined non-array value has the field
+ * dropped. Returns the input reference when no field needs dropping, so clean
+ * legacy snapshots keep their exact identity.
+ *
+ * @param candidate - Structurally valid snapshot record.
+ * @returns The input reference, or a shallow copy with invalid entries dropped.
+ */
+function normalizeSavedInstancePayloadSnapshotFields(candidate: Record<string, unknown>): Record<string, unknown> {
+  const source = candidate.savedInstancePayloads;
+  if (source === undefined || source === null) return candidate;
+  if (!Array.isArray(source)) {
+    const normalized: Record<string, unknown> = { ...candidate };
+    delete normalized.savedInstancePayloads;
+    return normalized;
+  }
+
+  const seenIds = new Set<string>();
+  const payloads: unknown[] = [];
+  for (const entry of source) {
+    if (!isPersistedSavedInstancePayload(entry)) continue;
+    if (seenIds.has(entry.id)) continue;
+    if (payloads.length >= SAVED_INSTANCE_PAYLOAD_MAX_ENTRIES) continue;
+    seenIds.add(entry.id);
+    payloads.push(entry);
+  }
+  if (payloads.length === source.length) return candidate;
+  return { ...candidate, savedInstancePayloads: payloads };
+}
+
+/**
  * Structural check for one persisted extension install record (extension
  * wave): a non-empty string `id`, `kind` `'mcp'`/`'pack'`, a shape-valid
  * transport hint, known `status`/`installSource`, a finite numeric
@@ -1921,6 +2092,12 @@ function normalizeAgentDiagnostics(entry: unknown): unknown {
  * 4. Optional sections when present: `recycleBin` (same per-entry checks as
  *    `agents`), `virtualFs` (workspace-ID and file-map shape), `messagingBus`,
  *    `scheduledTimers`, `worldClock`, and `agentDraftInputs`.
+ * 5. Additive optional fields when present: MOD-20 presets, realm records,
+ *    extension install records, imported templates, and the saved
+ *    hydration-payload library are normalized — invalid entries are dropped
+ *    individually and the saved-payload list is capped — while the Wave U
+ *    authority fields (`metaAuthorityGrants`/`templateAuthorityTrust`) fail
+ *    closed on any malformed shape.
  *
  * Purity: Pure inspection function. Never throws; returns `{ valid: false, error, code }` on invalid input.
  *
@@ -2218,10 +2395,12 @@ function inspectSandboxState(state: unknown): ValidationResult {
   // load (absent/invalid -> dropped; old snapshots byte-compatible).
   return {
     valid: true,
-    state: normalizeActiveAgentKeyField(
-      normalizeImportedTemplateSnapshotFields(
-        normalizeExtensionSnapshotFields(
-          normalizeRealmSnapshotFields(normalizePresetSnapshotFields(candidate))
+    state: normalizeSavedInstancePayloadSnapshotFields(
+      normalizeActiveAgentKeyField(
+        normalizeImportedTemplateSnapshotFields(
+          normalizeExtensionSnapshotFields(
+            normalizeRealmSnapshotFields(normalizePresetSnapshotFields(candidate))
+          )
         )
       )
     ) as unknown as SandboxPersistedState
@@ -2268,7 +2447,7 @@ function normalizeActiveAgentKeyField(candidate: Record<string, unknown>): Recor
  * 6. Exports MessagingBus audit logs and inboxes via `messagingBus.exportSnapshot()`.
  * 7. Exports active one-shot scheduled timers via `runtime.exportSchedules()`.
  * 8. Exports WorldClock simulation seconds and events via `worldClock.exportSnapshot()`.
- * 9. Attaches UI session metadata (`activeAgentId`, `activeFsWorkspace`, `activeTab`, `agentDraftInputs`), plus the additive MOD-20 preset topology (`activePresetId` and credential-stripped `customPresets`), the additive realm-registry topology (`realms`), and the additive imported-template topology (`importedRealmTemplates`) when supplied.
+ * 9. Attaches UI session metadata (`activeAgentId`, `activeFsWorkspace`, `activeTab`, `agentDraftInputs`), plus the additive MOD-20 preset topology (`activePresetId` and credential-stripped `customPresets`), the additive realm-registry topology (`realms`), the additive imported-template topology (`importedRealmTemplates`), and the additive saved hydration-payload library (`savedInstancePayloads`, capped and omitted when empty) when supplied.
  *
  * @param env - Live `AgentRuntime` instance or `PersistenceEnvironmentObject` container.
  * @param meta - Optional UI session metadata (active agent, tab, workspace, draft inputs).
@@ -2413,6 +2592,18 @@ export function serializeRuntimeEnvironment(
     ? sessionMeta.importedRealmTemplates.filter(isPersistedImportedRealmTemplate).map(serializeImportedRealmTemplate)
     : [];
 
+  // Additive saved hydration-payload library (ticket 81d8267): the composition
+  // root supplies the operator's saved entries; records are emitted as plain
+  // data and omitted when empty so an empty library keeps legacy wire bytes
+  // unchanged. Entries beyond the caps are excluded here and dropped again on
+  // load, so a hostile caller never widens the persisted library.
+  const savedInstancePayloads = Array.isArray(sessionMeta.savedInstancePayloads)
+    ? sessionMeta.savedInstancePayloads
+        .filter(isPersistedSavedInstancePayload)
+        .slice(0, SAVED_INSTANCE_PAYLOAD_MAX_ENTRIES)
+        .map(serializeSavedInstancePayload)
+    : [];
+
   // Export scheduled timers snapshot
   const scheduledTimers = actualRuntime && typeof actualRuntime.exportSchedules === 'function'
     ? actualRuntime.exportSchedules()
@@ -2451,7 +2642,8 @@ export function serializeRuntimeEnvironment(
     ...(customPresets.length > 0 ? { customPresets } : {}),
     ...(realms.length > 0 ? { realms } : {}),
     ...(extensions.length > 0 ? { extensions } : {}),
-    ...(importedRealmTemplates.length > 0 ? { importedRealmTemplates } : {})
+    ...(importedRealmTemplates.length > 0 ? { importedRealmTemplates } : {}),
+    ...(savedInstancePayloads.length > 0 ? { savedInstancePayloads } : {})
   };
 }
 
