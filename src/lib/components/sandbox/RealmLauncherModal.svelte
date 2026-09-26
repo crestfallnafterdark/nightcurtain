@@ -487,7 +487,12 @@
   let fileSlots = $derived(buildRealmReviewFileSlots(selectedTemplate, bundleFiles, {
     payload: attachedPayload,
     inputs: inputProjection.launchInputs,
-    edits: fileEdits
+    edits: fileEdits,
+    // a997a8a item 2: the review validates against the effective bundle
+    // version; a mismatching payload resolves content only after the explicit
+    // mismatch confirmation (the same condition the launch gate blocks on).
+    currentVersion: effectiveBundleVersion,
+    allowVersionMismatch: mismatchConfirmed
   }));
   let editedFileSlotCount = $derived(fileSlots.filter((slot) => slot.edited).length);
   let conflictedFileSlotCount = $derived(fileSlots.filter((slot) => slot.conflict).length);
@@ -2291,11 +2296,14 @@
 
                 <div class="disclosure-grid">
                   {#each disclosureRows as disclosure (disclosure.key)}
-                    <div class="meta-line disclosure-line">
-                      <span class="meta-label">{disclosure.label}</span>
-                      <span class="meta-value disclosure-value" class:disclosure-empty={!disclosure.present}>
-                        {disclosure.value}
-                      </span>
+                    <div class="disclosure-line">
+                      <div class="meta-line">
+                        <span class="meta-label">{disclosure.label}</span>
+                        <span class="meta-value disclosure-value" class:disclosure-empty={!disclosure.present}>
+                          {disclosure.value}
+                        </span>
+                      </div>
+                      <span class="disclosure-note">{disclosure.disclaimer}</span>
                     </div>
                   {/each}
                 </div>
@@ -2857,6 +2865,12 @@
             input destinations resolve from the launch inputs (then the attached payload) and are edited at the input
             field — this dialog is read-only.
           </p>
+          {#if payloadPreview.mismatch && !mismatchConfirmed}
+            <p class="field-hint payload-input-note">
+              The attached payload pins a different template version — confirm the mismatch in the review before its
+              content resolves here.
+            </p>
+          {/if}
           {#if fileSlots.length === 0}
             <p class="rows-empty">This template declares no placements.</p>
           {/if}
@@ -3895,6 +3909,15 @@
 
   .disclosure-line .meta-label {
     min-width: 110px;
+  }
+
+  .disclosure-note {
+    display: block;
+    margin-top: 0.1rem;
+    font-size: 0.68rem;
+    line-height: 1.35;
+    color: var(--text-muted);
+    opacity: 0.85;
   }
 
   .disclosure-value {
