@@ -26,12 +26,14 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 - `INV-PROTECTION` — ids declared protected at construction are never removed: removeRealm returns a `false` no-op without persisting or emitting, while list/get/add/update stay fully available for them.
 - `INV-EVENTS` — addRealm/updateRealm/removeRealm emit synchronously after the mutation; listeners observe the post-mutation state, listener exceptions are isolated, and unsubscribe is idempotent.
 - `INV-PURITY` — No ambient I/O, no import-time side effects, deterministic outputs; persistence flows only through the injected adapter, whose failures never propagate to callers.
-- `INV-CLOSED-SHAPE` — Only the canonical fields id/name/description/color/templateId/createdAt are retained; unknown fields on ingested records are dropped instead of stored.
+- `INV-CLOSED-SHAPE` — Only the canonical fields id/name/description/color/templateId/instance/extensions/createdAt are retained; unknown fields on ingested records are dropped instead of stored.
+- `INV-EXTENSIONS` — Realm extension attachments are validated through the extension registry's attachment vocabulary; updateRealm refuses a malformed or duplicate attachment list, while an ingested record drops malformed attachment entries individually and never loses the realm record.
 
 ## Decisions
 
 - Realm records are plain data with string-only descriptive fields and a finite numeric createdAt; add/update validation is exact-shape and the registry never interprets color/templateId semantics
 - storage.save receives the full frozen registry projection after every mutation; adapter load overlays records by id (last-wins), appends unknown ids, and load/save failures degrade to the in-memory registry
+- Attachments live on the realm record (realm-local, realm-managed) rather than in a parallel store map, so realm deletion, rollback, and persistence carry them; the extension registry owns only their shape and validation
 
 ## Surface
 
@@ -49,9 +51,21 @@ export interface RealmChangeEvent {
 export type RealmChangeType = 'realm-added' | 'realm-updated' | 'realm-removed';
 
 // @public
+export interface RealmExtensionAttachment {
+    readonly approvedAt: string;
+    readonly approvedBy: 'operator';
+    readonly extensionId: string;
+    // Warning: (ae-forgotten-export) The symbol "ExtensionAttachmentStatus" needs to be exported by the entry point index.d.ts
+    readonly status: ExtensionAttachmentStatus;
+    // Warning: (ae-forgotten-export) The symbol "ExtensionToolSelection" needs to be exported by the entry point index.d.ts
+    readonly toolSelection: ExtensionToolSelection;
+}
+
+// @public
 export interface RealmInstanceProvenance {
     readonly inputHashes: Readonly<Record<string, string>>;
     readonly launchedAt: string;
+    readonly missingExtensions?: readonly string[];
     readonly packageDigest?: string;
     readonly resolvedTools?: Readonly<Record<string, string>>;
     readonly seedPaths: readonly string[];
@@ -64,6 +78,7 @@ export interface RealmRecord {
     color?: string;
     createdAt: number;
     description?: string;
+    extensions?: readonly RealmExtensionAttachment[];
     id: string;
     instance?: RealmInstanceProvenance;
     name: string;
@@ -96,6 +111,7 @@ export interface RealmRegistryStorageAdapter {
 export interface RealmUpdatePatch {
     color?: string | null;
     description?: string | null;
+    extensions?: readonly RealmExtensionAttachment[] | null;
     instance?: RealmInstanceProvenance | null;
     name?: string;
     templateId?: string | null;
@@ -131,18 +147,33 @@ Synchronous notification published after a registry mutation.
 
 Registry mutation kind carried by RealmChangeEvent.
 
+### `RealmExtensionAttachment` — interface
+
+One realm-local attachment: the operator's statement that a realm accepts a globally installed extension, with the realm-level tool selection and the approval stamp.
+
+Attachments live on the realm record (realm-local, realm-managed), so realm deletion and persistence carry them; this module owns the shape and validation.
+
+#### Members
+
+- **`approvedAt`** — ISO-8601 timestamp of the operator approval that created the attachment.
+- **`approvedBy`** — Approval principal; always the operator.
+- **`extensionId`** — Id of the globally installed extension this realm attaches.
+- **`status`** — Activation state of the attachment.
+- **`toolSelection`** — Realm-level tool selection: `'all'` or an explicit sanitized call-name list.
+
 ### `RealmInstanceProvenance` — interface
 
 Launch provenance recorded on a Realm record when the Realm was launched from a Realm template (Realm Template Format v1 §5 step 5; Wave T, ticket 0df20ae).
 
-Provenance is descriptive metadata, never authority: it records *which* template revision an instance came from and *what* launch inputs it was hydrated with, as hashes only — raw input values and template/package content are never copied onto the record. `resolvedTools` is reserved for the providers wave (Wave P): it persists and hydrates when present but this wave never sets it.
+Provenance is descriptive metadata, never authority: it records *which* template revision an instance came from and *what* launch inputs it was hydrated with, as hashes only — raw input values and template/package content are never copied onto the record. `resolvedTools` and `missingExtensions` are written by the template launch resolution step: `resolvedTools` maps a sanitized model-facing call name to the extension id that resolved it, and `missingExtensions` lists the requested extension ids that did not resolve — both secret-free plain strings.
 
 #### Members
 
 - **`inputHashes`** — Per-input content hashes keyed by declared input id (no raw values).
 - **`launchedAt`** — ISO-8601 timestamp of the launch.
+- **`missingExtensions`** — Requested extension ids that did not resolve at launch (not installed or not attached), in declared request order. Persisted and hydrated verbatim when present.
 - **`packageDigest`** — Content hash of the canonical hydration-package serialization, when a package was attached.
-- **`resolvedTools`** — Reserved for Wave P: resolved capability id → provider binding (`requirement → publisher/pack@version#hash`). Persisted and hydrated verbatim when present; this wave never sets it.
+- **`resolvedTools`** — Resolved extension tools recorded at launch: sanitized model-facing call name → extension id. Persisted and hydrated verbatim when present.
 - **`seedPaths`** — Template-seed destination paths written at launch, in write order (empty when no seed ran).
 - **`templateId`** — Template id the Realm was launched from.
 - **`templateVersion`** — Effective template bundle content version (`sha256:<hex>`) at launch.
@@ -158,8 +189,9 @@ Records are closed-shape plain data (the registry copies only the canonical fiel
 - **`color`** — Optional UI accent color; presentation-only, never engine semantics.
 - **`createdAt`** — Epoch milliseconds when the Realm record was created.
 - **`description`** — Optional operator description.
+- **`extensions`** — Optional realm-local extension attachments: which globally installed extensions this Realm accepts, with the realm-level tool selection, activation status, and approval stamp. Frozen plain data; never authority by itself.
 - **`id`** — Stable registry key; non-empty and unique per registry.
-- **`instance`** — Optional launch provenance for template-launched Realms (Wave T, ticket 0df20ae): template revision, package digest, input hashes, seeded paths, and the launch timestamp. Frozen plain data; never authority.
+- **`instance`** — Optional launch provenance for template-launched Realms (Wave T, ticket 0df20ae): template revision, package digest, input hashes, seeded paths, launch resolution results, and the launch timestamp. Frozen plain data; never authority.
 - **`name`** — User-visible display name; non-empty.
 - **`templateId`** — Optional template id the Realm was launched from (template wave).
 
@@ -204,16 +236,17 @@ Patch accepted by `RealmRegistry.updateRealm()`. Only the provided fields change
 
 - **`color`** — Replacement accent color, or `null` to clear it.
 - **`description`** — Replacement description, or `null` to clear it.
+- **`extensions`** — Replacement extension attachments, or `null` to clear them.
 - **`instance`** — Replacement launch provenance, or `null` to clear it.
 - **`name`** — Replacement display name; must be a non-empty string when present.
 - **`templateId`** — Replacement template id, or `null` to clear it.
 
 ## Doc coverage
 
-- Top-level exports: 9
-- Declarations (exports + members): 40
-- Documented declarations: 40 / 40 (100%)
+- Top-level exports: 10
+- Declarations (exports + members): 49
+- Documented declarations: 49 / 49 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
-- Referenced but not exported (`ae-forgotten-export`): none
+- Referenced but not exported (`ae-forgotten-export`): `ExtensionAttachmentStatus`, `ExtensionToolSelection`
 - Unresolved `{@link}` targets (`ae-unresolved-link`): 0 (policy `none`; see `scripts/api_reports.mjs`)

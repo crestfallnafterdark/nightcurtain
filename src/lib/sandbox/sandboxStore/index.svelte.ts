@@ -37,7 +37,7 @@
  * @decision Realm deletion counts memberships with the same trim semantics as the realm grouping/resolution (`resolveMemberRealmId`): a hydrated `'  realm_x  '` member blocks the default deletion of `realm_x` and is purged by the recursive override, so a padded membership can never be orphaned by a removed record
  * @decision Generic protection is enforced at the registry boundary: the store constructs the registry with `protectedIds: [realm_generic]`, so `removeRealm(realm_generic)` is a `false` no-op on every public surface including the raw `getRealmRegistry()` API, while renames and every other management operation stay available and reconciliation can never prune the seeded default
  * @decision The H1 heal reads only the persisted capability selectors as data and applies them through the runtime's gated config-update path with the store's operator principal (the runtime's host principal), while the snapshot privilege/parentage claims are ignored entirely — capability is restored, authority is never re-derived from the snapshot
- * @decision Template launch resolves baked templates by id and fails closed for unknown ids; member launch forwards the materialized resolved grant list as `allowedTools` (the aggregate `subagent_management` sentinel preserved), the declared preset name as inert `toolPreset` metadata, and the per-key preset binding (winning over the spec `modelPresetId`) as `presetId` resolved through the owned preset catalog — no model literals
+ * @decision Template launch resolves baked templates by id and fails closed for unknown ids; member launch forwards the materialized resolved internal grant list as `allowedTools` — extension-bound derived call names are excluded because they belong to the extension grant channel — the declared preset name as inert `toolPreset` metadata, and the per-key preset binding (winning over the spec `modelPresetId`) as `presetId` resolved through the owned preset catalog — no model literals
  * @decision A failed template launch rolls back by purging every active member of the freshly created Realm under the operator principal and then removing the record through the recursive `deleteRealm` override (so a leftover member from a failed purge is retried by the same route); the thrown `ERR_STORE_REALM_LAUNCH_FAILED` error carries the original failure as `cause` plus the rollback report (`realmId`, `templateId`, `failedAgentId`, `rolledBack`, `terminatedMembers`, `evictedSeedFiles`, `rollbackFailures`), so a half-realm is never left un-described
  * @decision `launchRealmFromTemplate` applies a template's resolved launch plan inside the same atomic try: placement writes group by target in first-appearance order (one `seedRealm` call per target, reusing its fail-closed path/target validation and per-target write record), then every directive is delivered independently as an operator-attributed `source: 'realm_seed'` mailbox message addressed realm-exactly, `seed: false` skips placements and directives entirely, and a failure in either phase rolls back exactly like a member failure — including best-effort eviction of the files already written, reported as `evictedSeedFiles` (member private workspaces are evicted by the member purge; a realm-global partition is a VFS-reserved key, so its seeded files are deleted individually and an empty container key can remain)
  * @decision The launch catalog exposes the normalized format-v2 template (`normalizeTemplate` of the authored bundle template) through `listRealmTemplates`/`getRealmTemplateBundle`, so the launcher/review surfaces see declared inputs, placements, and directives; the authored form stays the identity source — imports persist and export re-emit their authored transport payload verbatim, shipped bundles re-serialize their authored template + files, and the effective template version is the authored-form pin (the import's parsed version, else `templateBundleVersion`), never a hash of the normalized model
@@ -53,8 +53,11 @@
  * @invariant Template registry resolution: the effective launch catalog resolves shipped (baked demo/embedded bundles plus the `realmTemplateBundles` host injection) → runtime imports, replacing in place by template id, with re-import replacing the previous import so every id has exactly one effective entry; `listRealmTemplates`/`getRealmTemplateBundle`/`launchRealmFromTemplate`/`exportRealmTemplate` all read that one catalog and `listRealmTemplateSources` labels each entry's origin (`shipped`/`imported`/`replacesShipped`).
  * @invariant Template registry honesty: `importRealmTemplate`/`deleteRealmTemplate` mutate the effective catalog and persist the snapshot synchronously; a failed write (quota/unavailable storage) rolls the mutation back and surfaces the typed `ERR_STORE_TEMPLATE_PERSIST_FAILED`, so the registry is never silently in-memory-only. Imports are capped at 2 MiB per bundle and 3 MiB total (`ERR_STORE_TEMPLATE_TOO_LARGE`), persisted as canonical transport payloads, and re-parsed/re-capped fail-closed on hydration without ever rewriting persisted bytes. `previewRealmTemplateImport` runs the identical parse → cap → label pipeline with zero side effects (`dry_run`), so preview and import can never disagree.
  * @invariant Publishing surface: the store is the host-side realm publishing composition root — it exposes the frozen `RealmPublishingPort` (real import path, effective-catalog resolution, session candidate store) to the store-owned runtime; pending instance payloads are session-only and cleared by a reset; approved template authorities are applied under the operator principal as ordinary registry grants (`metaAuthorityGrants`, canonical identity keys, hydration re-applied) and a `templateAuthorityTrust` record auto-approves only exact declared matches at a later launch. A template declaring an authority id unknown to this host fails the launch closed (`ERR_TEMPLATE_AUTHORITY_UNSUPPORTED`), approvals beyond declarations and malformed approvals are rejected (`ERR_STORE_INVALID_PARAMS`), and grant-free/trust-free snapshots keep every existing field and byte.
- * @invariant Realm launch fail-closed gates: a template whose `toolContract`/`providers` are non-empty is refused before any side effect with `ERR_TEMPLATE_PROVIDERS_UNSUPPORTED`, and an attached payload/package (or the operator-assembled explicit inputs) is validated against the effective template contract — including the pinned version — before the Realm record exists, so launch mismatches only with the explicit `allowVersionMismatch` confirmation, which rides the receipt as a warning.
- * @decision Instance provenance is hashes and paths only: a successful template launch records `RealmRecord.instance` with the authored `templateVersion`, the canonical payload digest (`payloadDigest` over the attached payload, when one was attached), per-input hashes over each supplied value's canonical tagged JSON, the placement paths the launch actually wrote, and `launchedAt`; raw input values, package content, and credentials never reach the record, and `resolvedTools` stays reserved, persisting/hydrating when present
+ * @invariant Realm launch resolution: a provider-bearing template launches — the retired providers gate no longer refuses it — and its requested extensions plus `<providerId>::<serverToolName>` references resolve against the global install registry and the Realm's attachments: installed-and-approved requests attach under the operator principal, unresolved requests ride the receipt's missing-extension disclosure and `instance.missingExtensions`, resolved tools are recorded as `instance.resolvedTools` (sanitized call name → extension id), and an attached payload/package (or the operator-assembled explicit inputs) is still validated against the effective template contract — including the pinned version — before the Realm record exists, so launch mismatches only with the explicit `allowVersionMismatch` confirmation, which rides the receipt as a warning.
+ * @invariant Extension surface: the store is the extension composition root — global install records live in one injected registry persisted additively as `extensions`, realm attachments ride the realm records, install/remove/attach/detach validate and emit `extension_installed`/`extension_removed`/`extension_attached`/`extension_detached` audit events on the runtime stream, `removeExtension` refuses an extension any Realm still attaches, a tampered snapshot attachment for an unknown extension hydrates as `unavailable`, and nothing ever connects or grants runtime authorization from these records.
+ * @decision Instance provenance is hashes, paths, and resolved tool ids only: a successful template launch records `RealmRecord.instance` with the authored `templateVersion`, the canonical payload digest (`payloadDigest` over the attached payload, when one was attached), per-input hashes over each supplied value's canonical tagged JSON, the placement paths the launch actually wrote, `launchedAt`, the resolved extension tools (`resolvedTools`: sanitized call name → extension id) and the unresolved requested extension ids (`missingExtensions`); raw input values, package content, and credentials never reach the record
+ * @decision The store is the extension composition root: it builds one install registry over a `{ load, save }` adapter backed by the sandbox snapshot (`extensions`), seeds it from the persisted field before construction, reconciles hydration through the registry's validated `reconcile` path, and exposes install/remove (global) plus attach/detach (realm) methods that validate against installed records and schedule the existing debounced save; realm attachments are realm-local `RealmRecord.extensions` entries, so realm deletion, rollback, and persistence carry them without a parallel store map
+ * @decision `launchRealmFromTemplate` extension approvals mirror the Wave U authority approvals: `extensionApprovals` entries must match a declared template request exactly, absent approval is a decline, only installed-and-approved requests attach (an approval of an uninstalled request attaches nothing and stays disclosed), attachments are written only on a fully successful launch with the operator approval stamp and the realm-level `'all'` selection, and no extension grant is passed to the runtime from this wave
  * 
  * @example
  * ```typescript
@@ -92,6 +95,19 @@ import type { ModelPreset, ModelPresetSourcePort, PresetCatalog, PresetModelConf
 import { createRealmRegistry } from '../realmRegistry/index.ts';
 import type { RealmInstanceProvenance, RealmRecord, RealmRegistry, RealmUpdatePatch } from '../realmRegistry/index.ts';
 import {
+  createExtensionRegistry,
+  normalizeRealmExtensionAttachment
+} from '../extensionRegistry/index.ts';
+import type {
+  ExtensionInstallRecord,
+  ExtensionKind,
+  ExtensionRegistry,
+  ExtensionRequest,
+  ExtensionResolution,
+  ExtensionTransportHint,
+  RealmExtensionAttachment
+} from '../extensionRegistry/index.ts';
+import {
   AGENT_AUTHORITIES,
   BAKED_TEMPLATE_BUNDLES,
   hashText,
@@ -101,7 +117,6 @@ import {
   payloadDigest,
   serializeTemplateBundle,
   templateBundleVersion,
-  templateRequiresProviders,
   templateUnsupportedAuthorities,
   validatePayload
 } from '../realmCatalog/index.ts';
@@ -178,10 +193,14 @@ type AuthorityGrantSnapshot = SandboxPersistedState & {
  * - `ERR_STORE_REALM_NOT_EMPTY`: `deleteRealm` was called on a Realm that still has active or recycled members (Wave R; use the recursive override).
  * - `ERR_STORE_REALM_PROTECTED`: `deleteRealm` targeted the seeded Generic default Realm, which can never be deleted.
  * - `ERR_STORE_REALM_DELETE_FAILED`: a recursive Realm deletion could not purge every member, so the record was left in place (fail-closed; the error carries a report).
- * - `ERR_TEMPLATE_PROVIDERS_UNSUPPORTED`: `launchRealmFromTemplate` targeted a template whose `toolContract` requirements or `providers` are non-empty; launch is blocked fail-closed until the providers wave resolves capabilities.
+ * - `ERR_TEMPLATE_PROVIDERS_UNSUPPORTED`: retired providers-gate code; `launchRealmFromTemplate` no longer emits it (provider-bearing templates resolve against installed and attached extensions and launch with missing-extension disclosure).
  * - `ERR_TEMPLATE_AUTHORITY_UNSUPPORTED`: `launchRealmFromTemplate` targeted a template declaring a publishing authority id unknown to this host; launch is blocked fail-closed while import/validation/review accept the declaration (providers precedent).
  * - `ERR_STORE_TEMPLATE_TOO_LARGE`: `importRealmTemplate` exceeded the per-bundle or total imported-template byte budget.
  * - `ERR_STORE_TEMPLATE_PERSIST_FAILED`: the registry mutation could not be persisted (storage quota/unavailable), so it was rolled back — an import/delete is never silently in-memory-only.
+ * - `ERR_STORE_EXTENSION_ALREADY_INSTALLED`: `installExtension` targeted an id that already has a global install record.
+ * - `ERR_STORE_EXTENSION_NOT_INSTALLED`: `attachExtension` named an extension with no global install record.
+ * - `ERR_STORE_EXTENSION_ALREADY_ATTACHED`: `attachExtension` targeted a Realm that already attaches the extension.
+ * - `ERR_STORE_EXTENSION_ATTACHED`: `removeExtension` targeted an extension still attached to at least one Realm; detach it first.
  * 
  * @example
  * ```typescript
@@ -205,10 +224,19 @@ export const SANDBOX_STORE_ERROR_CODES: {
   readonly ERR_STORE_REALM_NOT_EMPTY: 'ERR_STORE_REALM_NOT_EMPTY';
   readonly ERR_STORE_REALM_PROTECTED: 'ERR_STORE_REALM_PROTECTED';
   readonly ERR_STORE_REALM_DELETE_FAILED: 'ERR_STORE_REALM_DELETE_FAILED';
+  /**
+   * @deprecated The providers launch gate was removed: provider-bearing
+   * templates resolve against installed and attached extensions and launch
+   * with missing-extension disclosure, so this code is never emitted.
+   */
   readonly ERR_TEMPLATE_PROVIDERS_UNSUPPORTED: 'ERR_TEMPLATE_PROVIDERS_UNSUPPORTED';
   readonly ERR_TEMPLATE_AUTHORITY_UNSUPPORTED: 'ERR_TEMPLATE_AUTHORITY_UNSUPPORTED';
   readonly ERR_STORE_TEMPLATE_TOO_LARGE: 'ERR_STORE_TEMPLATE_TOO_LARGE';
   readonly ERR_STORE_TEMPLATE_PERSIST_FAILED: 'ERR_STORE_TEMPLATE_PERSIST_FAILED';
+  readonly ERR_STORE_EXTENSION_ALREADY_INSTALLED: 'ERR_STORE_EXTENSION_ALREADY_INSTALLED';
+  readonly ERR_STORE_EXTENSION_NOT_INSTALLED: 'ERR_STORE_EXTENSION_NOT_INSTALLED';
+  readonly ERR_STORE_EXTENSION_ALREADY_ATTACHED: 'ERR_STORE_EXTENSION_ALREADY_ATTACHED';
+  readonly ERR_STORE_EXTENSION_ATTACHED: 'ERR_STORE_EXTENSION_ATTACHED';
 } = Object.freeze({
   ERR_STORE_AGENT_NOT_FOUND: 'ERR_STORE_AGENT_NOT_FOUND',
   ERR_STORE_NO_AGENT_SELECTED: 'ERR_STORE_NO_AGENT_SELECTED',
@@ -221,7 +249,11 @@ export const SANDBOX_STORE_ERROR_CODES: {
   ERR_TEMPLATE_PROVIDERS_UNSUPPORTED: 'ERR_TEMPLATE_PROVIDERS_UNSUPPORTED',
   ERR_TEMPLATE_AUTHORITY_UNSUPPORTED: 'ERR_TEMPLATE_AUTHORITY_UNSUPPORTED',
   ERR_STORE_TEMPLATE_TOO_LARGE: 'ERR_STORE_TEMPLATE_TOO_LARGE',
-  ERR_STORE_TEMPLATE_PERSIST_FAILED: 'ERR_STORE_TEMPLATE_PERSIST_FAILED'
+  ERR_STORE_TEMPLATE_PERSIST_FAILED: 'ERR_STORE_TEMPLATE_PERSIST_FAILED',
+  ERR_STORE_EXTENSION_ALREADY_INSTALLED: 'ERR_STORE_EXTENSION_ALREADY_INSTALLED',
+  ERR_STORE_EXTENSION_NOT_INSTALLED: 'ERR_STORE_EXTENSION_NOT_INSTALLED',
+  ERR_STORE_EXTENSION_ALREADY_ATTACHED: 'ERR_STORE_EXTENSION_ALREADY_ATTACHED',
+  ERR_STORE_EXTENSION_ATTACHED: 'ERR_STORE_EXTENSION_ATTACHED'
 });
 
 /**
@@ -1531,6 +1563,19 @@ export interface RealmLaunchFromTemplateOptions {
    * operator grant registry.
    */
   trustAuthorities?: boolean;
+  /**
+   * Per-extension attach approvals (extension wave): each entry approves
+   * attaching one declared template-requested extension to the Realm being
+   * created. The id must match a declared `providers` request exactly — an
+   * undeclared id rejects the launch with `ERR_STORE_INVALID_PARAMS`; absent
+   * approval means the requested extension is not attached and rides the
+   * receipt's missing-extension disclosure. Approved extensions attach only
+   * when they carry a global install record; installed-and-approved extensions
+   * are attached under the operator principal with the approval stamp and the
+   * approved subset is recorded on the Realm record. Nothing connects: the
+   * approval is recorded state only.
+   */
+  extensionApprovals?: readonly { extensionId: string }[];
 }
 
 /**
@@ -1564,6 +1609,42 @@ export interface RealmLaunchReceipt {
   readonly agents: ReadonlyArray<RealmLaunchReceiptAgent>;
   /** Hydration warnings collected during launch (present only when non-empty; e.g. an allowed version mismatch). */
   readonly warnings?: readonly string[];
+}
+
+/**
+ * Draft accepted by `SandboxStore.installExtension()`: the operator-supplied
+ * extension identity and non-secret metadata. The store stamps `createdAt` and
+ * defaults `status` to `'installed'` and `installSource` to `'operator'`.
+ */
+export interface ExtensionInstallInput {
+  /** Host-unique extension id. */
+  readonly id: string;
+  /** Extension kind: MCP server or tool pack. */
+  readonly kind: ExtensionKind;
+  /** Optional operator-facing display name. */
+  readonly displayName?: string;
+  /** Transport hint the record is installed with (never dialed here). */
+  readonly transportHint: ExtensionTransportHint;
+  /** Optional vault credential id bound to the record (an id, never a secret). */
+  readonly credentialId?: string;
+  /** Optional initial status; defaults to `'installed'`. */
+  readonly status?: 'installed' | 'unavailable' | 'error';
+  /** Optional install source; defaults to `'operator'`. */
+  readonly installSource?: 'operator' | 'template-assist';
+  /** Optional operator-approved server URL. */
+  readonly approvedUrl?: string;
+  /** Optional non-fatal normalization findings recorded at install time. */
+  readonly normalizationWarnings?: readonly string[];
+}
+
+/**
+ * Options accepted by `SandboxStore.attachExtension()`: the realm-level tool
+ * selection of the new attachment. Defaults to `'all'` (every tool the
+ * extension provides).
+ */
+export interface ExtensionAttachOptions {
+  /** Realm-level tool selection: `'all'` or explicit sanitized call names. */
+  readonly toolSelection?: 'all' | readonly string[];
 }
 
 /**
@@ -1882,7 +1963,7 @@ function isRealmRecordShape(value: unknown): value is RealmRecord {
  * ticket 0df20ae): non-empty string `templateId`/`templateVersion`/
  * `launchedAt`, a string-valued `inputHashes` record, a string `seedPaths`
  * array, and optional non-empty `packageDigest` / string-valued
- * `resolvedTools`.
+ * `resolvedTools` / non-empty-string `missingExtensions`.
  *
  * @param value - Candidate provenance value from persisted storage.
  * @returns True when the value round-trips as provenance metadata.
@@ -1905,6 +1986,11 @@ function isRealmInstanceProvenanceShape(value: unknown): value is RealmInstanceP
     if (!resolvedTools || typeof resolvedTools !== 'object' || Array.isArray(resolvedTools)) return false;
     if (Object.values(resolvedTools).some((binding) => typeof binding !== 'string')) return false;
   }
+  const missingExtensions = instance.missingExtensions;
+  if (missingExtensions !== undefined) {
+    if (!Array.isArray(missingExtensions)) return false;
+    if (missingExtensions.some((id) => typeof id !== 'string' || !id.trim())) return false;
+  }
   return true;
 }
 
@@ -1924,15 +2010,67 @@ function cloneRealmInstanceProvenance(instance: RealmInstanceProvenance): RealmI
     inputHashes: { ...instance.inputHashes },
     seedPaths: [...instance.seedPaths],
     launchedAt: instance.launchedAt,
-    ...(instance.resolvedTools !== undefined ? { resolvedTools: { ...instance.resolvedTools } } : {})
+    ...(instance.resolvedTools !== undefined ? { resolvedTools: { ...instance.resolvedTools } } : {}),
+    ...(instance.missingExtensions !== undefined ? { missingExtensions: [...instance.missingExtensions] } : {})
+  };
+}
+
+/**
+ * Copies a Realm extension-attachment list into plain snapshot records,
+ * dropping malformed entries (attachments are descriptive metadata; a
+ * malformed entry never invalidates the Realm record).
+ *
+ * @param extensions - Registry attachment list.
+ * @returns Fresh plain attachment records.
+ */
+function cloneRealmExtensions(
+  extensions: readonly RealmExtensionAttachment[]
+): readonly RealmExtensionAttachment[] {
+  const cloned: RealmExtensionAttachment[] = [];
+  for (const candidate of extensions) {
+    const attachment = normalizeRealmExtensionAttachment(candidate);
+    if (attachment) cloned.push(attachment);
+  }
+  return Object.freeze(cloned);
+}
+
+/**
+ * Copies one global extension install record into a plain snapshot record
+ * (nested hint/warnings fresh) so the snapshot mirror never aliases a
+ * registry-internal reference.
+ *
+ * @param record - Registry install record.
+ * @returns Fresh plain install record.
+ */
+function cloneExtensionInstallRecord(record: ExtensionInstallRecord): ExtensionInstallRecord {
+  const hint = record.transportHint;
+  const transportHint: ExtensionTransportHint = hint.kind === 'http'
+    ? { kind: 'http', url: hint.url }
+    : hint.kind === 'stdio'
+      ? { kind: 'stdio', command: hint.command, ...(hint.args !== undefined ? { args: [...hint.args] } : {}) }
+      : { kind: 'pack', source: hint.source };
+  return {
+    id: record.id,
+    kind: record.kind,
+    ...(record.displayName !== undefined ? { displayName: record.displayName } : {}),
+    transportHint,
+    ...(record.credentialId !== undefined ? { credentialId: record.credentialId } : {}),
+    status: record.status,
+    installSource: record.installSource,
+    ...(record.approvedUrl !== undefined ? { approvedUrl: record.approvedUrl } : {}),
+    ...(record.normalizationWarnings !== undefined
+      ? { normalizationWarnings: [...record.normalizationWarnings] }
+      : {}),
+    createdAt: record.createdAt
   };
 }
 
 /**
  * Copies a Realm record into a plain snapshot record so persisted state never
  * aliases a registry-internal reference; absent optional fields stay absent.
- * A malformed `instance` provenance block is dropped (provenance is
- * descriptive metadata, never identity) while the Realm record survives.
+ * A malformed `instance` provenance block or malformed attachment entries are
+ * dropped (provenance and attachments are descriptive metadata, never
+ * identity) while the Realm record survives.
  *
  * @param realm - Registry realm record.
  * @returns Fresh plain realm record.
@@ -1947,6 +2085,7 @@ function cloneRealmRecord(realm: RealmRecord): RealmRecord {
     ...(realm.instance !== undefined && isRealmInstanceProvenanceShape(realm.instance)
       ? { instance: cloneRealmInstanceProvenance(realm.instance) }
       : {}),
+    ...(realm.extensions !== undefined ? { extensions: cloneRealmExtensions(realm.extensions) } : {}),
     createdAt: realm.createdAt
   };
 }
@@ -2484,21 +2623,141 @@ function invalidRealmParams(message: string): CodedError {
 }
 
 /**
- * Builds the fail-closed launch refusal for a template that declares
- * capability requirements or providers (Wave T decision 3.3): import, review,
- * and export accept the contract, but launch is blocked until the providers
- * wave can resolve it.
+ * Builds a `CodedError` carrying one of the standardized store codes.
  *
- * @param templateId - Template whose contract needs provider resolution.
- * @returns Coded `ERR_TEMPLATE_PROVIDERS_UNSUPPORTED` error.
+ * @param code - Standardized store error code.
+ * @param message - Human-readable diagnostic text.
+ * @returns Coded error.
  */
-function templateProvidersUnsupportedError(templateId: string): CodedError {
-  const err: CodedError = new Error(
-    `launchRealmFromTemplate: template '${templateId}' declares capability requirements/providers `
-    + 'that this wave cannot resolve yet — launch is blocked fail-closed'
-  );
-  err.code = SANDBOX_STORE_ERROR_CODES.ERR_TEMPLATE_PROVIDERS_UNSUPPORTED;
+function codedStoreError(code: SandboxStoreErrorCode, message: string): CodedError {
+  const err: CodedError = new Error(message);
+  err.code = code;
   return err;
+}
+
+/**
+ * Renders the missing-extension disclosure warnings for a launch receipt, in
+ * declared request order: a not-installed request points at the install flow,
+ * a not-attached request points at the attach approval.
+ *
+ * @param missing - Resolved missing extensions from the launch resolution.
+ * @returns Human-readable warning lines in input order.
+ */
+function renderMissingExtensionWarnings(
+  missing: readonly { readonly extensionId: string; readonly reason: 'not-installed' | 'not-attached' }[]
+): string[] {
+  const warnings: string[] = [];
+  for (const entry of missing) {
+    warnings.push(entry.reason === 'not-installed'
+      ? `Requested extension '${entry.extensionId}' is not installed — its tools stay unavailable in this Realm`
+      : `Requested extension '${entry.extensionId}' is installed but not attached — approve it to enable its tools`);
+  }
+  return warnings;
+}
+
+/**
+ * Collects the template's requested extensions from its `providers` block, in
+ * declared order with first-wins deduplication (the catalog accepts a
+ * repeated provider id; the request list keeps one entry per id).
+ *
+ * @param template - Effective template being launched.
+ * @returns Frozen requested extensions with transport hints.
+ */
+function collectExtensionRequests(template: RealmTemplate): readonly ExtensionRequest[] {
+  const providers = Array.isArray(template.providers) ? template.providers : [];
+  const requests: ExtensionRequest[] = [];
+  const seen = new Set<string>();
+  for (const provider of providers) {
+    if (!provider || typeof provider !== 'object') continue;
+    if (seen.has(provider.id)) continue;
+    seen.add(provider.id);
+    let transportHint: ExtensionTransportHint | undefined;
+    if (provider.kind === 'mcp') {
+      const transport = provider.transport;
+      if (transport && transport.kind === 'http') {
+        transportHint = Object.freeze({ kind: 'http', url: transport.url });
+      } else if (transport && transport.kind === 'stdio') {
+        transportHint = Object.freeze({
+          kind: 'stdio',
+          command: transport.command,
+          ...(Array.isArray(transport.args) ? { args: Object.freeze([...transport.args]) } : {})
+        });
+      }
+    } else if (provider.kind === 'pack' && typeof provider.source === 'string' && provider.source.trim().length > 0) {
+      transportHint = Object.freeze({ kind: 'pack', source: provider.source });
+    }
+    requests.push(Object.freeze({
+      id: provider.id,
+      kind: provider.kind,
+      ...(transportHint !== undefined ? { transportHint } : {})
+    }));
+  }
+  return Object.freeze(requests);
+}
+
+/**
+ * Collects every `<providerId>::<serverToolName>` extension tool reference
+ * declared across the template's agent tool profiles, in declared order with
+ * exact-duplicate deduplication. Non-reference entries (canonical names,
+ * aliases, legacy requirement ids, the wildcard) are ignored.
+ *
+ * @param template - Effective template being launched.
+ * @returns Frozen reference strings.
+ */
+function collectExtensionToolReferences(template: RealmTemplate): readonly string[] {
+  const references: string[] = [];
+  const agents = Array.isArray(template.agents) ? template.agents : [];
+  for (const spec of agents) {
+    const tools = spec && spec.toolProfile ? spec.toolProfile.tools : undefined;
+    if (!Array.isArray(tools)) continue;
+    for (const entry of tools) {
+      if (typeof entry !== 'string') continue;
+      if (entry.indexOf('::') === -1) continue;
+      if (!references.includes(entry)) references.push(entry);
+    }
+  }
+  return Object.freeze(references);
+}
+
+/**
+ * Resolves the effective approved extension-id set for a launch (extension
+ * wave): explicit approvals must match a declared template request exactly
+ * (unknown ids fail closed with `ERR_STORE_INVALID_PARAMS`), and absent
+ * approval is a decline.
+ *
+ * @param declared - Requested extensions in declared order.
+ * @param approvals - Caller-supplied explicit approvals, or `undefined`.
+ * @returns Approved extension ids.
+ * @throws {@link SANDBOX_STORE_ERROR_CODES.ERR_STORE_INVALID_PARAMS} When an approval is malformed or references an undeclared request.
+ */
+function resolveApprovedExtensions(
+  declared: readonly ExtensionRequest[],
+  approvals: unknown
+): ReadonlySet<string> {
+  const declaredIds = new Set(declared.map((request) => request.id));
+  const approved = new Set<string>();
+  if (approvals === undefined) return approved;
+  if (!Array.isArray(approvals)) {
+    throw invalidRealmParams('launchRealmFromTemplate extensionApprovals must be an array of { extensionId }');
+  }
+  approvals.forEach((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw invalidRealmParams(`launchRealmFromTemplate extensionApprovals[${index}] must be an object`);
+    }
+    const extensionId = typeof (entry as { extensionId?: unknown }).extensionId === 'string'
+      ? ((entry as { extensionId: string }).extensionId).trim()
+      : '';
+    if (!extensionId) {
+      throw invalidRealmParams(`launchRealmFromTemplate extensionApprovals[${index}] requires a non-empty extensionId`);
+    }
+    if (!declaredIds.has(extensionId)) {
+      throw invalidRealmParams(
+        `launchRealmFromTemplate extensionApprovals[${index}] approves undeclared extension '${extensionId}'`
+      );
+    }
+    approved.add(extensionId);
+  });
+  return approved;
 }
 
 /**
@@ -3018,6 +3277,10 @@ export class SandboxStore {
   #realmRecords: RealmRecord[] = [];
   /** Realm registry change subscription handle (keeps the projection in sync). */
   #unsubRealms: UnsubscribeFn | null = null;
+  /** Owned extension registry (composition root); the single source of global install truth. */
+  #extensionRegistry: ExtensionRegistry;
+  /** Snapshot-backed install-record mirror (the registry adapter's persistence write-through). */
+  #extensionRecords: ExtensionInstallRecord[] = [];
   /**
    * Frozen shipped launch catalog for this store instance: the baked demo
    * fixture plus embedded `templates/**` bundles, layered with any per-instance
@@ -3159,6 +3422,24 @@ export class SandboxStore {
       this.#syncRealms();
     });
     this.#syncRealms();
+
+    // Extension composition root: seed the snapshot-backed install mirror from
+    // the persisted session before the registry loads it, then build the
+    // registry over a `{ load, save }` adapter backed by that mirror. The
+    // registry owns global install records only; realm attachments ride the
+    // realm records. Only an auto-hydrating store touches storage here.
+    if (shouldAutoHydrate) {
+      this.#loadPersistedExtensionFields();
+    }
+    this.#extensionRegistry = createExtensionRegistry({
+      storage: {
+        load: () => this.#extensionRecords.map((record) => cloneExtensionInstallRecord(record)),
+        save: (records) => {
+          this.#extensionRecords = records.map((record) => cloneExtensionInstallRecord(record));
+          this.#scheduleAutoSave();
+        }
+      }
+    });
 
     // Late-bound identity bridge: substrates the store constructs resolve agent
     // authority through the runtime registry once the runtime exists (MOD-21
@@ -6189,6 +6470,274 @@ export class SandboxStore {
   }
 
   // ==========================================================================
+  // Extension Registry (extension wave)
+  // ==========================================================================
+
+  /**
+   * Retrieves the extension registry owned by this store (composition root).
+   * Exposes the management contract to UI call sites (`listExtensions`,
+   * `getExtension`, `installExtension`, `removeExtension`, `reconcile`,
+   * `createAttachment`, `attachExtension`, `detachExtension`, `resolve`).
+   * Registry mutations persist through the snapshot adapter and schedule the
+   * existing debounced save; realm attachments ride the realm records, so they
+   * persist through the realm registry adapter.
+   *
+   * @returns The `ExtensionRegistry` instance backing this store's global install records.
+   *
+   * @example
+   * ```typescript
+   * const registry = sandboxStore.getExtensionRegistry();
+   * registry.listExtensions().forEach(record => console.log(record.id, record.status));
+   * ```
+   */
+  getExtensionRegistry(): ExtensionRegistry {
+    return this.#extensionRegistry;
+  }
+
+  /**
+   * Lists the global extension install records in registry order.
+   *
+   * @returns Frozen install records (fresh copies).
+   */
+  listExtensions(): readonly ExtensionInstallRecord[] {
+    return this.#extensionRegistry.listExtensions();
+  }
+
+  /**
+   * Resolves one global extension install record.
+   *
+   * @param extensionId - Extension id.
+   * @returns The frozen install record, or `null` when nothing is installed under the id.
+   */
+  getExtension(extensionId: string): ExtensionInstallRecord | null {
+    return this.#extensionRegistry.getExtension(extensionId);
+  }
+
+  /**
+   * Installs one global extension record under the operator principal: the
+   * store stamps `createdAt`, defaults `status` to `'installed'` and
+   * `installSource` to `'operator'`, validates the record through the owned
+   * registry, and emits the `extension_installed` audit event. Installing an
+   * id that already has a record fails closed; nothing connects.
+   *
+   * @param input - Extension identity and non-secret metadata.
+   * @returns The frozen installed record.
+   * @throws {@link SANDBOX_STORE_ERROR_CODES.ERR_STORE_INVALID_PARAMS} When the input or record shape is invalid.
+   * @throws {@link SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_ALREADY_INSTALLED} When the id already has an install record.
+   *
+   * @example
+   * ```typescript
+   * sandboxStore.installExtension({
+   *   id: 'acme-scoring',
+   *   kind: 'mcp',
+   *   transportHint: { kind: 'http', url: 'https://mcp.example.com' }
+   * });
+   * ```
+   */
+  installExtension(input: ExtensionInstallInput): ExtensionInstallRecord {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) {
+      throw invalidRealmParams('installExtension requires an input object');
+    }
+    const id = typeof input.id === 'string' ? input.id.trim() : '';
+    if (!id) {
+      throw invalidRealmParams('installExtension requires a non-empty extension id');
+    }
+    if (this.#extensionRegistry.getExtension(input.id)) {
+      throw codedStoreError(
+        SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_ALREADY_INSTALLED,
+        `installExtension refuses extension '${input.id}' — it is already installed`
+      );
+    }
+    const candidate: ExtensionInstallRecord = {
+      id: input.id,
+      kind: input.kind,
+      ...(input.displayName !== undefined ? { displayName: input.displayName } : {}),
+      transportHint: input.transportHint,
+      ...(input.credentialId !== undefined ? { credentialId: input.credentialId } : {}),
+      status: input.status ?? 'installed',
+      installSource: input.installSource ?? 'operator',
+      ...(input.approvedUrl !== undefined ? { approvedUrl: input.approvedUrl } : {}),
+      ...(input.normalizationWarnings !== undefined
+        ? { normalizationWarnings: input.normalizationWarnings }
+        : {}),
+      createdAt: Date.now()
+    };
+    let record: ExtensionInstallRecord;
+    try {
+      record = this.#extensionRegistry.installExtension(candidate);
+    } catch (error) {
+      throw invalidRealmParams(
+        `installExtension rejected extension '${input.id}' — ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+    this.#emitExtensionAuditEvent('extension_installed', {
+      extensionId: record.id,
+      kind: record.kind,
+      installSource: record.installSource
+    });
+    return record;
+  }
+
+  /**
+   * Removes one global extension install record and emits the
+   * `extension_removed` audit event. The removal fails closed while any Realm
+   * still attaches the extension: detach it from every Realm first, so an
+   * attachment can never dangle. Unknown ids are a `false` no-op (no event).
+   *
+   * @param extensionId - Extension id.
+   * @returns `true` when a record existed and was removed.
+   * @throws {@link SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_ATTACHED} When at least one Realm still attaches the extension.
+   *
+   * @example
+   * ```typescript
+   * sandboxStore.removeExtension('acme-scoring');
+   * ```
+   */
+  removeExtension(extensionId: string): boolean {
+    if (typeof extensionId !== 'string' || extensionId.trim().length === 0) {
+      throw invalidRealmParams('removeExtension requires a non-empty extension id');
+    }
+    const attachedRealmIds = this.#realmRegistry.listRealms()
+      .filter((realm) => (realm.extensions ?? []).some((attachment) => attachment.extensionId === extensionId))
+      .map((realm) => realm.id);
+    if (attachedRealmIds.length > 0) {
+      throw codedStoreError(
+        SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_ATTACHED,
+        `removeExtension refuses extension '${extensionId}' — still attached to ${attachedRealmIds.length} Realm(s): ${attachedRealmIds.join(', ')}`
+      );
+    }
+    const removed = this.#extensionRegistry.removeExtension(extensionId);
+    if (removed) {
+      this.#emitExtensionAuditEvent('extension_removed', { extensionId });
+    }
+    return removed;
+  }
+
+  /**
+   * Lists one Realm's extension attachments in record order.
+   *
+   * @param realmId - Registered Realm id.
+   * @returns Frozen attachment records (fresh copies).
+   * @throws {@link SANDBOX_STORE_ERROR_CODES.ERR_STORE_INVALID_PARAMS} When the Realm is unknown.
+   */
+  listRealmExtensions(realmId: string): readonly RealmExtensionAttachment[] {
+    const realm = this.#realmRegistry.getRealm(realmId);
+    if (!realm) {
+      throw invalidRealmParams(`listRealmExtensions: unknown realm '${String(realmId)}'`);
+    }
+    return realm.extensions ?? Object.freeze([]);
+  }
+
+  /**
+   * Attaches one globally installed extension to a Realm under the operator
+   * principal: the store validates the Realm and the install record, stamps the
+   * approval (`approvedAt`, `approvedBy: 'operator'`), writes the attachment on
+   * the Realm record, and emits the `extension_attached` audit event. The
+   * extension must be installed (an unknown id fails closed) and must not
+   * already be attached to that Realm. Nothing connects: the attachment is
+   * recorded state only.
+   *
+   * @param realmId - Registered Realm id.
+   * @param extensionId - Id of the globally installed extension.
+   * @param options - Realm-level tool selection; defaults to `'all'`.
+   * @returns The frozen updated Realm record.
+   * @throws {@link SANDBOX_STORE_ERROR_CODES.ERR_STORE_INVALID_PARAMS} When the Realm is unknown, the selection is invalid, or the install record is malformed.
+   * @throws {@link SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_NOT_INSTALLED} When no install record carries the id.
+   * @throws {@link SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_ALREADY_ATTACHED} When the Realm already attaches the extension.
+   *
+   * @example
+   * ```typescript
+   * sandboxStore.attachExtension('realm_demo', 'acme-scoring');
+   * ```
+   */
+  attachExtension(
+    realmId: string,
+    extensionId: string,
+    options: ExtensionAttachOptions = {}
+  ): RealmRecord {
+    const realm = this.#realmRegistry.getRealm(realmId);
+    if (!realm) {
+      throw invalidRealmParams(`attachExtension: unknown realm '${String(realmId)}'`);
+    }
+    if (typeof extensionId !== 'string' || extensionId.trim().length === 0) {
+      throw invalidRealmParams('attachExtension requires a non-empty extension id');
+    }
+    if (!this.#extensionRegistry.getExtension(extensionId)) {
+      throw codedStoreError(
+        SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_NOT_INSTALLED,
+        `attachExtension: extension '${extensionId}' is not installed — install it first`
+      );
+    }
+    const existing = realm.extensions ?? [];
+    if (existing.some((attachment) => attachment.extensionId === extensionId)) {
+      throw codedStoreError(
+        SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_ALREADY_ATTACHED,
+        `attachExtension: realm '${realmId}' already attaches extension '${extensionId}'`
+      );
+    }
+    const toolSelection = options && options.toolSelection !== undefined ? options.toolSelection : 'all';
+    let attachment: RealmExtensionAttachment;
+    try {
+      attachment = this.#extensionRegistry.createAttachment({
+        extensionId,
+        toolSelection,
+        status: 'active',
+        approvedAt: new Date().toISOString(),
+        approvedBy: 'operator'
+      });
+    } catch (error) {
+      throw invalidRealmParams(
+        `attachExtension: invalid attachment — ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+    let next: readonly RealmExtensionAttachment[];
+    try {
+      next = this.#extensionRegistry.attachExtension(existing, attachment);
+    } catch (error) {
+      throw invalidRealmParams(
+        `attachExtension: failed to attach — ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+    const updated = this.#realmRegistry.updateRealm(realmId, { extensions: next });
+    this.#emitExtensionAuditEvent('extension_attached', { realmId, extensionId, source: 'operator' });
+    return updated;
+  }
+
+  /**
+   * Detaches one extension from a Realm under the operator principal and emits
+   * the `extension_detached` audit event. Detaching an extension the Realm does
+   * not attach is an idempotent no-op that returns the unchanged record (no
+   * event, no persist); the global install record survives.
+   *
+   * @param realmId - Registered Realm id.
+   * @param extensionId - Extension id.
+   * @returns The frozen updated (or unchanged) Realm record.
+   * @throws {@link SANDBOX_STORE_ERROR_CODES.ERR_STORE_INVALID_PARAMS} When the Realm is unknown or the id is empty.
+   *
+   * @example
+   * ```typescript
+   * sandboxStore.detachExtension('realm_demo', 'acme-scoring');
+   * ```
+   */
+  detachExtension(realmId: string, extensionId: string): RealmRecord {
+    const realm = this.#realmRegistry.getRealm(realmId);
+    if (!realm) {
+      throw invalidRealmParams(`detachExtension: unknown realm '${String(realmId)}'`);
+    }
+    if (typeof extensionId !== 'string' || extensionId.trim().length === 0) {
+      throw invalidRealmParams('detachExtension requires a non-empty extension id');
+    }
+    const existing = realm.extensions ?? [];
+    if (!existing.some((attachment) => attachment.extensionId === extensionId)) {
+      return realm;
+    }
+    const next = this.#extensionRegistry.detachExtension(existing, extensionId);
+    const updated = this.#realmRegistry.updateRealm(realmId, { extensions: next });
+    this.#emitExtensionAuditEvent('extension_detached', { realmId, extensionId });
+    return updated;
+  }
+
+  // ==========================================================================
   // Realm Launch from Template & Seed (Wave B)
   // ==========================================================================
 
@@ -6549,10 +7098,13 @@ export class SandboxStore {
    *   (shipped baked/injected bundles with runtime imports layered on top) and
    *   an unknown id fails closed before any record or member exists; the stored
    *   template is the normalized format-v2 model and the launch materializes it
-   *   through `materializeTemplate`. A template whose `toolContract`
-   *   requirements or `providers` are non-empty is refused before any side
-   *   effect with the typed `ERR_TEMPLATE_PROVIDERS_UNSUPPORTED` (Wave T
-   *   decision 3.3);
+   *   through `materializeTemplate`. A template requesting extensions
+   *   (`providers`) or carrying extension tool references launches normally:
+   *   the requested extensions and `<providerId>::<serverToolName>` references
+   *   resolve against the global install registry plus the extensions this
+   *   launch attaches, and the unresolved ones ride the receipt's
+   *   missing-extension disclosure instead of refusing the launch (the
+   *   retired providers gate);
    * - supplied values arrive either as an attached `payload` (or its legacy
    *   alias `package`) or as operator-assembled explicit values (`inputs`
    *   shape-tagged, plus the legacy `inputValues` string record). Every supplied
@@ -6572,12 +7124,13 @@ export class SandboxStore {
    *   auto-suffixed, while the same literal id in another realm launches its
    *   own registration — agent identity is the composite
    *   `(realmId, agentId)`, so realms are independent id namespaces;
-   * - each member's resolved grant list travels as `allowedTools` (the
-   *   aggregate `subagent_management` sentinel preserved), the declared preset
-   *   name as inert `toolPreset` metadata, and the effective preset id — a
-   *   per-key `presetBindings` override winning over the spec's
-   *   `modelPresetId` — as `presetId` resolved through the owned preset
-   *   catalog (no model literals);
+   * - each member's resolved internal grant list travels as `allowedTools`
+   *   (the aggregate `subagent_management` sentinel preserved; extension-bound
+   *   derived call names are excluded because they belong to the extension
+   *   grant channel), the declared preset name as inert `toolPreset` metadata,
+   *   and the effective preset id — a per-key `presetBindings` override winning
+   *   over the spec's `modelPresetId` — as `presetId` resolved through the
+   *   owned preset catalog (no model literals);
    * - `privileged`, `role`, `name`, and the composed `systemPrompt` are
    *   forwarded from the plan, and the plan's `initialPrompt` triggers the
    *   member's first turn when declared;
@@ -6612,9 +7165,13 @@ export class SandboxStore {
    * {@link RealmInstanceProvenance} on the Realm record (`templateId`, authored
    * `templateVersion`, canonical `packageDigest` when a payload was attached,
    * per-input hashes over the canonical tagged values, placement destination
-   * paths actually written, `launchedAt`) — hashes and paths only, never raw
-   * input values — and the receipt carries the updated record; `resolvedTools`
-   * stays reserved for the providers wave.
+   * paths actually written, `launchedAt`, `resolvedTools` mapping each
+   * resolved sanitized call name to its extension id, and `missingExtensions`
+   * listing the requested extension ids that did not resolve) — hashes, paths,
+   * and ids only, never raw input values or secrets — and the receipt carries
+   * the updated record. Extensions attached by this launch are written on the
+   * same record as `extensions`. Nothing connects and no extension grant is
+   * passed to the runtime from this wave.
    *
    * Partial-failure policy: when materialization, any member launch, a
    * placement write, or a directive delivery fails, every active member of the
@@ -6630,10 +7187,10 @@ export class SandboxStore {
    * deleted individually and an empty container key can remain.
    *
    * @param templateId - Launch template id (`'demo'` for the baked fixture).
-   * @param options - Optional name/color/description overrides, per-key preset bindings, per-key id overrides, operator-assembled `inputs`/legacy `inputValues`, an attached `payload` (or legacy alias `package`), the `allowVersionMismatch` confirmation, the seed toggle, and publishing-authority approvals/trust.
-   * @returns The created Realm record (with `instance` provenance) plus the launched member snapshots in template order and any payload warnings.
+   * @param options - Optional name/color/description overrides, per-key preset bindings, per-key id overrides, operator-assembled `inputs`/legacy `inputValues`, an attached `payload` (or legacy alias `package`), the `allowVersionMismatch` confirmation, the seed toggle, publishing-authority approvals/trust, and extension attach approvals.
+   * @returns The created Realm record (with `instance` provenance and any launch attachments) plus the launched member snapshots in template order and any payload/missing-extension warnings.
    * @throws Error with code `'ERR_STORE_INVALID_PARAMS'` when the template id, options, preset bindings, supplied inputs, seed toggle, payload/package alias pair, or `allowVersionMismatch` flag are invalid (nothing is created).
-   * @throws Error with code `'ERR_TEMPLATE_PROVIDERS_UNSUPPORTED'` when the template declares capability requirements/providers (nothing is created; fail-closed until the providers wave).
+   * @throws Error with code `'ERR_STORE_INVALID_PARAMS'` when an extension approval is malformed or names an undeclared template request, or when extension resolution itself fails closed (nothing is created).
    * @throws Error with code `'ERR_TEMPLATE_AUTHORITY_UNSUPPORTED'` when the template declares a publishing authority unknown to this host (nothing is created).
    * @throws Error with code `'ERR_STORE_INVALID_PARAMS'` when an authority approval is malformed or references an undeclared `(agentKey, authority)` pair (nothing is created).
    * @throws `RealmCatalogError` (`ERR_HYDRATION_PACKAGE`/`ERR_HYDRATION_VERSION_MISMATCH`) when the payload/package or the operator-assembled inputs are malformed or pin a version that was not explicitly allowed (nothing is created).
@@ -6660,12 +7217,55 @@ export class SandboxStore {
       throw invalidRealmParams(`launchRealmFromTemplate: unknown realm template '${templateId}'`);
     }
     const template = bundle.template;
-    // Providers gate (Wave T decision 3.3): import/parse/export accept a
-    // capability contract, but launch fails closed before any side effect
-    // while `toolContract`/`providers` are non-empty.
-    if (templateRequiresProviders(template)) {
-      throw templateProvidersUnsupportedError(template.id);
+    // Extension resolution (extension wave): the template's requested
+    // extensions and `<providerId>::<serverToolName>` references resolve
+    // against the global install registry plus the attachments this launch
+    // approves; a provider-bearing template launches with missing-extension
+    // disclosure instead of the retired providers gate. Attachments are
+    // written only after a fully successful launch, and no grant is handed to
+    // the runtime in this wave.
+    const extensionRequests = collectExtensionRequests(template);
+    const extensionToolReferences = collectExtensionToolReferences(template);
+    const approvedExtensionIds = resolveApprovedExtensions(extensionRequests, options.extensionApprovals);
+    const launchAttachments: RealmExtensionAttachment[] = [];
+    let extensionResolution: ExtensionResolution;
+    try {
+      if (extensionRequests.length > 0) {
+        const approvedAt = new Date().toISOString();
+        for (const request of extensionRequests) {
+          if (!approvedExtensionIds.has(request.id)) continue;
+          // Approving an uninstalled request attaches nothing: the extension
+          // stays on the missing disclosure until the operator installs it.
+          if (!this.#extensionRegistry.getExtension(request.id)) continue;
+          launchAttachments.push(this.#extensionRegistry.createAttachment({
+            extensionId: request.id,
+            toolSelection: 'all',
+            status: 'active',
+            approvedAt,
+            approvedBy: 'operator'
+          }));
+        }
+      }
+      extensionResolution = this.#extensionRegistry.resolve(
+        { requests: extensionRequests, toolReferences: extensionToolReferences },
+        launchAttachments
+      );
+    } catch (error) {
+      const failure = invalidRealmParams(
+        `launchRealmFromTemplate: template '${template.id}' extension resolution failed — `
+        + `${error instanceof Error ? error.message : String(error)}`
+      );
+      failure.cause = error;
+      throw failure;
     }
+    // Extension-bound derived call names stay out of the runtime allowlist in
+    // this wave: the runtime grant channel is wired separately, so an
+    // unresolved or resolved extension tool never masquerades as an internal
+    // tool grant.
+    const extensionBoundCallNames = new Set<string>([
+      ...Object.keys(extensionResolution.resolvedTools),
+      ...extensionResolution.missingTools.map((tool) => tool.callName)
+    ]);
     // Wave U publishing-authority gate (ticket 2518510): a template declaring
     // an authority id this host cannot enforce fails the launch closed before
     // any side effect (providers precedent), while import/validation/review
@@ -6825,6 +7425,12 @@ export class SandboxStore {
           throw duplicateRealmMemberIdError(agentPlan.agentId);
         }
         const presetId = presetIdByKey[agentPlan.key];
+        // Extension-bound derived call names are excluded from the internal
+        // allowlist (they belong to the extension grant channel, wired
+        // separately): every remaining entry is an internal canonical name,
+        // alias, legacy requirement-id derivation, or the wildcard sentinel.
+        const internalAllowedTools = agentPlan.toolProfile.tools
+          .filter((tool) => !extensionBoundCallNames.has(tool));
         const config: AgentConfig = {
           id: agentPlan.agentId,
           name: agentPlan.name,
@@ -6837,7 +7443,7 @@ export class SandboxStore {
           // declared preset name rides along as inert metadata (the composed
           // config consults `allowedTools` first) for consumers that display
           // the declared selector.
-          allowedTools: [...agentPlan.toolProfile.tools],
+          allowedTools: [...internalAllowedTools],
           ...(agentPlan.toolProfile.preset !== null ? { toolPreset: agentPlan.toolProfile.preset } : {}),
           ...(presetId !== undefined ? { presetId } : {}),
           ...(agentPlan.triggerPolicy !== undefined ? { triggerPolicy: agentPlan.triggerPolicy } : {})
@@ -6905,15 +7511,36 @@ export class SandboxStore {
         }
       }
       const packageDigest = payloadValue !== undefined ? payloadDigest(payloadValue) : undefined;
+      const resolvedToolCount = Object.keys(extensionResolution.resolvedTools).length;
+      const missingExtensionIds = extensionResolution.missingExtensions.map((entry) => entry.extensionId);
       const instance: RealmInstanceProvenance = Object.freeze({
         templateId: template.id,
         templateVersion: effectiveTemplateVersion,
         ...(packageDigest !== undefined ? { packageDigest } : {}),
         inputHashes: hashRealmInputValues(effectiveInputs),
         seedPaths: Object.freeze(seedPaths),
-        launchedAt: new Date().toISOString()
+        launchedAt: new Date().toISOString(),
+        ...(resolvedToolCount > 0
+          ? { resolvedTools: Object.freeze({ ...extensionResolution.resolvedTools }) }
+          : {}),
+        ...(missingExtensionIds.length > 0 ? { missingExtensions: Object.freeze(missingExtensionIds) } : {})
       });
-      const launchedRealm = this.#realmRegistry.updateRealm(realm.id, { instance });
+      const launchedRealm = this.#realmRegistry.updateRealm(realm.id, {
+        instance,
+        // Approved-and-installed extensions attach here, on the same
+        // fully-successful-launch write as the provenance: the attachment
+        // records the operator approval stamp and the realm-level `'all'`
+        // selection. Nothing connects.
+        ...(launchAttachments.length > 0 ? { extensions: launchAttachments } : {})
+      });
+      for (const attachment of launchAttachments) {
+        this.#emitExtensionAuditEvent('extension_attached', {
+          realmId: launchedRealm.id,
+          extensionId: attachment.extensionId,
+          source: 'launch'
+        });
+      }
+      warnings.push(...renderMissingExtensionWarnings(extensionResolution.missingExtensions));
 
       // Wave U trust override (ticket 2518510): persisted only after a fully
       // successful launch, and only when requested. The record is exactly the
@@ -7624,6 +8251,11 @@ export class SandboxStore {
    * `templateAuthorityTrust`; both are omitted when empty, so grant-free and
    * legacy snapshots stay byte-identical.
    *
+   * Extension wave: the global install records ride the additive `extensions`
+   * field (the registry's frozen projection) and each realm record carries its
+   * own attachments; both are omitted when empty, so install-free and legacy
+   * snapshots keep every existing field and byte.
+   *
    * @returns `SandboxPersistedState` ready for LocalStorage or JSON export.
    * 
    * @example
@@ -7645,6 +8277,7 @@ export class SandboxStore {
       activePresetId: this.#activePresetId,
       customPresets: this.#customPresets.map((preset) => cloneModelPreset(preset)),
       realms: this.#realmRecords.map((realm) => cloneRealmRecord(realm)),
+      extensions: this.#extensionRegistry.listExtensions().map((record) => cloneExtensionInstallRecord(record)),
       importedRealmTemplates: this.#serializeRealmTemplateImports()
     });
     let withAdditions: AuthorityGrantSnapshot = snapshot;
@@ -7750,6 +8383,10 @@ export class SandboxStore {
       // reconciled catalog (enumeration is available only in the store).
       this.#reconcilePresetCatalog(persistedState);
       this.#healSnapshotPresetBindings(persistedState);
+      // Extension wave: the persisted install topology is applied through the
+      // registry's validated reconcile path first, so the realm reconcile and
+      // the attachment heal that follow read the current install state.
+      this.#reconcileExtensionRegistry(persistedState);
       this.#reconcileRealmRegistry(persistedState);
       // Wave T (ticket 0df20ae): the persisted import topology re-resolves the
       // effective launch catalog in memory; hydration never rewrites the bytes
@@ -7777,6 +8414,12 @@ export class SandboxStore {
       // snapshots, so hydration stays byte-identical.
       this.#restorePersistedMetaAuthorityGrants(persistedState);
       this.#seedTemplateAuthorityTrustFrom(persistedState);
+      // Extension wave: attachment status degrades/recovers against the
+      // reconciled install records (a tampered snapshot attachment for an
+      // unknown extension becomes `unavailable`, never dangles silently). The
+      // pass is in-memory only: the suppression guard keeps autosave inert, so
+      // persisted bytes are never rewritten here.
+      this.#healRealmExtensionAttachments();
       // Wave I (ticket d57cbc1): recover legacy bare-keyed private workspace
       // bytes onto each record's canonical realm-qualified key. Runs after the
       // runtime restore (so the identity port resolves the restored records)
@@ -7931,6 +8574,9 @@ export class SandboxStore {
     // protected Generic default is restored to its pristine seed metadata
     // (Wave R hardening, ticket 0fe25fd).
     this.#reconcileRealmRegistry(null);
+    // Extension wave: an in-memory reset drops the snapshot-backed global
+    // install topology too (realm attachments went with the realm records).
+    this.#reconcileExtensionRegistry(null);
     // Wave T: an in-memory reset also drops the runtime template imports, so
     // the effective catalog returns to the shipped revision.
     this.#reconcileRealmTemplateImports(null);
@@ -8723,6 +9369,33 @@ export class SandboxStore {
   }
 
   /**
+   * Seeds the snapshot-backed extension install mirror from persisted storage
+   * before the extension registry is constructed. Only an auto-hydrating store
+   * reads storage here; absent or unreadable state leaves the empty registry
+   * unchanged, and the registry drops malformed entries on load. Nothing
+   * connects: seeding restores records only.
+   */
+  #loadPersistedExtensionFields(): void {
+    try {
+      const persisted = loadSandboxState({
+        onRecovery: (info) => {
+          this.hydrationNotice = {
+            message: 'Saved session could not be loaded — starting fresh',
+            at: Date.now(),
+            reason: info?.reason || 'unreadable'
+          };
+        }
+      });
+      if (!persisted) return;
+      if (Array.isArray(persisted.extensions)) {
+        this.#extensionRecords = persisted.extensions.map((record) => cloneExtensionInstallRecord(record));
+      }
+    } catch {
+      // Extension seeding is best-effort; the empty registry stays usable.
+    }
+  }
+
+  /**
    * Seeds the runtime template-import mirror from persisted storage before the
    * effective catalog is resolved. Only an auto-hydrating store reads storage
    * here; absent or unreadable state leaves the shipped catalog unchanged. The
@@ -9150,7 +9823,9 @@ export class SandboxStore {
       existing.name === GENERIC_REALM_NAME &&
       existing.description === undefined &&
       existing.color === undefined &&
-      existing.templateId === undefined
+      existing.templateId === undefined &&
+      existing.instance === undefined &&
+      existing.extensions === undefined
     ) {
       return; // Already pristine — never schedule a no-op save.
     }
@@ -9158,7 +9833,9 @@ export class SandboxStore {
       name: GENERIC_REALM_NAME,
       description: null,
       color: null,
-      templateId: null
+      templateId: null,
+      instance: null,
+      extensions: null
     });
   }
 
@@ -9283,6 +9960,58 @@ export class SandboxStore {
   }
 
   /**
+   * Reconciles the in-memory extension registry with the install topology of a
+   * persisted snapshot (or clears it on reset) through the registry's
+   * snapshot-authoritative `reconcile` path: every structurally valid persisted
+   * record is applied, malformed entries are dropped individually, and
+   * duplicate ids resolve last-wins in place. A no-op reconcile never
+   * persists, so a hydration that finds the already-seeded records leaves
+   * storage untouched. Nothing connects.
+   *
+   * @param persisted - Snapshot whose install topology wins, or null to drop every record.
+   */
+  #reconcileExtensionRegistry(persisted: SandboxPersistedState | null): void {
+    const incoming = persisted && Array.isArray(persisted.extensions) ? persisted.extensions : [];
+    this.#extensionRegistry.reconcile(incoming);
+  }
+
+  /**
+   * Heals the realm-attachment topology after hydration: an attachment whose
+   * extension carries no install record degrades to `unavailable` (the
+   * attachment and its approval stamp are never dropped), and an `unavailable`
+   * attachment whose extension is installed again returns to `active`. A
+   * `conflict` attachment is left untouched — conflict resolution belongs to
+   * catalog-time work. Runs in memory only: the hydration suppression guard
+   * keeps the debounced autosave inert, so persisted bytes are never rewritten
+   * here.
+   */
+  #healRealmExtensionAttachments(): void {
+    for (const realm of this.#realmRegistry.listRealms()) {
+      const attachments = realm.extensions;
+      if (!attachments || attachments.length === 0) continue;
+      let changed = false;
+      const healed = attachments.map((attachment) => {
+        const installed = this.#extensionRegistry.getExtension(attachment.extensionId) !== null;
+        if (!installed && attachment.status !== 'unavailable') {
+          changed = true;
+          return Object.freeze({ ...attachment, status: 'unavailable' as const });
+        }
+        if (installed && attachment.status === 'unavailable') {
+          changed = true;
+          return Object.freeze({ ...attachment, status: 'active' as const });
+        }
+        return attachment;
+      });
+      if (!changed) continue;
+      try {
+        this.#realmRegistry.updateRealm(realm.id, { extensions: healed });
+      } catch {
+        // A rejected heal leaves the persisted attachment state untouched.
+      }
+    }
+  }
+
+  /**
    * Reconciles the in-memory realm registry with the realm topology of a
    * persisted snapshot (or clears it on reset), using the registry's public
    * management API only:
@@ -9318,7 +10047,8 @@ export class SandboxStore {
             description: realm.description ?? null,
             color: realm.color ?? null,
             templateId: realm.templateId ?? null,
-            instance: realm.instance ?? null
+            instance: realm.instance ?? null,
+            extensions: realm.extensions ?? null
           });
         } else {
           this.#realmRegistry.addRealm(realm);
@@ -10023,6 +10753,28 @@ export class SandboxStore {
       };
     }
     this.clockSnapshot = snapshot;
+  }
+
+  /**
+   * Emits one extension audit event on the runtime event stream (the same
+   * channel the publishing-grant events use), so host subscribers observe
+   * install/attach/detach decisions. Emission is observational: a missing or
+   * throwing emit port never fails the mutation, and the payload carries ids
+   * and non-secret metadata only.
+   *
+   * @param type - Event type (`extension_installed`/`extension_removed`/`extension_attached`/`extension_detached`).
+   * @param payload - Non-secret event payload.
+   */
+  #emitExtensionAuditEvent(type: string, payload: Record<string, unknown>): void {
+    try {
+      const port = this.#runtime && typeof this.#runtime.createSubsystemEmitPort === 'function'
+        ? this.#runtime.createSubsystemEmitPort()
+        : null;
+      if (!port || typeof port.emit !== 'function') return;
+      port.emit({ type, timestamp: Date.now(), payload });
+    } catch {
+      // Audit emission is observational; it never fails the mutation.
+    }
   }
 
   /**

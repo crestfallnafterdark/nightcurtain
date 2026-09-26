@@ -390,7 +390,7 @@ test('14. persisted projection determinism across constructions and mutations', 
 // 7. Purity
 // ============================================================================
 
-test('15. module sources are pure: own-file imports and no ambient I/O', () => {
+test('15. module sources are pure: own-file plus sanctioned extensionRegistry imports and no ambient I/O', () => {
   const forbidden = [
     { id: 'window', pattern: /\bwindow\b/ },
     { id: 'localStorage', pattern: /\blocalStorage\b/ },
@@ -399,6 +399,10 @@ test('15. module sources are pure: own-file imports and no ambient I/O', () => {
     { id: 'XMLHttpRequest', pattern: /\bXMLHttpRequest\b/ },
     { id: 'navigator', pattern: /\bnavigator\b/ }
   ];
+  // The realm record hosts extension attachments, so the attachment
+  // vocabulary (type + structural normalizer) is imported from the owning
+  // extensionRegistry surface; every other cross-module import stays banned.
+  const sanctionedSpecifier = '../extensionRegistry/index.ts';
 
   for (const file of ['index.ts', 'registry.ts', 'types.ts']) {
     const source = fs.readFileSync(path.join(MODULE_DIR, file), 'utf-8');
@@ -409,7 +413,10 @@ test('15. module sources are pure: own-file imports and no ambient I/O', () => {
       (match) => match[1]
     );
     for (const specifier of specifiers) {
-      assert.ok(specifier.startsWith('./'), `${file} may import only its own files, found '${specifier}'`);
+      assert.ok(
+        specifier.startsWith('./') || specifier === sanctionedSpecifier,
+        `${file} may import only its own files or '${sanctionedSpecifier}', found '${specifier}'`
+      );
     }
   }
 
@@ -554,4 +561,93 @@ test('17. instance provenance is copied, frozen, patchable, and validated', () =
   });
   assert.deepStrictEqual(loaded.listRealms().map((record) => record.id), ['realm_ok']);
   assert.deepStrictEqual(loaded.getRealm('realm_ok').instance, instanceProvenance());
+});
+
+/**
+ * Builds a valid realm attachment literal.
+ *
+ * @param {object} [overrides] Field overrides
+ * @returns {object} Attachment literal
+ */
+function realmAttachment(overrides = {}) {
+  return {
+    extensionId: 'acme-scoring',
+    toolSelection: 'all',
+    status: 'active',
+    approvedAt: '2026-09-21T00:00:00.000Z',
+    approvedBy: 'operator',
+    ...overrides
+  };
+}
+
+test('18. realm attachments are copied, frozen, patchable, validated, and drop malformed entries on ingest', () => {
+  const { registry } = createHarness();
+
+  const added = registry.addRealm(realm({
+    instance: instanceProvenance({ missingExtensions: ['acme/text-tools'] }),
+    extensions: [realmAttachment(), realmAttachment({ extensionId: 'beta', toolSelection: ['docs_search'], status: 'unavailable' })]
+  }));
+  assert.deepStrictEqual(added.instance.missingExtensions, ['acme/text-tools'], 'provenance keeps the missing-extension list');
+  assert.ok(Object.isFrozen(added.extensions), 'the attachment list is frozen');
+  assert.ok(Object.isFrozen(added.extensions[0].toolSelection === 'all' ? added.extensions[0] : added.extensions[0].toolSelection), 'nested selections are frozen');
+  assert.deepStrictEqual(added.extensions.map((entry) => entry.extensionId), ['acme-scoring', 'beta']);
+
+  const fetched = registry.getRealm('realm_demo');
+  assert.notStrictEqual(fetched.extensions, added.extensions, 'reads hand out fresh attachment lists');
+  assert.deepStrictEqual(fetched.extensions, added.extensions);
+  assert.notStrictEqual(fetched.instance, added.instance, 'reads hand out fresh provenance copies');
+  assert.deepStrictEqual(fetched.instance.missingExtensions, ['acme/text-tools']);
+
+  // A valid list replaces the previous attachments; an empty list clears the field.
+  const replaced = registry.updateRealm('realm_demo', { extensions: [realmAttachment({ extensionId: 'gamma' })] });
+  assert.deepStrictEqual(replaced.extensions.map((entry) => entry.extensionId), ['gamma']);
+  const cleared = registry.updateRealm('realm_demo', { extensions: [] });
+  assert.strictEqual(cleared.extensions, undefined, 'an empty list clears the attachment field');
+  const withNull = registry.addRealm(realm({ id: 'realm_null_clear', extensions: [realmAttachment()] }));
+  assert.strictEqual(
+    registry.updateRealm('realm_null_clear', { extensions: null }).extensions,
+    undefined,
+    'null clears the attachment field'
+  );
+
+  // Strict caller-input validation refuses malformed and duplicate attachments
+  // without partial application.
+  const before = registry.getRealm('realm_null_clear').extensions;
+  for (const bad of [
+    [realmAttachment(), { extensionId: 'broken' }],
+    [realmAttachment(), realmAttachment({ extensionId: 'acme-scoring' })],
+    [realmAttachment({ status: 'bogus' })],
+    [realmAttachment({ toolSelection: ['read_file'] })],
+    [realmAttachment({ toolSelection: [] })],
+    [realmAttachment({ approvedBy: 'agent' })],
+    'not-an-array'
+  ]) {
+    assert.throws(
+      () => registry.updateRealm('realm_null_clear', { extensions: bad }),
+      /extension|extensions/,
+      'a malformed attachment list refuses updateRealm'
+    );
+  }
+  assert.deepStrictEqual(registry.getRealm('realm_null_clear').extensions, before, 'a refused patch changes nothing');
+  assert.strictEqual(withNull.extensions.length, 1);
+
+  // Ingested records drop malformed attachment entries individually while the
+  // realm survives; a malformed missingExtensions block invalidates only the
+  // provenance, and a non-array container drops the field.
+  const { registry: loaded } = createHarness({
+    stored: [
+      realm({ id: 'realm_ingest', extensions: [realmAttachment(), { extensionId: 'bad' }, { status: 'active' }, 'garbage'] }),
+      realm({ id: 'realm_prov_ok', instance: instanceProvenance({ missingExtensions: ['a', 'b'] }) }),
+      realm({ id: 'realm_prov_bad', instance: instanceProvenance({ missingExtensions: ['ok', ''] }) }),
+      realm({ id: 'realm_container_bad', extensions: 'not-an-array' })
+    ]
+  });
+  assert.deepStrictEqual(
+    loaded.getRealm('realm_ingest').extensions.map((entry) => entry.extensionId),
+    ['acme-scoring'],
+    'malformed attachment entries drop while the realm survives'
+  );
+  assert.deepStrictEqual(loaded.getRealm('realm_prov_ok').instance.missingExtensions, ['a', 'b']);
+  assert.strictEqual(loaded.getRealm('realm_prov_bad'), null, 'a malformed missingExtensions block invalidates the provenance (and with it the ingested record)');
+  assert.strictEqual(loaded.getRealm('realm_container_bad').extensions, undefined, 'a non-array attachment container drops the field');
 });

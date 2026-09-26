@@ -21,8 +21,10 @@
  *      explicit `allowVersionMismatch` confirmation, riding the receipt as a
  *      warning (the review API reports the same warning);
  *   6. a providers/capability-bearing template imports, exports, and lists
- *      fine but launch is blocked with `ERR_TEMPLATE_PROVIDERS_UNSUPPORTED`
- *      before any side effect (no partial realm).
+ *      fine and launches with the missing-extension disclosure instead of a
+ *      gate error: the requested extension ids ride the receipt warnings and
+ *      `instance.missingExtensions`, while no attachment and no resolved tool
+ *      is recorded without an install/approval.
  *
  * Zero-Mock Verification: every engine class is the real production class; the
  * fixture declares no turn trigger (no `initialPrompt`, no seed directive), so
@@ -429,7 +431,7 @@ const PROVIDERS_TRANSPORT = Object.freeze({
   files: {}
 });
 
-test('4. a providers-bearing template imports and exports fine but launch is blocked with the typed gate', async () => {
+test('4. a providers-bearing template imports and exports fine and launches with missing-extension disclosure', async () => {
   const store = createStore();
   try {
     const importReceipt = store.importRealmTemplate(PROVIDERS_TRANSPORT);
@@ -442,28 +444,30 @@ test('4. a providers-bearing template imports and exports fine but launch is blo
     );
     assert.equal(store.getRealmTemplateSource('te-providers').source, 'imported');
     const bundle = store.getRealmTemplateBundle('te-providers');
-    assert.equal(templateRequiresProviders(bundle.template), true, 'the catalog exposes the launch gate predicate');
+    assert.equal(templateRequiresProviders(bundle.template), true, 'the catalog still exposes the pure shape query');
 
-    const realmsBefore = store.realms.map((realm) => realm.id);
-    const agentsBefore = store.agents.map((agent) => agent.id).sort();
-    const messagesBefore = store.messages.length;
-    const fsBefore = JSON.stringify(store.fsSnapshot);
-
-    let failure = null;
-    try {
-      await store.launchRealmFromTemplate('te-providers');
-    } catch (err) {
-      failure = err;
-    }
-    assert.ok(failure, 'the providers-bearing template must block the launch');
-    assert.equal(failure.code, SANDBOX_STORE_ERROR_CODES.ERR_TEMPLATE_PROVIDERS_UNSUPPORTED);
-    assert.equal(failure.code, 'ERR_TEMPLATE_PROVIDERS_UNSUPPORTED');
-
-    assert.deepEqual(store.realms.map((realm) => realm.id), realmsBefore, 'no partial realm record');
-    assert.deepEqual(store.agents.map((agent) => agent.id).sort(), agentsBefore, 'no partial member');
-    assert.equal(store.recycleBin.length, 0, 'no recycle residue');
-    assert.equal(store.messages.length, messagesBefore, 'nothing is delivered');
-    assert.equal(JSON.stringify(store.fsSnapshot), fsBefore, 'nothing is written to any workspace');
+    const receipt = await store.launchRealmFromTemplate('te-providers', { name: 'Providers Disclosed' });
+    assert.equal(receipt.realm.templateId, 'te-providers', 'the provider-bearing template launches');
+    assert.equal(receipt.agents.length, 1, 'the member launches');
+    assert.deepEqual(
+      receipt.realm.instance.missingExtensions,
+      ['acme/text-tools', 'acme-scoring'],
+      'every requested extension rides the missing disclosure in declared order'
+    );
+    assert.equal(receipt.realm.instance.resolvedTools, undefined, 'nothing resolves without an install');
+    assert.equal(receipt.realm.extensions, undefined, 'nothing attaches without an approval');
+    assert.ok(Array.isArray(receipt.warnings) && receipt.warnings.length === 2, 'both requests are disclosed on the receipt');
+    assert.ok(
+      receipt.warnings.some((warning) => /'acme-scoring' is not installed/.test(warning)),
+      'the MCP request points at the install flow'
+    );
+    assert.ok(
+      receipt.warnings.some((warning) => /'acme\/text-tools' is not installed/.test(warning)),
+      'the pack request points at the install flow'
+    );
+    // The launched member is alive, but no provider was ever contacted and no
+    // partial state was rolled back: the launch is complete, not gated.
+    assert.ok(store.agents.some((agent) => agent.id === 'te-providers-observer'));
   } finally {
     store.destroy();
   }

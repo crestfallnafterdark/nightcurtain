@@ -2180,3 +2180,168 @@ test('authority fields: prototype-carried records reject as pollution and own re
   assert.deepStrictEqual(validated.state.metaAuthorityGrants, own.metaAuthorityGrants);
   assert.deepStrictEqual(validated.state.templateAuthorityTrust, own.templateAuthorityTrust);
 });
+
+// ============================================================================
+// 25. Extension wave: install records round-trip, drop invalid, stay absent
+// ============================================================================
+
+test('25. extension install records round-trip and invalid values are dropped on load', () => {
+  sharedLocalStorage.clear();
+
+  const runtimeStub = {
+    listAgents: () => [],
+    listRecycledAgents: () => [],
+    exportSchedules: () => []
+  };
+  const record = {
+    id: 'acme-scoring',
+    kind: 'mcp',
+    displayName: 'Acme Scoring',
+    transportHint: { kind: 'http', url: 'https://mcp.example.com' },
+    credentialId: 'cred_1',
+    status: 'installed',
+    installSource: 'operator',
+    approvedUrl: 'https://mcp.example.com',
+    normalizationWarnings: ['deprecated field ignored'],
+    createdAt: 1700000000000
+  };
+
+  const snapshot = serializeRuntimeEnvironment({ runtime: runtimeStub }, { extensions: [record] });
+  assert.strictEqual(snapshot.extensions.length, 1);
+  assert.deepStrictEqual(snapshot.extensions[0], record);
+  assert.notStrictEqual(snapshot.extensions[0], record, 'serialization must copy install records');
+  assert.notStrictEqual(snapshot.extensions[0].transportHint, record.transportHint, 'nested hints must be fresh copies');
+
+  // An empty registry omits the field so legacy wire bytes are unchanged.
+  const bare = serializeRuntimeEnvironment({ runtime: runtimeStub });
+  assert.ok(!('extensions' in bare), 'an empty install projection must omit the field');
+
+  // The validated snapshot keeps identity when every entry is valid, and the
+  // record survives a real storage round-trip.
+  const validated = validateSandboxState(snapshot);
+  assert.strictEqual(validated.valid, true);
+  assert.strictEqual(validated.state, snapshot, 'valid install fields must not force a snapshot copy');
+  assert.strictEqual(saveSandboxState(snapshot), true);
+  const loaded = loadSandboxState();
+  assert.deepStrictEqual(loaded.extensions, snapshot.extensions, 'install records must round-trip through storage');
+
+  // Invalid entries drop individually; a non-array container drops the field;
+  // unknown future top-level fields survive.
+  const invalid = {
+    ...snapshot,
+    extensions: [
+      record,
+      { ...record, id: '' },
+      { ...record, kind: 'stdio' },
+      { ...record, transportHint: { kind: 'http' } },
+      { ...record, transportHint: null },
+      { ...record, status: 'connected' },
+      { ...record, createdAt: 'yesterday' },
+      'garbage',
+      null
+    ]
+  };
+  const invalidValidated = validateSandboxState(invalid);
+  assert.strictEqual(invalidValidated.valid, true, 'invalid optional install entries must not fail validation');
+  assert.strictEqual(invalidValidated.state.extensions.length, 1, 'invalid install entries must be dropped individually');
+  assert.strictEqual(invalidValidated.state.extensions[0].id, 'acme-scoring');
+  assert.strictEqual(invalid.extensions.length, 9, 'validation must not mutate the input array');
+
+  const nonArray = { ...snapshot, extensions: 'not-an-array' };
+  const nonArrayValidated = validateSandboxState(nonArray);
+  assert.strictEqual(nonArrayValidated.valid, true);
+  assert.strictEqual(nonArrayValidated.state.extensions, undefined, 'a non-array extensions value must be dropped');
+
+  // A legacy snapshot without the field keeps its exact identity.
+  const legacy = { ...snapshot };
+  delete legacy.extensions;
+  const legacyValidated = validateSandboxState(legacy);
+  assert.strictEqual(legacyValidated.valid, true);
+  assert.strictEqual(legacyValidated.state, legacy, 'legacy snapshots must keep their identity');
+  assert.strictEqual(saveSandboxState(legacy), true);
+  assert.strictEqual(loadSandboxState().extensions, undefined);
+
+  sharedLocalStorage.clear();
+});
+
+// ============================================================================
+// 26. Extension wave: realm attachments + provenance missingExtensions
+// ============================================================================
+
+test('26. realm attachments and provenance missingExtensions round-trip and drop malformed entries', () => {
+  sharedLocalStorage.clear();
+
+  const runtimeStub = {
+    listAgents: () => [],
+    listRecycledAgents: () => [],
+    exportSchedules: () => []
+  };
+  const realm = {
+    id: 'realm_ext_persist',
+    name: 'Extension Persist',
+    createdAt: 1700000000000,
+    instance: {
+      templateId: 'tpl_ext',
+      templateVersion: 'sha256:abc',
+      packageDigest: 'sha256:def',
+      inputHashes: { premise: 'sha256:ghi' },
+      seedPaths: ['lore/world.md'],
+      launchedAt: '2026-01-01T00:00:00.000Z',
+      resolvedTools: { similarity: 'acme-scoring' },
+      missingExtensions: ['acme/text-tools']
+    },
+    extensions: [
+      {
+        extensionId: 'acme-scoring',
+        toolSelection: ['similarity'],
+        status: 'active',
+        approvedAt: '2026-01-01T00:00:00.000Z',
+        approvedBy: 'operator'
+      }
+    ]
+  };
+
+  const snapshot = serializeRuntimeEnvironment({ runtime: runtimeStub }, { realms: [realm] });
+  assert.deepStrictEqual(snapshot.realms[0], realm);
+  const validated = validateSandboxState(snapshot);
+  assert.strictEqual(validated.valid, true);
+  assert.deepStrictEqual(validated.state.realms[0].extensions, realm.extensions);
+  assert.deepStrictEqual(validated.state.realms[0].instance.resolvedTools, { similarity: 'acme-scoring' });
+  assert.deepStrictEqual(validated.state.realms[0].instance.missingExtensions, ['acme/text-tools']);
+  assert.strictEqual(saveSandboxState(snapshot), true);
+  assert.deepStrictEqual(loadSandboxState().realms[0], realm, 'attachments and provenance round-trip through storage');
+
+  // Malformed attachment entries drop individually while the realm survives;
+  // a malformed missingExtensions block drops the provenance but never the realm.
+  const malformed = {
+    ...snapshot,
+    realms: [
+      {
+        ...realm,
+        extensions: [
+          realm.extensions[0],
+          { extensionId: 'broken' },
+          { ...realm.extensions[0], extensionId: 'dup-status', status: 'bogus' },
+          { ...realm.extensions[0], extensionId: 'dup-selection', toolSelection: [] },
+          'garbage'
+        ],
+        instance: { ...realm.instance, missingExtensions: ['ok', ''] }
+      }
+    ]
+  };
+  const malformedValidated = validateSandboxState(malformed);
+  assert.strictEqual(malformedValidated.valid, true);
+  assert.deepStrictEqual(
+    malformedValidated.state.realms[0].extensions.map((entry) => entry.extensionId),
+    ['acme-scoring'],
+    'malformed attachment entries drop while the realm survives'
+  );
+  assert.strictEqual(
+    malformedValidated.state.realms[0].instance,
+    undefined,
+    'a malformed missingExtensions block drops the provenance block, not the realm'
+  );
+  assert.strictEqual(malformedValidated.state.realms[0].id, 'realm_ext_persist');
+
+  sharedLocalStorage.clear();
+});

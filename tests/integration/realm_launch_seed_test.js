@@ -64,6 +64,12 @@
  *      launch inputs, `defaultFile` prefill) exactly as the catalog
  *      materializes it; the explicit zero-tool profile resolves to no grants.
  *      This case pins wiring, never wording.
+ *  18. Extension wave: a provider-bearing template launches (no gate), the
+ *      installed+approved extension attaches and its declared tool reference
+ *      resolves into `instance.resolvedTools`, the unapproved/uninstalled
+ *      request rides the receipt warning and `instance.missingExtensions`, the
+ *      extension-bound call name stays out of the internal `allowedTools`
+ *      allowlist, and the store attach/detach APIs rewrite the realm record.
  *
  * Fixture note: launched template agents carry a bound catalog preset so no
  * model literal appears at the launch site. The suite registers one custom
@@ -1124,6 +1130,103 @@ test('17. the default store carries the embedded example_agent bundle and compos
     ]);
     assert.deepEqual(expected.placements, [], 'the bundle declares no placements');
     assert.deepEqual(expected.directives, [], 'the bundle declares no directives');
+  } finally {
+    store.destroy();
+  }
+});
+
+// ============================================================================
+// 18. Extension wave: launch resolution + attach/detach on the realm record
+// ============================================================================
+
+/** Extension-launch fixture: one internal grant plus one extension reference. */
+const EXTENSION_LAUNCH_TEMPLATE = {
+  id: 'c5-extension-fixture',
+  name: 'C5 Extension Fixture',
+  description: 'Declares one MCP request and one extension tool reference.',
+  formatVersion: 1,
+  agents: [
+    {
+      key: 'observer',
+      idPattern: 'c5-ext-observer',
+      name: 'Observer',
+      role: 'observer',
+      prompt: [{ kind: 'text', text: 'Observe the extension seam.' }],
+      toolProfile: { tools: ['acme-scoring::similarity', 'read_file'] },
+      privileged: false,
+      modelPresetId: OFFLINE_PRESET_ID
+    }
+  ],
+  providers: [
+    { kind: 'mcp', id: 'acme-scoring', transport: { kind: 'http', url: 'https://mcp.example.com' } },
+    { kind: 'pack', id: 'acme/text-tools', range: '^1' }
+  ]
+};
+
+/** The extension fixture as a store bundle. */
+const EXTENSION_LAUNCH_BUNDLE = { template: EXTENSION_LAUNCH_TEMPLATE, files: {} };
+
+test('18. installed+approved extensions resolve at launch and attach; the rest is disclosed', async () => {
+  const store = await createOperatorStore([EXTENSION_LAUNCH_BUNDLE]);
+  try {
+    registerOfflinePreset(store);
+    store.installExtension({
+      id: 'acme-scoring',
+      kind: 'mcp',
+      displayName: 'Acme Scoring',
+      transportHint: { kind: 'http', url: 'https://mcp.example.com' }
+    });
+
+    const receipt = await store.launchRealmFromTemplate('c5-extension-fixture', {
+      extensionApprovals: [{ extensionId: 'acme-scoring' }]
+    });
+
+    assert.equal(receipt.realm.templateId, 'c5-extension-fixture');
+    assert.deepEqual(
+      receipt.realm.instance.resolvedTools,
+      { similarity: 'acme-scoring' },
+      'the declared reference resolves to its sanitized call name'
+    );
+    assert.deepEqual(
+      receipt.realm.instance.missingExtensions,
+      ['acme/text-tools'],
+      'the unapproved/uninstalled pack request stays disclosed'
+    );
+    assert.deepEqual(
+      receipt.realm.extensions.map((entry) => [entry.extensionId, entry.toolSelection, entry.status, entry.approvedBy]),
+      [['acme-scoring', 'all', 'active', 'operator']],
+      'the installed+approved extension attaches with the operator stamp'
+    );
+    assert.deepEqual(
+      receipt.warnings,
+      ["Requested extension 'acme/text-tools' is not installed — its tools stay unavailable in this Realm"],
+      'the receipt discloses exactly the missing request'
+    );
+
+    const member = store.agents.find((agent) => agent.id === 'c5-ext-observer');
+    assert.deepEqual(
+      member.config.allowedTools,
+      ['read_file'],
+      'the extension-bound call name never enters the internal allowlist'
+    );
+
+    // The store attach/detach APIs rewrite the realm record; the launch
+    // attachment is ordinary realm state afterwards.
+    const detached = store.detachExtension(receipt.realm.id, 'acme-scoring');
+    assert.equal(detached.extensions, undefined, 'detach clears the realm attachment field');
+    const reattached = store.attachExtension(receipt.realm.id, 'acme-scoring', { toolSelection: ['similarity'] });
+    assert.deepEqual(
+      reattached.extensions.map((entry) => [entry.extensionId, entry.toolSelection]),
+      [['acme-scoring', ['similarity']]],
+      'attach records the narrowed realm selection'
+    );
+    assert.throws(
+      () => store.removeExtension('acme-scoring'),
+      (err) => err.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_ATTACHED,
+      'a still-attached install refuses removal'
+    );
+    assert.equal(store.detachExtension(receipt.realm.id, 'acme-scoring').extensions, undefined);
+    assert.equal(store.removeExtension('acme-scoring'), true, 'detaching first lets the install remove');
   } finally {
     store.destroy();
   }

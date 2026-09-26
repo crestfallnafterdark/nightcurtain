@@ -106,6 +106,33 @@ export interface HistoryMessageSnapshot {
 export function loadSandboxState(options?: StorageOptions): SandboxPersistedState | null;
 
 // @public
+export interface PersistedExtensionInstallRecord {
+    readonly approvedUrl?: string;
+    readonly createdAt: number;
+    readonly credentialId?: string;
+    readonly displayName?: string;
+    readonly id: string;
+    readonly installSource: 'operator' | 'template-assist';
+    readonly kind: 'mcp' | 'pack';
+    readonly normalizationWarnings?: readonly string[];
+    readonly status: 'installed' | 'unavailable' | 'error';
+    readonly transportHint: PersistedExtensionTransportHint;
+}
+
+// @public
+export type PersistedExtensionTransportHint = {
+    readonly kind: 'http';
+    readonly url: string;
+} | {
+    readonly kind: 'stdio';
+    readonly command: string;
+    readonly args?: readonly string[];
+} | {
+    readonly kind: 'pack';
+    readonly source: string;
+};
+
+// @public
 export interface PersistedImportedRealmTemplate {
     readonly id: string;
     readonly payload: string;
@@ -126,9 +153,19 @@ export interface PersistedModelPreset {
 }
 
 // @public
+export interface PersistedRealmExtensionAttachment {
+    readonly approvedAt: string;
+    readonly approvedBy: 'operator';
+    readonly extensionId: string;
+    readonly status: 'active' | 'conflict' | 'unavailable';
+    readonly toolSelection: 'all' | readonly string[];
+}
+
+// @public
 export interface PersistedRealmInstanceProvenance {
     readonly inputHashes: Readonly<Record<string, string>>;
     readonly launchedAt: string;
+    readonly missingExtensions?: readonly string[];
     readonly packageDigest?: string;
     readonly resolvedTools?: Readonly<Record<string, string>>;
     readonly seedPaths: readonly string[];
@@ -141,6 +178,7 @@ export interface PersistedRealmRecord {
     readonly color?: string;
     readonly createdAt: number;
     readonly description?: string;
+    readonly extensions?: readonly PersistedRealmExtensionAttachment[];
     readonly id: string;
     readonly instance?: PersistedRealmInstanceProvenance;
     readonly name: string;
@@ -223,6 +261,7 @@ export interface SandboxPersistedState {
     readonly agentDraftInputs: Record<string, string>;
     readonly agents: SerializedAgent[];
     readonly customPresets?: PersistedModelPreset[];
+    readonly extensions?: PersistedExtensionInstallRecord[];
     readonly importedRealmTemplates?: PersistedImportedRealmTemplate[];
     readonly messagingBus: SerializedMessagingBus;
     readonly metaAuthorityGrants?: PersistedMetaAuthorityGrants;
@@ -367,6 +406,7 @@ export interface SessionMetadata {
     readonly activeTab?: string;
     readonly agentDraftInputs?: Record<string, string>;
     readonly customPresets?: readonly PersistedModelPreset[];
+    readonly extensions?: readonly PersistedExtensionInstallRecord[];
     readonly importedRealmTemplates?: readonly PersistedImportedRealmTemplate[];
     readonly realms?: readonly PersistedRealmRecord[];
 }
@@ -635,6 +675,27 @@ if (state) {
 }
 ```
 
+### `PersistedExtensionInstallRecord` — interface
+
+Structural shape of one globally installed extension record carried by the persisted snapshot (extension wave). Deliberately type-local: persistence never imports the `extensionRegistry` module (the registry owns install semantics), so the shape is declared here as plain data. Additive optional snapshot data: absent while nothing is installed (legacy snapshots load byte-compatibly), structurally invalid entries are dropped individually, and hydration reconciles them through the registry's validated load path without ever connecting anything. Records carry ids and hints only, never credentials or secrets.
+
+#### Members
+
+- **`approvedUrl`** — Operator-approved server URL, when one was approved explicitly.
+- **`createdAt`** — Epoch milliseconds when the record was created.
+- **`credentialId`** — Optional vault credential id bound to the record (an id, never a secret).
+- **`displayName`** — Optional operator-facing display name.
+- **`id`** — Host-unique extension id.
+- **`installSource`** — How the record came to exist.
+- **`kind`** — Extension kind: MCP server or tool pack.
+- **`normalizationWarnings`** — Non-fatal normalization findings recorded at install time.
+- **`status`** — Installation lifecycle status.
+- **`transportHint`** — Transport hint the record was installed with.
+
+### `PersistedExtensionTransportHint` — type alias
+
+Structural shape of one extension transport hint carried by a persisted install record: `{ kind: 'http', url }`, `{ kind: 'stdio', command, args? }`, or `{ kind: 'pack', source }`. Declared here as plain data so a registry record assigns structurally without persistence importing the registry.
+
 ### `PersistedImportedRealmTemplate` — interface
 
 Structural shape of one persisted imported Realm-template bundle (Wave T, ticket 0df20ae). The payload is the canonical transport JSON text (`{ formatVersion, template, files }`) exactly as imported; the store re-parses it on hydration. Additive optional snapshot data: absent on legacy snapshots (which load byte-compatibly), structurally invalid entries are dropped during validation, and the payload carries no credentials by construction (template bundles never contain secrets).
@@ -664,16 +725,29 @@ Structural shape of one MOD-20 custom preset entry carried by the persisted snap
 - **`modelConfig`** — Credential-free model configuration (providerId/modelId plus tuning).
 - **`name`** — Display name shown by catalog consumers.
 
+### `PersistedRealmExtensionAttachment` — interface
+
+Structural shape of one realm-local extension attachment carried by a persisted Realm record (extension wave). Deliberately type-local: persistence never imports the `extensionRegistry` module (the registry owns attachment semantics), so the shape is declared here as plain data. Validation drops malformed attachment entries individually while the enclosing Realm record survives, exactly like a malformed provenance block.
+
+#### Members
+
+- **`approvedAt`** — ISO-8601 timestamp of the operator approval that created the attachment.
+- **`approvedBy`** — Approval principal; always the operator.
+- **`extensionId`** — Id of the globally installed extension this Realm attaches.
+- **`status`** — Activation state of the attachment.
+- **`toolSelection`** — Realm-level tool selection: `'all'` or an explicit sanitized call-name list.
+
 ### `PersistedRealmInstanceProvenance` — interface
 
-Structural shape of one Realm launch-provenance entry carried by the persisted snapshot (Wave T, ticket 0df20ae). Deliberately type-local: persistence never imports the `realmRegistry` module (the registry owns realm semantics), so the shape is declared here as plain data. Validation keeps only the canonical fields and treats a malformed provenance as an absent one — a corrupt provenance block never costs the Realm record itself. Records carry hashes/paths only, never raw input values or secrets. The nested collections are `readonly` exactly like the frozen registry shape (`realmRegistry.RealmInstanceProvenance`) so a registry record assigns to this type structurally without persistence importing the registry module.
+Structural shape of one Realm launch-provenance entry carried by the persisted snapshot (Wave T, ticket 0df20ae). Deliberately type-local: persistence never imports the `realmRegistry` module (the registry owns realm semantics), so the shape is declared here as plain data. Validation keeps only the canonical fields and treats a malformed provenance as an absent one — a corrupt provenance block never costs the Realm record itself. Records carry hashes/paths/ids only, never raw input values or secrets. The nested collections are `readonly` exactly like the frozen registry shape (`realmRegistry.RealmInstanceProvenance`) so a registry record assigns to this type structurally without persistence importing the registry module.
 
 #### Members
 
 - **`inputHashes`** — Per-input content hashes keyed by declared input id (hashes only).
 - **`launchedAt`** — ISO-8601 launch timestamp.
+- **`missingExtensions`** — Requested extension ids that did not resolve at launch, in declared order.
 - **`packageDigest`** — Optional content hash of the canonical hydration-package serialization.
-- **`resolvedTools`** — Reserved for Wave P: resolved capability id → provider binding.
+- **`resolvedTools`** — Resolved extension tools recorded at launch: sanitized call name → extension id.
 - **`seedPaths`** — Template-seed destination paths written at launch, in write order.
 - **`templateId`** — Template id the Realm was launched from.
 - **`templateVersion`** — Effective template bundle content version (`sha256:<hex>`) at launch.
@@ -687,6 +761,7 @@ Structural shape of one Realm-record entry carried by the persisted snapshot. De
 - **`color`** — Optional UI accent color; presentation-only.
 - **`createdAt`** — Epoch milliseconds when the Realm record was created.
 - **`description`** — Optional operator description.
+- **`extensions`** — Optional realm-local extension attachments (additive; malformed entries drop individually).
 - **`id`** — Registry key: a `realm_*` id (or any registry entry id carried by a foreign snapshot).
 - **`instance`** — Optional launch provenance of a template-launched Realm (additive).
 - **`name`** — User-visible display name.
@@ -895,6 +970,7 @@ if (validateSandboxState(state).valid) {
 - **`agentDraftInputs`** — Uncommitted user draft inputs per agent ID.
 - **`agents`** — Active agent instances serialized through the entity snapshot contract; restore normalizes them to state IDLE.
 - **`customPresets`** — User-authored MOD-20 custom preset entries (additive optional field). Official seed presets are never stored here; absent or invalid entries are dropped during validation so legacy snapshots load byte-compatibly.
+- **`extensions`** — Globally installed extension records (additive optional field, extension wave). Absent while nothing is installed so legacy snapshots stay byte-identical; invalid entries are dropped during validation so an otherwise valid snapshot still loads. Hydration reconciles the field through the extension registry's validated load path and never connects anything.
 - **`importedRealmTemplates`** — Runtime-imported Realm-template bundles (additive optional field, Wave T ticket 0df20ae). Absent while no import exists so legacy snapshots stay byte-identical; invalid entries are dropped during validation.
 - **`messagingBus`** — Messaging bus audit logs, inboxes, and registrations.
 - **`metaAuthorityGrants`** — Persisted Wave U publishing-authority grant lists (additive optional field, ticket 2518510): canonical identity keys per explicit authority. Absent while no grant exists (legacy snapshots stay byte-identical); malformed values fail validation closed, and hydration never derives authority from this field — it re-applies grants through the composition-root restore only (unknown/recycled refs skipped).
@@ -1163,6 +1239,7 @@ Transient UI and session metadata preserved across persistence boundaries.
 - **`activeTab`** — Identifier of the currently active navigation tab (e.g., 'chat', 'fs', 'clock').
 - **`agentDraftInputs`** — Map of uncommitted user draft inputs keyed by agent ID.
 - **`customPresets`** — User-authored MOD-20 custom preset entries captured from the catalog projection. Additive optional field: official seed presets are never persisted here, absent/invalid entries are dropped on validation, and old snapshots load unchanged.
+- **`extensions`** — Globally installed extension records captured from the composition root's extension registry (extension wave). Additive optional field: absent while nothing is installed (legacy snapshots load byte-compatibly), absent/invalid entries are dropped on validation, and hydration reconciles the remaining records through the registry's validated load path without connecting anything.
 - **`importedRealmTemplates`** — Runtime-imported Realm-template bundles captured from the composition root's template registry (Wave T, ticket 0df20ae). Additive optional field: absent while no import exists (legacy snapshots load byte- compatibly), absent/invalid entries are dropped on validation, and the store re-parses each payload and re-applies its own size caps on hydration.
 - **`realms`** — Realm registry records captured from the composition root's realm registry. Additive optional field: absent on legacy snapshots, absent/invalid entries are dropped on validation, and old snapshots load unchanged with an empty registry.
 
@@ -1250,9 +1327,9 @@ Serialized file record within a virtual filesystem workspace partition. Mirrors 
 
 ## Doc coverage
 
-- Top-level exports: 43
-- Declarations (exports + members): 227
-- Documented declarations: 227 / 227 (100%)
+- Top-level exports: 46
+- Declarations (exports + members): 249
+- Documented declarations: 249 / 249 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): `AgentRuntime`, `AgentState`, `InterruptedTurn`, `MessageEnvelope`, `MessagingBus`, `PartitionClockSnapshot`, `SchedulerStatus`, `TimerCondition`, `VirtualFS`, `WorldClock`, `WorldEvent`

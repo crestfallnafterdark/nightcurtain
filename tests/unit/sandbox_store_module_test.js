@@ -218,6 +218,10 @@ test('1. Strict Export Whitelist & Constant Types', () => {
     Object.keys(SANDBOX_STORE_ERROR_CODES).sort(),
     [
       'ERR_STORE_AGENT_NOT_FOUND',
+      'ERR_STORE_EXTENSION_ALREADY_ATTACHED',
+      'ERR_STORE_EXTENSION_ALREADY_INSTALLED',
+      'ERR_STORE_EXTENSION_ATTACHED',
+      'ERR_STORE_EXTENSION_NOT_INSTALLED',
       'ERR_STORE_INVALID_PARAMS',
       'ERR_STORE_NO_AGENT_SELECTED',
       'ERR_STORE_REALM_DELETE_FAILED',
@@ -230,7 +234,7 @@ test('1. Strict Export Whitelist & Constant Types', () => {
       'ERR_TEMPLATE_AUTHORITY_UNSUPPORTED',
       'ERR_TEMPLATE_PROVIDERS_UNSUPPORTED'
     ].sort(),
-    'Error code dictionary must contain exactly the live codes'
+    'Error code dictionary must contain exactly the live codes (the retired providers code stays as a deprecated constant)'
   );
   // Wave T (ticket 0df20ae) budgets are documented frozen constants.
   assert.strictEqual(
@@ -3875,19 +3879,21 @@ test('52. package launch writes generated files, merges inputs, seeds history, a
 });
 
 // ============================================================================
-// 53. Wave T: the providers launch gate fails closed before any side effect
+// 53. Extension wave: provider-bearing templates launch with resolution
 // ============================================================================
 
-test('53. a template declaring capability requirements imports but blocks launch with the typed gate', async () => {
+test('53. a provider-bearing template launches: installed+approved extensions resolve and attach, the rest is disclosed', async () => {
   sharedLocalStorage.clear();
-  const store = createSandboxStore({ autoBootstrapDirector: false, autoHydrate: false });
+  const { runtime, store } = createSharedSubstrateStore();
+  const events = [];
+  const unsubscribe = runtime.subscribe((event) => events.push(event));
   const bundle = {
     formatVersion: 1,
     template: {
       formatVersion: 1,
       id: 'unit-providers',
-      name: 'Provider Gate',
-      description: 'Declares one capability requirement.',
+      name: 'Provider Fixture',
+      description: 'Declares one MCP provider, one pack request, and one extension tool reference.',
       agents: [
         {
           key: 'observer',
@@ -3895,43 +3901,114 @@ test('53. a template declaring capability requirements imports but blocks launch
           name: 'Observer',
           role: 'observer',
           prompt: [{ kind: 'text', text: 'Observe.' }],
-          toolProfile: { tools: [] },
+          toolProfile: { tools: ['acme-scoring::similarity', 'read_file'] },
           privileged: false
         }
       ],
-      toolContract: {
-        requirements: [
-          {
-            id: 'text.similarity',
-            brief: 'Similarity between two texts.',
-            io: { in: { a: 'string', b: 'string' }, out: { score: 'number' } }
-          }
-        ]
-      }
+      providers: [
+        { kind: 'mcp', id: 'acme-scoring', transport: { kind: 'http', url: 'https://mcp.example.com' } },
+        { kind: 'pack', id: 'acme/text-tools', range: '^1' }
+      ]
     },
     files: {}
   };
 
   try {
     const receipt = store.importRealmTemplate(bundle);
-    assert.strictEqual(receipt.templateId, 'unit-providers', 'the capability contract is accepted at import');
+    assert.strictEqual(receipt.templateId, 'unit-providers', 'the provider request list is accepted at import');
     assert.strictEqual(
       store.exportRealmTemplate('unit-providers'),
       serializeTemplateBundle(bundle),
-      'the contract exports unchanged'
+      'the provider request list exports unchanged'
     );
     assert.strictEqual(store.getRealmTemplateSource('unit-providers').source, 'imported');
 
-    const realmsBefore = store.realms.map((realm) => realm.id);
-    await assert.rejects(
-      () => store.launchRealmFromTemplate('unit-providers'),
-      (err) => err.code === SANDBOX_STORE_ERROR_CODES.ERR_TEMPLATE_PROVIDERS_UNSUPPORTED
-        && err.code === 'ERR_TEMPLATE_PROVIDERS_UNSUPPORTED'
+    store.installExtension({
+      id: 'acme-scoring',
+      kind: 'mcp',
+      displayName: 'Acme Scoring',
+      transportHint: { kind: 'http', url: 'https://mcp.example.com' }
+    });
+
+    // (1) No approvals: the launch proceeds and discloses the unresolved requests.
+    const missing = await store.launchRealmFromTemplate('unit-providers', { name: 'Missing Extensions' });
+    assert.ok(Array.isArray(missing.warnings) && missing.warnings.length === 2, 'both requests are disclosed');
+    assert.ok(
+      missing.warnings.some((warning) => /'acme-scoring' is installed but not attached/.test(warning)),
+      'the installed-but-unattached request points at the attach approval'
     );
-    assert.deepStrictEqual(store.realms.map((realm) => realm.id), realmsBefore, 'no partial realm record');
-    assert.strictEqual(store.agents.length, 0, 'no partial member');
-    assert.strictEqual(store.recycleBin.length, 0, 'no recycle residue');
+    assert.ok(
+      missing.warnings.some((warning) => /'acme\/text-tools' is not installed/.test(warning)),
+      'the uninstalled request points at the install flow'
+    );
+    assert.deepStrictEqual(
+      missing.realm.instance.missingExtensions,
+      ['acme-scoring', 'acme/text-tools'],
+      'missing extensions ride the instance provenance in declared order'
+    );
+    assert.strictEqual(missing.realm.instance.resolvedTools, undefined, 'nothing resolved without approval');
+    assert.strictEqual(missing.realm.extensions, undefined, 'nothing attached without approval');
+    const missingMember = store.agents.find((agent) => agent.id === 'unit-providers-observer');
+    assert.deepStrictEqual(missingMember.config.allowedTools, ['read_file'], 'the extension-bound call name stays out of the internal allowlist');
+
+    // (2) Installed + approved: the reference resolves and the extension attaches.
+    const resolved = await store.launchRealmFromTemplate('unit-providers', {
+      name: 'Resolved Extensions',
+      extensionApprovals: [{ extensionId: 'acme-scoring' }]
+    });
+    assert.deepStrictEqual(
+      resolved.warnings,
+      ["Requested extension 'acme/text-tools' is not installed — its tools stay unavailable in this Realm"],
+      'only the unapproved uninstalled pack remains disclosed'
+    );
+    assert.deepStrictEqual(resolved.realm.instance.resolvedTools, { similarity: 'acme-scoring' });
+    assert.deepStrictEqual(
+      resolved.realm.instance.missingExtensions,
+      ['acme/text-tools'],
+      'the still-missing pack rides the provenance'
+    );
+    assert.deepStrictEqual(
+      resolved.realm.extensions.map((entry) => [entry.extensionId, entry.toolSelection, entry.status, entry.approvedBy]),
+      [['acme-scoring', 'all', 'active', 'operator']],
+      'the approved installed extension attaches with the operator approval stamp'
+    );
+    assert.ok(
+      events.some((event) => event.type === 'extension_attached' && event.payload?.extensionId === 'acme-scoring'),
+      'the launch attach emits the audit event'
+    );
+    assert.deepStrictEqual(
+      resolved.realm.extensions.map((entry) => entry.approvedAt.length > 0),
+      [true],
+      'the attachment carries an approval timestamp'
+    );
+
+    // (3) Approvals must reference a declared request exactly.
+    await assert.rejects(
+      () => store.launchRealmFromTemplate('unit-providers', { extensionApprovals: [{ extensionId: 'ghost' }] }),
+      (err) => err.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_INVALID_PARAMS
+    );
+    await assert.rejects(
+      () => store.launchRealmFromTemplate('unit-providers', { extensionApprovals: [{ extensionId: '' }] }),
+      (err) => err.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_INVALID_PARAMS
+    );
+    await assert.rejects(
+      () => store.launchRealmFromTemplate('unit-providers', { extensionApprovals: 'nope' }),
+      (err) => err.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_INVALID_PARAMS
+    );
+
+    // (4) Approving an uninstalled request attaches nothing and stays disclosed.
+    const packApproved = await store.launchRealmFromTemplate('unit-providers', {
+      name: 'Pack Approved Only',
+      extensionApprovals: [{ extensionId: 'acme-scoring' }, { extensionId: 'acme/text-tools' }]
+    });
+    assert.deepStrictEqual(packApproved.realm.extensions.map((entry) => entry.extensionId), ['acme-scoring']);
+    assert.deepStrictEqual(packApproved.realm.instance.missingExtensions, ['acme/text-tools']);
+    assert.ok(packApproved.warnings.some((warning) => /'acme\/text-tools' is not installed/.test(warning)));
+
+    // (5) The resolved record persists and rehydrates through the snapshot.
+    assert.strictEqual(store.saveToStorage(), true);
   } finally {
+    unsubscribe();
     store.destroy();
     sharedLocalStorage.clear();
   }
@@ -5039,4 +5116,152 @@ test('66. [5224a4a] cached input token tiers flow through projection, mirror, re
 
   store.destroy();
   sharedLocalStorage.clear();
+});
+
+// ============================================================================
+// 63. Extension wave: install/attach/detach APIs, error codes, audit events
+// ============================================================================
+
+test('63. install/attach/detach validate, persist, emit audit events, and refuse dangling removals', () => {
+  sharedLocalStorage.clear();
+  const { runtime, store } = createSharedSubstrateStore();
+  const events = [];
+  const unsubscribe = runtime.subscribe((event) => events.push(event));
+
+  try {
+    const record = store.installExtension({
+      id: 'audit-ext',
+      kind: 'pack',
+      transportHint: { kind: 'pack', source: 'npm:@acme/pack' },
+      displayName: 'Audit Ext'
+    });
+    assert.strictEqual(record.status, 'installed', 'status defaults to installed');
+    assert.strictEqual(record.installSource, 'operator', 'install source defaults to operator');
+    assert.deepStrictEqual(store.listExtensions().map((entry) => entry.id), ['audit-ext']);
+    assert.strictEqual(store.getExtension('audit-ext').displayName, 'Audit Ext');
+
+    assert.throws(
+      () => store.installExtension({ id: 'audit-ext', kind: 'pack', transportHint: { kind: 'pack', source: 'x' } }),
+      (err) => err.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_ALREADY_INSTALLED
+    );
+    assert.throws(
+      () => store.installExtension({ id: 'bad-shape', kind: 'pack', transportHint: { kind: 'http', url: 'u' } }),
+      (err) => err.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_INVALID_PARAMS
+    );
+    assert.throws(
+      () => store.installExtension({ id: '', kind: 'pack', transportHint: { kind: 'pack', source: 'x' } }),
+      (err) => err.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_INVALID_PARAMS
+    );
+
+    assert.throws(
+      () => store.attachExtension('realm_absent', 'audit-ext'),
+      (err) => err.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_INVALID_PARAMS
+    );
+    assert.throws(
+      () => store.attachExtension(GENERIC_REALM_ID, 'ghost-ext'),
+      (err) => err.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_NOT_INSTALLED
+    );
+    assert.throws(
+      () => store.listRealmExtensions('realm_absent'),
+      (err) => err.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_INVALID_PARAMS
+    );
+
+    const attached = store.attachExtension(GENERIC_REALM_ID, 'audit-ext');
+    assert.deepStrictEqual(attached.extensions.map((entry) => entry.extensionId), ['audit-ext']);
+    assert.deepStrictEqual(
+      attached.extensions.map((entry) => [entry.toolSelection, entry.status, entry.approvedBy]),
+      [['all', 'active', 'operator']]
+    );
+    assert.deepStrictEqual(store.listRealmExtensions(GENERIC_REALM_ID).map((entry) => entry.extensionId), ['audit-ext']);
+    assert.throws(
+      () => store.attachExtension(GENERIC_REALM_ID, 'audit-ext'),
+      (err) => err.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_ALREADY_ATTACHED
+    );
+    assert.throws(
+      () => store.removeExtension('audit-ext'),
+      (err) => err.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_ATTACHED
+    );
+
+    // Detach is idempotent; a narrowed selection re-attaches and validates.
+    const detached = store.detachExtension(GENERIC_REALM_ID, 'audit-ext');
+    assert.strictEqual(detached.extensions, undefined, 'detaching the last attachment clears the field');
+    const unchanged = store.detachExtension(GENERIC_REALM_ID, 'audit-ext');
+    assert.strictEqual(unchanged.extensions, undefined, 'detaching an absent attachment is a no-op copy');
+    const narrowed = store.attachExtension(GENERIC_REALM_ID, 'audit-ext', { toolSelection: ['docs_search'] });
+    assert.deepStrictEqual(narrowed.extensions[0].toolSelection, ['docs_search']);
+    assert.ok(Object.isFrozen(narrowed.extensions[0].toolSelection), 'the selection is frozen');
+    assert.throws(
+      () => store.attachExtension(GENERIC_REALM_ID, 'audit-ext', { toolSelection: ['read_file'] }),
+      (err) => err.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_ALREADY_ATTACHED,
+      'the duplicate attach check runs before the selection check'
+    );
+    store.detachExtension(GENERIC_REALM_ID, 'audit-ext');
+    assert.throws(
+      () => store.attachExtension(GENERIC_REALM_ID, 'audit-ext', { toolSelection: ['read_file'] }),
+      (err) => err.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_INVALID_PARAMS,
+      'a reserved call name in the selection is refused'
+    );
+    assert.throws(
+      () => store.attachExtension(GENERIC_REALM_ID, 'audit-ext', { toolSelection: ['*'] }),
+      (err) => err.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_INVALID_PARAMS,
+      'the internal wildcard is refused as a realm selection'
+    );
+
+    assert.strictEqual(store.removeExtension('audit-ext'), true, 'an unattached install removes');
+    assert.strictEqual(store.removeExtension('audit-ext'), false, 'a repeated remove is a false no-op');
+    assert.throws(
+      () => store.removeExtension(''),
+      (err) => err.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_INVALID_PARAMS
+    );
+
+    const types = events.map((event) => event.type);
+    for (const type of ['extension_installed', 'extension_attached', 'extension_detached', 'extension_removed']) {
+      assert.ok(types.includes(type), `the ${type} audit event rides the runtime stream`);
+    }
+    assert.ok(
+      events.every((event) => !('credentialId' in (event.payload ?? {}))),
+      'the audit payloads never carry credential material'
+    );
+  } finally {
+    unsubscribe();
+    store.destroy();
+    sharedLocalStorage.clear();
+  }
+});
+
+// ============================================================================
+// 64. Extension wave: reset drops install topology; empty snapshots omit fields
+// ============================================================================
+
+test('64. an install-free snapshot omits the additive fields, and a reset drops the topology', () => {
+  sharedLocalStorage.clear();
+  const store = createSandboxStore({ autoBootstrapDirector: false, autoHydrate: false });
+
+  try {
+    const clean = store.serialize();
+    assert.ok(!('extensions' in clean), 'an install-free snapshot omits the top-level extensions field');
+    assert.ok(
+      clean.realms.every((realm) => !('extensions' in realm)),
+      'attachment-free realms omit their extensions field'
+    );
+
+    store.installExtension({ id: 'reset-ext', kind: 'mcp', transportHint: { kind: 'http', url: 'https://reset.example.com' } });
+    store.attachExtension(GENERIC_REALM_ID, 'reset-ext');
+    const withExtension = store.serialize();
+    assert.deepStrictEqual(withExtension.extensions.map((entry) => entry.id), ['reset-ext']);
+    assert.deepStrictEqual(
+      withExtension.realms.find((realm) => realm.id === GENERIC_REALM_ID).extensions.map((entry) => entry.extensionId),
+      ['reset-ext']
+    );
+
+    store.reset();
+    assert.deepStrictEqual(store.listExtensions(), [], 'a reset drops the global install records');
+    assert.strictEqual(store.getRealm(GENERIC_REALM_ID).extensions, undefined, 'the pristine Generic default carries no attachments');
+    const afterReset = store.serialize();
+    assert.ok(!('extensions' in afterReset), 'the reset snapshot omits the field again');
+    assert.ok(afterReset.realms.every((realm) => !('extensions' in realm)), 'no realm carries attachments after the reset');
+  } finally {
+    store.destroy();
+    sharedLocalStorage.clear();
+  }
 });

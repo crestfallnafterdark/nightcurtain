@@ -3,6 +3,10 @@
  * injected storage wiring, the update patch, and the change-event vocabulary.
  */
 
+import type { RealmExtensionAttachment } from '../extensionRegistry/index.ts';
+
+export type { RealmExtensionAttachment } from '../extensionRegistry/index.ts';
+
 /**
  * Launch provenance recorded on a Realm record when the Realm was launched
  * from a Realm template (Realm Template Format v1 §5 step 5; Wave T, ticket
@@ -11,9 +15,11 @@
  * Provenance is descriptive metadata, never authority: it records *which*
  * template revision an instance came from and *what* launch inputs it was
  * hydrated with, as hashes only — raw input values and template/package
- * content are never copied onto the record. `resolvedTools` is reserved for
- * the providers wave (Wave P): it persists and hydrates when present but this
- * wave never sets it.
+ * content are never copied onto the record. `resolvedTools` and
+ * `missingExtensions` are written by the template launch resolution step:
+ * `resolvedTools` maps a sanitized model-facing call name to the extension id
+ * that resolved it, and `missingExtensions` lists the requested extension ids
+ * that did not resolve — both secret-free plain strings.
  */
 export interface RealmInstanceProvenance {
   /** Template id the Realm was launched from. */
@@ -29,11 +35,16 @@ export interface RealmInstanceProvenance {
   /** ISO-8601 timestamp of the launch. */
   readonly launchedAt: string;
   /**
-   * Reserved for Wave P: resolved capability id → provider binding
-   * (`requirement → publisher/pack@version#hash`). Persisted and hydrated
-   * verbatim when present; this wave never sets it.
+   * Resolved extension tools recorded at launch: sanitized model-facing call
+   * name → extension id. Persisted and hydrated verbatim when present.
    */
   readonly resolvedTools?: Readonly<Record<string, string>>;
+  /**
+   * Requested extension ids that did not resolve at launch (not installed or
+   * not attached), in declared request order. Persisted and hydrated verbatim
+   * when present.
+   */
+  readonly missingExtensions?: readonly string[];
 }
 
 /**
@@ -57,9 +68,17 @@ export interface RealmRecord {
   /**
    * Optional launch provenance for template-launched Realms (Wave T, ticket
    * 0df20ae): template revision, package digest, input hashes, seeded paths,
-   * and the launch timestamp. Frozen plain data; never authority.
+   * launch resolution results, and the launch timestamp. Frozen plain data;
+   * never authority.
    */
   instance?: RealmInstanceProvenance;
+  /**
+   * Optional realm-local extension attachments: which globally installed
+   * extensions this Realm accepts, with the realm-level tool selection,
+   * activation status, and approval stamp. Frozen plain data; never authority
+   * by itself.
+   */
+  extensions?: readonly RealmExtensionAttachment[];
   /** Epoch milliseconds when the Realm record was created. */
   createdAt: number;
 }
@@ -79,6 +98,8 @@ export interface RealmUpdatePatch {
   templateId?: string | null;
   /** Replacement launch provenance, or `null` to clear it. */
   instance?: RealmInstanceProvenance | null;
+  /** Replacement extension attachments, or `null` to clear them. */
+  extensions?: readonly RealmExtensionAttachment[] | null;
 }
 
 /**

@@ -14,10 +14,12 @@
  * - Synchronous change notification after every registry mutation.
  * - Frozen records and fresh frozen copies on every read.
  * - Protected-id refusal configured by the composition root (e.g. the Generic default): declared ids are never removed while their other management operations stay available.
+ * - Launch provenance and realm-local extension attachments as validated frozen record fields.
  *
  * ### Non-responsibilities
  * No agent membership or lifecycle, no filesystem/messaging/clock scoping, no
- * template materialization, no UI presentation, and no ambient I/O:
+ * template materialization, no extension installation or resolution (the
+ * extension registry owns those), no UI presentation, and no ambient I/O:
  * persistence lives behind the injected adapter.
  *
  * @module realmRegistry
@@ -27,14 +29,17 @@
  * @invariant INV-PROTECTION: ids declared protected at construction are never removed: removeRealm returns a `false` no-op without persisting or emitting, while list/get/add/update stay fully available for them.
  * @invariant INV-EVENTS: addRealm/updateRealm/removeRealm emit synchronously after the mutation; listeners observe the post-mutation state, listener exceptions are isolated, and unsubscribe is idempotent.
  * @invariant INV-PURITY: No ambient I/O, no import-time side effects, deterministic outputs; persistence flows only through the injected adapter, whose failures never propagate to callers.
- * @invariant INV-CLOSED-SHAPE: Only the canonical fields id/name/description/color/templateId/createdAt are retained; unknown fields on ingested records are dropped instead of stored.
+ * @invariant INV-CLOSED-SHAPE: Only the canonical fields id/name/description/color/templateId/instance/extensions/createdAt are retained; unknown fields on ingested records are dropped instead of stored.
+ * @invariant INV-EXTENSIONS: Realm extension attachments are validated through the extension registry's attachment vocabulary; updateRealm refuses a malformed or duplicate attachment list, while an ingested record drops malformed attachment entries individually and never loses the realm record.
  * @decision Realm records are plain data with string-only descriptive fields and a finite numeric createdAt; add/update validation is exact-shape and the registry never interprets color/templateId semantics
  * @decision storage.save receives the full frozen registry projection after every mutation; adapter load overlays records by id (last-wins), appends unknown ids, and load/save failures degrade to the in-memory registry
+ * @decision Attachments live on the realm record (realm-local, realm-managed) rather than in a parallel store map, so realm deletion, rollback, and persistence carry them; the extension registry owns only their shape and validation
  */
 
 export { createRealmRegistry } from './registry.ts';
 
 export type {
+  RealmExtensionAttachment,
   RealmInstanceProvenance,
   RealmRecord,
   RealmUpdatePatch,

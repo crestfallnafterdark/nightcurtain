@@ -137,6 +137,7 @@ const EXPECTED_MODULES = [
 const EXPECTED_MODULES_FOLDERS = [
   'credentialVault',
   'domain/directorAgent',
+  'extensionRegistry',
   'fsDownloadUtils',
   'inference',
   'inference/createProvider',

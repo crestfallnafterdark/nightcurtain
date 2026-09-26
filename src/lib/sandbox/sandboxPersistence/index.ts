@@ -170,13 +170,34 @@ export interface PersistedModelPreset {
 }
 
 /**
+ * Structural shape of one realm-local extension attachment carried by a
+ * persisted Realm record (extension wave). Deliberately type-local:
+ * persistence never imports the `extensionRegistry` module (the registry owns
+ * attachment semantics), so the shape is declared here as plain data.
+ * Validation drops malformed attachment entries individually while the
+ * enclosing Realm record survives, exactly like a malformed provenance block.
+ */
+export interface PersistedRealmExtensionAttachment {
+  /** Id of the globally installed extension this Realm attaches. */
+  readonly extensionId: string;
+  /** Realm-level tool selection: `'all'` or an explicit sanitized call-name list. */
+  readonly toolSelection: 'all' | readonly string[];
+  /** Activation state of the attachment. */
+  readonly status: 'active' | 'conflict' | 'unavailable';
+  /** ISO-8601 timestamp of the operator approval that created the attachment. */
+  readonly approvedAt: string;
+  /** Approval principal; always the operator. */
+  readonly approvedBy: 'operator';
+}
+
+/**
  * Structural shape of one Realm launch-provenance entry carried by the
  * persisted snapshot (Wave T, ticket 0df20ae). Deliberately type-local:
  * persistence never imports the `realmRegistry` module (the registry owns realm
  * semantics), so the shape is declared here as plain data. Validation keeps
  * only the canonical fields and treats a malformed provenance as an absent
  * one — a corrupt provenance block never costs the Realm record itself.
- * Records carry hashes/paths only, never raw input values or secrets. The
+ * Records carry hashes/paths/ids only, never raw input values or secrets. The
  * nested collections are `readonly` exactly like the frozen registry shape
  * (`realmRegistry.RealmInstanceProvenance`) so a registry record assigns to
  * this type structurally without persistence importing the registry module.
@@ -194,8 +215,10 @@ export interface PersistedRealmInstanceProvenance {
   readonly seedPaths: readonly string[];
   /** ISO-8601 launch timestamp. */
   readonly launchedAt: string;
-  /** Reserved for Wave P: resolved capability id → provider binding. */
+  /** Resolved extension tools recorded at launch: sanitized call name → extension id. */
   readonly resolvedTools?: Readonly<Record<string, string>>;
+  /** Requested extension ids that did not resolve at launch, in declared order. */
+  readonly missingExtensions?: readonly string[];
 }
 
 /**
@@ -221,6 +244,8 @@ export interface PersistedRealmRecord {
   readonly templateId?: string;
   /** Optional launch provenance of a template-launched Realm (additive). */
   readonly instance?: PersistedRealmInstanceProvenance;
+  /** Optional realm-local extension attachments (additive; malformed entries drop individually). */
+  readonly extensions?: readonly PersistedRealmExtensionAttachment[];
   /** Epoch milliseconds when the Realm record was created. */
   readonly createdAt: number;
 }
@@ -239,6 +264,51 @@ export interface PersistedImportedRealmTemplate {
   readonly id: string;
   /** Canonical transport JSON text of the imported bundle. */
   readonly payload: string;
+}
+
+/**
+ * Structural shape of one extension transport hint carried by a persisted
+ * install record: `{ kind: 'http', url }`, `{ kind: 'stdio', command, args? }`,
+ * or `{ kind: 'pack', source }`. Declared here as plain data so a registry
+ * record assigns structurally without persistence importing the registry.
+ */
+export type PersistedExtensionTransportHint =
+  | { readonly kind: 'http'; readonly url: string }
+  | { readonly kind: 'stdio'; readonly command: string; readonly args?: readonly string[] }
+  | { readonly kind: 'pack'; readonly source: string };
+
+/**
+ * Structural shape of one globally installed extension record carried by the
+ * persisted snapshot (extension wave). Deliberately type-local: persistence
+ * never imports the `extensionRegistry` module (the registry owns install
+ * semantics), so the shape is declared here as plain data. Additive optional
+ * snapshot data: absent while nothing is installed (legacy snapshots load
+ * byte-compatibly), structurally invalid entries are dropped individually,
+ * and hydration reconciles them through the registry's validated load path
+ * without ever connecting anything. Records carry ids and hints only, never
+ * credentials or secrets.
+ */
+export interface PersistedExtensionInstallRecord {
+  /** Host-unique extension id. */
+  readonly id: string;
+  /** Extension kind: MCP server or tool pack. */
+  readonly kind: 'mcp' | 'pack';
+  /** Optional operator-facing display name. */
+  readonly displayName?: string;
+  /** Transport hint the record was installed with. */
+  readonly transportHint: PersistedExtensionTransportHint;
+  /** Optional vault credential id bound to the record (an id, never a secret). */
+  readonly credentialId?: string;
+  /** Installation lifecycle status. */
+  readonly status: 'installed' | 'unavailable' | 'error';
+  /** How the record came to exist. */
+  readonly installSource: 'operator' | 'template-assist';
+  /** Operator-approved server URL, when one was approved explicitly. */
+  readonly approvedUrl?: string;
+  /** Non-fatal normalization findings recorded at install time. */
+  readonly normalizationWarnings?: readonly string[];
+  /** Epoch milliseconds when the record was created. */
+  readonly createdAt: number;
 }
 
 /**
@@ -309,6 +379,15 @@ export interface SessionMetadata {
    * unchanged with an empty registry.
    */
   readonly realms?: readonly PersistedRealmRecord[];
+  /**
+   * Globally installed extension records captured from the composition
+   * root's extension registry (extension wave). Additive optional field:
+   * absent while nothing is installed (legacy snapshots load byte-compatibly),
+   * absent/invalid entries are dropped on validation, and hydration reconciles
+   * the remaining records through the registry's validated load path without
+   * connecting anything.
+   */
+  readonly extensions?: readonly PersistedExtensionInstallRecord[];
   /**
    * Runtime-imported Realm-template bundles captured from the composition
    * root's template registry (Wave T, ticket 0df20ae). Additive optional
@@ -799,6 +878,15 @@ export interface SandboxPersistedState {
    */
   readonly realms?: PersistedRealmRecord[];
   /**
+   * Globally installed extension records (additive optional field, extension
+   * wave). Absent while nothing is installed so legacy snapshots stay
+   * byte-identical; invalid entries are dropped during validation so an
+   * otherwise valid snapshot still loads. Hydration reconciles the field
+   * through the extension registry's validated load path and never connects
+   * anything.
+   */
+  readonly extensions?: PersistedExtensionInstallRecord[];
+  /**
    * Runtime-imported Realm-template bundles (additive optional field, Wave T
    * ticket 0df20ae). Absent while no import exists so legacy snapshots stay
    * byte-identical; invalid entries are dropped during validation.
@@ -1152,11 +1240,35 @@ function isPersistedRealmRecord(value: unknown): value is PersistedRealmRecord {
 }
 
 /**
+ * Structural check for one persisted realm extension attachment entry
+ * (extension wave): a non-empty string `extensionId`/`approvedAt`, `'all'` or
+ * a non-empty array of non-empty string call names for `toolSelection`, a
+ * known `status`, and `approvedBy: 'operator'`.
+ *
+ * @param value - Candidate attachment entry.
+ * @returns True when the entry round-trips as a realm attachment.
+ */
+function isPersistedRealmExtensionAttachment(value: unknown): value is PersistedRealmExtensionAttachment {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const attachment = value as Record<string, unknown>;
+  if (typeof attachment.extensionId !== 'string' || !attachment.extensionId.trim()) return false;
+  const toolSelection = attachment.toolSelection;
+  if (toolSelection !== 'all') {
+    if (!Array.isArray(toolSelection) || toolSelection.length === 0) return false;
+    if (toolSelection.some((entry) => typeof entry !== 'string' || !entry.trim())) return false;
+  }
+  if (attachment.status !== 'active' && attachment.status !== 'conflict' && attachment.status !== 'unavailable') return false;
+  if (typeof attachment.approvedAt !== 'string' || !attachment.approvedAt.trim()) return false;
+  if (attachment.approvedBy !== 'operator') return false;
+  return true;
+}
+
+/**
  * Structural check for one persisted Realm launch-provenance entry
  * (Wave T, ticket 0df20ae): non-empty string `templateId`/`templateVersion`/
  * `launchedAt`, a string-valued `inputHashes` record, a string `seedPaths`
  * array, and optional non-empty string `packageDigest` / string-valued
- * `resolvedTools`.
+ * `resolvedTools` / non-empty-string `missingExtensions`.
  *
  * @param value - Candidate provenance entry.
  * @returns True when the entry round-trips as a provenance record.
@@ -1178,6 +1290,11 @@ function isPersistedRealmInstanceProvenance(value: unknown): value is PersistedR
     if (!resolvedTools || typeof resolvedTools !== 'object' || Array.isArray(resolvedTools)) return false;
     if (Object.values(resolvedTools).some((binding) => typeof binding !== 'string')) return false;
   }
+  const missingExtensions = instance.missingExtensions;
+  if (missingExtensions !== undefined) {
+    if (!Array.isArray(missingExtensions)) return false;
+    if (missingExtensions.some((id) => typeof id !== 'string' || !id.trim())) return false;
+  }
   return true;
 }
 
@@ -1198,19 +1315,21 @@ function serializeRealmInstance(
     inputHashes: { ...instance.inputHashes },
     seedPaths: [...instance.seedPaths],
     launchedAt: instance.launchedAt,
-    ...(instance.resolvedTools !== undefined ? { resolvedTools: { ...instance.resolvedTools } } : {})
+    ...(instance.resolvedTools !== undefined ? { resolvedTools: { ...instance.resolvedTools } } : {}),
+    ...(instance.missingExtensions !== undefined ? { missingExtensions: [...instance.missingExtensions] } : {})
   };
 }
 
 /**
  * Normalizes the additive realm-registry field of an already structurally
  * valid snapshot. Invalid realm entries are dropped individually and a
- * malformed `instance` provenance block is dropped while its Realm record
- * survives (provenance is descriptive metadata, never identity). An absent or
- * `null` value is preserved verbatim because consumers gate on `Array.isArray`,
- * while a defined non-array value has the field dropped. Returns the input
- * reference when no field needs dropping, so clean legacy snapshots keep their
- * exact identity.
+ * malformed `instance` provenance block or malformed attachment entries are
+ * dropped while their Realm record survives (provenance and attachments are
+ * descriptive metadata, never identity). An absent or `null` value is
+ * preserved verbatim because consumers gate on `Array.isArray`, while a
+ * defined non-array value has the field dropped. Returns the input reference
+ * when no field needs dropping, so clean legacy snapshots keep their exact
+ * identity.
  *
  * @param candidate - Structurally valid snapshot record.
  * @returns The input reference, or a shallow copy with invalid realm fields dropped.
@@ -1231,14 +1350,25 @@ function normalizeRealmSnapshotFields(candidate: Record<string, unknown>): Recor
       changed = true;
       continue;
     }
+    let rest: Record<string, unknown> | null = null;
     if (entry.instance !== undefined && !isPersistedRealmInstanceProvenance(entry.instance)) {
       changed = true;
-      const rest: Record<string, unknown> = { ...entry };
+      rest = rest ?? { ...entry };
       delete rest.instance;
-      realms.push(rest);
-      continue;
     }
-    realms.push(entry);
+    if (entry.extensions !== undefined && !Array.isArray(entry.extensions)) {
+      changed = true;
+      rest = rest ?? { ...entry };
+      delete rest.extensions;
+    } else if (Array.isArray(entry.extensions)) {
+      const validAttachments = entry.extensions.filter(isPersistedRealmExtensionAttachment);
+      if (validAttachments.length !== entry.extensions.length) {
+        changed = true;
+        rest = rest ?? { ...entry };
+        rest.extensions = validAttachments;
+      }
+    }
+    realms.push(rest ?? entry);
   }
   if (!changed) return candidate;
   return { ...candidate, realms };
@@ -1302,6 +1432,123 @@ function serializeImportedRealmTemplate(
 }
 
 /**
+ * Structural check for one persisted extension install record (extension
+ * wave): a non-empty string `id`, `kind` `'mcp'`/`'pack'`, a shape-valid
+ * transport hint, known `status`/`installSource`, a finite numeric
+ * `createdAt`, and optional string / string-array metadata fields.
+ *
+ * @param value - Candidate install-record entry.
+ * @returns True when the entry round-trips as an install record.
+ */
+function isPersistedExtensionInstallRecord(value: unknown): value is PersistedExtensionInstallRecord {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  if (typeof record.id !== 'string' || !record.id.trim()) return false;
+  if (record.kind !== 'mcp' && record.kind !== 'pack') return false;
+  const hint = record.transportHint;
+  if (!hint || typeof hint !== 'object' || Array.isArray(hint)) return false;
+  const hintRecord = hint as Record<string, unknown>;
+  if (record.kind === 'pack') {
+    if (hintRecord.kind !== 'pack' || typeof hintRecord.source !== 'string' || !hintRecord.source.trim()) return false;
+  } else if (hintRecord.kind === 'http') {
+    if (typeof hintRecord.url !== 'string' || !hintRecord.url.trim()) return false;
+  } else if (hintRecord.kind === 'stdio') {
+    if (typeof hintRecord.command !== 'string' || !hintRecord.command.trim()) return false;
+    if (hintRecord.args !== undefined) {
+      if (!Array.isArray(hintRecord.args) || hintRecord.args.some((arg) => typeof arg !== 'string')) return false;
+    }
+  } else {
+    return false;
+  }
+  if (record.status !== 'installed' && record.status !== 'unavailable' && record.status !== 'error') return false;
+  if (record.installSource !== 'operator' && record.installSource !== 'template-assist') return false;
+  if (typeof record.createdAt !== 'number' || !Number.isFinite(record.createdAt)) return false;
+  for (const field of ['displayName', 'credentialId', 'approvedUrl']) {
+    if (record[field] !== undefined && (typeof record[field] !== 'string' || !(record[field] as string).trim())) return false;
+  }
+  if (record.normalizationWarnings !== undefined) {
+    if (!Array.isArray(record.normalizationWarnings)) return false;
+    if (record.normalizationWarnings.some((warning) => typeof warning !== 'string' || !warning.trim())) return false;
+  }
+  return true;
+}
+
+/**
+ * Normalizes the additive install-record field of an already structurally
+ * valid snapshot: invalid entries are dropped individually, an absent or
+ * `null` value is preserved verbatim (consumers gate on `Array.isArray`), and
+ * a defined non-array value has the field dropped. Returns the input
+ * reference when no field needs dropping, so clean legacy snapshots keep
+ * their exact identity.
+ *
+ * @param candidate - Structurally valid snapshot record.
+ * @returns The input reference, or a shallow copy with invalid entries dropped.
+ */
+function normalizeExtensionSnapshotFields(candidate: Record<string, unknown>): Record<string, unknown> {
+  const hasExtensions = candidate.extensions !== undefined && candidate.extensions !== null;
+  if (!hasExtensions) return candidate;
+  const extensionsValid = Array.isArray(candidate.extensions)
+    && candidate.extensions.every(isPersistedExtensionInstallRecord);
+  if (extensionsValid) return candidate;
+
+  const normalized: Record<string, unknown> = { ...candidate };
+  if (Array.isArray(candidate.extensions)) {
+    normalized.extensions = candidate.extensions.filter(isPersistedExtensionInstallRecord);
+  } else {
+    delete normalized.extensions;
+  }
+  return normalized;
+}
+
+/**
+ * Copies one extension transport hint into its persisted form (nested args
+ * fresh).
+ *
+ * @param hint - Valid transport hint.
+ * @returns Plain JSON-serializable transport hint.
+ */
+function serializeExtensionTransportHint(
+  hint: PersistedExtensionTransportHint
+): PersistedExtensionTransportHint {
+  if (hint.kind === 'http') return { kind: 'http', url: hint.url };
+  if (hint.kind === 'stdio') {
+    return {
+      kind: 'stdio',
+      command: hint.command,
+      ...(hint.args !== undefined ? { args: [...hint.args] } : {})
+    };
+  }
+  return { kind: 'pack', source: hint.source };
+}
+
+/**
+ * Copies one extension install record into its persisted form: canonical
+ * fields only, nested hint/warnings fresh, so a registry reference is never
+ * aliased.
+ *
+ * @param record - Structurally valid install record.
+ * @returns Plain JSON-serializable install record.
+ */
+function serializeExtensionInstallRecord(
+  record: PersistedExtensionInstallRecord
+): PersistedExtensionInstallRecord {
+  return {
+    id: record.id,
+    kind: record.kind,
+    ...(record.displayName !== undefined ? { displayName: record.displayName } : {}),
+    transportHint: serializeExtensionTransportHint(record.transportHint),
+    ...(record.credentialId !== undefined ? { credentialId: record.credentialId } : {}),
+    status: record.status,
+    installSource: record.installSource,
+    ...(record.approvedUrl !== undefined ? { approvedUrl: record.approvedUrl } : {}),
+    ...(record.normalizationWarnings !== undefined
+      ? { normalizationWarnings: [...record.normalizationWarnings] }
+      : {}),
+    createdAt: record.createdAt
+  };
+}
+
+/**
  * Copies one Realm-record entry into its persisted form: only the canonical
  * registry fields are retained, in a fixed order, so unknown fields on an
  * ingested record never reach the serialized snapshot.
@@ -1317,6 +1564,19 @@ function serializeRealmRecord(realm: PersistedRealmRecord): PersistedRealmRecord
     ...(realm.color !== undefined ? { color: realm.color } : {}),
     ...(realm.templateId !== undefined ? { templateId: realm.templateId } : {}),
     ...(realm.instance !== undefined ? { instance: serializeRealmInstance(realm.instance) } : {}),
+    ...(realm.extensions !== undefined
+      ? {
+          extensions: realm.extensions.map((attachment) => ({
+            extensionId: attachment.extensionId,
+            ...(attachment.toolSelection === 'all'
+              ? { toolSelection: 'all' as const }
+              : { toolSelection: [...attachment.toolSelection] }),
+            status: attachment.status,
+            approvedAt: attachment.approvedAt,
+            approvedBy: attachment.approvedBy
+          }))
+        }
+      : {}),
     createdAt: realm.createdAt
   };
 }
@@ -1952,15 +2212,17 @@ function inspectSandboxState(state: unknown): ValidationResult {
   }
 
   // MOD-20 additive preset fields, the Wave A additive realm-registry field,
-  // and the Wave T additive imported-template field: structurally invalid
-  // values are dropped instead of failing the snapshot, so legacy and
-  // partially written sessions still load (absent/invalid -> dropped; old
-  // snapshots byte-compatible).
+  // the extension-wave additive install-record field, and the Wave T additive
+  // imported-template field: structurally invalid values are dropped instead
+  // of failing the snapshot, so legacy and partially written sessions still
+  // load (absent/invalid -> dropped; old snapshots byte-compatible).
   return {
     valid: true,
     state: normalizeActiveAgentKeyField(
       normalizeImportedTemplateSnapshotFields(
-        normalizeRealmSnapshotFields(normalizePresetSnapshotFields(candidate))
+        normalizeExtensionSnapshotFields(
+          normalizeRealmSnapshotFields(normalizePresetSnapshotFields(candidate))
+        )
       )
     ) as unknown as SandboxPersistedState
   };
@@ -2137,6 +2399,13 @@ export function serializeRuntimeEnvironment(
     ? sessionMeta.realms.filter(isPersistedRealmRecord).map(serializeRealmRecord)
     : [];
 
+  // Additive extension-wave install topology: the composition root supplies
+  // the extension registry projection; records are emitted as plain data and
+  // omitted when empty so legacy wire bytes are unchanged.
+  const extensions = Array.isArray(sessionMeta.extensions)
+    ? sessionMeta.extensions.filter(isPersistedExtensionInstallRecord).map(serializeExtensionInstallRecord)
+    : [];
+
   // Additive Wave T imported-template topology: the composition root supplies
   // the runtime-imported bundle payloads; entries are emitted as plain data and
   // omitted when empty so legacy wire bytes are unchanged.
@@ -2181,6 +2450,7 @@ export function serializeRuntimeEnvironment(
     ...(activePresetId ? { activePresetId } : {}),
     ...(customPresets.length > 0 ? { customPresets } : {}),
     ...(realms.length > 0 ? { realms } : {}),
+    ...(extensions.length > 0 ? { extensions } : {}),
     ...(importedRealmTemplates.length > 0 ? { importedRealmTemplates } : {})
   };
 }

@@ -4,9 +4,11 @@
  * and adapter-failure resilience.
  */
 
+import { normalizeRealmExtensionAttachment } from '../extensionRegistry/index.ts';
 import { REALM_CHANGE_TYPES } from './types.ts';
 import type {
   RealmChangeEvent,
+  RealmExtensionAttachment,
   RealmInstanceProvenance,
   RealmRecord,
   RealmRegistry,
@@ -65,8 +67,29 @@ function freezeInstanceProvenance(instance: RealmInstanceProvenance): RealmInsta
     launchedAt: instance.launchedAt,
     ...(instance.resolvedTools !== undefined
       ? { resolvedTools: Object.freeze({ ...instance.resolvedTools }) }
+      : {}),
+    ...(instance.missingExtensions !== undefined
+      ? { missingExtensions: Object.freeze([...instance.missingExtensions]) }
       : {})
   });
+}
+
+/**
+ * Freezes one realm attachment list as a fresh frozen copy of validated
+ * records.
+ *
+ * @param extensions - Attachment list to copy
+ * @returns A new frozen attachment list with valid entries only
+ */
+function freezeRealmExtensions(
+  extensions: readonly RealmExtensionAttachment[]
+): readonly RealmExtensionAttachment[] {
+  const frozen: RealmExtensionAttachment[] = [];
+  for (const candidate of extensions) {
+    const attachment = normalizeRealmExtensionAttachment(candidate);
+    if (attachment) frozen.push(attachment);
+  }
+  return Object.freeze(frozen);
 }
 
 /**
@@ -77,7 +100,8 @@ function freezeInstanceProvenance(instance: RealmInstanceProvenance): RealmInsta
  * adapter-loaded entries). Unknown sub-fields are dropped; the canonical shape
  * is `templateId`/`templateVersion`/`launchedAt` (non-empty strings),
  * `inputHashes` (string record), `seedPaths` (string array), and optional
- * `packageDigest` (non-empty string) and `resolvedTools` (string record).
+ * `packageDigest` (non-empty string), `resolvedTools` (string record), and
+ * `missingExtensions` (array of non-empty strings).
  *
  * @param value - Candidate provenance value
  * @returns The frozen provenance record, `undefined` when absent, or `null` when invalid
@@ -110,6 +134,17 @@ function parseInstanceProvenance(
     resolvedTools = parsedTools;
   }
 
+  let missingExtensions: string[] | undefined;
+  if (value.missingExtensions !== undefined) {
+    if (!Array.isArray(value.missingExtensions)) return null;
+    const parsedMissing: string[] = [];
+    for (const candidate of value.missingExtensions) {
+      if (typeof candidate !== 'string' || candidate.trim().length === 0) return null;
+      parsedMissing.push(candidate);
+    }
+    missingExtensions = parsedMissing;
+  }
+
   return freezeInstanceProvenance({
     templateId,
     templateVersion,
@@ -117,7 +152,8 @@ function parseInstanceProvenance(
     inputHashes,
     seedPaths: value.seedPaths as string[],
     launchedAt,
-    ...(resolvedTools !== undefined ? { resolvedTools } : {})
+    ...(resolvedTools !== undefined ? { resolvedTools } : {}),
+    ...(missingExtensions !== undefined ? { missingExtensions } : {})
   });
 }
 
@@ -136,8 +172,58 @@ function freezeRealm(realm: RealmRecord): RealmRecord {
     ...(realm.color !== undefined ? { color: realm.color } : {}),
     ...(realm.templateId !== undefined ? { templateId: realm.templateId } : {}),
     ...(realm.instance !== undefined ? { instance: freezeInstanceProvenance(realm.instance) } : {}),
+    ...(realm.extensions !== undefined ? { extensions: freezeRealmExtensions(realm.extensions) } : {}),
     createdAt: realm.createdAt
   });
+}
+
+/**
+ * Parses an optional realm attachment list on an ingested record. A non-array
+ * container drops the field; malformed entries are dropped individually while
+ * the enclosing realm record survives (attachments are descriptive realm
+ * metadata, never identity).
+ *
+ * @param value - Candidate `extensions` value
+ * @returns The frozen attachment list, or `undefined` when absent/dropped
+ */
+function parseRealmExtensions(
+  value: unknown
+): readonly RealmExtensionAttachment[] | undefined {
+  if (!Array.isArray(value) || value.length === 0) return undefined;
+  const parsed: RealmExtensionAttachment[] = [];
+  for (const candidate of value) {
+    const attachment = normalizeRealmExtensionAttachment(candidate);
+    if (attachment) parsed.push(attachment);
+  }
+  return parsed.length > 0 ? Object.freeze(parsed) : undefined;
+}
+
+/**
+ * Strictly validates a caller-supplied attachment list for
+ * `RealmRegistry.updateRealm()`: every entry must be a valid attachment record
+ * and attachment ids must be unique, otherwise the whole patch is refused.
+ *
+ * @param value - Candidate attachment list
+ * @returns The frozen validated attachment list
+ */
+function assertRealmExtensions(value: unknown): readonly RealmExtensionAttachment[] {
+  if (!Array.isArray(value)) {
+    throw new Error("updateRealm requires an array or null for 'extensions'");
+  }
+  const parsed: RealmExtensionAttachment[] = [];
+  const seen = new Set<string>();
+  for (const candidate of value) {
+    const attachment = normalizeRealmExtensionAttachment(candidate);
+    if (!attachment) {
+      throw new Error("updateRealm requires valid extension attachments for 'extensions'");
+    }
+    if (seen.has(attachment.extensionId)) {
+      throw new Error(`updateRealm refuses duplicate extension attachment '${attachment.extensionId}'`);
+    }
+    seen.add(attachment.extensionId);
+    parsed.push(attachment);
+  }
+  return Object.freeze(parsed);
 }
 
 /**
@@ -164,11 +250,14 @@ function parseRealm(value: unknown): RealmRecord | null {
   const instance = parseInstanceProvenance(value.instance);
   if (instance === null) return null;
 
+  const extensions = parseRealmExtensions(value.extensions);
+
   return freezeRealm({
     id,
     name,
     ...optional,
     ...(instance !== undefined ? { instance } : {}),
+    ...(extensions !== undefined ? { extensions } : {}),
     createdAt
   });
 }
@@ -291,6 +380,7 @@ export function createRealmRegistry(options: RealmRegistryOptions): RealmRegistr
       ...(existing.color !== undefined ? { color: existing.color } : {}),
       ...(existing.templateId !== undefined ? { templateId: existing.templateId } : {}),
       ...(existing.instance !== undefined ? { instance: existing.instance } : {}),
+      ...(existing.extensions !== undefined ? { extensions: existing.extensions } : {}),
       createdAt: existing.createdAt
     };
 
@@ -325,6 +415,22 @@ export function createRealmRegistry(options: RealmRegistryOptions): RealmRegistr
           throw new Error("updateRealm requires a valid instance provenance object or null for 'instance'");
         }
         next.instance = parsedInstance;
+      }
+    }
+
+    // Realm-local extension attachments (extension wave): a valid list
+    // replaces the previous attachments, `null` clears them, and every entry
+    // must validate — a malformed list never partially applies.
+    if ('extensions' in patch) {
+      if (patch.extensions === null) {
+        delete next.extensions;
+      } else {
+        const parsedExtensions = assertRealmExtensions(patch.extensions);
+        if (parsedExtensions.length === 0) {
+          delete next.extensions;
+        } else {
+          next.extensions = parsedExtensions;
+        }
       }
     }
 
