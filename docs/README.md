@@ -37,7 +37,7 @@ graph TD
         InvocationEngine["InvocationEngine (Multi-Turn Tool Loops)"]
         TriggerQ["TriggerQueue (Non-Blocking Priority Dispatch)"]
         MsgBus["MessagingBus (FIFO Mailboxes & Broadcast)"]
-        ToolDisp["ToolDispatcher (35 Canonical Schemas & Sudo Gate)"]
+        ToolDisp["ToolDispatcher (36 Canonical Schemas & Sudo Gate)"]
         VFS["VirtualFS (In-Memory Driver, Byte/Line Pagination, USTAR)"]
         Clock["WorldClock (Simulation Time & Monotonic Ticks)"]
     end
