@@ -234,7 +234,13 @@ export async function openSdkHttpSession(options: NormalizedMcpHttpOptions): Pro
   const teardown = (): Promise<void> => {
     if (closePromise === null) {
       closed = true;
-      if (signal !== null) signal.removeEventListener('abort', onAbort);
+      if (signal !== null) {
+        try {
+          signal.removeEventListener('abort', onAbort);
+        } catch {
+          // Best-effort teardown: a throwing signal implementation must not break close().
+        }
+      }
       closePromise = client.close().catch(() => undefined);
     }
     return closePromise;

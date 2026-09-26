@@ -114,7 +114,8 @@ function normalizeSignal(value: AbortSignal | undefined): AbortSignal | null {
   if (
     typeof value !== 'object' ||
     typeof value.aborted !== 'boolean' ||
-    typeof value.addEventListener !== 'function'
+    typeof value.addEventListener !== 'function' ||
+    typeof value.removeEventListener !== 'function'
   ) {
     throw new TypeError('McpClientOptions.signal must be an AbortSignal');
   }
