@@ -2766,4 +2766,74 @@ test('17. Archive member redaction drops keyId and credential-shaped endpoint UR
   assert.strictEqual(isSafeRealmArchiveEndpointUrl('https://example.com/v1?api_key=abc'), false);
   assert.strictEqual(isSafeRealmArchiveEndpointUrl('ftp://example.com/v1'), false);
   assert.strictEqual(isSafeRealmArchiveEndpointUrl('not a url'), false);
+
+  // S2 verifier F-2: well-known presigned URL credential params must fail the
+  // safe-endpoint predicate (they are bearer credentials in query shape).
+  assert.strictEqual(
+    isSafeRealmArchiveEndpointUrl('https://bucket.s3.amazonaws.com/obj?X-Amz-Signature=deadbeef&X-Amz-Credential=AKIAEXAMPLE'),
+    false,
+    'AWS presigned signature/credential params are rejected'
+  );
+  assert.strictEqual(
+    isSafeRealmArchiveEndpointUrl('https://storage.googleapis.com/obj?X-Goog-Signature=deadbeef&X-Goog-Credential=svc'),
+    false,
+    'Google signed URL params are rejected'
+  );
+  assert.strictEqual(
+    isSafeRealmArchiveEndpointUrl('https://host/v1?AWSAccessKeyId=AKIAEXAMPLE'),
+    false,
+    'a bare AWS access key id param is rejected'
+  );
+  assert.strictEqual(isSafeRealmArchiveEndpointUrl('https://host/v1?sig=abcdef'), false, 'the `sig` param is rejected');
+  assert.strictEqual(isSafeRealmArchiveEndpointUrl('https://host/v1?access_token=abcdef'), false, 'access_token is rejected');
+});
+
+test('17b. Archive member redaction walks nested config channels recursively (F-1)', () => {
+  const settingsAgent = new Agent({
+    id: 'archive_redaction_settings',
+    name: 'Nested Settings Probe',
+    modelConfig: { providerId: 'openai', modelId: 'probe-model' },
+    settings: {
+      modelConfig: {
+        providerId: 'openai',
+        modelId: 'legacy-model',
+        keyId: 'vault_ref_probe_settings',
+        url: 'https://probeuser:probe-secret-value@example.com/v1?token=probe-secret-value'
+      }
+    }
+  });
+  const snapshot = serializeRealmArchiveAgent(settingsAgent);
+  assert.strictEqual(snapshot.config.settings.modelConfig.keyId, undefined, 'the nested keyId is dropped');
+  assert.strictEqual(snapshot.config.settings.modelConfig.url, undefined, 'the nested credential URL is dropped');
+  assert.strictEqual(snapshot.config.settings.modelConfig.providerId, 'openai', 'benign nested fields are retained');
+  const bytes = JSON.stringify(snapshot);
+  assert.strictEqual(bytes.includes('vault_ref_probe_settings'), false, 'the nested keyId never reaches serialized bytes');
+  assert.strictEqual(bytes.includes('probe-secret-value'), false, 'the nested credential material never reaches serialized bytes');
+  assert.strictEqual(bytes.includes('keyId'), false, 'no keyId key survives the recursive walk');
+
+  // A benign nested URL is retained; a nested URL with any credential-shaped
+  // query param is dropped wholesale.
+  const safeNested = new Agent({
+    id: 'archive_redaction_nested_safe',
+    name: 'Nested Safe Probe',
+    settings: { endpoints: { primary: { baseUrl: 'https://api.example.com/v1' } } }
+  });
+  const safeNestedSnapshot = serializeRealmArchiveAgent(safeNested);
+  assert.strictEqual(
+    safeNestedSnapshot.config.settings.endpoints.primary.baseUrl,
+    'https://api.example.com/v1',
+    'benign nested endpoint references are retained'
+  );
+
+  const unsafeNested = new Agent({
+    id: 'archive_redaction_nested_unsafe',
+    name: 'Nested Unsafe Probe',
+    settings: { endpoints: { primary: { baseUrl: 'https://api.example.com/v1?X-Amz-Signature=deadbeef' } } }
+  });
+  const unsafeNestedSnapshot = serializeRealmArchiveAgent(unsafeNested);
+  assert.strictEqual(
+    unsafeNestedSnapshot.config.settings.endpoints.primary.baseUrl,
+    undefined,
+    'credential-bearing nested endpoint references are dropped'
+  );
 });

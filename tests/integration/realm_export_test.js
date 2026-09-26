@@ -37,6 +37,12 @@
  *   - AC-REX-6 `receipts + operator re-grant path`: the import receipt shape,
  *     and a post-import operator `grantRealmBypass` on an imported member
  *     succeeds through the ordinary operator API.
+ *   - Verifier-fix regressions: nested `config.settings.modelConfig` credential
+ *     channels are redacted from export bytes (F-1), reserved `global` pins
+ *     never export shared workspace bytes and are disclosed (F-3), and
+ *     canonical workspace pins outside the archive realm scope fail closed on
+ *     import while in-family canonical pins remap into the fresh realm
+ *     namespace (F-4).
  *
  * Zero-Mock: every engine class (store, runtime, VirtualFS, messaging bus,
  * world clock, realm registry, extension registry, preset catalog) is the real
@@ -916,6 +922,191 @@ test('AC-REX-5d re-import creates an independent realm (no id reuse)', async () 
   assert.notEqual(first.realmId, second.realmId, 'each import mints its own realm');
   assert.ok(store.getRealm(first.realmId) && store.getRealm(second.realmId), 'both realms stay live');
   assert.ok(store.realms.filter((realm) => realm.templateId === 'demo').length >= 3, 'no import replaces a prior one');
+});
+
+// ============================================================================
+// S2 verifier-fix regressions: F-1 nested redaction (bytes), F-3 reserved
+// workspace pins, F-4 canonical pins outside the archive realm scope.
+// ============================================================================
+
+test('AC-REX-2b nested settings credential channels never reach export bytes', async () => {
+  const harness = createHarness();
+  const { store } = harness;
+  registerOfflinePreset(store);
+  const launch = await store.launchRealmFromTemplate('demo', {
+    name: 'Settings Source',
+    presetBindings: { coordinator: OFFLINE_PRESET_ID, worker: OFFLINE_PRESET_ID }
+  });
+  await store.launchAgent({
+    id: 'legacy-settings',
+    name: 'Legacy Settings Member',
+    role: 'support',
+    realmId: launch.realm.id,
+    modelConfig: { providerId: 'openai', modelId: 'legacy-model' },
+    settings: {
+      modelConfig: {
+        providerId: 'openai',
+        modelId: 'legacy-model',
+        keyId: 'vault_ref_probe_settings',
+        url: 'https://probeuser:probe-secret-value@example.com/v1?token=probe-secret-value'
+      }
+    }
+  });
+
+  const result = store.exportRealmArchive(launch.realm.id);
+  assert.equal(result.success, true, 'the export succeeds');
+  assert.equal(result.json.includes('vault_ref_probe_settings'), false, 'the nested settings keyId never leaves');
+  assert.equal(result.json.includes('probe-secret-value'), false, 'the nested settings credential URL never leaves');
+  assert.equal(result.json.includes('keyId'), false, 'no keyId key survives anywhere in the bytes');
+
+  const envelope = JSON.parse(result.json);
+  const member = envelope.members.active.find((entry) => entry.id === 'legacy-settings');
+  assert.ok(member, 'the settings member is exported');
+  assert.equal(member.config.settings?.modelConfig?.keyId, undefined, 'the nested keyId is dropped');
+  assert.equal(member.config.settings?.modelConfig?.url, undefined, 'the nested credential URL is dropped');
+  assert.equal(member.config.settings?.modelConfig?.providerId, 'openai', 'benign nested fields are retained');
+});
+
+test('AC-REX-2c reserved global pins never export shared workspace bytes', async () => {
+  const harness = createHarness();
+  const { store } = harness;
+  registerOfflinePreset(store);
+  const launch = await store.launchRealmFromTemplate('demo', {
+    name: 'Reserved Pin Source',
+    presetBindings: { coordinator: OFFLINE_PRESET_ID, worker: OFFLINE_PRESET_ID }
+  });
+  store.writeFile('/shared/secret-note.md', 'rex-global-shared-secret', { workspaceId: 'global', owner: 'operator' });
+  await store.launchAgent({
+    id: 'global-pinned',
+    name: 'Global Pinned',
+    role: 'support',
+    realmId: launch.realm.id,
+    workspaceId: 'global',
+    modelConfig: { providerId: 'openai', modelId: 'rex-extra-model' }
+  });
+
+  const result = store.exportRealmArchive(launch.realm.id);
+  assert.equal(result.success, true, 'the export still succeeds');
+  assert.equal(result.json.includes('rex-global-shared-secret'), false, 'shared global bytes never leave');
+  const envelope = JSON.parse(result.json);
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(envelope.vfs.members, 'global'),
+    false,
+    'no reserved global member workspace is archived'
+  );
+  assert.equal(
+    result.warnings.some((warning) => warning.includes("workspace 'global'") && warning.includes('not exported')),
+    true,
+    'the excluded shared workspace is disclosed'
+  );
+});
+
+test('AC-REX-5e canonical pins outside the archive realm scope fail closed', async () => {
+  // Victim host session: the victim member's canonical workspace is lazy.
+  const victimHarness = createHarness();
+  const { store: victimStore, runtime: victimRuntime, virtualFs: victimFs } = victimHarness;
+  registerOfflinePreset(victimStore);
+  const victimLaunch = await victimStore.launchRealmFromTemplate('demo', {
+    name: 'Pin Victim Realm',
+    presetBindings: { coordinator: OFFLINE_PRESET_ID, worker: OFFLINE_PRESET_ID }
+  });
+  const victim = victimLaunch.realm;
+  await victimStore.launchAgent({
+    id: 'sentinel',
+    name: 'Victim Sentinel',
+    role: 'support',
+    realmId: victim.id,
+    modelConfig: { providerId: 'openai', modelId: 'rex-extra-model' }
+  });
+  const victimKey = createAgentIdentityKey(victim.id, 'sentinel');
+  assert.equal(victimFs.hasWorkspace(victimKey), false, 'the victim canonical workspace is unmaterialized');
+
+  // Attacker/source session crafts an archive pinning the victim canonical key.
+  const attackerHarness = createHarness();
+  const { store: attackerStore } = attackerHarness;
+  registerOfflinePreset(attackerStore);
+  const attackerLaunch = await attackerStore.launchRealmFromTemplate('demo', {
+    name: 'Pin Source Realm',
+    presetBindings: { coordinator: OFFLINE_PRESET_ID, worker: OFFLINE_PRESET_ID }
+  });
+  await attackerStore.launchAgent({
+    id: 'imported-member',
+    name: 'Imported Member',
+    role: 'support',
+    realmId: attackerLaunch.realm.id,
+    workspaceId: victimKey,
+    modelConfig: { providerId: 'openai', modelId: 'rex-extra-model' }
+  });
+  attackerStore.writeFile('/pwned.md', 'attacker-controlled content', { workspaceId: victimKey, owner: 'operator' });
+  const exported = attackerStore.exportRealmArchive(attackerLaunch.realm.id);
+  assert.equal(exported.success, true, 'the hostile archive is exportable');
+  assert.equal(
+    Object.keys(JSON.parse(exported.json).vfs.members).includes(victimKey),
+    false,
+    'foreign canonical workspace bytes are excluded from the export'
+  );
+
+  // The victim host refuses the pin fail-closed without touching the workspace.
+  const realmsBefore = victimStore.realms.length;
+  const err = captureThrow(() => victimStore.importRealmArchive(exported.json));
+  assert.ok(err, 'the hostile import is rejected');
+  assert.equal(err.code, SANDBOX_STORE_ERROR_CODES.ERR_STORE_INVALID_PARAMS, 'the rejection is typed');
+  assert.match(err.message, /outside the archive realm scope/, 'the rejection names the out-of-scope pin');
+  assert.equal(victimStore.realms.length, realmsBefore, 'no realm record is created');
+  assert.equal(victimFs.hasWorkspace(victimKey), false, 'the victim workspace stays unmaterialized');
+  const readErr = captureThrow(() => victimFs.readFile('/pwned.md', {
+    workspaceId: victimKey,
+    raw: true,
+    principal: victimRuntime.getOperatorPrincipal()
+  }));
+  assert.ok(readErr, 'the attacker file never reaches the victim workspace');
+});
+
+test('AC-REX-5f canonical pins inside the archive realm scope are remapped, never preserved', async () => {
+  const harness = createHarness();
+  const { store, runtime, virtualFs } = harness;
+  registerOfflinePreset(store);
+  const launch = await store.launchRealmFromTemplate('demo', {
+    name: 'Self Pin Source',
+    presetBindings: { coordinator: OFFLINE_PRESET_ID, worker: OFFLINE_PRESET_ID }
+  });
+  const sourceKey = createAgentIdentityKey(launch.realm.id, 'self-pinned');
+  await store.launchAgent({
+    id: 'self-pinned',
+    name: 'Self Pinned',
+    role: 'support',
+    realmId: launch.realm.id,
+    workspaceId: sourceKey,
+    modelConfig: { providerId: 'openai', modelId: 'rex-extra-model' }
+  });
+  store.writeFile('/self.md', 'self-pinned note', { workspaceId: sourceKey, owner: 'operator' });
+
+  const exported = store.exportRealmArchive(launch.realm.id);
+  assert.equal(exported.success, true, 'the in-family canonical pin exports');
+  assert.equal(
+    Object.keys(JSON.parse(exported.json).vfs.members).includes(sourceKey),
+    true,
+    'the in-family canonical workspace is exported'
+  );
+
+  const receipt = store.importRealmArchive(exported.json);
+  assert.equal(receipt.success, true, 'the in-family canonical pin import succeeds');
+  const newKey = createAgentIdentityKey(receipt.realmId, 'self-pinned');
+  const operatorContext = { principal: runtime.getOperatorPrincipal() };
+  assert.equal(virtualFs.hasWorkspace(newKey, operatorContext), true, 'files land in the fresh realm workspace');
+  assert.equal(
+    virtualFs.readFile('/self.md', { workspaceId: newKey, raw: true, ...operatorContext }),
+    'self-pinned note',
+    'the pinned file content round-trips into the fresh namespace'
+  );
+  const importedAgent = runtime.getAgent(newKey);
+  assert.equal(importedAgent.config.workspaceId, newKey, 'the imported member pin is remapped to the fresh realm key');
+  const reExport = store.exportRealmArchive(receipt.realmId);
+  assert.equal(
+    reExport.json.includes(sourceKey),
+    false,
+    'the stale source-realm canonical key never reappears'
+  );
 });
 
 // ============================================================================
