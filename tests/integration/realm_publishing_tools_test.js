@@ -769,6 +769,72 @@ test('10c. format-v2 import validates through the real catalog parser and resolv
   assert.equal(store.getRealmTemplateBundle('up-v2-oversize-bundle'), null);
 });
 
+test('10d. import receipts carry the declared seed-slot manifest (922fa34)', async () => {
+  const { runtime, store } = createFixtureStore();
+  const director = await runtime.ensureDirector();
+  const dispatcher = createPublishingDispatcher(store, runtime, director.id);
+
+  // The v1 fixture declares one `user` slot targeting the realm-global workspace.
+  const v1Receipt = await dispatcher.executeTool(PUBLISHING_TOOLS.IMPORT_REALM_TEMPLATE, {
+    manifest: { formatVersion: 1, template: createFixtureTemplate({ id: 'up-seed-v1' }), files: {} }
+  });
+  assert.equal(v1Receipt.success, true, JSON.stringify(v1Receipt));
+  assert.deepEqual(
+    v1Receipt.seedSlots,
+    { total: 1, fixed: 0, user: 1, generated: 0, targets: ['realm'] },
+    'the v1 user slot is summarized through the read shim'
+  );
+
+  // Mixed origins across the realm-global workspace and two template agents:
+  // fixed inline + fixed bundle file + generated + user, in declared order.
+  const mixedTemplate = createFixtureTemplate({ id: 'up-seed-mixed' });
+  mixedTemplate.seed = {
+    files: [
+      { path: 'lore/fixed-inline.md', target: 'realm', origin: 'fixed', source: { inline: 'baked lore' } },
+      { path: 'lore/fixed-file.md', target: { agent: 'architect' }, origin: 'fixed', source: { file: 'files/lore.md' } },
+      { path: 'lore/generated.md', target: 'realm', origin: 'generated', brief: 'Write the generated lore.' },
+      { path: 'lore/user.md', target: { agent: 'genesis' }, origin: 'user', brief: 'Attach the user notes.' }
+    ]
+  };
+  const mixedManifest = {
+    formatVersion: 1,
+    template: mixedTemplate,
+    files: { 'files/lore.md': 'BUNDLE LORE' }
+  };
+
+  // dry_run returns the identical seed summary with zero side effects.
+  const dry = await dispatcher.executeTool(PUBLISHING_TOOLS.IMPORT_REALM_TEMPLATE, {
+    manifest: mixedManifest,
+    dry_run: true
+  });
+  assert.equal(dry.success, true, JSON.stringify(dry));
+  assert.deepEqual(
+    dry.seedSlots,
+    { total: 4, fixed: 2, user: 1, generated: 1, targets: ['realm', 'architect', 'genesis'] },
+    'mixed-origin slots are counted by origin with distinct targets in declared order'
+  );
+  assert.equal(store.getRealmTemplateBundle('up-seed-mixed'), null, 'dry_run imports nothing');
+
+  const real = await dispatcher.executeTool(PUBLISHING_TOOLS.IMPORT_REALM_TEMPLATE, {
+    manifest: mixedManifest
+  });
+  assert.equal(real.success, true, JSON.stringify(real));
+  assert.deepEqual(real.seedSlots, dry.seedSlots, 'dry run and real import report the same seed summary');
+
+  // A slot-less template reports zeros (not an omitted field).
+  const bareTemplate = createFixtureTemplate({ id: 'up-seed-bare' });
+  delete bareTemplate.seed;
+  const bare = await dispatcher.executeTool(PUBLISHING_TOOLS.IMPORT_REALM_TEMPLATE, {
+    manifest: { formatVersion: 1, template: bareTemplate, files: {} }
+  });
+  assert.equal(bare.success, true, JSON.stringify(bare));
+  assert.deepEqual(
+    bare.seedSlots,
+    { total: 0, fixed: 0, user: 0, generated: 0, targets: [] },
+    'a slot-less template reports zeroed counts and no targets'
+  );
+});
+
 test('11. file-sourced manifests resolve through the caller view; caps fail typed without partial import', async () => {
   const { runtime, store, vfs } = createFixtureStore();
   const director = await runtime.ensureDirector();
