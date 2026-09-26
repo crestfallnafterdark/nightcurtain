@@ -48,6 +48,9 @@ const REALM = 'realm_spawn_contract';
 /** Spawner tool set used by most capability tests. */
 const MANAGER_TOOLS = Object.freeze(['spawn_agent', 'list_agents', 'read_file']);
 
+/** Same-id realm fixture tool set (spawn + self-scoped lifecycle). */
+const SAME_ID_TOOLS = Object.freeze(['spawn_agent', 'kill_agent', 'list_agents', 'read_file']);
+
 /**
  * Builds a real runtime with a realm-bound agent and a dispatcher bound to it.
  *
@@ -586,5 +589,98 @@ test('R11: a malformed lifecycle-port success record fails the receipt, never fa
     assert.equal(receipt.success, false, `${label}: a malformed port record must fail the receipt`);
     assert.equal(receipt.id, undefined, `${label}: no fabricated id may be projected`);
     assert.equal(JSON.stringify(receipt).includes('unknown'), false, `${label}: 'unknown' must never be fabricated`);
+  }
+});
+
+// ============================================================================
+// Trusted launch identity: realm-exact same-id creators, descriptor-less refusal
+// ============================================================================
+
+test('R15: a same-id realm-bound creator spawns into its own realm and stays clamped', async () => {
+  const runtime = new AgentRuntime({ autoBootstrapDirector: false });
+  try {
+    await runtime.ensureDirector();
+    // The same literal id in two realms (promoted from the frozen audit repro
+    // `tests/audit/repros/identity_spawn_same_id_caller.test.js`): each
+    // registration must resolve realm-exactly through its canonical key.
+    await runtime.launchAgent({ id: 'scout', realmId: 'realm_spawn_alpha', allowedTools: [...SAME_ID_TOOLS] });
+    await runtime.launchAgent({ id: 'scout', realmId: 'realm_spawn_beta', allowedTools: [...SAME_ID_TOOLS] });
+
+    const alpha = createSandboxToolDispatcher({ runtime, agentId: 'scout', realmId: 'realm_spawn_alpha' });
+    const beta = createSandboxToolDispatcher({ runtime, agentId: 'scout', realmId: 'realm_spawn_beta' });
+
+    const alphaSpawn = await alpha.executeTool('spawn_agent', { id: 'child_alpha', tools: ['write_file'] });
+    assert.equal(alphaSpawn.success, true, `the Alpha same-id spawn must launch: ${JSON.stringify(alphaSpawn)}`);
+    const childAlpha = runtime.getAgent('child_alpha');
+    assert.ok(childAlpha, 'the Alpha child must register');
+    assert.equal(childAlpha.config.realmId, 'realm_spawn_alpha', 'the child inherits the same-id creator realm');
+    assert.equal(
+      (childAlpha.config.allowedTools || []).includes('write_file'),
+      false,
+      'SEC-2: the child tools stay clamped to the ordinary creator allowlist'
+    );
+
+    const betaSpawn = await beta.executeTool('spawn_agent', { id: 'child_beta' });
+    assert.equal(betaSpawn.success, true, `the Beta same-id spawn must launch: ${JSON.stringify(betaSpawn)}`);
+    const childBeta = runtime.getAgent('child_beta');
+    assert.ok(childBeta, 'the Beta child must register');
+    assert.equal(childBeta.config.realmId, 'realm_spawn_beta', 'the Beta child registers in the Beta realm');
+
+    // Parent authority stays realm-exact: the Alpha creator cannot kill the
+    // Beta child, and the Beta creator can.
+    const crossKill = await alpha.executeTool('kill_agent', { agent_id: 'child_beta' });
+    assert.equal(crossKill.success, false, 'the Alpha same-id caller must not kill the Beta child');
+    assert.ok(runtime.getAgent('child_beta'), 'the cross-realm kill leaves the Beta child alive');
+    const betaOwnKill = await beta.executeTool('kill_agent', { agent_id: 'child_beta' });
+    assert.equal(betaOwnKill.success, true, `the Beta same-id creator kills its own child: ${JSON.stringify(betaOwnKill)}`);
+  } finally {
+    runtime.destroy();
+  }
+});
+
+test('R16: a descriptor-less spawn-capable dispatcher with no identity port fails closed', async () => {
+  const runtime = new AgentRuntime({ autoBootstrapDirector: false });
+  try {
+    // I2-V R3 (ticket 376e37f): a bound caller id with only a lifecycle port —
+    // no identity port — cannot be proven registered or unambiguous, so the
+    // launch must refuse instead of degrading to the anonymous host path
+    // (wrong realm, no confinement, no SEC-2 clamp).
+    const dispatcher = createSandboxToolDispatcher({
+      agentId: 'ghost_caller',
+      allowedTools: ['spawn_agent'],
+      lifecyclePort: runtime.createLifecyclePort()
+    });
+    const receipt = await dispatcher.executeTool('spawn_agent', { id: 'child_descriptorless' });
+    assert.equal(receipt.success, false, `the unverifiable caller must not reach a launch: ${JSON.stringify(receipt)}`);
+    assert.equal(receipt.code, 'PERMISSION_DENIED', 'the refusal carries the uniform denial code');
+    assert.equal(runtime.getAgent('child_descriptorless'), null, 'no child registers');
+    assert.equal(
+      runtime.listAgents({ realmId: 'realm_generic' }).some((agent) => agent.id === 'child_descriptorless'),
+      false,
+      'no anonymous host launch lands in the seeded Generic realm'
+    );
+  } finally {
+    runtime.destroy();
+  }
+});
+
+test('R16b: a trusted pinned callerKey keeps the exact launch channel without an identity port', async () => {
+  const runtime = new AgentRuntime({ autoBootstrapDirector: false });
+  try {
+    await runtime.launchAgent({ id: 'scout', realmId: 'realm_pinned_key', allowedTools: ['spawn_agent', 'read_file'] });
+    const key = runtime.createAgentIdentityPort().getAgentIdentity('scout', { realmId: 'realm_pinned_key' }).key;
+    const dispatcher = createSandboxToolDispatcher({
+      agentId: 'scout',
+      callerKey: key,
+      allowedTools: ['spawn_agent'],
+      lifecyclePort: runtime.createLifecyclePort()
+    });
+    const receipt = await dispatcher.executeTool('spawn_agent', { id: 'child_pinned_key' });
+    assert.equal(receipt.success, true, `the exact-key launch must succeed: ${JSON.stringify(receipt)}`);
+    const child = runtime.getAgent('child_pinned_key');
+    assert.ok(child, 'the child registers');
+    assert.equal(child.config.realmId, 'realm_pinned_key', 'the child inherits the exact caller realm');
+  } finally {
+    runtime.destroy();
   }
 });
