@@ -193,18 +193,19 @@ test('4. Draft-07 JSON Schema Generation & Invariant 4 Zero Schema Pollution', (
   const allSchemas = getSandboxToolsSchema('all');
   assert.strictEqual(allSchemas.length, 35);
 
-  // 2. Preset-filtered schema generation
+  // 2. Preset-filtered schema generation (generated family tiers; every tier
+  // carries the innate baseline, so `describe_tool` is schema-visible too)
   const managerSchemas = getSandboxToolsSchema('manager');
-  assert.strictEqual(managerSchemas.length, 28); // 24 listed in manager preset + 4 expanded subagent management tools
+  assert.strictEqual(managerSchemas.length, 31);
 
   const collabSchemas = getSandboxToolsSchema('collaborator');
-  assert.strictEqual(collabSchemas.length, 24);
+  assert.strictEqual(collabSchemas.length, 25);
 
   const readonlyCollabSchemas = getSandboxToolsSchema('readonly_collaborator');
-  assert.strictEqual(readonlyCollabSchemas.length, 13);
+  assert.strictEqual(readonlyCollabSchemas.length, 14);
 
   const readonlySchemas = getSandboxToolsSchema('readonly');
-  assert.strictEqual(readonlySchemas.length, 12);
+  assert.strictEqual(readonlySchemas.length, 13);
 
   // 3. Option: includeReflection: false
   const noReflectionSchemas = getSandboxToolsSchema('all', { includeReflection: false });

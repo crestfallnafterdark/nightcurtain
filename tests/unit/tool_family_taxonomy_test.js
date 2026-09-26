@@ -106,33 +106,36 @@ const LEGACY_EFFECTIVE_SORTED = Object.freeze({
 });
 
 /**
- * Canonical-order generated tier literals for the pre-C parity state
- * (commit A/B target — must equal the normalized `LEGACY_EFFECTIVE_SORTED`).
+ * Canonical-order generated tier literals for the final Wave-1 state: the
+ * pre-C parity literals plus the ratified deltas (every innate tool is
+ * schema-visible per tier; manager gains `list_agents`/`wait_for_invocation`).
  */
 const GENERATED_TIER_LITERALS = Object.freeze({
   all: Object.freeze(['*']),
   readonly: Object.freeze([
     'read_file', 'list_files', 'query_json', 'grep', 'wait_for_mail', 'list_inbox',
-    'read_message', 'get_archive', 'get_inbox', 'whoami', 'get_current_time', 'batch_precall'
+    'read_message', 'get_archive', 'get_inbox', 'whoami', 'get_current_time', 'batch_precall',
+    'describe_tool'
   ]),
   readonly_collaborator: Object.freeze([
     'read_file', 'list_files', 'query_json', 'grep', 'send_message', 'wait_for_mail',
     'list_inbox', 'read_message', 'get_archive', 'get_inbox', 'whoami', 'get_current_time',
-    'batch_precall'
+    'batch_precall', 'describe_tool'
   ]),
   collaborator: Object.freeze([
     'read_file', 'write_file', 'replace_file_content', 'copy_file', 'delete_file', 'list_files',
     'write_json', 'query_json', 'json_patch', 'grep', 'set_permissions', 'send_message',
     'wait_for_mail', 'list_inbox', 'read_message', 'get_archive', 'inline_file_in_message',
     'get_inbox', 'whoami', 'schedule', 'list_schedules', 'cancel_schedule', 'get_current_time',
-    'batch_precall'
+    'batch_precall', 'describe_tool'
   ]),
   manager: Object.freeze([
     'read_file', 'write_file', 'replace_file_content', 'copy_file', 'delete_file', 'list_files',
     'write_json', 'query_json', 'json_patch', 'grep', 'set_permissions', 'send_message',
     'wait_for_mail', 'list_inbox', 'read_message', 'get_archive', 'inline_file_in_message',
-    'get_inbox', 'spawn_agent', 'kill_agent', 'whoami', 'undo_turn', 'invoke_agent',
-    'schedule', 'list_schedules', 'cancel_schedule', 'get_current_time', 'batch_precall'
+    'get_inbox', 'spawn_agent', 'kill_agent', 'list_agents', 'whoami', 'undo_turn',
+    'invoke_agent', 'wait_for_invocation', 'schedule', 'list_schedules', 'cancel_schedule',
+    'get_current_time', 'batch_precall', 'describe_tool'
   ])
 });
 
@@ -165,6 +168,22 @@ function normalizeEffectiveSet(input) {
     out.add(canonical);
   }
   return [...out].sort();
+}
+
+/**
+ * The frozen parity baseline plus the ratified delta ledger — the only
+ * allowed membership/visibility change over the pre-rebuild effective sets.
+ *
+ * @param {string} tier - Named capability tier
+ * @returns {string[]} the sorted expected effective set
+ */
+function expectedEffectiveSet(tier) {
+  const expected = new Set(LEGACY_EFFECTIVE_SORTED[tier]);
+  for (const tool of RATIFIED_DELTAS.innate) expected.add(tool);
+  if (tier === 'manager') {
+    for (const tool of RATIFIED_DELTAS.manager) expected.add(tool);
+  }
+  return [...expected].sort();
 }
 
 /** The generated catalog under test (the exported generated `TOOL_PRESETS`). */
@@ -235,14 +254,24 @@ test('T5 generated tiers equal the frozen effective sets plus the ratified delta
   for (const tier of NAMED_TIERS) {
     assert.deepStrictEqual(
       normalizeEffectiveSet(GENERATED_TIER_LITERALS[tier]),
-      LEGACY_EFFECTIVE_SORTED[tier],
-      `generated '${tier}' must normalize to the frozen pre-rebuild effective set`
+      expectedEffectiveSet(tier),
+      `generated '${tier}' must normalize to the frozen pre-rebuild effective set plus the ratified deltas`
     );
     assert.deepStrictEqual(
       normalizeEffectiveSet(generatedCatalog[tier]),
-      LEGACY_EFFECTIVE_SORTED[tier],
-      `catalog '${tier}' must normalize to the frozen pre-rebuild effective set`
+      expectedEffectiveSet(tier),
+      `catalog '${tier}' must normalize to the frozen pre-rebuild effective set plus the ratified deltas`
     );
+    // No named-tier membership beyond the ledger: the ratified widening is
+    // manager-only, and the innate visibility delta applies to every tier.
+    for (const tool of generatedCatalog[tier]) {
+      assert.ok(
+        LEGACY_EFFECTIVE_SORTED[tier].includes(tool)
+        || RATIFIED_DELTAS.innate.includes(tool)
+        || (tier === 'manager' && RATIFIED_DELTAS.manager.includes(tool)),
+        `'${tier}' must not gain unratified member '${tool}'`
+      );
+    }
   }
   assert.deepStrictEqual(normalizeEffectiveSet(generatedCatalog.all), ['*']);
 });

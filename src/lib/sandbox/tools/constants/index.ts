@@ -11,7 +11,7 @@
  * @invariant Frozen error-code dictionary: `TOOL_SYSTEM_ERROR_CODES` freezes the canonical machine-readable codes (`TOOL_NOT_FOUND`, `PERMISSION_DENIED`, `INVALID_ARGUMENTS`, `SERVICE_UNAVAILABLE`, `PRECALL_FORBIDDEN`, `EXECUTION_FAILED`, `AGENT_ALREADY_EXISTS`); the dispatcher's universal error shield constrains every emitted failure receipt to this vocabulary, normalizing downstream subsystem codes outside it to `EXECUTION_FAILED`.
  * @invariant Tool-family taxonomy: `TOOL_FAMILIES` declares exactly one primary family — from the frozen 11-family vocabulary (`vfs.read`, `vfs.write`, `messaging.send`, `mailbox.read`, `mailbox.consume`, `lifecycle`, `invocation`, `scheduler`, `clock`, `world`, `precall`) — for every canonical `SANDBOX_TOOLS` entry; `FAMILY_TIER_PLAN` maps each family to its named tiers, and `TOOL_TIER_EXPOSURE` carries the explicit never/override decisions (an absent tool defaults to `'family'`).
  * @invariant Retired-selector window: `RETIRED_TOOL_SELECTORS` freezes the canonical `subagent_management` selector expansion (`spawn_agent`, `kill_agent`, `invoke_agent`, `undo_turn`, fixed legacy order), and `expandRetiredToolSelector` is a pure fail-closed lookup keyed by the canonical selector id only — spellings resolve through the alias normalizer.
- * @invariant Capability tiers: exactly five presets (`all`, `manager`, `collaborator`, `readonly_collaborator`, `readonly`), each a frozen string array; `all` is exactly `['*']`. The named tiers are generated once from the family taxonomy (innate baseline + `FAMILY_TIER_PLAN`/`TOOL_TIER_EXPOSURE`, canonical declaration order, duplicate-free) — no hand-enumerated member list exists, and no tier carries the retired `subagent_management` selector.
+ * @invariant Capability tiers: exactly five presets (`all`, `manager`, `collaborator`, `readonly_collaborator`, `readonly`), each a frozen string array; `all` is exactly `['*']`. The named tiers are generated once from the family taxonomy (innate baseline + `FAMILY_TIER_PLAN`/`TOOL_TIER_EXPOSURE`, canonical declaration order, duplicate-free) — no hand-enumerated member list exists, no tier carries the retired `subagent_management` selector, and every `INNATE_TOOLS` primitive (including `describe_tool`) is a member of every named tier. `includeReflection: false` still removes `describe_tool` from emitted schemas without changing tier membership.
  * @invariant Preset values are allowlist strings only: no execution-context or infrastructure configuration (model, provider, temperature, privilege/whitelist flags) is represented in the preset definitions.
  * @invariant Mutation-capability vocabulary: `MUTATING_TOOLS` and `READ_ONLY_TOOLS` partition every canonical `SANDBOX_TOOLS` entry exactly once (disjoint, union = the 35-name canonical set) as frozen arrays in canonical declaration order, and `isMutatingTool` is a pure membership probe over that vocabulary. The clock/event tools (`world_clock`, `event_list`) classify as mutating because they step simulation time and mutate VFS-backed event registries.
  * @invariant Publishing-tool vocabulary: `PUBLISHING_TOOLS` freezes the two publishing tool names (`import_realm_template`, `submit_hydration_package`) outside the canonical taxonomy — they are explicit-grant-only meta tools, never wildcard-implied capabilities.
@@ -638,9 +638,8 @@ export type ToolExposure = 'family' | 'never' | readonly ToolPresetName[];
  *
  * Only overrides are listed — an absent tool defaults to `'family'`. The
  * `'never'` entries are the documented orphan decisions: `concat_files` and
- * `drain_inbox` (explicit-grant plumbing), `world_clock`/`event_list`
- * (operator stepping), plus `list_agents`/`wait_for_invocation` during the
- * parity migration. `inline_file_in_message` carries the historical
+ * `drain_inbox` (explicit-grant plumbing) and `world_clock`/`event_list`
+ * (operator stepping). `inline_file_in_message` carries the historical
  * `collaborator+` override (the read-only collaborator keeps plain
  * `send_message` and never attachment sends).
  *
@@ -656,27 +655,10 @@ export type ToolExposure = 'family' | 'never' | readonly ToolPresetName[];
 export const TOOL_TIER_EXPOSURE: Readonly<Partial<Record<SandboxToolName, ToolExposure>>> = Object.freeze({
   [SANDBOX_TOOLS.CONCAT_FILES]: 'never',
   [SANDBOX_TOOLS.DRAIN_INBOX]: 'never',
-  [SANDBOX_TOOLS.LIST_AGENTS]: 'never',
-  [SANDBOX_TOOLS.WAIT_FOR_INVOCATION]: 'never',
   [SANDBOX_TOOLS.WORLD_CLOCK]: 'never',
   [SANDBOX_TOOLS.EVENT_LIST]: 'never',
   [SANDBOX_TOOLS.INLINE_FILE_IN_MESSAGE]: Object.freeze(['collaborator', 'manager'] as const)
 });
-
-/**
- * Innate tools the pre-rebuild hand lists actually carried, staged for the
- * migration (ticket 5efc129): `whoami`, `get_current_time`, `batch_precall`.
- *
- * The strict-parity commits seed every generated tier with exactly these three
- * so the generated tiers are byte-parity with the frozen hand sets; once the
- * ratified visibility delta lands, the generator reads `INNATE_TOOLS` directly
- * and this staged constant is deleted.
- */
-const TIER_BASELINE_TOOLS: readonly SandboxToolName[] = Object.freeze([
-  SANDBOX_TOOLS.WHOAMI,
-  SANDBOX_TOOLS.GET_CURRENT_TIME,
-  SANDBOX_TOOLS.BATCH_PRECALL
-]);
 
 /** Canonical tool declaration order (`SANDBOX_TOOLS` value order, frozen). */
 const CANONICAL_TOOL_ORDER: readonly SandboxToolName[] = Object.freeze(Object.values(SANDBOX_TOOLS));
@@ -694,7 +676,7 @@ const CANONICAL_TOOL_ORDER: readonly SandboxToolName[] = Object.freeze(Object.va
  * @returns The frozen canonical-order tier array
  */
 function generateTier(tier: ToolPresetName): readonly string[] {
-  const members = new Set<SandboxToolName>(TIER_BASELINE_TOOLS);
+  const members = new Set<SandboxToolName>(INNATE_TOOLS);
   for (const tool of CANONICAL_TOOL_ORDER) {
     const exposure = TOOL_TIER_EXPOSURE[tool] ?? 'family';
     if (exposure === 'never') continue;

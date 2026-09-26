@@ -344,11 +344,11 @@ async function runEpic16TestSuite() {
     () => {
       assert.deepEqual(resolveToolPreset('all'), ['*']);
       assert.deepEqual(resolveToolPreset('*'), ['*']);
-      // Generated tiers are sentinel-free: manager resolves to its 28
+      // Generated tiers are sentinel-free: manager resolves to its 31
       // concrete tools (the retired selector window is asserted separately).
-      assert.equal(resolveToolPreset('manager').length, 28);
-      assert.equal(resolveToolPreset('readonly').length, 12);
-      assert.equal(resolveToolPreset('collaborator').length, 24);
+      assert.equal(resolveToolPreset('manager').length, 31);
+      assert.equal(resolveToolPreset('readonly').length, 13);
+      assert.equal(resolveToolPreset('collaborator').length, 25);
     }
   );
 

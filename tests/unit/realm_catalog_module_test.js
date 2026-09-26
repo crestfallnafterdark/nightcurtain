@@ -764,6 +764,18 @@ test('12. manager preset expands the aggregate selector for unprivileged specs',
   }
   assert.ok(!summary.grants.includes('subagent_management'), 'the aggregate selector is expanded');
   assert.ok(!summary.unrecognized.includes('subagent_management'));
+  // Manager-tier membership amendment: the observation/await half is present
+  // in the resolved generated tier.
+  for (const tool of ['list_agents', 'wait_for_invocation']) {
+    assert.ok(summary.grants.includes(tool), `${tool} must be granted by the manager tier`);
+  }
+  // Innate visibility: `describe_tool` is a member of every named tier.
+  assert.ok(summary.readOnly.includes('describe_tool'), 'innate reflection is schema-visible per tier');
+
+  // `subagentManagement` is an honest membership test: an explicit grant of a
+  // legacy subagent-management tool reports true even without the selector.
+  const explicit = summarizeAgentCapabilities(agentSpec({ toolProfile: { tools: ['spawn_agent'] } }));
+  assert.strictEqual(explicit.subagentManagement, true);
 });
 
 test('13. wildcard profiles report full vocabulary coverage', () => {

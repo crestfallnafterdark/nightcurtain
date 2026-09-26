@@ -608,11 +608,13 @@ async function runEpic6UnitTests() {
     assert(exposed[0].function.parameters.additionalProperties === false, `${descriptor.name} exposed schema is closed`);
   }
 
-  // --- SECTION 10: Schema ⊄ authorization inversion guard (F6 / ec397bf) --
+  // --- SECTION 10: Schema ⊆ dispatcher-authorized (preset invariance) -----
   // Every tool exposed by `getSandboxToolsSchema(preset)` must be dispatcher-
-  // authorized for that preset. The reverse does not hold by design: innate
-  // tools (`whoami`, `get_current_time`, `describe_tool`, `batch_precall`) are
-  // universally authorized but never injected into a restricted schema.
+  // authorized for that preset. The former innate-hidden asymmetry (ticket
+  // ec397bf) is closed: innate tools (`whoami`, `get_current_time`,
+  // `describe_tool`, `batch_precall`) are universally authorized AND injected
+  // into every named tier, so schema membership and authorization agree for
+  // the generated presets.
   console.log('\n--- 10. Schema ⊆ Dispatcher-authorized (preset invariance) ---');
   const presetRuntime = new AgentRuntime({ autoBootstrapDirector: false });
   await presetRuntime.ensureDirector();
