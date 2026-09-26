@@ -23,6 +23,7 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 - Prototype-pollution-safe resolution: alias lookups read only own keys of the frozen alias map (`hasOwnProperty`-guarded) and of a prototype-free `Object.create(null)` lowercased dictionary; non-string or unresolvable input resolves to `null`, and the sanitizer drops `__proto__`/`constructor`/`prototype` on both source and target keys.
 - Failure-safe sanitization: `createParamSanitizer` never throws and never mutates its configured `defaults`; invalid, absent, non-object, or array arguments return a fresh shallow copy of `defaults`, and `null`/`undefined` values are skipped.
 - Precall allowlist policy: `PRECALL_ALLOWLIST` is frozen and holds exactly 14 canonical tool names, each resolvable by `getCanonToolName`; every tool outside the set is denied by the `batch_precall` descriptor (`PRECALL_FORBIDDEN`) and by the turn-execution precall gate (`FORBIDDEN_PRECALL`).
+- Call-name hygiene: `deriveToolCallName` is total and deterministic (every character outside `[A-Za-z0-9_]` becomes `_`, per character, with no collapsing, case folding, or trimming) and `isReservedToolCallName` rejects every candidate that resolves through the alias map (canonical, alias, selector, and publishing spellings) or equals a frozen baked/publishing descriptor name, so a derived requirement or extension call name can never shadow a baked tool.
 
 ## Decisions
 
@@ -35,7 +36,13 @@ _(none tagged)_
 export function createParamSanitizer(paramAliasMap?: Record<string, string>, defaults?: Record<string, unknown>): (rawArgs?: unknown) => Record<string, unknown>;
 
 // @public
+export function deriveToolCallName(capabilityId: string): string;
+
+// @public
 export function getCanonToolName(toolName: unknown): string | null;
+
+// @public
+export function isReservedToolCallName(candidate: string): boolean;
 
 // @public
 export const normalizeToolName: typeof getCanonToolName;
@@ -68,6 +75,28 @@ Factory creating a parameter sanitizer function with pre-configured alias mappin
 
 A sanitizer function that accepts raw arguments (object, JSON string, or arbitrary value) and returns a fresh sanitized parameters object.
 
+### `deriveToolCallName` — function
+
+Derives the model-facing tool call name from a capability id or a server-side tool name: every character outside `[A-Za-z0-9_]` becomes `_` — per character, with no collapsing, case folding, or trimming, so the derivation is total and deterministic for any input string.
+
+The call name is a stability promise: it is what models and providers see (and what plans and capability summaries carry), so it must never change between implementations of the same tool (`text.similarity` → `text_similarity`, `acme.scoring.similarity` → `acme_scoring_similarity`, `a-b` → `a_b`, `a..b` → `a__b`). Derived names must be unreserved by isReservedToolCallName; callers fail closed on collisions instead of renaming.
+
+#### Parameters
+
+- `capabilityId` — Capability requirement id or server-side tool name
+
+#### Returns
+
+The derived call name
+
+#### Examples
+
+```typescript
+import { deriveToolCallName } from './tools/normalizers/index.ts';
+
+deriveToolCallName('text.similarity'); // 'text_similarity'
+```
+
 ### `getCanonToolName` — function
 
 Pure lookup function returning canonical snake_case tool name or null. Safe against prototype pollution.
@@ -79,6 +108,30 @@ Pure lookup function returning canonical snake_case tool name or null. Safe agai
 #### Returns
 
 The canonical snake_case tool name, or `null` when the input is not a non-empty string or has no alias entry.
+
+### `isReservedToolCallName` — function
+
+Reports whether a candidate tool call name is already reserved by the baked or publishing tool surface: a name is reserved when it resolves through the tool alias map (canonical names, documented aliases, the aggregate `subagent_management` selector, and the publishing meta-tool spellings) or equals a frozen baked/publishing descriptor name.
+
+Derived requirement and extension call names must be unreserved, so a template-derived call can never shadow — or be routed as — a baked, selector, or publishing tool. The equality clause is a belt-and-suspenders check that holds even if an alias entry is ever dropped.
+
+#### Parameters
+
+- `candidate` — Candidate model-facing call name
+
+#### Returns
+
+`true` when the name is reserved
+
+#### Examples
+
+```typescript
+import { isReservedToolCallName } from './tools/normalizers/index.ts';
+
+isReservedToolCallName('read_file'); // true
+isReservedToolCallName('import_realm_template'); // true
+isReservedToolCallName('acme_scoring_similarity'); // false
+```
 
 ### `normalizeToolName` — variable
 
@@ -118,9 +171,9 @@ The snake_case form of the input, or an empty string for non-string/empty input.
 
 ## Doc coverage
 
-- Top-level exports: 7
-- Declarations (exports + members): 7
-- Documented declarations: 7 / 7 (100%)
+- Top-level exports: 9
+- Declarations (exports + members): 9
+- Documented declarations: 9 / 9 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): none

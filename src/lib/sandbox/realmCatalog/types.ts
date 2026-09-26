@@ -20,9 +20,11 @@ export interface RealmAgentToolProfile {
   /** Canonical capability preset name (for example `manager` or `readonly`). */
   preset?: ToolPresetName;
   /**
-   * Explicit tool names, resolved through the canonical preset resolver;
-   * declared requirement ids resolve to their derived call names
-   * (`deriveToolCallName`).
+   * Explicit tool grants: `'*'`, a canonical internal tool name or alias, an
+   * extension tool reference `<providerId>::<serverToolName>` (the provider id
+   * must be declared by the owning template's `providers`; the resolved
+   * model-facing call name is `deriveToolCallName(serverToolName)`), or a
+   * legacy `toolContract` requirement id (resolved to its derived call name).
    */
   tools?: readonly string[];
 }
@@ -209,7 +211,8 @@ export interface RealmHydrationDeclarationV1 {
 }
 
 /**
- * One capability the template requires from the host (format v1 §3.9).
+ * One capability the template requires from the host (legacy capability
+ * layer).
  *
  * Requirements are requests, never implementations: the capability id is
  * namespaced (`text.similarity`, `acme.scoring.similarity`), `io` records the
@@ -220,15 +223,19 @@ export interface RealmHydrationDeclarationV1 {
  * `acme.scoring.similarity` → `acme_scoring_similarity`) and is stable across
  * implementations. Grants in `toolProfile.tools`, resolved plans, and
  * capability summaries carry the derived call name, while the id remains the
- * authoring identity (and the future `resolvedTools` capability key). Derived
- * call names must be unique across the contract and must not collide with a
- * recognized canonical tool (`read.file` → `read_file` is rejected), and both
- * collisions fail closed at validation and materialization. Requirements are
- * accepted and shape-validated in this wave; resolution arrives with the
- * providers wave.
+ * authoring identity. A derived call name is rejected when it is reserved by
+ * the baked/publishing surface (`read.file` → `read_file`, also
+ * `import.realm.template` → `import_realm_template`) or when another declared
+ * source derives it, and both collisions fail closed at validation and
+ * materialization.
+ *
+ * @deprecated The capability layer is retired: reference concrete extensions
+ * (`providers`) and concrete extension tools
+ * (`toolProfile.tools` references) instead. Requirement-id grants keep
+ * working as a legacy compatibility path.
  */
 export interface RealmToolRequirement {
-  /** Capability id (namespaced; referenced by `toolProfile.tools` and provider `provides`). */
+  /** Capability id (namespaced; referenced by `toolProfile.tools` on the legacy path). */
   id: string;
   /** Human/agent-readable description of the capability. */
   brief: string;
@@ -248,16 +255,29 @@ export interface RealmToolRequirement {
 }
 
 /**
- * The template's capability contract: the requirements it asks the host to
- * satisfy. Accepted and shape-validated in this wave, never resolved here.
+ * The template's legacy capability contract: the requirements it asks the
+ * host to satisfy.
+ *
+ * Accepted and shape-validated on the compatibility path; requirement-id
+ * grants keep working.
+ *
+ * @deprecated The capability layer is retired: templates request concrete
+ * extensions (`providers`) and reference concrete extension tools in
+ * `toolProfile.tools` instead.
  */
 export interface RealmToolContract {
-  /** Declared capability requirements. */
+  /**
+   * Declared capability requirements.
+   *
+   * @deprecated The capability layer is retired; concrete extension tool
+   * references replace requirement ids. Accepted for compatibility.
+   */
   requirements?: readonly RealmToolRequirement[];
 }
 
 /**
- * A host-installed tool pack requested by the template.
+ * A host-installed tool pack requested by the template: a concrete extension
+ * request, not a capability abstract.
  */
 export interface RealmProviderPack {
   /** Provider kind discriminator. */
@@ -272,6 +292,10 @@ export interface RealmProviderPack {
 
 /**
  * One capability → provider surface mapping of an MCP provider.
+ *
+ * @deprecated The capability layer is retired: `provides` is accepted for
+ * compatibility but never resolved; templates reference concrete extension
+ * tools (`<providerId>::<serverToolName>`) instead.
  */
 export interface RealmProviderProvides {
   /** Capability id this surface provides. */
@@ -303,27 +327,39 @@ export interface RealmProviderStdioTransport {
 }
 
 /**
- * An MCP server requested by the template.
+ * An MCP server extension requested by the template.
  */
 export interface RealmProviderMcp {
   /** Provider kind discriminator. */
   kind: 'mcp';
-  /** Server id. */
+  /** Server id (declared by extension tool references). */
   id: string;
   /** Exactly one transport (http or stdio). */
   transport: RealmProviderHttpTransport | RealmProviderStdioTransport;
-  /** Capability → surface mappings. */
+  /**
+   * Capability → surface mappings.
+   *
+   * @deprecated Accepted for compatibility, never resolved: reference
+   * concrete extension tools in `toolProfile.tools` instead.
+   */
   provides?: readonly RealmProviderProvides[];
-  /** Credential vault key *name* (never a secret). */
+  /**
+   * Credential vault key *name* hint (never a secret).
+   *
+   * @deprecated Installation, attachment, and credential binding are wholly
+   * user-side; this field is an informational hint only and is never resolved.
+   */
   authRef?: string;
 }
 
 /**
- * A provider request: a host-installed tool pack or an MCP server.
+ * A provider request: a concrete extension request — a host-installed tool
+ * pack or an MCP server — the template asks the host to install or attach.
  *
- * Providers are requests; templates never ship or auto-load executable code
- * and never carry credentials (`authRef` names a vault entry). Accepted and
- * shape-validated in this wave, never connected or resolved here.
+ * Providers are requests; templates never ship or auto-load executable code,
+ * credentials are user-side, and the deprecated `provides`/`authRef` MCP
+ * fields never resolve. Accepted and shape-validated here, never connected by
+ * this module.
  */
 export type RealmProvider = RealmProviderPack | RealmProviderMcp;
 
@@ -355,9 +391,16 @@ export interface RealmTemplateV1 {
   agents: RealmAgentSpec[];
   /** Optional seed manifest resolved by materialization. */
   seed?: RealmSeedManifestV1;
-  /** Optional capability requirements (shape-validated; never resolved in this wave). */
+  /**
+   * Optional legacy capability requirements (shape-validated; requirement-id
+   * grants keep working).
+   *
+   * @deprecated The capability layer is retired: request concrete extensions
+   * (`providers`) and reference concrete extension tools in
+   * `toolProfile.tools` instead.
+   */
   toolContract?: RealmToolContract;
-  /** Optional provider requests (shape-validated; never resolved in this wave). */
+  /** Optional concrete extension requests (shape-validated; never connected in this module). */
   providers?: readonly RealmProvider[];
 }
 
@@ -385,9 +428,11 @@ export interface BakedTemplateBundle {
  * `preset` reports the declared preset name (or `null` for explicit lists) and
  * `tools` carries the resolved grants exactly as the runtime allowlist will
  * receive them: canonical names and aliases pass through in declared order
- * (the capability summary canonicalizes alias spellings), and declared
+ * (the capability summary canonicalizes alias spellings), declared legacy
  * `toolContract` requirement ids resolve to their derived model-facing call
- * names (`deriveToolCallName`).
+ * names (`deriveToolCallName`), and extension tool references
+ * (`providerId::serverToolName`) resolve to
+ * `deriveToolCallName(serverToolName)`.
  */
 export interface RealmLaunchToolProfile {
   /** Declared preset name, or `null` when the spec declared an explicit list. */
@@ -572,9 +617,10 @@ type _CapabilityWildcardSourcesSyncCheck = _AssertTrue<_CapabilityWildcardSource
  * and aggregate expansion (wildcard reported as `['*']`); `mutating` and
  * `readOnly` partition the canonical grants against the canonical mutation
  * vocabulary, and `unrecognized` names every declared grant that maps to no
- * canonical tool. A privileged spec reports effective wildcard capability
- * regardless of its declared profile, matching the runtime authority
- * derivation, with `wildcardSource` naming the reason.
+ * canonical tool and no declared requirement id or extension reference. A
+ * privileged spec reports effective wildcard capability regardless of its
+ * declared profile, matching the runtime authority derivation, with
+ * `wildcardSource` naming the reason.
  */
 export interface AgentCapabilitySummary {
   /** Stable per-template agent key from the source spec. */
@@ -727,9 +773,16 @@ export interface RealmTemplate {
   placements?: readonly RealmPlacement[];
   /** Declared launch directives, in delivery order. */
   directives?: readonly RealmDirective[];
-  /** Optional capability requirements (shape-validated; never resolved in this wave). */
+  /**
+   * Optional legacy capability requirements (shape-validated; requirement-id
+   * grants keep working).
+   *
+   * @deprecated The capability layer is retired: request concrete extensions
+   * (`providers`) and reference concrete extension tools in
+   * `toolProfile.tools` instead.
+   */
   toolContract?: RealmToolContract;
-  /** Optional provider requests (shape-validated; never resolved in this wave). */
+  /** Optional concrete extension requests (shape-validated; never connected in this module). */
   providers?: readonly RealmProvider[];
 }
 

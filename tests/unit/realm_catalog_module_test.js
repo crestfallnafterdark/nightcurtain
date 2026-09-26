@@ -17,8 +17,8 @@
  *  6. Fail-closed validation of options, templates, specs, prompt parts,
  *     inputs, legacy seed manifests, and tool profiles.
  *  7. Capability summaries: presets, aggregate expansion, wildcard, aliases,
- *     derived requirement call names, strict grant validation, privilege
- *     escalation, frozen deterministic output.
+ *     derived requirement and extension-reference call names, strict grant
+ *     validation, privilege escalation, frozen deterministic output.
  *  8. Composition: declared order, verbatim pieces, empty-input omission,
  *     required rejection, default/defaultFile resolution, bundle files,
  *     provenance, frozen deterministic output.
@@ -27,7 +27,8 @@
  *     sorted id order, accessor semantics, and a stable sha256 content version.
  * 11. Legacy format-v1 schema (through the shim): input origins/briefs,
  *     seed-slot origin/source rules, history schema, toolContract/providers,
- *     derived requirement call names and their collision rejection.
+ *     derived requirement and extension-reference call names and their
+ *     collision rejection (the publishing regression included).
  * 12. Baked history: composition, empty-entry rejection, plan carriage, input
  *     precedence, missing-file failure, frozen deterministic output.
  * 13. Per-bundle versioning: canonical byte stream (independently reproduced
@@ -72,9 +73,20 @@ import {
 } from '../../src/lib/sandbox/realmCatalog/index.ts';
 import {
   MUTATING_TOOLS,
+  PUBLISHING_TOOLS,
   READ_ONLY_TOOLS,
+  SANDBOX_TOOLS,
   TOOL_PRESETS
 } from '../../src/lib/sandbox/tools/constants/index.ts';
+import {
+  deriveToolCallName as deriveToolCallNameFromNormalizers,
+  getCanonToolName,
+  isReservedToolCallName
+} from '../../src/lib/sandbox/tools/normalizers/index.ts';
+import {
+  PUBLISHING_TOOL_REGISTRY,
+  TOOL_REGISTRY
+} from '../../src/lib/sandbox/tools/descriptors/index.ts';
 
 /** Module folder under test (source-level purity checks). */
 const MODULE_DIR = path.resolve(import.meta.dirname, '../../src/lib/sandbox/realmCatalog');
@@ -188,6 +200,11 @@ test('1. runtime surface exports the demo template, the baked bundles, and the p
   assert.strictEqual(typeof validateTemplate, 'function');
   assert.strictEqual(typeof templateRequiresProviders, 'function');
   assert.strictEqual(typeof RealmCatalogError, 'function');
+  assert.strictEqual(
+    deriveToolCallName,
+    deriveToolCallNameFromNormalizers,
+    'the realmCatalog surface re-exports the canonical tools/normalizers derivation'
+  );
   assert.ok(Object.isFrozen(REALM_CATALOG_ERROR_CODES), 'the error-code dictionary is frozen');
   assert.ok(!('default' in RealmCatalogModule), 'no default export');
 });
@@ -775,12 +792,12 @@ test('14. explicit grants are strict: aliases canonicalize; unknown names and un
 
   assert.throws(
     () => summarizeAgentCapabilities(agentSpec({ toolProfile: { tools: ['definitely_not_a_tool'] } })),
-    /neither a canonical tool name nor a declared toolContract requirement id/,
+    /neither a canonical tool name, a declared legacy requirement id, nor a declared extension tool reference/,
     'the silent unrecognized pass-through is replaced by strict validation'
   );
   assert.throws(
     () => summarizeAgentCapabilities(agentSpec({ toolProfile: { tools: ['text.similarity'] } })),
-    /neither a canonical tool name nor a declared toolContract requirement id/,
+    /neither a canonical tool name, a declared legacy requirement id, nor a declared extension tool reference/,
     'a requirement id is only a valid grant when the owning template declares it'
   );
 
@@ -1376,10 +1393,10 @@ test('31. materialized history resolves launch/default/defaultFile inputs like p
 });
 
 // ============================================================================
-// 13. Tool contract / providers (accepted and validated, never resolved)
+// 13. Tool contract / providers (deprecated compatibility + extension requests)
 // ============================================================================
 
-test('32. toolContract and providers are accepted and shape-validated, never resolved', () => {
+test('32. toolContract and providers are accepted and shape-validated (deprecated compatibility fields)', () => {
   const declared = template({
     agents: [agentSpec({ toolProfile: { tools: ['read_file', 'text.similarity'] } })],
     toolContract: {
@@ -1480,7 +1497,40 @@ test('32. toolContract and providers are accepted and shape-validated, never res
   // Requirement ids are valid grants only when declared by the same template.
   assert.throws(
     () => materializeTemplate(template({ agents: [agentSpec({ toolProfile: { tools: ['text.similarity'] } })] }), { realmId: 'r' }),
-    /neither a canonical tool name nor a declared toolContract requirement id/
+    /neither a canonical tool name, a declared legacy requirement id, nor a declared extension tool reference/
+  );
+
+  // The deprecated provider subfields (`provides`, `authRef`) are accepted and
+  // carried through normalization without resolution or connection, and the
+  // deprecated `toolContract` keeps its requirement-id grant mapping.
+  const deprecated = template({
+    agents: [agentSpec({ toolProfile: { tools: ['read_file'] } })],
+    toolContract: {
+      requirements: [{ id: 'text.similarity', brief: 'sim', io: { in: {}, out: {} } }]
+    },
+    providers: [{
+      kind: 'mcp',
+      id: 'acme',
+      transport: { kind: 'http', url: 'https://acme.example/mcp' },
+      provides: [{ capability: 'text.similarity', tool: 'server_tool' }],
+      authRef: 'vault_name'
+    }]
+  });
+  const normalizedDeprecated = normalizeTemplate(deprecated);
+  assert.deepStrictEqual(
+    normalizedDeprecated.providers,
+    deprecated.providers,
+    'deprecated provider fields pass through normalization verbatim'
+  );
+  assert.strictEqual(
+    normalizedDeprecated.toolContract,
+    deprecated.toolContract,
+    'the deprecated tool contract passes through normalization verbatim'
+  );
+  assert.deepStrictEqual(
+    materializeTemplate(deprecated, { realmId: 'r' }).agents[0].toolProfile.tools,
+    ['read_file'],
+    'deprecated provider fields never alter the resolved plan'
   );
 });
 
@@ -1539,9 +1589,9 @@ test('32a. derived tool call names: derivation rule, plan grants, and collision 
     'derived-duplicate rejection is independent of declaration order'
   );
 
-  // Canonical collisions: read.file derives read_file (a recognized canonical
-  // tool); save.file derives save_file, which resolves through the alias map
-  // to write_file.
+  // Reserved-name collisions: read.file derives read_file (a canonical tool);
+  // save.file derives save_file, which resolves through the alias map to
+  // write_file.
   assert.throws(
     () => materializeTemplate(
       template({ toolContract: { requirements: [requirement('read.file')] } }),
@@ -1559,12 +1609,222 @@ test('32a. derived tool call names: derivation rule, plan grants, and collision 
     'an alias-resolving derived name collides through the canonical resolution too'
   );
 
+  // The tightened collision universe covers the whole resolvable-name surface:
+  // publishing names, camel aliases, selector spellings, case variants, and
+  // dot-normalized aliases fail closed. `import.realm.template` derives
+  // `import_realm_template` (a publishing tool) and is the regression case.
+  const reservedDerivations = [
+    ['import.realm.template', 'import_realm_template'],
+    ['importRealmTemplate', 'importRealmTemplate'],
+    ['submit.hydration.package', 'submit_hydration_package'],
+    ['manage.subagents', 'manage_subagents'],
+    ['READ_FILE', 'READ_FILE'],
+    ['fs.read.file', 'fs_read_file']
+  ];
+  for (const [id, callName] of reservedDerivations) {
+    assert.throws(
+      () => materializeTemplate(
+        template({ toolContract: { requirements: [requirement(id)] } }),
+        { realmId: 'r' }
+      ),
+      (error) => error.message.includes(`derives the tool call name '${callName}'`)
+        && error.message.includes('reserved tool name'),
+      `requirement '${id}' deriving '${callName}' must fail closed`
+    );
+  }
+
+  // The shared predicate rejects every baked/publishing descriptor name and
+  // every alias-resolvable spelling, and accepts derived-safe names.
+  for (const name of [...Object.values(SANDBOX_TOOLS), ...Object.values(PUBLISHING_TOOLS)]) {
+    assert.ok(isReservedToolCallName(name), `'${name}' is reserved`);
+    assert.notStrictEqual(
+      getCanonToolName(name),
+      null,
+      `'${name}' resolves through the alias map (the equality clause is a belt)`
+    );
+  }
+  for (const name of ['read', 'readFile', 'Read.File', 'importTemplate', 'manage_subagents', 'READ_FILE', 'fs.read.file']) {
+    assert.ok(isReservedToolCallName(name), `'${name}' is reserved through alias resolution`);
+  }
+  // The equality clause covers the actual descriptor registries, not just the
+  // canonical taxonomy: every baked/publishing descriptor name is reserved.
+  for (const name of [...Object.keys(TOOL_REGISTRY), ...Object.keys(PUBLISHING_TOOL_REGISTRY)]) {
+    assert.ok(isReservedToolCallName(name), `descriptor name '${name}' is reserved`);
+  }
+  assert.ok(!isReservedToolCallName('acme_scoring_similarity'), 'a derived-safe name stays free');
+  assert.ok(!isReservedToolCallName('docs_search'), 'a derived-safe name stays free');
+
   // The v1 read shim validates the same contract: a v1-format requirement id
   // is rejected before any plan is built.
   assert.throws(
     () => normalizeTemplate(template({ toolContract: { requirements: [requirement('read.file')] } })),
-    /canonical/,
+    /reserved tool name/,
     'the v1 shim carries the collision rejection'
+  );
+  assert.throws(
+    () => normalizeTemplate(template({ toolContract: { requirements: [requirement('import.realm.template')] } })),
+    /reserved tool name 'import_realm_template'/,
+    'the v1 shim carries the publishing regression too'
+  );
+});
+
+test('32b. extension tool references validate, resolve, and collide across the template', () => {
+  /** Builds an MCP extension request. */
+  const mcpProvider = (id) => ({
+    kind: 'mcp',
+    id,
+    transport: { kind: 'http', url: `https://${id}.example/mcp` }
+  });
+
+  // A reference resolves to the sanitized server tool name (the provider id is
+  // only the declaration reference), alongside legacy requirement grants and
+  // canonical names.
+  const declared = template({
+    agents: [agentSpec({ toolProfile: { tools: ['acme::search.docs', 'read_file'] } })],
+    providers: [mcpProvider('acme')]
+  });
+  const plan = materializeTemplate(declared, { realmId: 'r' });
+  assert.deepStrictEqual(
+    plan.agents[0].toolProfile.tools,
+    ['search_docs', 'read_file'],
+    'an extension reference resolves to deriveToolCallName(serverToolName)'
+  );
+  assert.ok(
+    !plan.agents[0].toolProfile.tools.includes('acme::search.docs'),
+    'the reference syntax never leaks into a resolved plan'
+  );
+
+  // Capability summaries surface the derived name unclassified when the
+  // declared providers are supplied.
+  const summary = summarizeAgentCapabilities(
+    declared.agents[0],
+    declared.toolContract?.requirements,
+    declared.providers
+  );
+  assert.deepStrictEqual(summary.grants, ['search_docs', 'read_file']);
+  assert.deepStrictEqual(summary.unrecognized, [], 'a validated reference is not unrecognized');
+  assert.deepStrictEqual(summary.mutating, [], 'derived reference grants carry no mutation classification');
+  assert.deepStrictEqual(summary.readOnly, ['read_file']);
+
+  // Without the declared providers the reference cannot be validated: fail closed.
+  assert.throws(
+    () => summarizeAgentCapabilities(declared.agents[0]),
+    /references undeclared provider id 'acme'/,
+    'a summary without declared providers rejects an extension reference'
+  );
+
+  // Refs resolve across the format-v1 shim too.
+  const legacy = normalizeTemplate(template({
+    agents: [agentSpec({ toolProfile: { tools: ['acme::a.b'] } })],
+    providers: [mcpProvider('acme')]
+  }));
+  assert.deepStrictEqual(
+    materializeTemplate(legacy, { realmId: 'r' }).agents[0].toolProfile.tools,
+    ['a_b'],
+    'the v1 shim validates and resolves extension references'
+  );
+
+  // Shape failures: empty provider id, empty server tool name, undeclared
+  // provider, and reserved derived call names.
+  const invalid = [
+    [['::x'], /must name a provider id before '::'/],
+    [['acme::'], /must name a non-empty server tool name after '::'/],
+    [['acme::   '], /must name a non-empty server tool name after '::'/],
+    [['other::x'], /references undeclared provider id 'other'/],
+    [['acme::read.file'], /collides with the reserved tool name 'read_file'/],
+    [['acme::import.realm.template'], /collides with the reserved tool name 'import_realm_template'/]
+  ];
+  for (const [tools, pattern] of invalid) {
+    assert.throws(
+      () => materializeTemplate(
+        template({ agents: [agentSpec({ toolProfile: { tools } })], providers: [mcpProvider('acme')] }),
+        { realmId: 'r' }
+      ),
+      pattern,
+      `'${tools[0]}' must fail closed`
+    );
+  }
+
+  // Cross-source collisions: two references (across agents), a reference
+  // against a legacy requirement-derived name, and two references to the same
+  // server tool name on different providers.
+  assert.throws(
+    () => materializeTemplate(
+      template({
+        agents: [agentSpec({ toolProfile: { tools: ['acme::a.b', 'acme::a_b'] } })],
+        providers: [mcpProvider('acme')]
+      }),
+      { realmId: 'r' }
+    ),
+    (error) => /collides with reference 'acme::a\.b'/.test(error.message),
+    'two references inside one profile deriving one call name fail closed'
+  );
+  assert.throws(
+    () => materializeTemplate(
+      template({
+        agents: [
+          agentSpec({ toolProfile: { tools: ['acme::a.b'] } }),
+          agentSpec({ key: 'b', idPattern: 'b', toolProfile: { tools: ['beta::a_b'] } })
+        ],
+        providers: [mcpProvider('acme'), mcpProvider('beta')]
+      }),
+      { realmId: 'r' }
+    ),
+    (error) => /collides with reference 'acme::a\.b'/.test(error.message),
+    'two references deriving one call name fail closed'
+  );
+  assert.throws(
+    () => materializeTemplate(
+      template({
+        agents: [agentSpec({ toolProfile: { tools: ['acme::x_y'] } })],
+        toolContract: { requirements: [{ id: 'x.y', brief: 'b', io: { in: {}, out: {} } }] },
+        providers: [mcpProvider('acme')]
+      }),
+      { realmId: 'r' }
+    ),
+    (error) => /collides with requirement 'x\.y'/.test(error.message),
+    'a reference colliding with a legacy requirement-derived name fails closed'
+  );
+  assert.throws(
+    () => materializeTemplate(
+      template({
+        agents: [
+          agentSpec({ toolProfile: { tools: ['acme::a.b'] } }),
+          agentSpec({ key: 'b', idPattern: 'b', toolProfile: { tools: ['beta::a.b'] } })
+        ],
+        providers: [mcpProvider('acme'), mcpProvider('beta')]
+      }),
+      { realmId: 'r' }
+    ),
+    (error) => /collides with reference 'acme::a\.b'/.test(error.message),
+    'same server tool name on two providers fails closed'
+  );
+
+  // The same reference may be granted by several profiles (one tool, one call name).
+  const shared = materializeTemplate(
+    template({
+      agents: [
+        agentSpec({ toolProfile: { tools: ['acme::docs.search'] } }),
+        agentSpec({ key: 'b', idPattern: 'b', toolProfile: { tools: ['acme::docs.search'] } })
+      ],
+      providers: [mcpProvider('acme')]
+    }),
+    { realmId: 'r' }
+  );
+  assert.deepStrictEqual(
+    shared.agents.map((agent) => agent.toolProfile.tools),
+    [['docs_search'], ['docs_search']],
+    'the same reference granted twice is the same tool, not a collision'
+  );
+
+  // An alias-resolving server tool name is rejected through the same predicate.
+  assert.throws(
+    () => materializeTemplate(
+      template({ agents: [agentSpec({ toolProfile: { tools: ['acme::search'] } })], providers: [mcpProvider('acme')] }),
+      { realmId: 'r' }
+    ),
+    /collides with the reserved tool name 'grep'/,
+    'a server tool name alias-resolving to a canonical tool fails closed'
   );
 });
 

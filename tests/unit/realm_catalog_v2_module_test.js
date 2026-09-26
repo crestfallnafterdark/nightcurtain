@@ -28,8 +28,9 @@
  * 10. Materialization: v2 plans (placements/directives/agents), id overrides,
  *     demo and legacy fixtures.
  * 11. Capability summaries and provider/authority gates accept v2 specs;
- *     derived requirement call names resolve in v2 plans/summaries and
- *     derived call-name collisions fail closed.
+ *     derived requirement and extension-reference call names resolve in v2
+ *     plans/summaries and derived call-name collisions (publishing surface
+ *     included) fail closed.
  * 12. Gap matrix: totality reference permutations, v2-only path/reserved-name
  *     surfaces, directive target/requiredness details, per-target placement
  *     destinations and root/file collisions, fileset-selection edges, payload
@@ -1569,7 +1570,7 @@ test('50. derived tool call names resolve in v2 plans/summaries and collisions f
   );
   assert.throws(
     () => validateTemplate(templateV2({ toolContract: { requirements: [requirement('read.file')] } })),
-    (error) => /'read\.file'.*'read_file'.*canonical/.test(error.message),
+    (error) => /'read\.file'.*'read_file'.*reserved tool name/.test(error.message),
     'derived-vs-canonical collisions fail closed at validation'
   );
   assert.throws(
@@ -1577,13 +1578,23 @@ test('50. derived tool call names resolve in v2 plans/summaries and collisions f
       templateV2({ toolContract: { requirements: [requirement('read.file')] } }),
       { realmId: 'realm_1' }
     ),
-    /canonical/,
+    /reserved tool name/,
     'materialization rejects the same collision'
   );
   assert.throws(
     () => validateTemplate(templateV2({ toolContract: { requirements: [requirement('a'), requirement('a')] } })),
     /carries duplicate requirement id 'a'/,
     'exact duplicate ids keep the existing error'
+  );
+
+  // The tightened collision universe includes the publishing surface:
+  // `import.realm.template` derives `import_realm_template`.
+  assert.throws(
+    () => validateTemplate(templateV2({
+      toolContract: { requirements: [requirement('import.realm.template')] }
+    })),
+    (error) => /'import\.realm\.template'.*'import_realm_template'.*reserved tool name/.test(error.message),
+    'derived-vs-publishing collisions fail closed at validation'
   );
 
   // The v1 read shim validates the same contract.
@@ -1600,6 +1611,104 @@ test('50. derived tool call names resolve in v2 plans/summaries and collisions f
   // are still rejected.
   assert.throws(
     () => validateTemplate(templateV2({ agents: [agentV2({ toolProfile: { tools: ['text.similarity'] } })] })),
-    /neither a canonical tool name nor a declared toolContract requirement id/
+    /neither a canonical tool name, a declared legacy requirement id, nor a declared extension tool reference/
+  );
+});
+
+// ============================================================================
+// 14. Extension tool references (P2.1)
+// ============================================================================
+
+test('51. extension tool references validate, resolve, and surface in v2 plans and summaries', () => {
+  /** Builds an MCP extension request. */
+  const mcpProvider = (id) => ({
+    kind: 'mcp',
+    id,
+    transport: { kind: 'http', url: `https://${id}.example/mcp` }
+  });
+
+  const declared = templateV2({
+    agents: [agentV2({ toolProfile: { tools: ['acme::docs.search', 'text.similarity', 'read_file'] } })],
+    toolContract: {
+      requirements: [{ id: 'text.similarity', brief: 'Similarity.', io: { in: {}, out: {} } }]
+    },
+    providers: [mcpProvider('acme')]
+  });
+  assert.strictEqual(validateTemplate(declared), declared, 'the canonical validator accepts resolved references');
+  const plan = materializeTemplate(declared, { realmId: 'realm_1' });
+  assert.deepStrictEqual(
+    plan.agents[0].toolProfile.tools,
+    ['docs_search', 'text_similarity', 'read_file'],
+    'references, legacy requirements, and canonical names resolve side by side'
+  );
+
+  const summary = summarizeAgentCapabilities(
+    declared.agents[0],
+    declared.toolContract.requirements,
+    declared.providers
+  );
+  assert.deepStrictEqual(
+    summary.grants,
+    ['docs_search', 'text_similarity', 'read_file'],
+    'reference-derived and requirement-derived grants surface unclassified in declared order'
+  );
+  assert.deepStrictEqual(summary.unrecognized, [], 'neither derived form is unrecognized');
+  assert.deepStrictEqual(summary.readOnly, ['read_file'], 'only canonical grants classify');
+
+  // Cross-agent collisions and undeclared providers fail closed at validation.
+  assert.throws(
+    () => validateTemplate(templateV2({
+      agents: [
+        agentV2({ toolProfile: { tools: ['acme::docs.search'] } }),
+        agentV2({ key: 'second', idPattern: 'second', toolProfile: { tools: ['beta::docs_search'] } })
+      ],
+      providers: [mcpProvider('acme')]
+    })),
+    /references undeclared provider id 'beta'/,
+    'undeclared provider ids fail closed at v2 validation'
+  );
+  assert.throws(
+    () => validateTemplate(templateV2({
+      agents: [
+        agentV2({ toolProfile: { tools: ['acme::a.b'] } }),
+        agentV2({ key: 'second', idPattern: 'second', toolProfile: { tools: ['beta::a_b'] } })
+      ],
+      providers: [mcpProvider('acme'), mcpProvider('beta')]
+    })),
+    /collides with reference 'acme::a\.b'/,
+    'two references deriving one call name fail closed at v2 validation'
+  );
+
+  // Deprecated MCP subfields are accepted without affecting resolution.
+  const deprecated = templateV2({
+    agents: [agentV2({ toolProfile: { tools: ['acme::docs.search'] } })],
+    providers: [{
+      ...mcpProvider('acme'),
+      provides: [{ capability: 'text.similarity', tool: 'server_tool' }],
+      authRef: 'vault_name'
+    }]
+  });
+  assert.strictEqual(validateTemplate(deprecated), deprecated, 'deprecated provider fields stay accepted');
+  assert.deepStrictEqual(
+    materializeTemplate(deprecated, { realmId: 'realm_1' }).agents[0].toolProfile.tools,
+    ['docs_search'],
+    'deprecated provider fields never contribute grants'
+  );
+
+  // The v1 shim resolves references on the same rules.
+  assert.deepStrictEqual(
+    materializeTemplate(
+      normalizeTemplate({
+        formatVersion: 1,
+        id: 'v1_refs',
+        name: 'V1 refs',
+        description: 'fixture',
+        agents: [agentV2({ toolProfile: { tools: ['acme::docs.search'] } })],
+        providers: [mcpProvider('acme')]
+      }),
+      { realmId: 'realm_1' }
+    ).agents[0].toolProfile.tools,
+    ['docs_search'],
+    'the v1 shim resolves extension references'
   );
 });
