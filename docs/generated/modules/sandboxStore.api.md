@@ -72,6 +72,7 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 - The store's operator principal is the runtime's host operator principal (`runtime.getOperatorPrincipal()`, exact-reference validated): every operator-scoped store action — runtime lifecycle/scheduler calls, substrate calls, and manual-send attribution — carries that principal, never an agent id or a director descriptor, so operator actions work with zero agents and never depend on the director's lifecycle
 - `realmBypass` is a user-facing operator grant: `grantRealmBypass`/`revokeRealmBypass` validate the agent id, delegate to the runtime under the operator principal, and schedule the debounced save; targeting is additive — a canonical identity key or a realm-exact `{ realmId }` scope addresses the exact same-id registration (composed to the canonical key store-side), while a bare id keeps the unique-match rule and fails closed on ambiguity; the active grant list persists as the additive top-level snapshot field `realmBypassGrants` — canonical identity keys emitted by the lifecycle listing, so a scoped grant on a same-id pair round-trips realm-exactly — and is re-applied at hydration, after the agents are registered, through `restoreRealmBypassGrants`, which drops unknown/recycled refs fail-closed and still hydrates legacy bare-id snapshots through unique-match (an ambiguous bare id is skipped, never duplicated across realms); grant-free snapshots keep every existing field and byte
 - Publishing grants and trust: `grantTemplateAuthority`/`revokeTemplateAuthority`/`grantHydrationAuthority`/`revokeHydrationAuthority` are operator actions delegating to the runtime under the store principal and persist additively as `metaAuthorityGrants` (canonical identity keys per authority; hydration re-applies through `restoreMetaAuthorityGrants`, unknown/recycled refs skipped). `launchRealmFromTemplate` validates every approval against the template's declared pairs before any side effect, applies approved grants under the operator principal, and — only on a fully successful launch with `trustAuthorities: true` — persists the effective approved declared set as `templateAuthorityTrust`; later launches auto-approve exact matches only, `clearTemplateAuthorityTrust` removes the override without revoking already-applied grants, and pending instance payloads stay session-only
+- Saved hydration-payload library (ticket 81d8267): the store owns the operator's named authored payloads — `saveInstancePayload`/`listSavedInstancePayloads`/`getSavedInstancePayload`/`deleteSavedInstancePayload`/`clearSavedInstancePayloads` validate fail-closed (`ERR_STORE_INVALID_PARAMS`, `ERR_STORE_PAYLOAD_LIBRARY_FULL` at the entry cap, `ERR_STORE_PAYLOAD_LIBRARY_TOO_LARGE` at the byte cap), freeze an isolated payload copy, digest it with the catalog's canonical `payloadDigest`, and persist additively as `savedInstancePayloads` (field omitted when empty; payloads re-validate only at attach). Hydration is snapshot-authoritative (malformed entries dropped, legacy snapshots without the field hydrate empty, the id counter seeds past restored numeric suffixes, and the suppression guard never rewrites persisted bytes); reset/factory-reset clears the library and its field
 - `seedRealm` writes validated files through the operator-context VFS surface into the target member's resolved private workspace (or `realm:<realmId>:global` when no target), rejects traversal, reserved workspace targets, the reserved `global`/`public` seed path roots (rejected, never re-rooted, so the legacy VirtualFS prefix routing can never divert a write into the ungrouped shared workspace under a receipt that names the selected one), and empty or duplicate file lists before the first write, and delivers the directive as an operator-attributed mailbox message (the non-agent `'human'` label routes through the host operator principal by exact reference) that requires an explicit member target — never a realm-wide fan-out
 - Seed targets resolve realm-scoped: a named member target is an ACTIVE member of the requested Realm by `(realmId, agentId)` — a same-literal-id registration in another Realm is never selected (only it yields the historical membership error) — and the write addresses that exact registration's private storage key (explicit pin, canonical identity key, or legacy bare id) while the directive addresses its canonical mailbox; receipt labels stay realm-opaque/bare
 - Seed-target membership compares under the store trim semantics: the target lookup resolves a padded hydrated `config.realmId` to the same realm the grouping and `deleteRealm` resolve, a same-id registration in another Realm stays excluded (ambiguous registrations never fall back to a bare ghost workspace when an identity port exists), and the canonical write key is re-normalized to the resolved (trimmed) realm's identity while explicit pins stay verbatim
@@ -538,6 +539,8 @@ export const SANDBOX_STORE_ERROR_CODES: {
     readonly ERR_STORE_EXTENSION_PLAINTEXT_CREDENTIAL: 'ERR_STORE_EXTENSION_PLAINTEXT_CREDENTIAL';
     readonly ERR_STORE_EXTENSION_CREDENTIAL_UNRESOLVED: 'ERR_STORE_EXTENSION_CREDENTIAL_UNRESOLVED';
     readonly ERR_STORE_EXTENSION_CONNECT_FAILED: 'ERR_STORE_EXTENSION_CONNECT_FAILED';
+    readonly ERR_STORE_PAYLOAD_LIBRARY_FULL: 'ERR_STORE_PAYLOAD_LIBRARY_FULL';
+    readonly ERR_STORE_PAYLOAD_LIBRARY_TOO_LARGE: 'ERR_STORE_PAYLOAD_LIBRARY_TOO_LARGE';
 };
 
 // @public
@@ -570,6 +573,7 @@ export class SandboxStore {
     clearAgentLastError(agentId?: string | null): void;
     clearAgentTelemetry(agentId?: string | null): boolean;
     clearPendingInstancePayload(templateId: string): boolean;
+    clearSavedInstancePayloads(): void;
     clearTemplateAuthorityTrust(templateId: string): boolean;
     clockSnapshot: Record<string, AgentClockState>;
     connectExtension(extensionId: string, options?: ExtensionConnectOptions): Promise<ExtensionConnectionProjection>;
@@ -586,6 +590,7 @@ export class SandboxStore {
     deleteHistoryMessage(agentId: string, messageIndexOrId: string | number): boolean;
     deleteRealm(id: string, options?: RealmDeleteOptions): boolean;
     deleteRealmTemplate(templateId: string): boolean;
+    deleteSavedInstancePayload(id: string): boolean;
     demoLogs: DemoLogEntry[];
     demoStep: string;
     destroy(): void;
@@ -633,6 +638,7 @@ export class SandboxStore {
     getRealmTemplateBundle(templateId: string): RealmTemplateBundleView | null;
     getRealmTemplateSource(templateId: string): RealmTemplateSourceInfo | null;
     getRecycledAgent(agentId: string): RecycledAgentStateSnapshot | null;
+    getSavedInstancePayload(id: string): SavedInstancePayload | null;
     grantHydrationAuthority(agentId: string, scope?: AgentIdentityScope): Promise<AuthorityDescriptor | null>;
     // Warning: (ae-forgotten-export) The symbol "AgentIdentityScope" needs to be exported by the entry point index.svelte.d.ts
     // Warning: (ae-forgotten-export) The symbol "AuthorityDescriptor" needs to be exported by the entry point index.svelte.d.ts
@@ -671,6 +677,7 @@ export class SandboxStore {
     listRealmTemplates(): readonly RealmTemplate[];
     listRealmTemplateSources(): readonly RealmTemplateSourceInfo[];
     listRecycledAgents(): ReadonlyArray<RecycledAgentStateSnapshot>;
+    listSavedInstancePayloads(): readonly SavedInstancePayload[];
     listTemplateAuthorityTrust(): Readonly<Record<string, Readonly<Record<string, readonly string[]>>>>;
     markMessageRead(agentId: string, messageId: string): ReadMessageResult;
     // Warning: (ae-forgotten-export) The symbol "MessageEnvelope" needs to be exported by the entry point index.svelte.d.ts
@@ -703,6 +710,7 @@ export class SandboxStore {
     revokeRealmBypass(agentId: string, scope?: AgentIdentityScope): Promise<AuthorityDescriptor | null>;
     revokeTemplateAuthority(agentId: string, scope?: AgentIdentityScope): Promise<AuthorityDescriptor | null>;
     runHandshakeDemo(): Promise<DemoResult>;
+    saveInstancePayload(draft: SavedInstancePayloadDraft): SavedInstancePayload;
     saveToStorage(): boolean;
     scheduledTimers: ScheduledTimerSnapshot[];
     scheduleTimer(input?: ScheduleTimerParams): Promise<ScheduleTimerReceipt>;
@@ -725,6 +733,7 @@ export class SandboxStore {
     get streamingProse(): string;
     get streamingReasoning(): string;
     submitChatTurn(text: string, options?: TurnOptions | string): Promise<TurnResult>;
+    subscribeSavedInstancePayloads(listener: () => void): () => void;
     // Warning: (ae-forgotten-export) The symbol "TurnInput" needs to be exported by the entry point index.svelte.d.ts
     triggerTurn(agentId: string, prompt?: TurnInput, options?: TurnOptions | string): Promise<TurnResult>;
     undoAgentTurn(agentId?: string | null): UndoTurnResult | null;
@@ -783,6 +792,25 @@ export interface SandboxTelemetryStats {
     readonly totalMessages: number;
     readonly totalTimers: number;
     readonly waiting: number;
+}
+
+// @public
+export interface SavedInstancePayload {
+    readonly digest: string;
+    readonly id: string;
+    readonly name: string;
+    readonly payload: Readonly<Record<string, unknown>>;
+    readonly savedAt: string;
+    readonly templateId: string;
+    readonly templateVersion: string;
+}
+
+// @public
+export interface SavedInstancePayloadDraft {
+    readonly name: string;
+    readonly payload: unknown;
+    readonly templateId: string;
+    readonly templateVersion: string;
 }
 
 // @public
@@ -1662,7 +1690,7 @@ if (redoResult?.success) {
 
 Standardized error code dictionary for the sandbox store module contract. Provides frozen programmatic error constants to eliminate brittle string matching in error handlers.
 
-Codes: - `ERR_STORE_AGENT_NOT_FOUND`: Target agent ID does not exist in active registry or recycle bin. - `ERR_STORE_NO_AGENT_SELECTED`: Conversational action invoked when `selectedAgentId === null`. - `ERR_STORE_TURN_FAILED`: LLM inference stream, provider gateway, or tool execution threw an uncaught error. - `ERR_STORE_INVALID_PARAMS`: Invalid arguments passed to store methods (e.g. a missing agent config `id`, a non-positive timer duration, or an unresolvable timer target agent). - `ERR_STORE_VFS_FAILED`: VirtualFS operation failed due to quota limit, path permission, or missing source file. - `ERR_STORE_REALM_NOT_EMPTY`: `deleteRealm` was called on a Realm that still has active or recycled members (Wave R; use the recursive override). - `ERR_STORE_REALM_PROTECTED`: `deleteRealm` targeted the seeded Generic default Realm, which can never be deleted. - `ERR_STORE_REALM_DELETE_FAILED`: a recursive Realm deletion could not purge every member, so the record was left in place (fail-closed; the error carries a report). - `ERR_STORE_REALM_LAUNCH_FAILED`: a template launch failed after the Realm record existed (materialization, a member launch, a placement write, or a directive delivery), so the record and its members were rolled back first; the error carries the rollback report and the original failure as `cause`. - `ERR_TEMPLATE_PROVIDERS_UNSUPPORTED`: retired providers-gate code; `launchRealmFromTemplate` no longer emits it (provider-bearing templates resolve against installed and attached extensions and launch with missing-extension disclosure). - `ERR_TEMPLATE_AUTHORITY_UNSUPPORTED`: `launchRealmFromTemplate` targeted a template declaring a publishing authority id unknown to this host; launch is blocked fail-closed while import/validation/review accept the declaration (providers precedent). - `ERR_STORE_TEMPLATE_TOO_LARGE`: `importRealmTemplate` exceeded the per-bundle or total imported-template byte budget. - `ERR_STORE_TEMPLATE_PERSIST_FAILED`: the registry mutation could not be persisted (storage quota/unavailable), so it was rolled back — an import/delete is never silently in-memory-only. - `ERR_STORE_EXTENSION_ALREADY_INSTALLED`: `installExtension` targeted an id that already has a global install record. - `ERR_STORE_EXTENSION_NOT_INSTALLED`: `attachExtension`/`connectExtension`/`disconnectExtension`/`reconnectExtension` named an extension with no global install record. - `ERR_STORE_EXTENSION_ALREADY_ATTACHED`: `attachExtension` targeted a Realm that already attaches the extension. - `ERR_STORE_EXTENSION_ATTACHED`: `removeExtension` targeted an extension still attached to at least one Realm; detach it first. - `ERR_STORE_EXTENSION_NOT_CONNECTABLE`: `connectExtension` targeted a `pack` extension, which has no connectable transport. - `ERR_STORE_EXTENSION_TRANSPORT_UNSUPPORTED`: `connectExtension` targeted an MCP record carrying the host-only `stdio` transport hint. - `ERR_STORE_EXTENSION_INVALID_ENDPOINT`: `connectExtension` targeted a record whose transport URL is not an absolute URL, or whose explicitly approved URL (`approvedUrl`) is not an absolute URL or does not match the transport URL after URL normalization — a stale or inconsistent approval never dials. - `ERR_STORE_EXTENSION_PLAINTEXT_CREDENTIAL`: `connectExtension` targeted a `credentialId`-bearing record on a non-`https:` endpoint — refused before any vault read or network activity. - `ERR_STORE_EXTENSION_CREDENTIAL_UNRESOLVED`: `connectExtension` targeted a `credentialId` the vault cannot resolve (deleted/unknown id) — fail closed, no network activity. - `ERR_STORE_EXTENSION_CONNECT_FAILED`: the error code of an unclassified operational connection failure (a classified MCP client failure keeps its own `ERR_MCP_*` code); never thrown by the pre-connection gates.
+Codes: - `ERR_STORE_AGENT_NOT_FOUND`: Target agent ID does not exist in active registry or recycle bin. - `ERR_STORE_NO_AGENT_SELECTED`: Conversational action invoked when `selectedAgentId === null`. - `ERR_STORE_TURN_FAILED`: LLM inference stream, provider gateway, or tool execution threw an uncaught error. - `ERR_STORE_INVALID_PARAMS`: Invalid arguments passed to store methods (e.g. a missing agent config `id`, a non-positive timer duration, or an unresolvable timer target agent). - `ERR_STORE_VFS_FAILED`: VirtualFS operation failed due to quota limit, path permission, or missing source file. - `ERR_STORE_REALM_NOT_EMPTY`: `deleteRealm` was called on a Realm that still has active or recycled members (Wave R; use the recursive override). - `ERR_STORE_REALM_PROTECTED`: `deleteRealm` targeted the seeded Generic default Realm, which can never be deleted. - `ERR_STORE_REALM_DELETE_FAILED`: a recursive Realm deletion could not purge every member, so the record was left in place (fail-closed; the error carries a report). - `ERR_STORE_REALM_LAUNCH_FAILED`: a template launch failed after the Realm record existed (materialization, a member launch, a placement write, or a directive delivery), so the record and its members were rolled back first; the error carries the rollback report and the original failure as `cause`. - `ERR_TEMPLATE_PROVIDERS_UNSUPPORTED`: retired providers-gate code; `launchRealmFromTemplate` no longer emits it (provider-bearing templates resolve against installed and attached extensions and launch with missing-extension disclosure). - `ERR_TEMPLATE_AUTHORITY_UNSUPPORTED`: `launchRealmFromTemplate` targeted a template declaring a publishing authority id unknown to this host; launch is blocked fail-closed while import/validation/review accept the declaration (providers precedent). - `ERR_STORE_TEMPLATE_TOO_LARGE`: `importRealmTemplate` exceeded the per-bundle or total imported-template byte budget. - `ERR_STORE_TEMPLATE_PERSIST_FAILED`: the registry mutation could not be persisted (storage quota/unavailable), so it was rolled back — an import/delete is never silently in-memory-only. - `ERR_STORE_EXTENSION_ALREADY_INSTALLED`: `installExtension` targeted an id that already has a global install record. - `ERR_STORE_EXTENSION_NOT_INSTALLED`: `attachExtension`/`connectExtension`/`disconnectExtension`/`reconnectExtension` named an extension with no global install record. - `ERR_STORE_EXTENSION_ALREADY_ATTACHED`: `attachExtension` targeted a Realm that already attaches the extension. - `ERR_STORE_EXTENSION_ATTACHED`: `removeExtension` targeted an extension still attached to at least one Realm; detach it first. - `ERR_STORE_EXTENSION_NOT_CONNECTABLE`: `connectExtension` targeted a `pack` extension, which has no connectable transport. - `ERR_STORE_EXTENSION_TRANSPORT_UNSUPPORTED`: `connectExtension` targeted an MCP record carrying the host-only `stdio` transport hint. - `ERR_STORE_EXTENSION_INVALID_ENDPOINT`: `connectExtension` targeted a record whose transport URL is not an absolute URL, or whose explicitly approved URL (`approvedUrl`) is not an absolute URL or does not match the transport URL after URL normalization — a stale or inconsistent approval never dials. - `ERR_STORE_EXTENSION_PLAINTEXT_CREDENTIAL`: `connectExtension` targeted a `credentialId`-bearing record on a non-`https:` endpoint — refused before any vault read or network activity. - `ERR_STORE_EXTENSION_CREDENTIAL_UNRESOLVED`: `connectExtension` targeted a `credentialId` the vault cannot resolve (deleted/unknown id) — fail closed, no network activity. - `ERR_STORE_EXTENSION_CONNECT_FAILED`: the error code of an unclassified operational connection failure (a classified MCP client failure keeps its own `ERR_MCP_*` code); never thrown by the pre-connection gates. - `ERR_STORE_PAYLOAD_LIBRARY_FULL`: `saveInstancePayload` targeted a library already holding `SAVED_INSTANCE_PAYLOAD_MAX_ENTRIES` entries; delete one before saving another. - `ERR_STORE_PAYLOAD_LIBRARY_TOO_LARGE`: `saveInstancePayload` targeted a payload whose serialized size exceeds `SAVED_INSTANCE_PAYLOAD_MAX_BYTES`.
 
 #### Examples
 
@@ -1741,6 +1769,7 @@ console.log('Agent response:', turn.output);
 - **`clearAgentLastError`** — Clears the diagnostic error banner on an agent without mutating conversational history.
 - **`clearAgentTelemetry`** — Resets cumulative token counters and call metrics for an agent.
 - **`clearPendingInstancePayload`** — Clears the pending instance payload for one template id (Wave U ticket 2518510). Session-only surface: nothing was persisted, so clearing cannot leave storage behind.
+- **`clearSavedInstancePayloads`** — Removes every saved hydration payload (ticket 81d8267). An empty library is a no-op; a non-empty clear persists through the existing debounced snapshot save, so the field is omitted from the next snapshot.
 - **`clearTemplateAuthorityTrust`** — Clears the "trust this template" override for one template id (Wave U ticket 2518510). Clearing removes the persisted trust record, so future launches of the template no longer auto-approve its exact previously approved set — every declared authority re-prompts. Already-applied grants are ordinary registry grants and stay revocable through the grant methods; clearing trust never revokes them implicitly.
 - **`clockSnapshot`** — Reactive dictionary of narrative clock states across agent partitions and global. Structured as `Record<partitionId, AgentClockState>`.
 - **`connectExtension`** — Connects one installed MCP extension over the HTTP transport and discovers its tool catalog — the explicit operator connection act (nothing auto-connects at load, hydration, or launch). Pre-connection gates run first and fail closed: an unknown id rejects with `ERR_STORE_EXTENSION_NOT_INSTALLED`, a `pack` record with `ERR_STORE_EXTENSION_NOT_CONNECTABLE`, a `stdio` transport hint with `ERR_STORE_EXTENSION_TRANSPORT_UNSUPPORTED`, and an unparseable transport URL — or a present `approvedUrl` that is unparseable or not URL-equal to the transport URL — with `ERR_STORE_EXTENSION_INVALID_ENDPOINT`. A `credentialId` on a non-`https:` endpoint is refused with `ERR_STORE_EXTENSION_PLAINTEXT_CREDENTIAL` **before any vault read or network activity** (plaintext local servers connect unauthenticated when no `credentialId` is bound); a bound credential the vault cannot resolve fails closed with `ERR_STORE_EXTENSION_CREDENTIAL_UNRESOLVED` before any network activity. The session is single-flight: a concurrent call while the same extension is `connecting` returns the in-flight promise, and a call on an already `connected`/`conflict` extension resolves the current projection without a second session. A successful discovery indexes the catalog, assigns the connection-completion sequence, re-arbitrates every live catalog, syncs the affected realm attachment statuses through the safe-state sweep, and emits `extension_connected` (plus `extension_conflict` when the new catalog lost a call-name race). An operational failure (unreachable endpoint, protocol, timeout, cancellation, auth) resolves with status `'error'` and emits `extension_connect_failed`; it never throws after the gates.
@@ -1752,6 +1781,7 @@ console.log('Agent response:', turn.output);
 - **`deleteHistoryMessage`** — Deletes a message from agent history with tool-call hygiene.
 - **`deleteRealm`** — Removes a Realm through the owned registry under the Wave R realm model (ticket 56ba4b9): membership never moves, so deletion never re-groups anybody. Member counting resolves each membership with the same trim semantics as the realm grouping (`resolveMemberRealmId`), so a hydrated `' realm_x '` member still blocks the deletion of `realm_x` (Wave R hardening, ticket 0fe25fd). The default (non-recursive) deletion refuses a Realm that still carries ACTIVE or RECYCLED members with the typed `ERR_STORE_REALM_NOT_EMPTY` error ("terminate or delete members first") and leaves the record and every membership intact. The explicit recursive override (`deleteRealm(id, { recursive: true })`) permanently purges every active member and empties every recycled member of the Realm under the host operator principal (Wave I, ticket c02d0b9 — always present, so no director is required), then removes the record. If any member cannot be purged the call fails closed: the record survives and the thrown `ERR_STORE_REALM_DELETE_FAILED` error carries a RealmDeletionReport describing the purged members and the failures. The seeded Generic default (`realm_generic`) is always refused with `ERR_STORE_REALM_PROTECTED`, recursive override included. Unknown ids are a `false` no-op.
 - **`deleteRealmTemplate`** — Deletes a runtime template import (Wave T, ticket 0df20ae). Only imports are deletable: shipped (baked/host-injected) templates have no delete path here, so this method returns `false` when the id carries no import and the shipped revision keeps resolving. Deleting an import that shadowed a shipped id reveals the shipped revision in place. Like import, the removal persists synchronously; a failed write rolls the deletion back and throws `ERR_STORE_TEMPLATE_PERSIST_FAILED`.
+- **`deleteSavedInstancePayload`** — Deletes one saved hydration payload by id (ticket 81d8267). The deletion is persisted through the existing debounced snapshot save.
 - **`demoLogs`** — Structured chronological logs of the handshake demo execution.
 - **`demoStep`** — Current human-readable milestone step of the running handshake scenario.
 - **`destroy`** — Cleanly tears down store subscriptions, MessagingBus listeners, auto-save timers, and tickers. Essential for component unmount and test suite teardown.
@@ -1789,6 +1819,7 @@ console.log('Agent response:', turn.output);
 - **`getRealmTemplateBundle`** — Resolves the launch bundle behind one template id: the normalized format-v2 template plus the bundle file bodies its prompt parts, placement `file` sources, and input `defaultFile` prefills resolve against. The launcher preview reads the same normalized template and bundle files the launch materializes with, so a previewed prompt can never disagree with the launched system prompt. Unknown ids return `null`; the returned bundle and template are frozen.
 - **`getRealmTemplateSource`** — Resolves the origin label of one effective launch template, or `null` for an unknown id. See SandboxStore.listRealmTemplateSources.
 - **`getRecycledAgent`** — Retrieves a specific soft-killed agent snapshot by ID from the recycle bin.
+- **`getSavedInstancePayload`** — Resolves one saved hydration payload by id (ticket 81d8267).
 - **`grantHydrationAuthority`** — Grants the explicit `@hydration:authority` publishing capability to one active agent (operator action, Wave U ticket 2518510).
 - **`grantRealmBypass`** — Grants the cross-Realm `realmBypass` authority to one active agent (user operator action, Wave I ticket c02d0b9). The store delegates to the runtime under its host operator principal by exact reference; the runtime records the grant in the agent's frozen authority inputs and rebuilds the descriptor, so the identity projection reports the bypass — never an id. The grant is per-agent (never ambient) and never moves Realm membership (immutable). The debounced autosave is scheduled so the active grant list persists with the session snapshot. Targeting is additive (Wave I, ticket d57cbc1; fix lane F3): a canonical identity key passed as `agentId` resolves its exact registration, and an optional realm-exact `scope` (`{ realmId }`) composes that key, so the same literal id registered in two Realms is addressable without ambiguity. A bare id without a scope keeps the unique-match rule and fails closed (`null`) when it is ambiguous.
 - **`grantTemplateAuthority`** — Grants the explicit `@template:authority` publishing capability to one active agent (operator action, Wave U ticket 2518510). Same authority, validation, and additive targeting contract as grantRealmBypass: the store delegates to the runtime under its host operator principal, the capability selector and Realm membership are untouched, and the grant persists through the additive `metaAuthorityGrants` snapshot field (canonical identity keys) so hydration re-applies it. A canonical identity key or a realm-exact `scope` addresses the exact same-id registration.
@@ -1815,6 +1846,7 @@ console.log('Agent response:', turn.output);
 - **`listRealmTemplates`** — Lists the Realm launch templates this store can launch, in bundle registration order. The store owns the launch catalog (the templates `launchRealmFromTemplate` resolves against), so the launcher UI reads its picker options here instead of importing fixtures directly. Every entry is the normalized format-v2 template (`normalizeTemplate` of the authored bundle template), so the picker and review surfaces can read declared inputs, placements, and directives without a format branch. The catalog is the effective catalog: the baked catalog (the `realmCatalog` demo fixture plus the embedded template bundles generated by the content pipeline), any per-instance injection (SandboxStoreOptions.realmTemplateBundles), and runtime imports layered on top — an imported bundle whose id matches a shipped id replaces it in place, so every id resolves exactly once (SandboxStore.listRealmTemplateSources labels the origin); the returned array and every template are frozen.
 - **`listRealmTemplateSources`** — Lists the origin label of every effective launch template for the launcher UI (Wave T, ticket 0df20ae): `shipped` for the store's build/host catalog, `imported` for runtime imports, plus a `replacesShipped` flag so an import that shadows a shipped id renders as `imported · replaces shipped`. Entries follow the effective catalog order (`listRealmTemplates()` order), one entry per template id, and are frozen. `templateVersion` is `null` only for a malformed host injection that cannot be versioned yet.
 - **`listRecycledAgents`** — Returns the reactive array of all soft-killed agent snapshots currently in the recycle bin (the same reference exposed as `recycleBin`).
+- **`listSavedInstancePayloads`** — Lists the persisted saved hydration payloads in save order (ticket 81d8267).
 - **`listTemplateAuthorityTrust`** — Lists the persisted per-template authority trust records (Wave U ticket 2518510): template id → agent key → previously approved authority ids. Trust is operator intent only: a later launch auto-approves exact declared matches; it never grants authority by itself. The returned record is a frozen copy.
 - **`markMessageRead`** — Marks an inbox envelope as read.
 - **`messages`** — Complete chronological audit log of all messages routed through the `MessagingBus`. Includes point-to-point, broadcast, and system delivery envelopes.
@@ -1841,6 +1873,7 @@ console.log('Agent response:', turn.output);
 - **`revokeRealmBypass`** — Revokes the cross-Realm `realmBypass` authority from one active agent (user operator action, Wave I ticket c02d0b9). Same authority, validation, and additive targeting contract as grantRealmBypass: the store delegates to the runtime under its host operator principal, membership and capability are untouched, and the revocation persists through the debounced autosave. A canonical identity key or a realm-exact `scope` addresses the exact same-id registration.
 - **`revokeTemplateAuthority`** — Revokes the explicit `@template:authority` publishing capability from one active agent (operator action, Wave U ticket 2518510).
 - **`runHandshakeDemo`** — Executes the multi-agent handshake collaboration scenario (PRD AC #5). Provisions Scout Unit Alpha and HQ Commander, writes `/mission_report.json` and `/orders.json` to the shared `global` workspace, dispatches the alert and order messages across the MessagingBus, and returns `success: true` when no step throws. The scenario performs no cross-workspace isolation or mutual-synchronization assertions.
+- **`saveInstancePayload`** — Saves one named payload into the persisted hydration-payload library (ticket 81d8267). The draft is validated fail-closed (`ERR_STORE_INVALID_PARAMS`) and the entry is persisted through the existing debounced snapshot save as the additive `savedInstancePayloads` field. The saved bytes are an isolated frozen copy; the payload itself is re-validated against the effective template contract only when a launch attaches it — never here.
 - **`saveToStorage`** — Flushes debounced saves and writes complete state snapshot immediately to LocalStorage.
 - **`scheduledTimers`** — Reactive list of deferred timer executions with live 1s countdown tracking (`remainingSeconds`).
 - **`scheduleTimer`** — Enqueues a deferred turn execution with live countdown tracking. Starts internal 1-second countdown interval ticker if not already running.
@@ -1852,7 +1885,7 @@ console.log('Agent response:', turn.output);
 - **`selectedAgentId`** — Derived bare realm-local id of the selected agent, or `null` when no agent is selected. Legacy read surface: selection is keyed by `selectedAgentKey`, so two same-literal-id registrations resolve independently through the key while this getter stays the realm-opaque display/label form.
 - **`selectedAgentKey`** — Canonical `(realmId, agentId)` identity key of the currently selected / focused agent across Chat Studio and Agent Inspector, or `null` when no agent is selected. The single source of truth for selection (defect 7d2c314): a realm-local agent whose literal id equals another scope's id is addressed realm-exactly and never shadowed by a bare-id match.
 - **`sendMessage`** — Injects a manual point-to-point or broadcast message into the `MessagingBus`. An unregistered recipient that is not marked terminated is auto-registered before delivery. The store does not verify that the recipient exists as an active runtime agent, so a phantom recipient id is accepted and delivered to instead of following the bus `RECIPIENT_NOT_FOUND` dead-letter path. Operator attribution (ticket 99faaf1; Wave I, ticket c02d0b9): the store is the human-operator surface, so a `from` label that does not resolve to a registered agent identity (e.g. the `MessagingBusViewer` default `'human'`) is sent through a store-built execution context carrying the runtime's host operator principal by exact reference — the bypass is the principal, never an id, and the label stays presentation only. Agent- labelled sends keep the agent's own identity and Realm scope.
-- **`serialize`** — Serializes complete store, runtime, VirtualFS, MessagingBus, clock, and UI metadata snapshot. Wave I (ticket c02d0b9; fix lane G2): the active operator `realmBypass` grants (`runtime.listRealmBypassGrants()`, canonical identity keys) ride the additive top-level `realmBypassGrants` field; it is omitted when empty, so grant-free and legacy snapshots keep every existing field and byte. Wave U (ticket 2518510): the explicit publishing-authority grants ride the additive `metaAuthorityGrants` field (canonical identity keys per authority) and the per-template trust record rides `templateAuthorityTrust`; both are omitted when empty, so grant-free and legacy snapshots stay byte-identical. Extension wave: the global install records ride the additive `extensions` field (the registry's frozen projection) and each realm record carries its own attachments; both are omitted when empty, so install-free and legacy snapshots keep every existing field and byte.
+- **`serialize`** — Serializes complete store, runtime, VirtualFS, MessagingBus, clock, and UI metadata snapshot. Wave I (ticket c02d0b9; fix lane G2): the active operator `realmBypass` grants (`runtime.listRealmBypassGrants()`, canonical identity keys) ride the additive top-level `realmBypassGrants` field; it is omitted when empty, so grant-free and legacy snapshots keep every existing field and byte. Wave U (ticket 2518510): the explicit publishing-authority grants ride the additive `metaAuthorityGrants` field (canonical identity keys per authority) and the per-template trust record rides `templateAuthorityTrust`; both are omitted when empty, so grant-free and legacy snapshots stay byte-identical. Extension wave: the global install records ride the additive `extensions` field (the registry's frozen projection) and each realm record carries its own attachments; both are omitted when empty, so install-free and legacy snapshots keep every existing field and byte. Ticket 81d8267: the saved hydration-payload library rides the additive `savedInstancePayloads` field, omitted when empty, so a library-free session keeps every existing field and byte.
 - **`setActiveFsWorkspace`** — Changes the active workspace filter in the VirtualFS Explorer tab. Operator surfaces pass a partition key from `fsWorkspacePartitions` (an internal snapshot key) so a realm-global partition or a same-id agent in two Realms is addressed exactly (ticket 7571ce5). Legacy callers keep the historical verbatim behavior: a public label is stored as-is and the read paths (`activeFsFiles`, `activeFsPartition`) resolve it through the unique registration when one exists.
 - **`setActiveTab`** — Changes the workstation view tab (`'chat'`, `'settings'`, `'inspector'`, `'filesystem'`, `'messaging'`).
 - **`setAgentDraft`** — Sets the draft prompt text for an agent and schedules debounced auto-persistence.
@@ -1861,6 +1894,7 @@ console.log('Agent response:', turn.output);
 - **`streamingProse`** — In-flight prose token stream currently being generated by the selected agent. Returns empty string `""` when idle.
 - **`streamingReasoning`** — In-flight thinking / reasoning token stream currently being generated by the selected agent. Returns empty string `""` when idle.
 - **`submitChatTurn`** — Submits a conversational prompt turn to the currently selected agent. Accepts orchestrator action modes (`'directive'`, `'system'`, `'injection'`) and the legacy category strings `'do'`, `'say'`, and `'story'`, which execute as directives. Clears the agent's persistent draft input upon successful submission. When the runtime exposes its `TriggerQueue`, the turn is enqueued as a `TRIGGER_TYPES.USER` trigger and dispatched by `TriggerDispatcher` (single dispatch point, per-agent FIFO); a direct `executeAgentTurn` call remains only as the no-queue fallback.
+- **`subscribeSavedInstancePayloads`** — Subscribes to saved-payload library mutations (ticket 81d8267). Listeners fire after save, delete, clear, and after a hydration/reset pass replaced the library. A failing listener never blocks a mutation.
 - **`triggerTurn`** — Triggers an execution turn for a specific target agent. When the runtime exposes its `TriggerQueue`, the turn is enqueued as a `TRIGGER_TYPES.USER` trigger and dispatched by `TriggerDispatcher` (single dispatch point, per-agent FIFO); a direct `executeAgentTurn` call remains only as the no-queue fallback.
 - **`undoAgentTurn`** — Pops the last user/assistant turn from conversational history, pushes it to the redo stack, and atomically restores the undone user prompt text into the agent's draft input buffer.
 - **`unstickAgent`** — Emergency unstick engine primitive: synchronously aborts any pending in-flight turn, purges streaming prose/reasoning buffers, emits `stream_reset`, transitions agent to `IDLE`, and unfreezes subsequent turn submissions (INV-UNSTICK). Operator-mediated (MOD-21 W8; Wave I, ticket c02d0b9): the store forwards the runtime's host operator principal, which exists with zero agents.
@@ -1946,6 +1980,31 @@ console.log(`Active agents: ${stats.total}, Running: ${stats.running}, Files: ${
 - **`totalMessages`** — Total number of messages recorded in the MessagingBus audit log.
 - **`totalTimers`** — Total number of scheduled timers recorded (pending, triggered, and cancelled).
 - **`waiting`** — Number of agents currently in a `waiting` state (e.g. awaiting subagent or timer).
+
+### `SavedInstancePayload` — interface
+
+One frozen entry of the store's saved hydration-payload library (ticket 81d8267). The payload is descriptive data: it is persisted additively in the snapshot (`savedInstancePayloads`) and re-validated against the effective template contract only when a launch attaches it.
+
+#### Members
+
+- **`digest`** — Canonical `payloadDigest` of the authored payload.
+- **`id`** — Stable library id (`saved_payload_<n>`), unique within the library.
+- **`name`** — Operator-chosen display name (trimmed).
+- **`payload`** — The authored payload value (frozen, caller-mutation-isolated copy).
+- **`savedAt`** — ISO-8601 save timestamp.
+- **`templateId`** — Template id the payload targets.
+- **`templateVersion`** — Effective template version the payload validated against (`sha256:<hex>`).
+
+### `SavedInstancePayloadDraft` — interface
+
+Draft accepted by `SandboxStore.saveInstancePayload()` (ticket 81d8267): the operator-supplied name plus the authored payload envelope and the template binding it was validated against.
+
+#### Members
+
+- **`name`** — Operator-chosen display name (non-empty, unique per library, case-insensitive).
+- **`payload`** — Authored format-v2 payload value (plain finite JSON object).
+- **`templateId`** — Template id the payload targets.
+- **`templateVersion`** — Effective template version the payload validated against (`sha256:<hex>`).
 
 ### `ScheduledTimerSnapshot` — interface
 
@@ -2212,9 +2271,9 @@ console.log(`Uploaded ${receipt.count} files:`, receipt.files);
 
 ## Doc coverage
 
-- Top-level exports: 70
-- Declarations (exports + members): 493
-- Documented declarations: 493 / 493 (100%)
+- Top-level exports: 72
+- Declarations (exports + members): 512
+- Documented declarations: 512 / 512 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): `Agent`, `AgentConfig`, `AgentConfigUpdate`, `AgentIdentityScope`, `AgentRuntime`, `AgentState`, `ArchiveDownloadReceipt`, `AuthorityDescriptor`, `BatchDownloadFailure`, `BusMessageEnvelope`, `CopyReceipt`, `CredentialResolverPort`, `CredentialStoragePort`, `CredentialVault`, `DownloadReceipt`, `ExtensionCatalogConflict`, `ExtensionCatalogDiff`, `ExtensionInstallRecord`, `ExtensionKind`, `ExtensionRegistry`, `ExtensionTransportHint`, `FileRecord`, `GrepMatch`, `GrepOptions`, `InboxHeader`, `InboxListOptions`, `LaunchHistoryEntry`, `McpClientServerInfo`, `MessageEnvelope`, `MessagingBus`, `NarrativeEvent`, `PendingInstancePayload`, `PresetCatalog`, `PresetModelConfig`, `ReadMessageResult`, `RealmExtensionAttachment`, `RealmInputValues`, `RealmPublishingPort`, `RealmRecord`, `RealmRegistry`, `RealmTemplate`, `RealmUpdatePatch`, `SandboxPersistedState`, `ScheduleReceipt`, `SendMessageReceipt`, `TurnBundle`, `TurnExecutionResult`, `TurnInput`, `VfsCopyOptions`, `VfsWriteOptions`, `VirtualFS`, `WriteReceipt`
