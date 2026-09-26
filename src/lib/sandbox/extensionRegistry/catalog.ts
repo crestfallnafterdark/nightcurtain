@@ -53,12 +53,38 @@ function arbitrationError(message: string): ExtensionRegistryError {
 }
 
 /**
+ * Defines one own enumerable data property on a copy object, including
+ * prototype-named keys. A plain `target[key] = value` assignment would invoke
+ * the inherited `__proto__` accessor: an object value would be installed as
+ * the copy's prototype (readable through the prototype chain, invisible to
+ * `Object.keys`/`JSON.stringify`/the digest) and a primitive would be silently
+ * dropped. `defineProperty` always creates an own data property, so every wire
+ * key survives byte-faithfully, no wire value is ever readable through the
+ * prototype chain, and the copy's prototype is never modified.
+ *
+ * @param target - Copy object under construction
+ * @param key - Own key from the wire value
+ * @param value - Normalized value for that key
+ */
+function defineOwnJsonMember(target: Record<string, unknown>, key: string, value: unknown): void {
+  Object.defineProperty(target, key, {
+    value,
+    enumerable: true,
+    writable: true,
+    configurable: true
+  });
+}
+
+/**
  * Validates that one schema value is JSON-compatible and returns its deeply
- * frozen copy: arrays and plain records are copied (records with fresh
- * sorted-independent key order), primitives pass through, and `undefined`
- * object members are omitted. Cycles, non-finite numbers, functions, symbols,
- * bigints, and class instances fail closed — a value reaching a catalog must
- * be exactly what the wire delivered.
+ * frozen copy: arrays and plain records are copied (records with fresh key
+ * sets), primitives pass through, and `undefined` object members are omitted.
+ * Every own key — prototype-named keys such as `__proto__`, `constructor`, and
+ * `prototype` included — becomes an own enumerable data property; wire data is
+ * never installed as a prototype and no key is read through the prototype
+ * chain. Cycles, non-finite numbers, functions, symbols, bigints, and class
+ * instances fail closed — a value reaching a catalog must be exactly what the
+ * wire delivered.
  *
  * @param value - Candidate JSON value
  * @param label - Human-readable label used in error messages
@@ -87,7 +113,7 @@ function freezeCatalogJson(value: unknown, label: string): unknown {
       for (const key of Object.keys(candidate)) {
         const entry = candidate[key];
         if (entry === undefined) continue;
-        copy[key] = normalize(entry);
+        defineOwnJsonMember(copy, key, normalize(entry));
       }
       stack.delete(candidate);
       return Object.freeze(copy);
@@ -98,11 +124,13 @@ function freezeCatalogJson(value: unknown, label: string): unknown {
 }
 
 /**
- * Renders one JSON value in a canonical text form: object keys are sorted
- * recursively and array order is preserved, so two structurally equal values
- * with different key insertion order render identically. The input is
- * expected to already be a frozen catalog JSON projection; the cycle guard is
- * a defensive invariant.
+ * Renders one JSON value in a canonical text form: object keys (own keys
+ * only, prototype-named keys included as own data properties via
+ * {@link defineOwnJsonMember}) are sorted recursively and array order is
+ * preserved, so two structurally equal values with different key insertion
+ * order render identically and distinct wire payloads never collapse. The
+ * input is expected to already be a frozen catalog JSON projection; the cycle
+ * guard is a defensive invariant.
  *
  * @param value - Frozen JSON value
  * @returns Canonical JSON text
@@ -129,7 +157,7 @@ function canonicalJsonText(value: unknown): string {
       for (const key of Object.keys(candidate).sort()) {
         const entry = candidate[key];
         if (entry === undefined) continue;
-        copy[key] = canonicalize(entry);
+        defineOwnJsonMember(copy, key, canonicalize(entry));
       }
       stack.delete(candidate);
       return copy;

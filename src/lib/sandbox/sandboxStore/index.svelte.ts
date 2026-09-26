@@ -3648,6 +3648,16 @@ export class SandboxStore {
    */
   #extensionCallNameResolver: Map<string, { extensionId: string; serverToolName: string }> = new Map();
   /**
+   * In-memory explicit-disconnect markers (extension wave, P3.1/F1): extension
+   * ids whose realm attachment must not be healed back to `active` by the
+   * install-only heal after an operator disconnect (or a reconnect/removal
+   * close) — the heal consults the marker as a live-state constraint until an
+   * explicit successful connect clears it. Session state only: never
+   * persisted, dropped by hydration/reset/destroy, and cleared by a fresh
+   * operator approval (install/attach) or record removal.
+   */
+  #extensionDisconnected: Set<string> = new Set();
+  /**
    * Frozen shipped launch catalog for this store instance: the baked demo
    * fixture plus embedded `templates/**` bundles, layered with any per-instance
    * `realmTemplateBundles` injection (both are "shipped" for this store).
@@ -7019,6 +7029,9 @@ export class SandboxStore {
         `installExtension rejected extension '${input.id}' — ${error instanceof Error ? error.message : String(error)}`
       );
     }
+    // A fresh install is a new operator approval: no stale disconnect marker
+    // may constrain the (re)installed record.
+    this.#extensionDisconnected.delete(record.id);
     this.#emitExtensionAuditEvent('extension_installed', {
       extensionId: record.id,
       kind: record.kind,
@@ -7064,6 +7077,8 @@ export class SandboxStore {
       if (live) {
         void this.#closeExtensionConnection(live, 'removed').catch(() => undefined);
       }
+      // The record is gone: no marker may outlive it.
+      this.#extensionDisconnected.delete(extensionId);
     }
     return removed;
   }
@@ -7154,6 +7169,10 @@ export class SandboxStore {
       );
     }
     const updated = this.#realmRegistry.updateRealm(realmId, { extensions: next });
+    // A fresh attach is a new operator approval: it resets the connection-state
+    // constraint so the attach's `active` status cannot churn against a stale
+    // disconnect marker on the next install-only heal.
+    this.#extensionDisconnected.delete(extensionId);
     this.#emitExtensionAuditEvent('extension_attached', { realmId, extensionId, source: 'operator' });
     // Safe-state extension sweep (extension wave, P2.4): re-attaching an
     // extension can re-activate resolved tools that were dropped while it was
@@ -7331,12 +7350,17 @@ export class SandboxStore {
     if (typeof extensionId !== 'string' || extensionId.trim().length === 0) {
       throw invalidRealmParams('reconnectExtension requires a non-empty extension id');
     }
+    // F2: every gate (record, transport, approved-URL boundary, options,
+    // plaintext, credential resolution) runs before the previous session is
+    // touched, so a rejected reconnect leaves the live connection, catalog,
+    // and resolver entry fully intact.
+    const target = this.#resolveExtensionConnectionTarget(extensionId, options);
     const existing = this.#extensionConnections.get(extensionId);
     const previousCatalog = existing && existing.catalog ? existing.catalog : null;
     if (existing) {
       await this.#closeExtensionConnection(existing, 'reconnect');
     }
-    return this.#startExtensionConnection(extensionId, options, previousCatalog);
+    return this.#startExtensionConnection(extensionId, options, previousCatalog, target);
   }
 
   /**
@@ -7375,20 +7399,21 @@ export class SandboxStore {
   }
 
   /**
-   * Shared implementation of connect/reconnect: gates, single-flight,
-   * credential resolution, and session open. `previousCatalog` is non-null
-   * only on a reconnect re-discovery, where the drift diff is disclosed.
+   * Runs every pre-connection gate and resolves the dial target for one
+   * extension connection: record existence and kind, transport kind and URL
+   * parsing, the approved-URL boundary, options validation, the
+   * plaintext-credential gate, and vault credential resolution. The method is
+   * synchronous and touches no live connection state, so callers may validate
+   * before tearing a previous session down.
    *
    * @param extensionId - Extension id.
    * @param options - Connection options.
-   * @param previousCatalog - Catalog captured before the reconnect, or `null`.
-   * @returns Promise of the frozen connection projection.
+   * @returns The validated dial target (`url`, `credential`, `requestTimeoutMs`).
    */
-  async #startExtensionConnection(
+  #resolveExtensionConnectionTarget(
     extensionId: string,
-    options: ExtensionConnectOptions,
-    previousCatalog: ExtensionCatalog | null
-  ): Promise<ExtensionConnectionProjection> {
+    options: ExtensionConnectOptions
+  ): { url: URL; credential: McpClientCredential | null; requestTimeoutMs: number | null } {
     if (typeof extensionId !== 'string' || extensionId.trim().length === 0) {
       throw invalidRealmParams('connectExtension requires a non-empty extension id');
     }
@@ -7463,19 +7488,6 @@ export class SandboxStore {
       );
     }
 
-    // Single-flight: one live session per extension. A concurrent connect
-    // returns the in-flight promise; an already-connected extension keeps its
-    // session (re-discovery is an explicit reconnect).
-    const existing = this.#extensionConnections.get(extensionId);
-    if (existing) {
-      if (existing.status === 'connecting' && existing.pending) {
-        return existing.pending;
-      }
-      if ((existing.status === 'connected' || existing.status === 'conflict') && existing.session) {
-        return this.#projectExtensionConnection(existing);
-      }
-    }
-
     // Credential resolution happens only after the plaintext gate passed and
     // only over https; an unresolvable id fails closed before any network.
     let credential: McpClientCredential | null = null;
@@ -7489,6 +7501,44 @@ export class SandboxStore {
         );
       }
       credential = Object.freeze({ id: record.credentialId, secret });
+    }
+
+    return { url, credential, requestTimeoutMs };
+  }
+
+  /**
+   * Shared implementation of connect/reconnect: target resolution,
+   * single-flight, and session open. `previousCatalog` is non-null only on a
+   * reconnect re-discovery, where the drift diff is disclosed. A caller that
+   * already validated the target (reconnect validates before tearing the
+   * previous session down) passes `resolvedTarget` instead of resolving again.
+   *
+   * @param extensionId - Extension id.
+   * @param options - Connection options.
+   * @param previousCatalog - Catalog captured before the reconnect, or `null`.
+   * @param resolvedTarget - Precomputed validated target, or `null` to resolve here.
+   * @returns Promise of the frozen connection projection.
+   */
+  async #startExtensionConnection(
+    extensionId: string,
+    options: ExtensionConnectOptions,
+    previousCatalog: ExtensionCatalog | null,
+    resolvedTarget: { url: URL; credential: McpClientCredential | null; requestTimeoutMs: number | null } | null = null
+  ): Promise<ExtensionConnectionProjection> {
+    const target = resolvedTarget ?? this.#resolveExtensionConnectionTarget(extensionId, options);
+    const { url, credential, requestTimeoutMs } = target;
+
+    // Single-flight: one live session per extension. A concurrent connect
+    // returns the in-flight promise; an already-connected extension keeps its
+    // session (re-discovery is an explicit reconnect).
+    const existing = this.#extensionConnections.get(extensionId);
+    if (existing) {
+      if (existing.status === 'connecting' && existing.pending) {
+        return existing.pending;
+      }
+      if ((existing.status === 'connected' || existing.status === 'conflict') && existing.session) {
+        return this.#projectExtensionConnection(existing);
+      }
     }
 
     const entry: LiveExtensionConnection = {
@@ -7570,6 +7620,9 @@ export class SandboxStore {
       // the call-name resolver, syncs attachment statuses, and emits any
       // conflict-transition events.
       this.#rearbitrateExtensionCatalogs([entry.extensionId]);
+      // A successful discovery clears any explicit-disconnect marker: from
+      // here on the live entry itself constrains the attachment status.
+      this.#extensionDisconnected.delete(entry.extensionId);
       this.#emitExtensionAuditEvent('extension_connected', {
         extensionId: entry.extensionId,
         status: entry.status,
@@ -7648,6 +7701,9 @@ export class SandboxStore {
     entry.status = 'error';
     entry.error = Object.freeze({ code: MCP_CLIENT_ERROR_CODES.CANCELLED });
     this.#extensionConnections.delete(entry.extensionId);
+    // The explicit-disconnect marker keeps the attachment `unavailable` across
+    // the install-only heal until an explicit successful connect clears it.
+    this.#extensionDisconnected.add(entry.extensionId);
     entry.abortController.abort();
     const session = entry.session;
     entry.session = null;
@@ -7805,10 +7861,14 @@ export class SandboxStore {
    */
   #liveAttachmentStatus(extensionId: string): 'active' | 'conflict' | 'unavailable' | null {
     const entry = this.#extensionConnections.get(extensionId);
-    if (!entry || entry.status === 'connecting') return null;
-    if (entry.status === 'connected') return 'active';
-    if (entry.status === 'conflict') return 'conflict';
-    return 'unavailable';
+    if (entry && entry.status === 'connected') return 'active';
+    if (entry && entry.status === 'conflict') return 'conflict';
+    if (entry && entry.status === 'error') return 'unavailable';
+    // A `connecting` session (transient) or no live entry imposes no
+    // constraint — except when an explicit disconnect marker is present: a
+    // disconnected extension stays `unavailable` across install-only heals
+    // until an explicit successful connect clears the marker.
+    return this.#extensionDisconnected.has(extensionId) ? 'unavailable' : null;
   }
 
   /**
@@ -7895,6 +7955,7 @@ export class SandboxStore {
     const entries = [...this.#extensionConnections.values()];
     this.#extensionConnections.clear();
     this.#extensionCallNameResolver.clear();
+    this.#extensionDisconnected.clear();
     this.extensionConnections = Object.freeze([]);
     for (const entry of entries) {
       // In-flight connect callers observe a cancelled projection, never a
