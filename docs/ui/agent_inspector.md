@@ -1,7 +1,7 @@
 # Agent Inspector & Telemetry Trace Architecture
 
 **Status:** CURRENT
-**Last verified: 2026-09-24**
+**Last verified: 2026-09-26**
 
 > [!NOTE]
 > This document details the technical implementation, reactive state synchronization, and observability features of `AgentInspector.svelte` within the `ai-story` Studio UI.
@@ -15,7 +15,7 @@
 1. **Live Cognitive & Prose Trace**: Real-time streaming markdown, thinking token accordions, and active tool call visualizations.
 2. **Scheduled Timers & Narrative Clock Controls**: Live deferred countdown timers, WorldClock narrative time tracking, and event registry inspection.
 3. **Turn Execution & History Scrubbing**: Manual directive submission, per-agent draft synchronization, quick suggestion chips, undo/redo turn scrubbing, and raw JSON payload toggles.
-4. **Token Telemetry Grid**: Cumulative input/output token consumption metrics, percentage splits, per-turn averages, and last-turn breakdowns.
+4. **Token Telemetry Grid**: Cumulative uncached/cached input, output, and total token consumption metrics, cache hit rate, percentage splits, per-turn averages, and last-turn breakdowns.
 5. **Sent Context Inspector**: Exact formatted message context arrays dispatched to model APIs with token estimations per message.
 6. **Recovery & Failure Diagnostics**: A dismissible session-recovery notice when persisted state could not be loaded, plus a live execution-error banner with Retry Turn / Undo Turn & Edit Prompt / Dismiss actions.
 
@@ -43,8 +43,8 @@ flowchart TD
 
         subgraph TabTelemetry ["Tab: Telemetry & Tokens"]
             TelHeader["Telemetry Summary & Clear Action"]
-            MetricsGrid["4-Metric Grid: Total Tokens | Input (Prompt) | Output (Completion) | Invocations"]
-            LastTurn["Most Recent Turn Consumption (Prompt vs Completion)"]
+            MetricsGrid["5-Metric Grid: Total Tokens | Input (Uncached) | Cached Input (hit rate) | Output (Completion) | Invocations"]
+            LastTurn["Most Recent Turn Consumption (Uncached Prompt | Cached Prompt | Completion)"]
         end
 
         subgraph TabContext ["Tab: Sent Context (Debug)"]
@@ -206,22 +206,25 @@ The Telemetry tab provides a granular breakdown of resource usage for the agent 
 
 ```mermaid
 graph TD
-    subgraph MetricsGrid ["4-Metric Telemetry Grid"]
-        M1["Total Tokens\n(Input + Output Combined)"]
-        M2["Input Tokens (Prompt)\n(N tokens • % of Total)"]
-        M3["Output Tokens (Completion/Reasoning)\n(N tokens • % of Total)"]
-        M4["LLM Invocations / Turns\n(N turns • ~N tokens/turn avg)"]
+    subgraph MetricsGrid ["5-Metric Telemetry Grid"]
+        M1["Total Tokens\n(Uncached + Cached + Output)"]
+        M2["Input Tokens (Uncached)\n(N tokens • % of Total)"]
+        M3["Cached Input\n(N tokens • % cache hit rate)"]
+        M4["Output Tokens (Completion/Reasoning)\n(N tokens • % of Total)"]
+        M5["LLM Invocations / Turns\n(N turns • ~N tokens/turn avg)"]
     end
 
     subgraph LastTurnCard ["Most Recent Turn Consumption Card"]
-        LT1["Last Prompt Tokens"]
-        LT2["Last Completion Tokens"]
-        LT3["Last Turn Total (Highlighted)"]
+        LT1["Last Prompt (Uncached)"]
+        LT2["Last Cached Prompt"]
+        LT3["Last Completion Tokens"]
+        LT4["Last Turn Total (Highlighted)"]
     end
 
     MetricsGrid --> LastTurnCard
 ```
 
+- **Cached-token split**: prompt accounting separates the uncached tier (`inputTokens` / `lastPromptTokens`) from the cached tier (`cachedInputTokens` / `lastCachedPromptTokens`). The header **Tokens** chip shows `↓ uncached ⚡ cached ↑ output`; the Cached Input card's sub-line is the cache hit rate `Math.round(cached / (cached + uncached) * 100)%` (`0%` when no input tokens have been recorded).
 - **Clear Telemetry**: Invokes `sandboxStore.clearAgentTelemetry(agent.id)`, resetting cumulative token counters and turn counts to zero.
 
 ---
@@ -265,11 +268,13 @@ Two other surfaces carry the same **Execution Error Encountered** title and the 
 
 | Metric Field | Source | Description |
 | :--- | :--- | :--- |
-| `inputTokens` | `agent.telemetry.inputTokens` | Cumulative tokens processed in prompts for this agent instance. |
+| `inputTokens` | `agent.telemetry.inputTokens` | Cumulative **uncached** prompt tokens processed for this agent instance. |
+| `cachedInputTokens` | `agent.telemetry.cachedInputTokens` | Cumulative prompt tokens served from the provider prompt cache. |
 | `outputTokens` | `agent.telemetry.outputTokens` | Cumulative completion and reasoning tokens generated. |
-| `totalTokens` | `agent.telemetry.totalTokens` | Sum of `inputTokens` and `outputTokens`. |
+| `totalTokens` | `agent.telemetry.totalTokens` | Sum of `inputTokens`, `cachedInputTokens`, and `outputTokens`. |
 | `turnCount` | `agent.telemetry.turnCount` | Total LLM turn invocations executed by the agent. |
-| `lastPromptTokens` | `agent.telemetry.lastPromptTokens` | Prompt tokens consumed on the most recent API call. |
+| `lastPromptTokens` | `agent.telemetry.lastPromptTokens` | **Uncached** prompt tokens consumed on the most recent API call. |
+| `lastCachedPromptTokens` | `agent.telemetry.lastCachedPromptTokens` | Cached prompt tokens consumed on the most recent API call. |
 | `lastCompletionTokens` | `agent.telemetry.lastCompletionTokens` | Completion tokens generated on the most recent API call. |
 | `lastSentContext` | `agent.telemetry.lastSentContext` | Snapshot of the exact prompt array sent to the model API. |
 | `estimatedContextTokens` | Derived Calculation | Sum of estimated tokens across all messages in `lastSentContext`. |
