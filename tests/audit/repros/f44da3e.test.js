@@ -1,5 +1,13 @@
 /**
  * @file tests/audit/repros/f44da3e.test.js
+ * @status FROZEN — historical evidence; superseded, not a standing regression.
+ *   Do not treat a red run as a defect signal. Convention:
+ *   docs/testing/audit_and_repro.md §6.
+ * @superseded-by 3f9b3d4 (spawn contract): the tool boundary strips/warns the
+ *   `workspace` input this repro attacks through, so its historical red is no
+ *   longer reproducible by design; reserved-key confinement/eviction keeps its
+ *   standing regression in the owning suites.
+ * @frozen 2026-09-26 (ticket 3838ab4, autopilot decision A14)
  * @description Audit repro for ticket f44da3e (Major; prog:realm): a
  * manager-preset agent (`spawn_agent` + `kill_agent`) can pin a spawned
  * child's workspace to ANY key — the `spawn_agent` parameter sanitizer

@@ -269,4 +269,101 @@ test('PremProvider HTTP failures and payload hooks (offline, fetch mocked)', asy
     assert.equal(payloads[0].stream, true);
     assert.equal(payloads[0].stream_flag, 'on');
   });
+
+  // Ticket c24b8f4 (verification, no defect): the Prem enclave SDK converts
+  // provider error frames into thrown errors before the provider sees a chunk —
+  // `@premai/api-sdk@1.0.65` `dist/core.browser.mjs` throws on an SSE
+  // `event: error` frame (`:25416-25418`) and on a decrypted `chunk.error`
+  // (`:25423-25425`), while HTTP failures go through `throwIfErrorResponse`.
+  // These tests pin the provider side of that contract: SDK errors propagate
+  // with their exact identity, are never wrapped or swallowed, and a failed
+  // stream never emits a terminal `finish` chunk (partial text may already
+  // have been yielded). `ProviderInterface` ratifies SDK-error propagation
+  // (`index.ts:19-20,360,369`), so no provider-side taxonomy wrapping is due.
+  await t.test('complete() propagates an SDK error unwrapped', async () => {
+    const sdkError = Object.assign(new Error('enclave failure: invalid_request_error'), {
+      name: 'APIError',
+      status: 400,
+      error: { message: 'enclave failure: invalid_request_error', type: 'invalid_request_error' }
+    });
+    let calls = 0;
+    const client = {
+      chat: { completions: { create: async () => { calls += 1; throw sdkError; } } }
+    };
+
+    const provider = new PremProvider({ apiKey: 'test-key', client });
+    const model = provider.createModel('prem-sdk-error-model');
+
+    await assert.rejects(
+      () => model.complete({ messages: [{ role: 'user', content: 'ping' }] }),
+      err => {
+        assert.strictEqual(err, sdkError, 'the exact SDK error identity must propagate');
+        return true;
+      }
+    );
+    assert.equal(calls, 1, 'the provider must not retry or re-issue a failed SDK call');
+  });
+
+  await t.test('stream() propagates an SDK error thrown mid-stream without emitting finish', async () => {
+    const sdkError = new Error('encrypted stream error frame: upstream rejected the request');
+    const client = {
+      chat: {
+        completions: {
+          create: async () => (async function* () {
+            yield { choices: [{ delta: { content: 'partial' }, finish_reason: null }] };
+            throw sdkError;
+          })()
+        }
+      }
+    };
+
+    const provider = new PremProvider({ apiKey: 'test-key', client });
+    const model = provider.createModel('prem-stream-error-model');
+    const chunks = [];
+
+    await assert.rejects(
+      async () => {
+        for await (const _chunk of model.stream({
+          messages: [{ role: 'user', content: 'ping' }],
+          onChunk: (chunk) => chunks.push(chunk)
+        })) {}
+      },
+      err => {
+        assert.strictEqual(err, sdkError, 'the exact SDK stream error identity must propagate');
+        return true;
+      }
+    );
+
+    assert.deepEqual(
+      chunks.map((chunk) => chunk.type),
+      ['text'],
+      'no finish chunk may follow a mid-stream SDK error'
+    );
+    assert.equal(chunks[0].content, 'partial', 'chunks yielded before the error are preserved');
+  });
+
+  await t.test('stream() propagates an SDK error thrown at stream creation', async () => {
+    const sdkError = new Error('error frame before the first chunk');
+    const client = {
+      chat: { completions: { create: async () => { throw sdkError; } } }
+    };
+
+    const provider = new PremProvider({ apiKey: 'test-key', client });
+    const model = provider.createModel('prem-stream-create-error-model');
+    const chunks = [];
+
+    await assert.rejects(
+      async () => {
+        for await (const _chunk of model.stream({
+          messages: [{ role: 'user', content: 'ping' }],
+          onChunk: (chunk) => chunks.push(chunk)
+        })) {}
+      },
+      err => {
+        assert.strictEqual(err, sdkError, 'the exact SDK error identity must propagate');
+        return true;
+      }
+    );
+    assert.deepEqual(chunks, [], 'a failed stream must not emit any chunk');
+  });
 });

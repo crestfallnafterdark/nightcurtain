@@ -1,5 +1,13 @@
 /**
  * @file tests/audit/repros/identity_spawn_same_id_caller.test.js
+ * @status FROZEN — historical evidence; superseded, not a standing regression.
+ *   Do not treat a red run as a defect signal. Convention:
+ *   docs/testing/audit_and_repro.md §6.
+ * @superseded-by 3f9b3d4 (spawn contract): `spawn_agent` ignores the
+ *   `workspace` parameter with a warning, so the peer-pin attack test no
+ *   longer reproduces; the realm-exact caller-resolution test remains as
+ *   historical evidence of the F1 fix.
+ * @frozen 2026-09-26 (ticket 3838ab4, autopilot decision A14)
  * @description Red-first audit repro for Wave I I2-V finding F1 (HIGH,
  * security; ticket d57cbc1): the lifecycle tool paths from a realm-bound
  * caller whose bare id exists in two realms must resolve the caller

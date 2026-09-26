@@ -278,6 +278,31 @@ test('5. resolveAgentRealmId trims, and safeRealmColor accepts only 3/6-digit he
   assert.strictEqual(safeRealmColor('red;background:url(x)'), null);
 });
 
+test('5.1. realm member selection shares the engine trim semantics for padded memberships (7368e98)', async () => {
+  const { selectRealmMembers } = await import('../../src/lib/components/sandbox/realmGroups.ts');
+
+  // Ticket 7368e98: the deletion dialog counted exact-string memberships while
+  // the engine counted trimmed ones, so a hydrated `' realm_one '` membership
+  // could make the dialog and the engine disagree. Member selection must use
+  // the same trim semantics as `resolveAgentRealmId`/`resolveMemberRealmId`.
+  const members = selectRealmMembers(
+    [
+      agent('padded', ' realm_one '),
+      agent('exact', 'realm_one'),
+      agent('blank', '   '),
+      agent('other', 'realm_two'),
+      agent('absent')
+    ],
+    'realm_one'
+  );
+
+  assert.deepStrictEqual(
+    members.map((entry) => entry.id),
+    ['padded', 'exact'],
+    'a padded hydrated membership must count as a member of its trimmed realm'
+  );
+});
+
 test('6. the deletion plan refuses member-bearing realms and offers the recursive override explicitly', () => {
   const blocked = describeRealmDeletion(realm('r1', 'Story Realm'), { active: 2, recycled: 1 });
   assert.strictEqual(blocked.realmId, 'r1');

@@ -1,5 +1,13 @@
 /**
  * @file tests/audit/repros/26c3913.test.js
+ * @status FROZEN — historical evidence; superseded, not a standing regression.
+ *   Do not treat a red run as a defect signal. Convention:
+ *   docs/testing/audit_and_repro.md §6.
+ * @superseded-by 3f9b3d4 (spawn contract): launch-pin composition through the
+ *   `workspace`/id parameters is stripped/warned at the tool boundary, so the
+ *   pinned-child scenarios (b)/(d) no longer reproduce; the denial-path tests
+ *   remain as historical evidence.
+ * @frozen 2026-09-26 (ticket 3838ab4, autopilot decision A14)
  * @description Audit repro for ticket 26c3913 (Major; prog:realm; verifier
  * finding V7-F1): the f44da3e launch confinement guards only EXPLICIT
  * workspace pins, so destruction is still reachable without any pin.

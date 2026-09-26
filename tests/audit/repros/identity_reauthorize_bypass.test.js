@@ -121,6 +121,16 @@ test('c02d0b9: omitted realmBypass preserves an operator grant through reauthori
   const after = lifecycle.getAuthorityDescriptor('i1f_sudoer');
   assert.ok(after, 'the reauthorized agent must stay resolvable');
   assert.equal(after.realmBypass, true, 'an omitted realmBypass key must preserve the operator grant');
-  assert.equal(after.allow.has('read_file'), true, 'the capability update must land');
-  assert.equal(after.allow.has('*'), false, 'the capability update must replace the wildcard capability');
+  // Present-key replacement semantics (extension wave): the supplied
+  // `allowedTools` axis lands on the authority inputs, while the omitted
+  // `privileged` axis is preserved — and a preserved `privileged: true` still
+  // implies the wildcard allow, so this descriptor keeps '*'. The historical
+  // "capability update replaces the wildcard" expectation predates that
+  // semantics and can no longer hold for this fixture (re-pinned by ticket
+  // 3838ab4).
+  const inputs = lifecycle.getAuthorityInputs('i1f_sudoer');
+  assert.deepStrictEqual([...inputs.allowedTools], ['read_file'], 'the supplied capability axis must land');
+  assert.equal(inputs.privileged, true, 'an omitted privileged axis is preserved');
+  assert.equal(inputs.realmBypass, true, 'the grant stays recorded on the authority inputs');
+  assert.equal(after.allow.has('*'), true, 'the preserved privileged grant still implies the wildcard');
 });

@@ -29,6 +29,12 @@
  * dialog: it pins the default refusal ("terminate or delete members first"),
  * the Generic protection, and the explicit recursive override copy.
  *
+ * `selectRealmMembers` is the manager modal's member filter: it applies the
+ * same trimmed membership semantics as the engine
+ * (`resolveAgentRealmId` / the store's `resolveMemberRealmId`), so a hydrated
+ * padded membership is counted by both the deletion dialog and the engine
+ * (defect 7368e98).
+ *
  * `safeRealmColor` is the presentation guard for operator-supplied accent
  * colors: only 3/6-digit hex colors pass, everything else falls back to the
  * caller's default instead of reaching a CSS declaration.
@@ -133,6 +139,25 @@ export function resolveAgentRealmId(agent: RealmGroupableAgent): string | null {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+/**
+ * Selects the agents whose resolved Realm membership equals `realmId`, using
+ * the same trimmed semantics as {@link resolveAgentRealmId} and the engine's
+ * `resolveMemberRealmId` (defect 7368e98). A hydrated `'  realm_x  '`
+ * membership is selected for `realm_x`, so the Realm manager's active/recycled
+ * counts agree with the deletion engine instead of undercounting padded
+ * records. Non-arrays yield `[]`; an absent/blank target selects nothing.
+ *
+ * @param agents - Agent snapshots (active or recycled) in incoming order.
+ * @param realmId - Target Realm id (trimmed before comparison).
+ * @returns The members of `realmId`, in incoming order.
+ */
+export function selectRealmMembers<T extends RealmGroupableAgent>(agents: readonly T[], realmId: string): T[] {
+  const list = Array.isArray(agents) ? agents : [];
+  const target = typeof realmId === 'string' ? realmId.trim() : '';
+  if (!target) return [];
+  return list.filter((agent) => resolveAgentRealmId(agent) === target);
 }
 
 /**

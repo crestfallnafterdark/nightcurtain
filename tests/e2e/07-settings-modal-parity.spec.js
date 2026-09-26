@@ -17,8 +17,8 @@ test.describe('07: Catalog-driven Sandbox Settings Modal', () => {
     let dialog = await openSettings();
     await expect(dialog.locator('#sandbox-settings-heading')).toHaveText('Sandbox Settings');
 
-    const presetSection = dialog.locator('section[aria-labelledby="preset-section-heading"]');
-    const vaultSection = dialog.locator('section[aria-labelledby="vault-section-heading"]');
+    const presetSection = dialog.locator('div[aria-labelledby~="preset-section-heading"]');
+    const vaultSection = dialog.locator('div[aria-labelledby~="vault-section-heading"]');
     const presetSelect = dialog.locator('#preset-select');
     const presetStatus = presetSection.locator('.status-banner');
 
@@ -76,10 +76,12 @@ test.describe('07: Catalog-driven Sandbox Settings Modal', () => {
     await expect(dialog).not.toBeVisible();
     dialog = await openSettings();
     await expect(dialog.locator('#preset-select')).toHaveValue(customValue);
-    await expect(dialog.locator('section[aria-labelledby="preset-section-heading"] .badge-active')).toHaveText('Active');
+    await expect(dialog.locator('div[aria-labelledby~="preset-section-heading"] .badge-active')).toHaveText('Active');
 
-    // 7. Vault: add a key (auto-activated) and move the active pointer to the canonical slot.
-    const vaultStatus = dialog.locator('section[aria-labelledby="vault-section-heading"] .status-banner');
+    // 7. Vault: switch to the API Keys tab, add a key (auto-activated) and move
+    // the active pointer to the canonical slot.
+    await dialog.getByRole('tab', { name: 'API Keys' }).click();
+    const vaultStatus = dialog.locator('div[aria-labelledby~="vault-section-heading"] .status-banner');
     await dialog.getByRole('tab', { name: 'DEEPSEEK' }).click();
     await expect(dialog.locator('.vault-tabs-row')).toBeVisible();
     const canonicalCard = dialog.locator('.cred-card:has-text("Default slot")');
@@ -101,7 +103,9 @@ test.describe('07: Catalog-driven Sandbox Settings Modal', () => {
     await addedCard.locator('button:has-text("Set Active")').click();
     await expect(addedCard).toHaveClass(/active/);
 
-    // 8. Delete the custom preset (confirm dialog) and fall back to the master default.
+    // 8. Back to Model Presets: delete the custom preset (confirm dialog) and
+    // fall back to the master default.
+    await dialog.getByRole('tab', { name: 'Model Presets' }).click();
     page.once('dialog', browserDialog => browserDialog.accept());
     await dialog.getByRole('button', { name: 'Delete', exact: true }).click();
     await expect(presetStatus).toContainText('Custom preset "E2E Custom Preset" deleted.');

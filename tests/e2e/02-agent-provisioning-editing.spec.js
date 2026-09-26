@@ -72,10 +72,24 @@ test.describe('02: Agent Provisioning & Editing', () => {
     attachAuditor(page);
     await gotoSandbox(page);
 
-    // Attempt to launch an agent with existing ID 'director'
-    await page.locator('.drawer-header-actions button[aria-label="Launch Agent"]').click();
-    await page.fill('#agent-id', 'director');
-    await page.fill('#agent-name', 'Director Clone');
+    // Realm-local identity (defect 7d2c314): duplicate detection is per
+    // `(realmId, agentId)`, so the collision must be established in the
+    // launcher's selected Realm. The system-scope `director` is a distinct
+    // registration and launches normally there (spawn contract 3f9b3d4).
+    const launchBtn = page.locator('.drawer-header-actions button[aria-label="Launch Agent"]');
+
+    // 1. Establish the id in the launcher's default selected Realm.
+    await launchBtn.click();
+    await page.fill('#agent-id', 'agent-dup-probe');
+    await page.fill('#agent-name', 'Dup Probe');
+    await page.locator('.launcher-modal button[type="submit"]').click();
+    await expect(page.locator('.launcher-modal')).not.toBeVisible();
+    await expect(page.locator('.agent-card:has-text("Dup Probe")')).toBeVisible();
+
+    // 2. A second launch with the same id in the same Realm is refused inline.
+    await launchBtn.click();
+    await page.fill('#agent-id', 'agent-dup-probe');
+    await page.fill('#agent-name', 'Dup Probe Clone');
     await page.locator('.launcher-modal button[type="submit"]').click();
 
     // Verify error banner is shown and modal stays open

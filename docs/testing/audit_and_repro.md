@@ -1,6 +1,6 @@
 # Audit Findings & Reproduction Tests
 
-**Status:** RATIFIED (user, 2026-09-18) · **Last verified:** 2026-09-22.
+**Status:** RATIFIED (user, 2026-09-18) · **Last verified:** 2026-09-26.
 
 Mechanics that keep independent audit findings actionable, regression-proof, and attributable. Applies to defect audits of sandbox modules and to provider/environment failures.
 
@@ -33,3 +33,22 @@ It makes one minimal completion per required provider (NanoGPT, DeepSeek) and ex
 
 ## 5. Secret hygiene
 Repros, harnesses, logs: provider ids, booleans, lengths, response bodies only. Never print key material, request headers, or `.env.local` contents.
+
+## 6. Frozen / superseded repros
+A repro can stop reproducing its historical red when a later ratified contract change removes the scenario it drove (for example, the spawn contract `3f9b3d4` strips `workspace` and role-as-preset inputs at the tool boundary) or replaces the semantics it pinned. Such a repro is **frozen**, not deleted:
+
+- The file keeps its red-first history in git; it is un-gated (like every repro), and a red run is not a defect signal.
+- A frozen file carries three tags in its existing docblock:
+
+  ```
+  * @status FROZEN — historical evidence; superseded, not a standing regression.
+  *   Do not treat a red run as a defect signal. Convention:
+  *   docs/testing/audit_and_repro.md §6.
+  * @superseded-by <commit> (<contract change>): <one-line reason the red is unreachable>.
+  * @frozen <date> (ticket <id>, autopilot decision A14)
+  ```
+
+- Classify per file against its current run output and its boundary usage — a directory or name prefix is not a classification. Only repros whose scenario is unreachable by design are frozen; a repro whose red is still reproducible (green on HEAD) stays a standing guard and must not carry the header.
+- A repro that only needs its expectations re-pinned to current ratified semantics is re-pinned and kept green rather than frozen.
+- Port a frozen repro into its owning suite only when a standing security regression would otherwise be missing (`A14`); freeze first, port deliberately.
+- Frozen repros stay in-tree as audit evidence; deleting them follows the normal destructive-action gate.

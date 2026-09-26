@@ -1,5 +1,13 @@
 /**
  * @file tests/audit/repros/e6f10db.test.js
+ * @status FROZEN — historical evidence; superseded, not a standing regression.
+ *   Do not treat a red run as a defect signal. Convention:
+ *   docs/testing/audit_and_repro.md §6.
+ * @superseded-by 3f9b3d4 (spawn contract): the manager-preset fixture's
+ *   role-as-preset launch no longer grants `spawn_agent`, so the positive
+ *   control (b) is denied before the workspace claim it probed; the reserved
+ *   key-shape denials remain as historical evidence.
+ * @frozen 2026-09-26 (ticket 3838ab4, autopilot decision A14)
  * @description Audit repro for ticket e6f10db (Major; prog:realm; verifier
  * finding V8-F1): reserved key SHAPES need not exist, so the existence-based
  * shadow check (`hasWorkspace`) does not stop a non-authority own-id launch

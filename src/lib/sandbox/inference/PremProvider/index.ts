@@ -371,7 +371,11 @@ export class PremModel implements ModelInterface {
    *
    * @param options - Streaming request options.
    * @throws An `Error` when the signal is already aborted before execution or
-   *   when no Prem API key can be resolved for the underlying client.
+   *   when no Prem API key can be resolved for the underlying client. An
+   *   in-band failure reported by the enclave transport is thrown by the SDK
+   *   (plain `Error` for `error` frames / decrypted `chunk.error`, `APIError`
+   *   for HTTP failures) before any terminal chunk and propagates unwrapped,
+   *   so a failed stream never yields `finish` (ticket c24b8f4).
    */
   async *stream(options: StreamOptions): AsyncGenerator<StreamChunk, CompletionResult, void> {
     if (options.signal?.aborted) {
@@ -486,7 +490,10 @@ export class PremModel implements ModelInterface {
    *
    * @param options - Completion request options.
    * @throws An `Error` when no Prem API key can be resolved or when Prem
-   *   returns an empty choices array.
+   *   returns an empty choices array (a non-streaming in-band error body
+   *   surfaces here as the documented plain `Error` — the SDK does not
+   *   classify it), or the raw SDK error shape, which propagates unwrapped
+   *   (ticket c24b8f4).
    */
   async complete(options: CompletionOptions): Promise<CompletionResult> {
     const client = await this.provider.getClient();

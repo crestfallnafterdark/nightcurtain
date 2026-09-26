@@ -1339,6 +1339,40 @@ test('23.3 Uncloneable non-plain entries normalize instead of aliasing (dbeb5d4-
   assert.ok(Object.isFrozen(captured));
 });
 
+test('23.4 Prototype-call mutation on a leaked snapshot container cannot rewrite internal state (06f1ecb)', () => {
+  const telemetry = new RuntimeTelemetry();
+
+  telemetry.recordContextSnapshot(
+    'agent_proto_bypass',
+    [{
+      role: 'user',
+      content: 'hello',
+      metadata: {
+        map: new Map([['key', { nested: 1 }]]),
+        set: new Set(['original']),
+        date: new Date(1000)
+      }
+    }],
+    { maxMessagesToRetain: 10, truncateContentAt: 50 }
+  );
+
+  // Ticket 06f1ecb: `Object.freeze` does not immobilize Map/Set/Date internal
+  // slots, so calling the prototype mutators directly bypasses the neutralized
+  // own properties. A leaked snapshot reference must still never reach the
+  // collector's internal capture.
+  const leaked = telemetry.getAgentMetrics('agent_proto_bypass').lastSentContext[0].metadata;
+  Map.prototype.set.call(leaked.map, 'evil', true);
+  Set.prototype.add.call(leaked.set, 'evil');
+  Date.prototype.setTime.call(leaked.date, 0);
+
+  // A fresh read must come from untouched internal state.
+  const reread = telemetry.getAgentMetrics('agent_proto_bypass').lastSentContext[0].metadata;
+  assert.strictEqual(reread.map.has('evil'), false, 'prototype-call Map mutation must not reach internal state');
+  assert.strictEqual(reread.map.size, 1);
+  assert.strictEqual(reread.set.has('evil'), false, 'prototype-call Set mutation must not reach internal state');
+  assert.strictEqual(reread.date.getTime(), 1000, 'prototype-call Date mutation must not reach internal state');
+});
+
 // ============================================================================
 // 24. Cached prompt-token accounting (5224a4a)
 // ============================================================================
