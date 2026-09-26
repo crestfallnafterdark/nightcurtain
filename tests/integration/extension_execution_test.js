@@ -24,6 +24,8 @@
  *     the snapshot; protocol errors carry the fixed client taxonomy text.
  *  9. Typed client failures (timeout, JSON-RPC error) surface as redacted
  *     `EXECUTION_FAILED` receipts.
+ * 10. Registration sweep on the real `spawn_agent` tool path: a tool-launched
+ *     child receives the connected realm universe at registration (9327633).
  */
 
 import '../test_env.js';
@@ -32,6 +34,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { SANDBOX_STORE_ERROR_CODES, SandboxStore } from '../../src/lib/sandbox/sandboxStore/index.svelte.ts';
+import { AgentRuntime } from '../../src/lib/sandbox/runtime/index.ts';
 import { createMcpFixtureServer } from '../fixtures/mcp/http_fixture_server.mjs';
 
 /** Generic realm id (the seeded default every realm record carries). */
@@ -622,6 +625,72 @@ test('7b. a catalog change during a turn queues and applies at turn_complete, ne
     assert.strictEqual(sseServerCalls(), 1, 'exactly one server call, made after the safe state');
   } finally {
     store.destroy();
+    await fixture.close();
+    sharedLocalStorage.clear();
+  }
+});
+
+// ============================================================================
+// 7c. Registration sweep on the real spawn_agent tool path (ticket 9327633)
+// ============================================================================
+
+test('7c. a child spawned through the spawn_agent tool receives the realm universe at registration', async () => {
+  sharedLocalStorage.clear();
+  const fixture = await createMcpFixtureServer({ tools: FIXTURE_TOOLS });
+  // Injected runtime keeps the identity projection observable; the grant
+  // computation under test is store-side and independent of the execution
+  // ports a store-owned runtime would add.
+  const runtime = new AgentRuntime({ autoBootstrapDirector: false });
+  const store = new SandboxStore({
+    runtime,
+    virtualFs: runtime.virtualFs,
+    messagingBus: runtime.messagingBus,
+    autoBootstrapDirector: false,
+    autoHydrate: false
+  });
+  try {
+    installMcp(store, 'ext-a', fixture);
+    store.attachExtension(GENERIC_REALM_ID, 'ext-a');
+    await store.connectExtension('ext-a');
+
+    // The parent holds the spawn capability; its first turn executes the real
+    // `spawn_agent` descriptor, which launches through the lifecycle port with
+    // no extension grants (ticket 9327633).
+    const model = createScriptedModel([
+      { content: 'spawning', toolCalls: [toolCall('sp1', 'spawn_agent', { id: 'p33-spawned' })] },
+      { content: 'done' }
+    ]);
+    await store.launchAgent({
+      id: 'p33-spawner',
+      name: 'p33-spawner',
+      role: 'observer',
+      realmId: GENERIC_REALM_ID,
+      allowedTools: ['read_file', 'spawn_agent'],
+      extensionTools: 'all'
+    }, model);
+    await store.triggerTurn('p33-spawner', 'spawn a child');
+
+    const receipt = toolMessages(store, 'p33-spawner').map(receiptOf)[0];
+    assert.strictEqual(receipt.success, true, `the spawn tool must succeed: ${JSON.stringify(receipt)}`);
+    assert.strictEqual(receipt.id, 'p33-spawned', 'the receipt carries the child handle');
+
+    const child = runtime.getAgent('p33-spawned');
+    assert.ok(child, 'the child registers through the tool lifecycle port');
+    assert.strictEqual(child.config.realmId, GENERIC_REALM_ID, 'the child inherits the spawner realm');
+
+    const identity = runtime.createAgentIdentityPort().getAgentIdentity('p33-spawned', { realmId: GENERIC_REALM_ID });
+    assert.ok(identity, 'the child carries a canonical identity projection');
+    assert.deepStrictEqual(
+      [...identity.authority.extensions].sort(),
+      ['echo', 'fail', 'slow'],
+      'the registration sweep delivers the connected catalog as the realm universe'
+    );
+    // The parent's sibling grant (same realm) is untouched by the child sweep.
+    const parentIdentity = runtime.createAgentIdentityPort().getAgentIdentity('p33-spawner', { realmId: GENERIC_REALM_ID });
+    assert.deepStrictEqual([...parentIdentity.authority.extensions].sort(), ['echo', 'fail', 'slow']);
+  } finally {
+    store.destroy();
+    runtime.destroy();
     await fixture.close();
     sharedLocalStorage.clear();
   }

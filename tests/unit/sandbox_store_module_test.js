@@ -41,6 +41,7 @@ import { GENERIC_REALM_ID as UI_GENERIC_REALM_ID } from '../../src/lib/component
 import { AgentRuntime, createAgentIdentityKey } from '../../src/lib/sandbox/runtime/index.ts';
 import { AGENT_STATES } from '../../src/lib/sandbox/runtime/agentLifecycle/index.ts';
 import {
+  AGENT_AUTHORITIES,
   BAKED_TEMPLATE_BUNDLES,
   DEMO_TEMPLATE,
   RealmCatalogError,
@@ -232,6 +233,7 @@ test('1. Strict Export Whitelist & Constant Types', () => {
       'ERR_STORE_INVALID_PARAMS',
       'ERR_STORE_NO_AGENT_SELECTED',
       'ERR_STORE_REALM_DELETE_FAILED',
+      'ERR_STORE_REALM_LAUNCH_FAILED',
       'ERR_STORE_REALM_NOT_EMPTY',
       'ERR_STORE_REALM_PROTECTED',
       'ERR_STORE_TEMPLATE_PERSIST_FAILED',
@@ -261,6 +263,11 @@ test('1. Strict Export Whitelist & Constant Types', () => {
   assert.strictEqual(SANDBOX_STORE_ERROR_CODES.ERR_STORE_TURN_FAILED, 'ERR_STORE_TURN_FAILED');
   assert.strictEqual(SANDBOX_STORE_ERROR_CODES.ERR_STORE_INVALID_PARAMS, 'ERR_STORE_INVALID_PARAMS');
   assert.strictEqual(SANDBOX_STORE_ERROR_CODES.ERR_STORE_VFS_FAILED, 'ERR_STORE_VFS_FAILED');
+  assert.strictEqual(
+    SANDBOX_STORE_ERROR_CODES.ERR_STORE_REALM_LAUNCH_FAILED,
+    'ERR_STORE_REALM_LAUNCH_FAILED',
+    'the template-launch rollback code is a declared store error code (be7714b)'
+  );
 
   // Verify Singletons and Factories
   assert.ok(typeof createSandboxStore === 'function', 'createSandboxStore must be a function');
@@ -6031,6 +6038,169 @@ test('75. [P3.1] an explicit approvedUrl must parse and match the transport URL 
     store.destroy();
     await transportFixture.close();
     await approvedFixture.close();
+    sharedLocalStorage.clear();
+  }
+});
+
+// ============================================================================
+// 76. [9327633] Registration-time realm-universe sweep (spawn-tool path)
+// ============================================================================
+
+test('76. [9327633] a lifecycle-port registration (spawn-tool path) receives the realm universe at its first safe state', async () => {
+  sharedLocalStorage.clear();
+  const { runtime, store } = createSharedSubstrateStore();
+  try {
+    const receipt = await launchP24Fixture(store);
+    const realmId = receipt.realm.id;
+    const identityPort = runtime.createAgentIdentityPort();
+    const extensionsOf = (id) => [...identityPort.getAgentIdentity(id, { realmId }).authority.extensions];
+
+    // P2.4 doctrine: the parent's own selector never propagates. Restrict the
+    // caller to the empty selector so a granted child can only come from the
+    // realm universe, never from inheritance.
+    store.updateAgentConfig(createAgentIdentityKey(realmId, 'p24-restricted'), { extensionTools: [] });
+    assert.deepStrictEqual(extensionsOf('p24-restricted'), [], 'the restricted caller carries no extension grant');
+
+    // The spawn tool launches through `context.lifecyclePort.launchAgent` with
+    // no extension grants (ticket 9327633): the registration diff must detect
+    // the new canonical key and sweep the realm universe × its own selector.
+    await runtime.createLifecyclePort().launchAgent({
+      config: { id: 'p24-tool-spawned', name: 'Tool Spawned', role: 'observer' },
+      callerContext: { callerAgentId: 'p24-restricted' }
+    });
+
+    const child = runtime.getAgent('p24-tool-spawned');
+    assert.ok(child, 'the lifecycle-port child registers');
+    assert.strictEqual(child.config.realmId, realmId, 'the child inherits the caller realm');
+    assert.strictEqual(
+      child.config.extensionTools,
+      'all',
+      'the child default selector is all — the parent selector never propagates'
+    );
+    assert.deepStrictEqual(
+      extensionsOf('p24-tool-spawned'),
+      ['similarity'],
+      'the registration sweep delivers the realm universe at the child safe state'
+    );
+    // The child was never launched through the store's grant-composing path.
+    assert.strictEqual(
+      store.agents.some((agent) => agent.id === 'p24-tool-spawned'),
+      true,
+      'the child joins the reactive projection'
+    );
+  } finally {
+    store.destroy();
+    sharedLocalStorage.clear();
+  }
+});
+
+// ============================================================================
+// 77-79. [be7714b] Store error-code dictionary + closed-shape approvals
+// ============================================================================
+
+test('77. [be7714b] the store error-code dictionary covers every emitted store code', () => {
+  // Static contract scan: every literal `ERR_*` code assignment in the store
+  // source is an emission and must be a value of the frozen dictionary.
+  const contractSource = fs.readFileSync(CONTRACT_PATH, 'utf-8');
+  const emitted = new Set(
+    [...contractSource.matchAll(/\.code\s*=\s*'(ERR_[A-Z0-9_]+)'/g)].map((match) => match[1])
+  );
+  assert.ok(emitted.size > 0, 'the emitted-code scan must find literal store emissions');
+
+  const declared = new Set(Object.values(SANDBOX_STORE_ERROR_CODES));
+  for (const code of emitted) {
+    assert.ok(
+      declared.has(code),
+      `emitted store error code '${code}' must be declared in SANDBOX_STORE_ERROR_CODES`
+    );
+  }
+  assert.ok(
+    declared.has('ERR_STORE_REALM_LAUNCH_FAILED'),
+    'the template-launch rollback code is declared (ticket be7714b item 1)'
+  );
+});
+
+test('78. [be7714b] a failed template launch throws the declared ERR_STORE_REALM_LAUNCH_FAILED code', async () => {
+  const store = await createOperatorStore();
+  try {
+    const failure = await store
+      .launchRealmFromTemplate('demo', { idOverrides: { worker: 'realm:beta:worker' } })
+      .then(() => null, (err) => err);
+    assert.ok(failure, 'the realm-vocabulary member id fails the launch');
+    assert.strictEqual(
+      failure.code,
+      SANDBOX_STORE_ERROR_CODES.ERR_STORE_REALM_LAUNCH_FAILED,
+      'the thrown code is the dictionary member, never a loose literal'
+    );
+  } finally {
+    store.destroy();
+  }
+});
+
+test('79. [be7714b] approval entries are closed-shape: unknown keys are rejected before any side effect', async () => {
+  sharedLocalStorage.clear();
+  const { store } = createSharedSubstrateStore();
+  try {
+    store.importRealmTemplate({
+      formatVersion: 1,
+      template: {
+        formatVersion: 1,
+        id: 'unit-approval-shape',
+        name: 'Approval Shape',
+        description: 'One declared authority pair for closed-shape approval checks.',
+        agents: [
+          {
+            key: 'architect',
+            idPattern: 'unit-approval-architect',
+            name: 'Architect',
+            role: 'observer',
+            prompt: [{ kind: 'text', text: 'Build.' }],
+            toolProfile: { tools: ['read_file'] },
+            privileged: false,
+            authorities: [AGENT_AUTHORITIES.TEMPLATE]
+          }
+        ]
+      },
+      files: {}
+    });
+
+    // The exact declared pair is otherwise valid: the shape gate is what fails.
+    const accepted = await store.launchRealmFromTemplate('unit-approval-shape', {
+      authorityApprovals: [{ agentKey: 'architect', authority: AGENT_AUTHORITIES.TEMPLATE }]
+    });
+    assert.ok(
+      accepted.agents.some((agent) => agent.id === 'unit-approval-architect'),
+      'the exact declared pair launches'
+    );
+
+    const realmsBefore = store.realms.length;
+    await assert.rejects(
+      () => store.launchRealmFromTemplate('unit-approval-shape', {
+        authorityApprovals: [{
+          agentKey: 'architect',
+          authority: AGENT_AUTHORITIES.TEMPLATE,
+          inert: 'extra-key'
+        }]
+      }),
+      (err) => (
+        err.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_INVALID_PARAMS
+        && /unknown key/i.test(err.message)
+      ),
+      'an authorityApprovals entry with an extra key is refused as open-shaped'
+    );
+    await assert.rejects(
+      () => store.launchRealmFromTemplate('unit-approval-shape', {
+        extensionApprovals: [{ extensionId: 'ghost', inert: 'extra-key' }]
+      }),
+      (err) => (
+        err.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_INVALID_PARAMS
+        && /unknown key/i.test(err.message)
+      ),
+      'an extensionApprovals entry with an extra key is refused as open-shaped'
+    );
+    assert.strictEqual(store.realms.length, realmsBefore, 'a refused approval creates no realm record');
+  } finally {
+    store.destroy();
     sharedLocalStorage.clear();
   }
 });
