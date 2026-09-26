@@ -42,6 +42,7 @@ import {
   SANDBOX_STORE_ERROR_CODES,
   SandboxStore
 } from '../../src/lib/sandbox/sandboxStore/index.svelte.ts';
+import { AGENT_AUTHORITIES } from '../../src/lib/sandbox/realmCatalog/index.ts';
 import { createMcpFixtureServer, MCP_FIXTURE_SERVER_INFO } from '../fixtures/mcp/http_fixture_server.mjs';
 
 /** Generic realm id (the seeded default every realm record carries). */
@@ -1098,6 +1099,84 @@ test('18. [M3] setExtensionToolSelection validates against the live catalog and 
     assert.ok(audit, 'the ceiling change is audited');
     assert.equal(audit.payload.extensionId, 'm3-selection-ext');
     assert.equal(audit.payload.source, 'operator');
+  } finally {
+    unsubscribe();
+    store.destroy();
+    await fixture.close();
+    sharedLocalStorage.clear();
+  }
+});
+
+// ============================================================================
+// 19. M4 privileged realm-wide attach against the live connection lifecycle
+// (ticket a02bce7)
+// ============================================================================
+
+test('19. [M4] a privileged realm-wide attach rides the live connection lifecycle and the member sweep', async () => {
+  const fixture = await createMcpFixtureServer({ tools: FIXTURE_TOOLS_A });
+  const { runtime, store, events, unsubscribe } = createHarness();
+  try {
+    installMcp(store, 'm4-priv-ext', fixture);
+    await store.connectExtension('m4-priv-ext');
+    const identityPort = runtime.createAgentIdentityPort();
+    const grantsOf = (id) => [...identityPort.getAgentIdentity(id, { realmId: GENERIC_REALM_ID }).authority.extensions];
+
+    await store.launchAgent({
+      id: 'm4-conn-member',
+      name: 'M4 Conn Member',
+      role: 'observer',
+      realmId: GENERIC_REALM_ID,
+      allowedTools: [],
+      extensionTools: ['alpha_only']
+    });
+    await store.launchAgent({
+      id: 'm4-conn-actor',
+      name: 'M4 Conn Actor',
+      role: 'observer',
+      realmId: GENERIC_REALM_ID,
+      allowedTools: ['readonly']
+    });
+    await store.grantAuthority('m4-conn-actor', AGENT_AUTHORITIES.EXTENSIONS);
+    assert.deepStrictEqual(grantsOf('m4-conn-member'), [], 'no attachment → no grants');
+
+    const port = store.getRealmAdminPort();
+    const attach = port.attachExtension({
+      actorRef: 'm4-conn-actor',
+      extensionId: 'm4-priv-ext',
+      toolSelection: ['alpha_only']
+    });
+    assert.equal(attach.success, true, JSON.stringify(attach));
+    assert.equal(attach.applied, true);
+    assert.deepStrictEqual(
+      store.getRealm(GENERIC_REALM_ID).extensions.map((entry) => [entry.extensionId, entry.toolSelection]),
+      [['m4-priv-ext', ['alpha_only']]],
+      'the realm-wide uniform set gains the attachment with the requested ceiling'
+    );
+    assert.deepStrictEqual(grantsOf('m4-conn-member'), ['alpha_only'], 'the idle member is swept');
+    const attachedEvent = events.find((event) => event.type === 'extension_attached' && event.payload?.extensionId === 'm4-priv-ext');
+    assert.equal(attachedEvent.payload.source, 'privileged-agent');
+    assert.equal(attachedEvent.payload.actorId, 'm4-conn-actor');
+
+    // Disconnect degrades the attachment and the existing sweep drops the
+    // member grants; reconnect restores both through the same internals.
+    await store.disconnectExtension('m4-priv-ext');
+    assert.equal(store.getRealm(GENERIC_REALM_ID).extensions[0].status, 'unavailable');
+    assert.deepStrictEqual(grantsOf('m4-conn-member'), [], 'a disconnected extension grants nothing');
+
+    await store.reconnectExtension('m4-priv-ext');
+    assert.equal(store.getRealm(GENERIC_REALM_ID).extensions[0].status, 'active');
+    assert.deepStrictEqual(grantsOf('m4-conn-member'), ['alpha_only'], 'reconnect restores the member grants');
+
+    // A repeated privileged attach is a no-op that never disturbs live state.
+    const repeated = port.attachExtension({ actorRef: 'm4-conn-actor', extensionId: 'm4-priv-ext' });
+    assert.equal(repeated.applied, false);
+    assert.equal(repeated.alreadyAttached, true);
+    assert.equal(
+      events.filter((event) => event.type === 'extension_attached' && event.payload?.extensionId === 'm4-priv-ext').length,
+      1,
+      'no duplicate audit on the idempotent path'
+    );
+    assert.deepStrictEqual(grantsOf('m4-conn-member'), ['alpha_only']);
   } finally {
     unsubscribe();
     store.destroy();

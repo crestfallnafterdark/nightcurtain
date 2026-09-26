@@ -68,6 +68,7 @@
  * @invariant Extension connection credential gate: a `credentialId` on a non-`https:` endpoint is refused with `ERR_STORE_EXTENSION_PLAINTEXT_CREDENTIAL` before any vault read or network activity, a bound credential the vault cannot resolve fails closed with `ERR_STORE_EXTENSION_CREDENTIAL_UNRESOLVED` before any network activity, plaintext local servers with no `credentialId` connect unauthenticated, and connection projections/audits/errors carry no credential material.
  * @invariant Extension catalog arbitration: live catalogs arbitrate only by explicit connection-completion sequence (never map insertion order), the earlier `active` extension keeps every contested call name, each later conflicting extension is `conflict` and not activated until a re-arbitration clears it, re-arbitration runs on every connect/disconnect/reconnect and audits conflict transitions, and realm attachment statuses follow the live state (`connected` → `active`, `conflict` → `conflict`, disconnected/`error` → `unavailable`) through the existing safe-state reauthorization sweep.
  * @invariant Realm-admin port (M3, ticket 094de1b): the store is the host-side realm-admin composition root — `getRealmAdminPort()` returns the frozen `RealmAdminPort` whose `inspectRealm`/`updateRealm` resolve the actor's exact scoped grant registry-side from the dispatcher-pinned reference (missing/unknown/grant-less actors and unknown/ambiguous/out-of-scope labels throw one uniform `PERMISSION_DENIED`, so a direct store call can never run under the operator principal without an actor record — R6) and whose edits apply only through the existing registry update, `attachExtension`, and `setExtensionToolSelection` internals. `setExtensionToolSelection` validates the attachment exists and every explicit call name against the extension's live conflict-free catalog (fail closed, never silently regranted), emits `extension_tool_selection_updated`, and schedules the P2.4 safe-state sweep; non-operator audit sources require a non-empty actor id; receipts and audits carry display labels and bare ids only, never realm ids, `realm:` paths, transport URLs, or credential material.
+ * @invariant Extension-admin port methods (M4, ticket a02bce7): the same frozen `RealmAdminPort` carries `listExtensions`/`attachExtension` under the exact `@extensions:authority` grant — the actor's registry-side scope resolves own-realm target candidates exactly like M3 (uniform `PERMISSION_DENIED` for every resolution failure), `listExtensions` projects only install metadata + live state + call names (never transport URLs, credentials, or realm ids) and audits `extensions_inspected`, and `attachExtension` requires the extension installed + connected with any explicit ceiling inside the live conflict-free catalog, attaches realm-wide through the shared `attachExtension` internals (`source:'privileged-agent'` + actor id), sweeps members at their safe state, and returns an idempotent `applied:false` no-op (no mutation, no duplicate audit) when the realm already attaches it. It never installs, dials, disconnects, detaches, or touches credentials.
  * 
  * @example
  * ```typescript
@@ -164,7 +165,11 @@ import type {
 } from '../realmCatalog/index.ts';
 import { resolveToolPreset } from '../toolDefinitions/index.ts';
 import type {
+  ExtensionAttachReceipt,
   ExtensionToolProviderPort,
+  ExtensionsAdminAttachmentView,
+  ExtensionsAdminInstalledView,
+  ExtensionsInspectReceipt,
   RealmAdminAttachmentView,
   RealmAdminMemberView,
   RealmAdminPatch,
@@ -2678,6 +2683,7 @@ function toAgentVisibleAgentReference(value: unknown): string | null {
 const REALM_ADMIN_INSPECT_DENIED_MESSAGE = 'Realm inspection is not permitted for the requested realm.';
 const REALM_ADMIN_EDIT_DENIED_MESSAGE = 'The requested realm edit is not permitted for the requested realm.';
 const REALM_ADMIN_EDIT_BOUND_DENIED_MESSAGE = 'The requested realm edit is not permitted for the requested fields.';
+const EXTENSIONS_ADMIN_DENIED_MESSAGE = 'Extension administration is not permitted for the requested realm.';
 
 /**
  * Builds one coded store error for the realm-admin port path (the dispatcher
@@ -12040,7 +12046,13 @@ export class SandboxStore {
     return Object.freeze({
       inspectRealm: (input: { actorRef: string | null; realmLabel: string | null }) => this.#inspectRealmForAdmin(input),
       updateRealm: (input: { actorRef: string | null; realmLabel: string | null; patch: RealmAdminPatch }) =>
-        this.#updateRealmForAdmin(input)
+        this.#updateRealmForAdmin(input),
+      listExtensions: (input: { actorRef: string | null }) => this.#listExtensionsForAdmin(input),
+      attachExtension: (input: {
+        actorRef: string | null;
+        extensionId: string;
+        toolSelection?: RealmAdminToolSelection;
+      }) => this.#attachExtensionForAdmin(input)
     });
   }
 
@@ -12597,6 +12609,162 @@ export class SandboxStore {
       before,
       after
     }) as RealmUpdateReceipt;
+  }
+
+  /**
+   * Lists the installed extensions and the caller realm's attachments under
+   * the caller's exact scoped `@extensions:authority` grant (M4, ticket
+   * a02bce7): registry-side scope + own-realm resolution, then a bounded
+   * projection of the host install records (id/display name/kind/status/live/
+   * attached) and the realm's attachments (the M3 view plus live call names).
+   * The `extensions_inspected` audit event carries the bare actor id and the
+   * display label only; transport URLs, credential ids, and realm ids never
+   * appear.
+   *
+   * @param input - Trusted port input (dispatcher-pinned actor reference only).
+   * @returns The frozen bounded listing receipt.
+   * @throws `Error` - Code `'PERMISSION_DENIED'` for every resolution failure.
+   */
+  #listExtensionsForAdmin(input: { actorRef: string | null }): ExtensionsInspectReceipt {
+    const scope = this.#resolveRealmAdminScopeOrDeny(
+      input?.actorRef ?? null,
+      AGENT_AUTHORITIES.EXTENSIONS,
+      EXTENSIONS_ADMIN_DENIED_MESSAGE
+    );
+    const realm = this.#resolveRealmAdminRealm(scope, null, EXTENSIONS_ADMIN_DENIED_MESSAGE);
+    const attachments = realm.extensions ?? [];
+    const attachedIds = new Set<string>();
+    for (let i = 0; i < attachments.length; i++) attachedIds.add(attachments[i].extensionId);
+    const installed: ExtensionsAdminInstalledView[] = [];
+    const records = this.#extensionRegistry.listExtensions();
+    for (let i = 0; i < records.length; i++) {
+      const record = records[i];
+      const names = this.#connectedExtensionCatalogCallNames(record.id);
+      const view: {
+        id: string;
+        displayName?: string;
+        kind: string;
+        status: string;
+        connected: boolean;
+        attached: boolean;
+        tools?: readonly string[];
+      } = {
+        id: record.id,
+        kind: record.kind,
+        status: record.status,
+        connected: names !== null,
+        attached: attachedIds.has(record.id)
+      };
+      if (record.displayName) view.displayName = record.displayName;
+      if (names) view.tools = names;
+      installed[installed.length] = Object.freeze(view) as ExtensionsAdminInstalledView;
+    }
+    const attachmentViews: ExtensionsAdminAttachmentView[] = [];
+    for (let i = 0; i < attachments.length; i++) {
+      const base = this.#projectRealmAdminAttachment(attachments[i]);
+      const names = this.#connectedExtensionCatalogCallNames(attachments[i].extensionId);
+      attachmentViews[attachmentViews.length] = Object.freeze({
+        ...base,
+        ...(names ? { tools: names } : {})
+      }) as ExtensionsAdminAttachmentView;
+    }
+    const receipt = Object.freeze({
+      success: true,
+      realm: realm.name,
+      installed: Object.freeze(installed),
+      attachments: Object.freeze(attachmentViews)
+    }) as ExtensionsInspectReceipt;
+    this.#emitExtensionAuditEvent('extensions_inspected', { actorId: scope.actorId, realmLabel: realm.name });
+    return receipt;
+  }
+
+  /**
+   * Attaches one installed+connected extension to the caller's realm under
+   * the caller's exact scoped `@extensions:authority` grant (M4, ticket
+   * a02bce7): registry-side scope + own-realm resolution, shape validation,
+   * the installed+connected gates, the live-catalog selection bound, and —
+   * when the realm already attaches the extension — an idempotent no-op
+   * receipt (no mutation, no duplicate audit, the stored ceiling wins). A
+   * fresh attach goes through the shared `attachExtension` internals with
+   * `source:'privileged-agent'` + actor id and therefore follows the P2.4
+   * member sweep. Never installs, dials, disconnects, detaches, or touches
+   * credentials.
+   *
+   * @param input - Trusted port input (dispatcher-pinned actor reference, extension id, optional ceiling).
+   * @returns The frozen attach receipt (`applied:false` on the idempotent path).
+   * @throws `Error` - Code `'PERMISSION_DENIED'` for resolution failures, `'INVALID_ARGUMENTS'` for malformed inputs or gate failures.
+   */
+  #attachExtensionForAdmin(input: {
+    actorRef: string | null;
+    extensionId: string;
+    toolSelection?: RealmAdminToolSelection;
+  }): ExtensionAttachReceipt {
+    const scope = this.#resolveRealmAdminScopeOrDeny(
+      input?.actorRef ?? null,
+      AGENT_AUTHORITIES.EXTENSIONS,
+      EXTENSIONS_ADMIN_DENIED_MESSAGE
+    );
+    const realm = this.#resolveRealmAdminRealm(scope, null, EXTENSIONS_ADMIN_DENIED_MESSAGE);
+    const rawExtensionId = input?.extensionId;
+    if (typeof rawExtensionId !== 'string' || rawExtensionId.trim().length === 0) {
+      throw realmAdminCodedError(
+        "attach_extension: 'extensionId' is required and must be a non-empty string.",
+        'INVALID_ARGUMENTS'
+      );
+    }
+    const extensionId = rawExtensionId;
+    let selection: 'all' | readonly string[];
+    try {
+      selection = input?.toolSelection === undefined ? 'all' : normalizeRealmAdminSelection(input.toolSelection);
+    } catch (error) {
+      throw realmAdminCodedError(
+        `attach_extension: invalid tool selection — ${error instanceof Error ? error.message : String(error)}`,
+        'INVALID_ARGUMENTS'
+      );
+    }
+    if (!this.#extensionRegistry.getExtension(extensionId)) {
+      throw realmAdminCodedError(`attach_extension: extension '${extensionId}' is not installed.`, 'INVALID_ARGUMENTS');
+    }
+    const liveNames = this.#connectedExtensionCatalogCallNames(extensionId);
+    if (!liveNames) {
+      throw realmAdminCodedError(`attach_extension: extension '${extensionId}' is not connected.`, 'INVALID_ARGUMENTS');
+    }
+    if (selection !== 'all') {
+      for (let i = 0; i < selection.length; i++) {
+        if (!liveNames.includes(selection[i])) {
+          throw realmAdminCodedError(
+            `attach_extension: '${selection[i]}' is outside extension '${extensionId}' live catalog.`,
+            'INVALID_ARGUMENTS'
+          );
+        }
+      }
+    }
+    const existing = (realm.extensions ?? []).find((attachment) => attachment.extensionId === extensionId);
+    if (existing) {
+      // Idempotent: the realm-wide uniform set already carries the extension.
+      // No mutation, no duplicate audit, no sweep — the stored ceiling wins.
+      return Object.freeze({
+        success: true,
+        realm: realm.name,
+        extensionId,
+        toolSelection: existing.toolSelection,
+        applied: false,
+        alreadyAttached: true
+      }) as ExtensionAttachReceipt;
+    }
+    this.attachExtension(realm.id, extensionId, {
+      toolSelection: selection,
+      source: 'privileged-agent',
+      actorId: scope.actorId
+    });
+    return Object.freeze({
+      success: true,
+      realm: realm.name,
+      extensionId,
+      toolSelection: selection,
+      applied: true,
+      alreadyAttached: false
+    }) as ExtensionAttachReceipt;
   }
 
   #createRealmPublishingPort(): RealmPublishingPort {

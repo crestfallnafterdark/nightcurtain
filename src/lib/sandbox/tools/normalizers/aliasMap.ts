@@ -3,7 +3,7 @@
  * Private implementation detail of the `tools/normalizers` module; the public surface is `index.ts`.
  */
 
-import { PUBLISHING_TOOLS, REALM_ADMIN_TOOLS, SANDBOX_TOOLS } from '../constants/index.ts';
+import { PUBLISHING_TOOLS, REALM_ADMIN_TOOLS, EXTENSIONS_ADMIN_TOOLS, SANDBOX_TOOLS } from '../constants/index.ts';
 
 /**
  * Master Tool Alias Map
@@ -674,7 +674,13 @@ export const TOOL_ALIAS_MAP: Readonly<Record<string, string>> = Object.freeze({
   'inspect_realm': REALM_ADMIN_TOOLS.INSPECT_REALM,
   'inspectRealm': REALM_ADMIN_TOOLS.INSPECT_REALM,
   'update_realm': REALM_ADMIN_TOOLS.UPDATE_REALM,
-  'updateRealm': REALM_ADMIN_TOOLS.UPDATE_REALM
+  'updateRealm': REALM_ADMIN_TOOLS.UPDATE_REALM,
+
+  // --- M4 Extension-Admin Meta Tools (explicit-grant-only; never wildcard-exposed) ---
+  'list_extensions': EXTENSIONS_ADMIN_TOOLS.LIST_EXTENSIONS,
+  'listExtensions': EXTENSIONS_ADMIN_TOOLS.LIST_EXTENSIONS,
+  'attach_extension': EXTENSIONS_ADMIN_TOOLS.ATTACH_EXTENSION,
+  'attachExtension': EXTENSIONS_ADMIN_TOOLS.ATTACH_EXTENSION
 });
 
 const LOWER_TOOL_ALIAS_MAP = Object.create(null);

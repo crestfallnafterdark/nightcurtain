@@ -16,6 +16,7 @@
  * @invariant Mutation-capability vocabulary: `MUTATING_TOOLS` and `READ_ONLY_TOOLS` partition every canonical `SANDBOX_TOOLS` entry exactly once (disjoint, union = the 38-name canonical set) as frozen arrays in canonical declaration order, and `isMutatingTool` is a pure membership probe over that vocabulary. The clock/event tools (`world_clock`, `event_list`) classify as mutating because they step simulation time and mutate VFS-backed event registries.
  * @invariant Publishing-tool vocabulary: `PUBLISHING_TOOLS` freezes the two publishing tool names (`import_realm_template`, `submit_hydration_package`) outside the canonical taxonomy — they are explicit-grant-only meta tools, never wildcard-implied capabilities.
  * @invariant Realm-admin tool vocabulary (M3): `REALM_ADMIN_TOOLS` freezes the two realm meta-tool names (`inspect_realm`, `update_realm`) outside the canonical taxonomy — explicit-grant-only (`@realm:inspect`/`@realm:edit`), never wildcard-, privileged-, or preset-implied, and exposed only through the exact-authority schema filter.
+ * @invariant Extension-admin tool vocabulary (M4): `EXTENSIONS_ADMIN_TOOLS` freezes the two extension meta-tool names (`list_extensions`, `attach_extension`) outside the canonical taxonomy — explicit-grant-only (`@extensions:authority`), never wildcard-, privileged-, or preset-implied, and exposed only through the exact-authority schema filter.
  * @invariant `resolveToolPreset` is a pure resolver: `null`/`undefined`/empty input returns `[]`, the wildcard string returns exactly `['*']`, named presets resolve case-insensitively to fresh copies (never the frozen stored arrays), comma-separated strings are split and trimmed, Sets/arrays are copied without mutation, and every entry whose canonical form is a retired selector expands in place to that selector's frozen tool list (fixed legacy order, no de-duplication).
  */
 
@@ -505,6 +506,34 @@ export const REALM_ADMIN_TOOLS: {
 } = Object.freeze({
   INSPECT_REALM: 'inspect_realm',
   UPDATE_REALM: 'update_realm'
+});
+
+/**
+ * Frozen vocabulary of the M4 extension-admin meta-tool names.
+ *
+ * These two tools are **not** part of the canonical `SANDBOX_TOOLS` taxonomy:
+ * they are explicit-grant-only authority tools (`@extensions:authority`), never
+ * implied by the wildcard capability, `privileged`, or any preset, and their
+ * schemas are exposed only to a caller whose frozen authority descriptor
+ * carries the exact id. The names ship here so the vocabulary is frozen ahead
+ * of the descriptors and handlers.
+ *
+ * @readonly
+ * @example
+ * ```typescript
+ * import { EXTENSIONS_ADMIN_TOOLS } from './constants/index.ts';
+ *
+ * const listName = EXTENSIONS_ADMIN_TOOLS.LIST_EXTENSIONS; // 'list_extensions'
+ * ```
+ */
+export const EXTENSIONS_ADMIN_TOOLS: {
+  /** Lists installed extensions, the realm's attachments, and available call names. */
+  readonly LIST_EXTENSIONS: 'list_extensions';
+  /** Attaches one installed+connected extension to the caller's realm (idempotent). */
+  readonly ATTACH_EXTENSION: 'attach_extension';
+} = Object.freeze({
+  LIST_EXTENSIONS: 'list_extensions',
+  ATTACH_EXTENSION: 'attach_extension'
 });
 
 // ============================================================================

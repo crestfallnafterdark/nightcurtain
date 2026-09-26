@@ -127,7 +127,14 @@ export {
   inspect_realm,
   updateRealmDescriptor,
   updateRealm,
-  update_realm
+  update_realm,
+  extensionsAdminToolDescriptors,
+  listExtensionsDescriptor,
+  listExtensions,
+  list_extensions,
+  attachExtensionDescriptor,
+  attachExtension,
+  attach_extension
 } from './metaTools.ts';
 
 export {

@@ -40,6 +40,114 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 export const ALL_TOOL_DESCRIPTORS: readonly ToolDescriptor[];
 
 // @public
+export const attach_extension: Readonly<{
+    name: "attach_extension";
+    authority: "@extensions:authority";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {
+            extensionId: {
+                type: string;
+                description: string;
+            };
+            toolSelection: {
+                type: string[];
+                items: {
+                    type: string;
+                };
+                description: string;
+            };
+        };
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: (rawArgs?: unknown) => ToolParams_4;
+    handler: (params: ToolParams_4, context: ExecutionContext) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | ExtensionAttachReceipt | {
+        success: boolean;
+        error: string;
+        code: "PERMISSION_DENIED";
+    }>;
+}>;
+
+// @public
+export const attachExtension: Readonly<{
+    name: "attach_extension";
+    authority: "@extensions:authority";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {
+            extensionId: {
+                type: string;
+                description: string;
+            };
+            toolSelection: {
+                type: string[];
+                items: {
+                    type: string;
+                };
+                description: string;
+            };
+        };
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: (rawArgs?: unknown) => ToolParams_4;
+    handler: (params: ToolParams_4, context: ExecutionContext) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | ExtensionAttachReceipt | {
+        success: boolean;
+        error: string;
+        code: "PERMISSION_DENIED";
+    }>;
+}>;
+
+// @public
+export const attachExtensionDescriptor: Readonly<{
+    name: "attach_extension";
+    authority: "@extensions:authority";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {
+            extensionId: {
+                type: string;
+                description: string;
+            };
+            toolSelection: {
+                type: string[];
+                items: {
+                    type: string;
+                };
+                description: string;
+            };
+        };
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: (rawArgs?: unknown) => ToolParams_4;
+    handler: (params: ToolParams_4, context: ExecutionContext) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | ExtensionAttachReceipt | {
+        success: boolean;
+        error: string;
+        code: "PERMISSION_DENIED";
+    }>;
+}>;
+
+// @public
 export const AUTHORITY_TOOL_REGISTRY: Readonly<Record<string, AuthorityToolDescriptor>>;
 
 // @public
@@ -47,7 +155,6 @@ export interface AuthorityToolDescriptor {
     readonly authority: string;
     readonly description: string;
     // Warning: (ae-forgotten-export) The symbol "ToolParams_9" needs to be exported by the entry point index.d.ts
-    // Warning: (ae-forgotten-export) The symbol "ExecutionContext" needs to be exported by the entry point index.d.ts
     readonly handler: (params: ToolParams_9, context: ExecutionContext) => unknown;
     readonly name: string;
     readonly paramAliasMap: Readonly<Record<string, string>>;
@@ -1038,6 +1145,63 @@ export const eventListDescriptor: Readonly<{
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
     handler: (params: ToolParams_7, context: ExecutionContext) => Promise<unknown>;
 }>;
+
+// @public
+export const extensionsAdminToolDescriptors: readonly (Readonly<{
+    name: "list_extensions";
+    authority: "@extensions:authority";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {};
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: (rawArgs?: unknown) => ToolParams_4;
+    handler: (params: ToolParams_4, context: ExecutionContext) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | ExtensionsInspectReceipt | {
+        success: boolean;
+        error: string;
+        code: "PERMISSION_DENIED";
+    }>;
+}> | Readonly<{
+    name: "attach_extension";
+    authority: "@extensions:authority";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {
+            extensionId: {
+                type: string;
+                description: string;
+            };
+            toolSelection: {
+                type: string[];
+                items: {
+                    type: string;
+                };
+                description: string;
+            };
+        };
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: (rawArgs?: unknown) => ToolParams_4;
+    handler: (params: ToolParams_4, context: ExecutionContext) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | ExtensionAttachReceipt | {
+        success: boolean;
+        error: string;
+        code: "PERMISSION_DENIED";
+    }>;
+}>)[];
 
 // @public
 export const get_archive: Readonly<{
@@ -2593,6 +2757,30 @@ export const list_agents: Readonly<{
 }>;
 
 // @public
+export const list_extensions: Readonly<{
+    name: "list_extensions";
+    authority: "@extensions:authority";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {};
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: (rawArgs?: unknown) => ToolParams_4;
+    handler: (params: ToolParams_4, context: ExecutionContext) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | ExtensionsInspectReceipt | {
+        success: boolean;
+        error: string;
+        code: "PERMISSION_DENIED";
+    }>;
+}>;
+
+// @public
 export const list_files: Readonly<{
     name: "list_files";
     description: "List files and directories within a directory of the virtual filesystem. Listing \"/\" shows your private files plus the global/ mount (and agents/ for mounting authority); listing \"/global\" shows the shared workspace. \"/\" is your private workspace, \"/global/...\" is the shared workspace visible to every agent in your scope, and \"/agents/<agentId>/...\" mounts another agent's private workspace (authority required).";
@@ -2732,6 +2920,54 @@ export const listAgentsDescriptor: Readonly<{
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
     handler: (params: ToolParams_3, context: ExecutionContext) => Promise<PublicAgentDescriptor[]>;
+}>;
+
+// @public
+export const listExtensions: Readonly<{
+    name: "list_extensions";
+    authority: "@extensions:authority";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {};
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: (rawArgs?: unknown) => ToolParams_4;
+    handler: (params: ToolParams_4, context: ExecutionContext) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | ExtensionsInspectReceipt | {
+        success: boolean;
+        error: string;
+        code: "PERMISSION_DENIED";
+    }>;
+}>;
+
+// @public
+export const listExtensionsDescriptor: Readonly<{
+    name: "list_extensions";
+    authority: "@extensions:authority";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {};
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: (rawArgs?: unknown) => ToolParams_4;
+    handler: (params: ToolParams_4, context: ExecutionContext) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | ExtensionsInspectReceipt | {
+        success: boolean;
+        error: string;
+        code: "PERMISSION_DENIED";
+    }>;
 }>;
 
 // @public
@@ -6972,12 +7208,15 @@ export const writeJsonDescriptor: Readonly<{
 // <declarations>/tools/descriptors/lifecycleTools.d.ts:921:5 - (ae-forgotten-export) The symbol "PublicAgentDescriptor" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/lifecycleTools.d.ts:955:5 - (ae-forgotten-export) The symbol "UndoTurnPortResult" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/messagingTools.d.ts:823:5 - (ae-forgotten-export) The symbol "ToolParams_2" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/metaTools.d.ts:104:5 - (ae-forgotten-export) The symbol "ToolParams_4" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/metaTools.d.ts:424:5 - (ae-forgotten-export) The symbol "sanitizeMetaUpdateParams" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/metaTools.d.ts:442:9 - (ae-forgotten-export) The symbol "AgentUpdateReceipt" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/metaTools.d.ts:531:5 - (ae-forgotten-export) The symbol "RealmInspectReceipt" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/metaTools.d.ts:889:5 - (ae-forgotten-export) The symbol "sanitizeRealmAdminUpdateParams" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/metaTools.d.ts:890:5 - (ae-forgotten-export) The symbol "RealmUpdateReceipt" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/metaTools.d.ts:432:5 - (ae-forgotten-export) The symbol "sanitizeMetaUpdateParams" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/metaTools.d.ts:450:9 - (ae-forgotten-export) The symbol "AgentUpdateReceipt" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/metaTools.d.ts:539:5 - (ae-forgotten-export) The symbol "RealmInspectReceipt" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/metaTools.d.ts:897:5 - (ae-forgotten-export) The symbol "sanitizeRealmAdminUpdateParams" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/metaTools.d.ts:898:5 - (ae-forgotten-export) The symbol "RealmUpdateReceipt" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/metaTools.d.ts:1084:5 - (ae-forgotten-export) The symbol "ToolParams_4" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/metaTools.d.ts:1085:5 - (ae-forgotten-export) The symbol "ExecutionContext" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/metaTools.d.ts:1085:5 - (ae-forgotten-export) The symbol "ExtensionAttachReceipt" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/metaTools.d.ts:1112:5 - (ae-forgotten-export) The symbol "ExtensionsInspectReceipt" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/precallTools.d.ts:187:5 - (ae-forgotten-export) The symbol "ToolParams_8" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/realmTools.d.ts:290:5 - (ae-forgotten-export) The symbol "PublishingFailure" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/schedulerTools.d.ts:220:5 - (ae-forgotten-export) The symbol "ToolParams_6" needs to be exported by the entry point index.d.ts
@@ -6989,6 +7228,18 @@ export const writeJsonDescriptor: Readonly<{
 ### `ALL_TOOL_DESCRIPTORS` — variable
 
 Array of all 38 Canonical Tool Descriptors
+
+### `attach_extension` — variable
+
+snake_case alias of `attachExtensionDescriptor`.
+
+### `attachExtension` — variable
+
+camelCase alias of `attachExtensionDescriptor`.
+
+### `attachExtensionDescriptor` — variable
+
+`attach_extension` descriptor — exact-grant-only (`@extensions:authority`) realm-wide attach of one installed+connected extension: the caller's realm uniform set gains the attachment through the shared store path and the member safe-state sweep follows. Repeat attaches are idempotent (no mutation, no duplicate audit). Install/connect/disconnect/remove, credential handling, realm addressing, and every authority id are operator-only and fail the whole call uniformly.
 
 ### `AUTHORITY_TOOL_REGISTRY` — variable
 
@@ -7014,7 +7265,7 @@ The `authority` member is the single capability declaration the dispatcher consu
 
 ### `authorityToolDescriptors` — variable
 
-Every authority meta-tool descriptor (M1): the Wave U publishing pair plus the M3 realm-admin pair; the remaining meta-plane phases (M4–M5b) append their descriptors here (`metaTools.ts` or the same file), and every filter below derives its membership from this one array plus each descriptor's `authority` id.
+Every authority meta-tool descriptor (M1): the Wave U publishing pair, the M3 realm-admin pair, and the M4 extension-admin pair; the remaining meta-plane phases (M5b) append their descriptors here (`metaTools.ts` or the same file), and every filter below derives its membership from this one array plus each descriptor's `authority` id.
 
 ### `batch_precall` — variable
 
@@ -7117,6 +7368,10 @@ camelCase alias of `eventListDescriptor`.
 `event_list` descriptor — query, register, resolve, or cancel world simulation events.
 
 Args: `action` (optional, defaults to "query"), optional `event_id`, `name`, `trigger_minutes`, `category`, `description`. Prefers `context.worldClock.handleEventTool()`, otherwise dispatches to `registerEvent`/`resolveEvent`/`cancelEvent`/`queryEvents`; throws when `worldClock` is missing.
+
+### `extensionsAdminToolDescriptors` — variable
+
+Array of the M4 extension-admin authority descriptors: appended to `authorityToolDescriptors` by `realmTools.ts`, so their schemas are exposed through the generic exact-id filter and never through the canonical taxonomy.
 
 ### `get_archive` — variable
 
@@ -7324,6 +7579,10 @@ Array of all 5 Lifecycle Tool Descriptors
 
 snake_case alias of `listAgentsDescriptor`.
 
+### `list_extensions` — variable
+
+snake_case alias of `listExtensionsDescriptor`.
+
 ### `list_files` — variable
 
 snake_case alias of `listFilesDescriptor`.
@@ -7349,6 +7608,14 @@ Args: optional `state` and `role` filters applied as post-filters on the project
 Fail closed: a host-supplied legacy port without the scoped `listAgentDescriptors` projector raises a clear error instead of falling back to the unscoped `listAgents` listing; the dispatcher's universal error shield normalizes it to an `EXECUTION_FAILED` receipt (ticket 9133495).
 
 Realm-exact caller resolution (Wave I, ticket d57cbc1; I2-V F1): the projector receives the dispatcher-pinned canonical `callerKey` when the caller resolved realm-exactly, so a same-literal-id caller lists its own realm's set instead of failing closed on the ambiguous bare subject. Per-call identity/realm claims remain stripped and inert (a1ce597).
+
+### `listExtensions` — variable
+
+camelCase alias of `listExtensionsDescriptor`.
+
+### `listExtensionsDescriptor` — variable
+
+`list_extensions` descriptor — exact-grant-only (`@extensions:authority`) bounded read of the host's installed extensions and the caller realm's attachments: install metadata, live connection state, and available call names. Transport URLs and credential material never appear.
 
 ### `listFiles` — variable
 
@@ -7720,10 +7987,10 @@ Args: `file_path` (required), exactly one of inline `data` or file-sourced `data
 
 ## Doc coverage
 
-- Top-level exports: 143
-- Declarations (exports + members): 150
-- Documented declarations: 150 / 150 (100%)
+- Top-level exports: 150
+- Declarations (exports + members): 157
+- Documented declarations: 157 / 157 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
-- Referenced but not exported (`ae-forgotten-export`): `AgentUpdateReceipt`, `ExecutionContext`, `JsonSchemaDraft07`, `PublicAgentDescriptor`, `PublishingFailure`, `RealmInspectReceipt`, `RealmUpdateReceipt`, `sanitizeMetaUpdateParams`, `sanitizeRealmAdminUpdateParams`, `ToolDescriptor`, `ToolParams`, `ToolParams_2`, `ToolParams_3`, `ToolParams_4`, `ToolParams_5`, `ToolParams_6`, `ToolParams_7`, `ToolParams_8`, `ToolParams_9`, `UndoTurnPortResult`
+- Referenced but not exported (`ae-forgotten-export`): `AgentUpdateReceipt`, `ExecutionContext`, `ExtensionAttachReceipt`, `ExtensionsInspectReceipt`, `JsonSchemaDraft07`, `PublicAgentDescriptor`, `PublishingFailure`, `RealmInspectReceipt`, `RealmUpdateReceipt`, `sanitizeMetaUpdateParams`, `sanitizeRealmAdminUpdateParams`, `ToolDescriptor`, `ToolParams`, `ToolParams_2`, `ToolParams_3`, `ToolParams_4`, `ToolParams_5`, `ToolParams_6`, `ToolParams_7`, `ToolParams_8`, `ToolParams_9`, `UndoTurnPortResult`
 - Unresolved `{@link}` targets (`ae-unresolved-link`): 8 (policy `none`; see `scripts/api_reports.mjs`)

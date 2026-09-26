@@ -6679,6 +6679,8 @@ test('89. [M3] the realm-admin port is pinned and the store exposes a frozen han
     assert.ok(Object.isFrozen(port));
     assert.equal(typeof port.inspectRealm, 'function');
     assert.equal(typeof port.updateRealm, 'function');
+    assert.equal(typeof port.listExtensions, 'function', 'the M4 listing method shares the pinned handle');
+    assert.equal(typeof port.attachExtension, 'function', 'the M4 attach method shares the pinned handle');
     assert.equal(store.getRealmAdminPort(), port, 'the handle is stable');
   } finally {
     store.destroy();
@@ -6724,6 +6726,94 @@ test('90. [M3] the realm-admin port re-validates the patch closure at nested dep
   } finally {
     store.destroy();
     runtime.destroy();
+    sharedLocalStorage.clear();
+  }
+});
+
+// ============================================================================
+// M4 extension admin — pinned port listing/attach (ticket a02bce7)
+// ============================================================================
+
+test('91. [M4] the realm-admin port lists and attaches under the pinned actor and refuses the deputy path', async () => {
+  const fixture = await createMcpFixtureServer({ tools: [{ name: 'echo' }] });
+  const runtime = new AgentRuntime({ autoBootstrapDirector: false });
+  const store = new SandboxStore({ runtime, autoHydrate: false, autoBootstrapDirector: false });
+  const events = [];
+  const unsubscribe = runtime.subscribe((event) => events.push(event));
+  try {
+    store.createRealm({ id: 'realm_m4_unit', name: 'M4 Unit' });
+    store.installExtension({
+      id: 'unit-m4-ext',
+      kind: 'mcp',
+      displayName: 'Unit M4 Ext',
+      transportHint: { kind: 'http', url: fixture.url }
+    });
+    await store.connectExtension('unit-m4-ext');
+    await store.launchAgent({
+      id: 'm4-unit-actor',
+      name: 'M4 Actor',
+      realmId: 'realm_m4_unit',
+      allowedTools: ['readonly'],
+      model: createMockModel()
+    });
+    await store.grantAuthority('m4-unit-actor', AGENT_AUTHORITIES.EXTENSIONS);
+    const port = store.getRealmAdminPort();
+
+    // The deputy path never runs under the operator principal.
+    assert.throws(
+      () => port.listExtensions({ actorRef: null }),
+      (error) => error?.code === 'PERMISSION_DENIED'
+    );
+    assert.throws(
+      () => port.attachExtension({ actorRef: 'ghost-actor', extensionId: 'unit-m4-ext' }),
+      (error) => error?.code === 'PERMISSION_DENIED'
+    );
+    assert.equal(store.getRealm('realm_m4_unit').extensions, undefined, 'no deputy mutation');
+
+    const listing = port.listExtensions({ actorRef: 'm4-unit-actor' });
+    assert.equal(listing.success, true, JSON.stringify(listing));
+    assert.equal(listing.realm, 'M4 Unit');
+    assert.equal(listing.installed.length, 1);
+    assert.equal(listing.installed[0].id, 'unit-m4-ext');
+    assert.equal(listing.installed[0].displayName, 'Unit M4 Ext');
+    assert.equal(listing.installed[0].connected, true);
+    assert.equal(listing.installed[0].attached, false);
+    assert.deepEqual([...listing.installed[0].tools], ['echo']);
+    assert.deepEqual(listing.attachments, []);
+
+    const first = port.attachExtension({ actorRef: 'm4-unit-actor', extensionId: 'unit-m4-ext' });
+    assert.equal(first.success, true, JSON.stringify(first));
+    assert.equal(first.applied, true);
+    assert.equal(first.alreadyAttached, false);
+    assert.equal(first.realm, 'M4 Unit');
+    const second = port.attachExtension({ actorRef: 'm4-unit-actor', extensionId: 'unit-m4-ext' });
+    assert.equal(second.success, true);
+    assert.equal(second.applied, false, 'a repeated attach is idempotent');
+    assert.equal(second.alreadyAttached, true);
+    assert.equal(
+      events.filter((event) => event.type === 'extension_attached' && event.payload?.extensionId === 'unit-m4-ext').length,
+      1,
+      'the idempotent path emits no duplicate audit'
+    );
+    const attachedEvent = events.find((event) => event.type === 'extension_attached' && event.payload?.extensionId === 'unit-m4-ext');
+    assert.equal(attachedEvent.payload.source, 'privileged-agent');
+    assert.equal(attachedEvent.payload.actorId, 'm4-unit-actor');
+
+    const after = port.listExtensions({ actorRef: 'm4-unit-actor' });
+    assert.equal(after.installed[0].attached, true);
+    assert.equal(after.attachments.length, 1);
+    assert.equal(after.attachments[0].extensionId, 'unit-m4-ext');
+    assert.equal(after.attachments[0].live, 'connected');
+    const inspected = events.filter((event) => event.type === 'extensions_inspected');
+    assert.equal(inspected.length, 2, 'each listing call is audited');
+    assert.equal(inspected[0].payload.actorId, 'm4-unit-actor');
+    assert.equal(inspected[0].payload.realmLabel, 'M4 Unit');
+    assert.equal(JSON.stringify(inspected[0].payload).includes('realm_m4_unit'), false, 'audit carries the label only');
+  } finally {
+    unsubscribe();
+    store.destroy();
+    runtime.destroy();
+    await fixture.close();
     sharedLocalStorage.clear();
   }
 });
