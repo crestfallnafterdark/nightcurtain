@@ -165,6 +165,11 @@ export interface ToolExecutionPort {
  * Structural receipt returned by the host template-import path (Wave T realm
  * template registry): the committed template id and content version, whether
  * the import shadowed a shipped entry, and the effective import budget.
+ *
+ * The `import_realm_template` tool receipt additionally carries the
+ * handler-derived `seedSlots` summary (slot counts by origin plus distinct
+ * targets); that summary is computed from the parsed template in the tool
+ * handler, so this port receipt stays unchanged (ticket 922fa34).
  */
 export interface RealmTemplateImportView {
   /** Imported template id. */

@@ -51,6 +51,7 @@ import {
 import type {
   PendingInstancePayload,
   RealmInputValue,
+  RealmPlacement,
   RealmTemplateInput,
   RealmTemplate
 } from '../../realmCatalog/index.ts';
@@ -316,6 +317,69 @@ function resolveManifestArgument(
     return { manifest: parsed, manifestSource: 'file' };
   }
   return { manifest: params.manifest, manifestSource: 'inline' };
+}
+
+/**
+ * Compact seed-slot manifest summary of a normalized template (ticket
+ * 922fa34).
+ *
+ * The format-v2 model expresses seed slots as placements — the v1 read shim
+ * converts every `seed.files` slot into a placement, with fixed inline slots
+ * gaining a defaulted text input — and origin is derived exactly like the
+ * launch review's display origin: a bundle-file placement is `fixed`, an input
+ * placement is `generated` when the input is required, `fixed` when a text
+ * input carries a `default`/`defaultFile` prefill, and `user` otherwise.
+ * Targets are the distinct destination labels (`realm` or the template agent
+ * key) in declared order. The summary is bounded by declaration count — the
+ * full resolved slot list with content/provenance stays in the launch review.
+ *
+ * @param template - Normalized (format-v2) template.
+ * @returns The `{ total, fixed, user, generated, targets }` summary.
+ */
+function summarizeSeedSlots(
+  template: RealmTemplate
+): { total: number; fixed: number; user: number; generated: number; targets: string[] } {
+  const placements: readonly RealmPlacement[] = Array.isArray(template.placements) ? template.placements : [];
+  const inputsById = new Map<string, RealmTemplateInput>(
+    (Array.isArray(template.inputs) ? template.inputs : [])
+      .filter((input): input is RealmTemplateInput => Boolean(input) && typeof input.id === 'string' && input.id.length > 0)
+      .map((input) => [input.id, input] as const)
+  );
+  const targets: string[] = [];
+  let total = 0;
+  let fixed = 0;
+  let user = 0;
+  let generated = 0;
+  for (const placement of placements) {
+    if (!isPlainRecord(placement)) continue;
+    total++;
+    const target = placement.target === 'realm'
+      ? 'realm'
+      : (isPlainRecord(placement.target) && typeof placement.target.agent === 'string' && placement.target.agent.length > 0
+        ? placement.target.agent
+        : '');
+    if (target && !targets.includes(target)) targets.push(target);
+    let origin: 'fixed' | 'user' | 'generated';
+    if (typeof placement.file === 'string' && placement.file.length > 0) {
+      origin = 'fixed';
+    } else {
+      const declaration = typeof placement.inputId === 'string' ? inputsById.get(placement.inputId) : undefined;
+      if (declaration?.required === true) origin = 'generated';
+      else if (
+        declaration
+        && declaration.shape === 'text'
+        && (typeof declaration.default === 'string' || typeof declaration.defaultFile === 'string')
+      ) {
+        origin = 'fixed';
+      } else {
+        origin = 'user';
+      }
+    }
+    if (origin === 'fixed') fixed++;
+    else if (origin === 'generated') generated++;
+    else user++;
+  }
+  return { total, fixed, user, generated, targets };
 }
 
 /**
@@ -990,7 +1054,9 @@ const importRealmTemplateParamAliasMap = Object.freeze({
  * Receipt: the store import receipt (`templateId`, authored `templateVersion`,
  * shadow labels, effective byte budget, parser warnings) plus
  * `sourceFormatVersion` (which authored format the transport declared),
- * `fileCount`, `manifestSource`, `dryRun`, and `imported`.
+ * `fileCount`, `seedSlots` (the declared seed-slot summary: counts by origin
+ * plus distinct targets, ticket 922fa34), `manifestSource`, `dryRun`, and
+ * `imported`.
  */
 export const importRealmTemplateDescriptor = Object.freeze({
   name: PUBLISHING_TOOLS.IMPORT_REALM_TEMPLATE,
@@ -1038,6 +1104,9 @@ export const importRealmTemplateDescriptor = Object.freeze({
         replacedImport: receipt.replacedImport,
         totalImportedBytes: receipt.totalImportedBytes,
         fileCount: Object.keys(parsed.files).length,
+        // Seed-slot manifest summary (ticket 922fa34): derived from the
+        // normalized template, identical on the dry-run and real paths.
+        seedSlots: summarizeSeedSlots(parsed.template),
         manifestSource,
         dryRun,
         imported: !dryRun,
