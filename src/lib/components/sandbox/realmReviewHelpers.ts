@@ -34,6 +34,7 @@
 
 import {
   AGENT_AUTHORITIES,
+  REALM_CATALOG_ERROR_CODES,
   composeAgentHistory,
   normalizeTemplate,
   validatePayload
@@ -685,7 +686,7 @@ export function realmReviewSlotKey(target: unknown, path: unknown): string {
  *
  * @param template - Selected template (structural; malformed slots skipped).
  * @param bundleFiles - Bundle file bodies.
- * @param options - Attached payload and the explicit launch input values.
+ * @param options - Attached payload, explicit launch inputs, and the effective bundle version.
  * @returns Slot views in declared order.
  */
 export function buildRealmReviewFileSlots(
@@ -696,6 +697,10 @@ export function buildRealmReviewFileSlots(
     readonly edits?: Readonly<Record<string, string>> | null;
     /** Explicit launch input values (shape-tagged; win over the payload). */
     readonly inputs?: RealmInputValues | null;
+    /** Effective authored bundle version the launch pins (a997a8a item 2). */
+    readonly currentVersion?: string | null;
+    /** Explicit confirmation that a mismatching payload pin may resolve (a997a8a item 2). */
+    readonly allowVersionMismatch?: boolean;
   } | null | undefined = {}
 ): RealmReviewFileSlot[] {
   if (!template || typeof template !== 'object') return [];
@@ -714,7 +719,7 @@ export function buildRealmReviewFileSlots(
  *
  * @param template - Canonical template.
  * @param bundleFiles - Bundle file bodies.
- * @param options - Attached payload and explicit shape-tagged launch inputs.
+ * @param options - Attached payload, explicit shape-tagged launch inputs, and the effective bundle version.
  * @returns Slot views in declared order.
  */
 function buildRealmReviewFileSlotsFromModel(
@@ -723,6 +728,8 @@ function buildRealmReviewFileSlotsFromModel(
   options: {
     readonly payload?: unknown;
     readonly inputs?: RealmInputValues | null;
+    readonly currentVersion?: string | null;
+    readonly allowVersionMismatch?: boolean;
   } | null | undefined
 ): RealmReviewFileSlot[] {
   const placements = Array.isArray(template.placements) ? template.placements : [];
@@ -730,7 +737,10 @@ function buildRealmReviewFileSlotsFromModel(
   const agents = Array.isArray(template.agents) ? template.agents : [];
   const bodies = isRecord(bundleFiles) ? bundleFiles as Readonly<Record<string, string>> : {};
   const opts = isRecord(options) ? options : {};
-  const payloadValues = reviewPayloadShapeTaggedInputs(template, opts.payload);
+  const payloadValues = reviewPayloadShapeTaggedInputs(template, opts.payload, {
+    currentVersion: opts.currentVersion,
+    allowVersionMismatch: opts.allowVersionMismatch === true
+  });
   const explicitValues: RealmInputValues = isRecord(opts.inputs) ? opts.inputs as RealmInputValues : {};
   const declarationsById: ReadonlyMap<string, RealmTemplateInput> = new Map(
     (Array.isArray(template.inputs) ? template.inputs : [])
@@ -888,15 +898,52 @@ function buildRealmReviewFileSlotsFromModel(
  * template (a v1 package converts through the catalog); a malformed payload
  * resolves nothing here — its typed error is surfaced by the package preview.
  *
+ * Version handling (a997a8a item 2): when the effective `currentVersion` is
+ * provided the payload's pin is checked by the real `validatePayload`. A
+ * mismatch that has not been explicitly allowed withholds every value — the
+ * review must not present content from a pin the launch gate still blocks as
+ * reviewed slot content. Omitting `currentVersion` keeps the legacy permissive
+ * resolution (no pin is known to check against).
+ *
  * @param template - Normalized format-v2 template.
  * @param payload - Attached payload.
- * @returns Validated shape-tagged values (empty when unresolvable).
+ * @param options - Effective bundle version and the explicit mismatch confirmation.
+ * @returns Validated shape-tagged values (empty when unresolvable or withheld).
  */
-function reviewPayloadShapeTaggedInputs(template: RealmTemplate, payload: unknown): RealmInputValues {
+function reviewPayloadShapeTaggedInputs(
+  template: RealmTemplate,
+  payload: unknown,
+  options: { readonly currentVersion?: unknown; readonly allowVersionMismatch?: boolean } | null | undefined = {}
+): RealmInputValues {
   if (payload === null || payload === undefined) return {};
+  const currentVersion = typeof options?.currentVersion === 'string' && options.currentVersion.length > 0
+    ? options.currentVersion
+    : undefined;
+  const allowVersionMismatch = options?.allowVersionMismatch === true;
+  // A canonical payload whose pin has not been accepted withholds every value
+  // up front: the version check must not be skipped because a different
+  // contract error would fail the payload first (the launch gate blocks on the
+  // unconfirmed mismatch either way).
+  if (!allowVersionMismatch
+    && currentVersion !== undefined
+    && isRecord(payload)
+    && payload.formatVersion === 2
+    && typeof payload.templateVersion === 'string'
+    && payload.templateVersion.length > 0
+    && payload.templateVersion !== currentVersion) {
+    return {};
+  }
   try {
-    return validatePayload(template, payload, { allowVersionMismatch: true }).inputs;
-  } catch {
+    return validatePayload(template, payload, {
+      ...(allowVersionMismatch ? { allowVersionMismatch: true } : {}),
+      ...(currentVersion !== undefined ? { currentVersion } : {})
+    }).inputs;
+  } catch (error) {
+    if (!allowVersionMismatch
+      && currentVersion !== undefined
+      && codeOf(error) === REALM_CATALOG_ERROR_CODES.ERR_HYDRATION_VERSION_MISMATCH) {
+      return {};
+    }
     if (!isRecord(payload) || payload.formatVersion !== 2 || !isRecord(payload.inputs)) return {};
     const values: Record<string, RealmInputValue> = {};
     for (const [inputId, candidate] of Object.entries(payload.inputs)) {
@@ -1819,13 +1866,16 @@ export interface RealmAgentDisclosureRow {
   readonly value: string;
   /** Whether the declared field is present. */
   readonly present: boolean;
+  /** Operator-facing semantics disclaimer for the row (never empty). */
+  readonly disclaimer: string;
 }
 
 /**
  * Builds the per-agent disclosure rows the review must show (Wave T carry-over
  * plus Wave U): `initialPrompt` (the text that triggers the first turn),
  * `triggerPolicy` (display-only label), `modelPresetId` (declared binding), and
- * `privileged` (elevated privilege).
+ * `privileged` (elevated privilege). Each row carries the catalog's semantics
+ * disclaimer so the value can never be read as more than it is.
  *
  * @param spec - Agent spec (structural; missing fields render absent rows).
  * @param presetBindingLabel - Optional resolved binding label from the preset display model.
@@ -1848,25 +1898,29 @@ export function buildRealmAgentDisclosureRows(
       key: 'initialPrompt',
       label: 'Initial prompt',
       value: initialPrompt.length > 0 ? initialPrompt : '—',
-      present: initialPrompt.length > 0
+      present: initialPrompt.length > 0,
+      disclaimer: 'A declared initial prompt triggers a real first turn (model completion) at launch.'
     },
     {
       key: 'triggerPolicy',
       label: 'Trigger policy',
       value: triggerPolicy.length > 0 ? triggerPolicy : '—',
-      present: triggerPolicy.length > 0
+      present: triggerPolicy.length > 0,
+      disclaimer: 'Legacy label stored for display only — it does not gate, queue, or defer turns.'
     },
     {
       key: 'modelPresetId',
       label: 'Model preset',
       value: binding.length > 0 ? binding : 'catalog default',
-      present: binding.length > 0
+      present: binding.length > 0,
+      disclaimer: 'Catalog binding; the launch resolves it against the effective catalog (unresolved falls back to the active default).'
     },
     {
       key: 'privileged',
       label: 'Privileged',
       value: privileged ? 'yes — sudo authority' : 'no',
-      present: true
+      present: true,
+      disclaimer: 'Elevated (sudo) privilege is granted at launch and never implies publishing authorities.'
     }
   ];
 }

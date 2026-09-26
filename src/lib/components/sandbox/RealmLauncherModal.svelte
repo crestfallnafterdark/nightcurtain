@@ -1,16 +1,34 @@
 <script>
   /**
-   * Realm Launcher modal (Wave B, ticket b309e02; Wave T, ticket 2b5db57): a
-   * two-step wizard that launches a Realm from a launch template and then
-   * (optionally) seeds it.
+   * Realm Launcher modal (Wave B, ticket b309e02; Wave T, ticket 2b5db57;
+   * launcher redesign, ticket e1e8775): a two-step wizard that launches a
+   * Realm from a launch template and then (optionally) seeds it.
    *
-   * Step 1 — template picker plus name/color/description inputs, with a
-   * per-agent preview built from `realmCatalog.summarizeAgentCapabilities`:
-   * name, role, privilege badge, resolved tool grants partitioned into
-   * mutating/read-only, and the model-preset binding. The launch calls
-   * `sandboxStore.launchRealmFromTemplate`, so the store creates the record,
-   * materializes the template, and rolls back a partial launch on failure
-   * (the coded rollback report is surfaced inline).
+   * Redesign decomposition (e1e8775): this component is the composition root —
+   * it owns the launch/seed draft state, the catalog selection, the validation
+   * projections, the launch/seed calls, and the modal shell (header, step rail,
+   * banners, review gate, footers). Every section renders through a focused
+   * subcomponent under this folder:
+   * `RealmLauncherTemplatePicker` (catalog select + import/export/delete),
+   * `RealmLauncherInputsPanel` (shape-tagged input requirements + filesets),
+   * `RealmLauncherPayloadPanel` (payload attach/candidates/library + pin),
+   * `RealmLauncherSeedPreview` (template seed summary + directives),
+   * `RealmLauncherAgentsPreview` (capability preview + disclosures + prompts),
+   * `RealmLauncherAuthoritiesPanel` (declared authority approvals + trust),
+   * `RealmLauncherExtensionsPanel` (requested extensions + references),
+   * `RealmLauncherSeedStep` (receipt + missing extensions + seed form), and
+   * `RealmLauncherFilesDialog` (resolved placement contents). Shared styles
+   * live in `realmLauncherUi.css`, scoped under `.realm-launcher-modal`.
+   *
+   * Step 1 — template picker plus name/color/description inputs, the hydration
+   * workspace, the per-agent capability preview built from
+   * `realmCatalog.summarizeAgentCapabilities` (name, role, privilege badge,
+   * resolved tool grants partitioned into mutating/read-only, the model-preset
+   * binding, and the `initialPrompt`/`triggerPolicy`/`modelPresetId`/
+   * `privileged` disclosures with their semantics disclaimers). The launch
+   * calls `sandboxStore.launchRealmFromTemplate`, so the store creates the
+   * record, materializes the template, and rolls back a partial launch on
+   * failure (the coded rollback report is surfaced inline).
    *
    * Wave T additions: the picker lists the effective catalog with store source
    * labels (`shipped` / `imported` / `imported · replaces shipped`), imports a
@@ -31,6 +49,12 @@
    * pairs and the trust decision travel as `authorityApprovals` /
    * `trustAuthorities`; the validated payload travels as `{ package }`.
    *
+   * Wave U carry-over (ticket a997a8a items 2–3): the review validates the
+   * attached payload against the effective bundle version — the files dialog
+   * resolves payload content only once a version mismatch is explicitly
+   * confirmed, exactly like the launch gate — and each preview disclosure
+   * carries the catalog's semantics disclaimer.
+   *
    * Step 2 — seed the freshly launched Realm: file rows (path + content), an
    * optional directive, and a target picker (Realm-global default or one
    * launched member), calling `sandboxStore.seedRealm`. The success receipt
@@ -50,32 +74,25 @@
    * store's reactive `realms`/`agents` projections drive the drawer grouping,
    * so the wizard does not need to touch the sidebar.
    */
+  import './realmLauncherUi.css';
   import { sandboxStore } from '../../sandbox/sandboxStore/index.svelte.ts';
   import { triggerBrowserBlobDownload } from '../../sandbox/fsDownloadUtils/index.ts';
   import {
     buildRealmDirectiveReview,
-    buildRealmFileAttachmentViews,
     buildRealmHydrationPinView,
-    buildRealmInputPlacementDestinations,
     buildRealmSavedPayloadFilename
   } from './realmHydrationHelpers.ts';
   import { realmPayloadLibrary } from './realmPayloadLibrary.ts';
   import {
-    buildRealmInputAttachment,
     buildRealmPreviewProjection,
-    buildRealmPromptPreview,
     buildRealmSeedSummary,
     buildRealmV2InputDrafts,
     buildSeedTargetOptions,
     describeRealmLaunchError,
-    describeRealmPresetBinding,
     describeRealmSeedError,
-    describeSeedWorkspace,
-    isRealmV2InputEditable,
     resetRealmV2InputDraft,
     setRealmV2InputFiles,
     setRealmV2InputText,
-    uniqueRealmAttachmentPath,
     validateRealmInputAttachments,
     validateRealmLaunchDraft,
     validateRealmV2InputDrafts,
@@ -85,7 +102,6 @@
     buildRealmTemplateCatalogEntries,
     buildRealmTemplateExportFilename,
     describeRealmTemplateDeleteError,
-    describeRealmTemplateDeletion,
     describeRealmTemplateExportError,
     describeRealmTemplateImportError,
     describeRealmTemplateImportReceipt,
@@ -94,13 +110,10 @@
   import {
     assembleRealmAuthorityApprovals,
     assembleRealmExtensionApprovals,
-    buildRealmAgentDisclosureRows,
     buildRealmAuthorityDecisions,
     buildRealmAuthorityDecisionKey,
     buildRealmAuthorityReviewAgents,
     buildRealmExtensionDecisions,
-    buildRealmHistoryEditorViews,
-    buildRealmPartProvenanceViews,
     buildRealmPayloadFilename,
     buildRealmPendingPayloadViews,
     buildRealmReviewFileSlots,
@@ -111,17 +124,24 @@
     resolveRealmReviewLaunchPayload,
     serializeRealmPendingPayload
   } from './realmReviewHelpers.ts';
-  import { safeRealmColor } from './realmGroups.ts';
-  import ExtensionInstallDialog from './ExtensionInstallDialog.svelte';
   import {
-    REALM_EXTENSION_TRUST_DISCLOSURE,
     buildExtensionInstallPrefill,
     buildMissingExtensionFlowViews,
     buildRealmExtensionReferenceViews,
     buildRealmExtensionRequestViews,
-    describeExtensionAttachError,
-    describeRealmExtensionState
+    describeExtensionAttachError
   } from './extensionUiHelpers.ts';
+  import { safeRealmColor } from './realmGroups.ts';
+  import ExtensionInstallDialog from './ExtensionInstallDialog.svelte';
+  import RealmLauncherTemplatePicker from './RealmLauncherTemplatePicker.svelte';
+  import RealmLauncherInputsPanel from './RealmLauncherInputsPanel.svelte';
+  import RealmLauncherPayloadPanel from './RealmLauncherPayloadPanel.svelte';
+  import RealmLauncherSeedPreview from './RealmLauncherSeedPreview.svelte';
+  import RealmLauncherAgentsPreview from './RealmLauncherAgentsPreview.svelte';
+  import RealmLauncherAuthoritiesPanel from './RealmLauncherAuthoritiesPanel.svelte';
+  import RealmLauncherExtensionsPanel from './RealmLauncherExtensionsPanel.svelte';
+  import RealmLauncherSeedStep from './RealmLauncherSeedStep.svelte';
+  import RealmLauncherFilesDialog from './RealmLauncherFilesDialog.svelte';
 
   /** @typedef {import('../../sandbox/sandboxStore/index.svelte.ts').RealmLaunchReceipt} RealmLaunchReceipt */
   /** @typedef {import('../../sandbox/sandboxStore/index.svelte.ts').RealmSeedReceipt} RealmSeedReceipt */
@@ -161,38 +181,12 @@
   );
   let preview = $derived(buildRealmPreviewProjection(selectedTemplate));
 
-  // Template registry controls (Wave T): import a canonical bundle file,
-  // export the effective bundle, delete an import (shipped revisions have no
-  // delete path).
-  let templateImportInput = $state(/** @type {HTMLInputElement | null} */(null));
-  let payloadFileInput = $state(/** @type {HTMLInputElement | null} */(null));
-  let isImporting = $state(false);
-  let templateDeleteConfirming = $state(false);
-  let templateDeletePlan = $derived(describeRealmTemplateDeletion(selectedTemplateEntry));
-
-  // Catalog presets drive the per-agent preset-binding display (the store
-  // resolves the actual launch binding from the same catalog).
-  const presetCatalog = sandboxStore.getPresetCatalog();
-  let catalogPresets = $state(presetCatalog.listPresets());
-  let defaultPresetId = $state(presetCatalog.createPresetSourcePort().getDefaultPresetId());
-
-  $effect(() => {
-    const unsubscribe = presetCatalog.subscribe(() => {
-      catalogPresets = presetCatalog.listPresets();
-      defaultPresetId = presetCatalog.createPresetSourcePort().getDefaultPresetId();
-    });
-    return unsubscribe;
-  });
-
   // Launch draft
   let realmName = $state('');
   let realmColor = $state('#7c9cff');
   let realmDescription = $state('');
   let inputDrafts = $state(/** @type {import('./realmLauncherHelpers.ts').RealmInputDraft[]} */([]));
   let inputErrors = $state(/** @type {Record<string, string>} */({}));
-  // The files picker is shared: the draft id it targets is recorded on click.
-  let inputFilesInput = $state(/** @type {HTMLInputElement | null} */(null));
-  let activeFilesDraftId = $state('');
 
   // The launch bundle seam: the preview resolves the same bundle files the
   // store's launch materializes with (today the baked demo bundle has none).
@@ -219,10 +213,6 @@
   let savedPayloadName = $state('');
   let savedPayloadError = $state('');
   let libraryRevision = $state(0);
-  let folderFilesInput = $state(/** @type {HTMLInputElement | null} */(null));
-  let replaceFileInput = $state(/** @type {HTMLInputElement | null} */(null));
-  let activeReplaceDraftId = $state('');
-  let activeReplaceIndex = $state(-1);
   let payloadFileValue = $state(/** @type {Record<string, unknown> | null} */(null));
   let payloadFileName = $state('');
   let payloadFileError = $state('');
@@ -487,7 +477,12 @@
   let fileSlots = $derived(buildRealmReviewFileSlots(selectedTemplate, bundleFiles, {
     payload: attachedPayload,
     inputs: inputProjection.launchInputs,
-    edits: fileEdits
+    edits: fileEdits,
+    // a997a8a item 2: the review validates against the effective bundle
+    // version; a mismatching payload resolves content only after the explicit
+    // mismatch confirmation (the same condition the launch gate blocks on).
+    currentVersion: effectiveBundleVersion,
+    allowVersionMismatch: mismatchConfirmed
   }));
   let editedFileSlotCount = $derived(fileSlots.filter((slot) => slot.edited).length);
   let conflictedFileSlotCount = $derived(fileSlots.filter((slot) => slot.conflict).length);
@@ -551,45 +546,9 @@
     unknownAuthorities
   }));
 
-  /**
-   * Display value of one input for the review projections (effective text, or
-   * the attached fileset's paths).
-   *
-   * @param {string} inputId - Declared input id.
-   * @returns Display text.
-   */
-  function inputDisplayFor(inputId) {
-    const value = reviewInputValues[inputId];
-    if (!value) return '';
-    return value.shape === 'text' ? value.text : value.files.map((file) => file.path).join(', ');
-  }
-
   /** Review decisions for one declared pair (absent = declined). */
   function authorityDecision(agentKey, authority) {
     return authorityDecisions[buildRealmAuthorityDecisionKey(agentKey, authority)] ?? 'declined';
-  }
-
-  /** Whether one declared pair is checked (approved or trust-auto-approved). */
-  function authorityChecked(agentKey, authority) {
-    const decision = authorityDecision(agentKey, authority);
-    return decision === 'approved' || decision === 'trusted';
-  }
-
-  /** Whether one declared pair renders locked by the template trust override. */
-  function authorityTrusted(agentKey, authority) {
-    return authorityDecision(agentKey, authority) === 'trusted';
-  }
-
-  /**
-   * Resolves the source agent spec behind one preview row (the summary does
-   * not carry `modelPresetId`).
-   *
-   * @param {string} key - Template agent key.
-   * @returns {import('../../sandbox/realmCatalog/index.ts').RealmAgentSpec | null} Spec or null.
-   */
-  function agentSpecFor(key) {
-    if (!selectedTemplate) return null;
-    return selectedTemplate.agents.find((agent) => agent.key === key) ?? null;
   }
 
   function clearMessages() {
@@ -637,7 +596,6 @@
    */
   function applyTemplateSelection(templateId) {
     selectedTemplateId = templateId;
-    templateDeleteConfirming = false;
     const template = templates.find((entry) => entry.id === templateId) ?? null;
     if (!template) {
       realmName = '';
@@ -659,19 +617,13 @@
   }
 
   /**
-   * Resets the template-driven draft when the operator picks a template.
+   * Applies the operator's picker choice and clears the transient banners.
    *
-   * The selected id is read from the event target (not the bound state) so
-   * the draft always follows the operator's choice regardless of listener
-   * ordering. Input drafts re-prefill from the newly selected template's
-   * declared defaults; the seed toggle returns to its default-on position.
-   *
-   * @param {Event} [event] - Change event from the template select.
+   * @param {string} templateId - Template id read from the picker.
    */
-  function handleTemplateChange(event) {
+  function handleTemplateSelect(templateId) {
     clearMessages();
-    const select = /** @type {HTMLSelectElement | null} */ (event ? event.currentTarget : null);
-    applyTemplateSelection(select ? select.value : selectedTemplateId);
+    applyTemplateSelection(templateId);
   }
 
   /**
@@ -680,14 +632,10 @@
    * bundle, template validation, size budget, persistence rollback) are
    * surfaced inline; the picker re-resolves from the store on success.
    *
-   * @param {Event} event - Change event of the hidden file input.
+   * @param {File} file - Picked canonical bundle file.
    */
-  async function handleTemplateImport(event) {
-    const input = /** @type {HTMLInputElement | null} */ (event.currentTarget);
-    const file = input && input.files ? input.files[0] : null;
-    if (!file) return;
+  async function handleTemplateImport(file) {
     clearMessages();
-    isImporting = true;
     try {
       const payload = await file.text();
       const receipt = sandboxStore.importRealmTemplate(payload);
@@ -696,9 +644,6 @@
       notice = describeRealmTemplateImportReceipt(receipt);
     } catch (err) {
       validationError = describeRealmTemplateImportError(err);
-    } finally {
-      isImporting = false;
-      if (input) input.value = '';
     }
   }
 
@@ -727,25 +672,20 @@
   }
 
   /**
-   * Deletes the selected imported template after an inline confirmation.
-   * Deleting an import that shadowed a shipped id restores the shipped
-   * revision in place; a failed persistence write rolls the delete back and
-   * is surfaced inline.
+   * Deletes the selected imported template (the picker owns the inline
+   * confirmation). Deleting an import that shadowed a shipped id restores the
+   * shipped revision in place; a failed persistence write rolls the delete
+   * back and is surfaced inline.
    */
   function handleTemplateDelete() {
     const entry = selectedTemplateEntry;
-    if (!entry || !templateDeletePlan.allowed) return;
+    if (!entry || !entry.deletable) return;
     clearMessages();
-    if (!templateDeleteConfirming) {
-      templateDeleteConfirming = true;
-      return;
-    }
     const templateId = entry.id;
     const shadowed = entry.replacesShipped;
     try {
       sandboxStore.deleteRealmTemplate(templateId);
       catalogRevision += 1;
-      templateDeleteConfirming = false;
       if (sandboxStore.getRealmTemplateBundle(templateId) !== null) {
         // The shipped revision of this id resurfaced: keep the selection.
         applyTemplateSelection(templateId);
@@ -756,7 +696,6 @@
         ? `Deleted the imported revision of "${templateId}" — the shipped revision resolves again.`
         : `Deleted the imported template "${templateId}".`;
     } catch (err) {
-      templateDeleteConfirming = false;
       validationError = describeRealmTemplateDeleteError(err);
     }
   }
@@ -765,29 +704,27 @@
    * Records one text field edit on a format-v2 draft (dirty presence
    * semantics) and clears its inline error.
    *
-   * @param {import('./realmLauncherHelpers.ts').RealmInputDraft | null} draft - Edited draft.
+   * @param {string} inputId - Declared input id.
    * @param {string} value - New field text.
    */
-  function setInputValue(draft, value) {
-    if (!draft || typeof draft.id !== 'string') return;
+  function handleInputText(inputId, value) {
     inputDrafts = inputDrafts.map((entry) =>
-      entry.id === draft.id ? setRealmV2InputText(entry, value) : entry
+      entry.id === inputId ? setRealmV2InputText(entry, value) : entry
     );
-    clearInputError(draft.id);
+    clearInputError(inputId);
   }
 
   /**
    * Replaces the fileset of one files draft and clears its inline error.
    *
-   * @param {import('./realmLauncherHelpers.ts').RealmInputDraft | null} draft - Edited draft.
+   * @param {string} inputId - Declared input id.
    * @param {Array<{ path: string, content: string, name: string }>} files - New attachments.
    */
-  function setInputFiles(draft, files) {
-    if (!draft || typeof draft.id !== 'string') return;
+  function handleInputFiles(inputId, files) {
     inputDrafts = inputDrafts.map((entry) =>
-      entry.id === draft.id ? setRealmV2InputFiles(entry, files) : entry
+      entry.id === inputId ? setRealmV2InputFiles(entry, files) : entry
     );
-    clearInputError(draft.id);
+    clearInputError(inputId);
   }
 
   /**
@@ -806,247 +743,6 @@
   }
 
   /**
-   * Opens the shared file picker for one files draft.
-   *
-   * @param {import('./realmLauncherHelpers.ts').RealmInputDraft} draft - Target files draft.
-   */
-  function openInputFilePicker(draft) {
-    if (!draft || draft.shape !== 'files') return;
-    activeFilesDraftId = draft.id;
-    inputFilesInput?.click();
-  }
-
-  /**
-   * Reads every picked file as a text attachment and appends it to the active
-   * files draft: each attachment carries its own fileset-relative `path`
-   * (the file name, made unique) so `path` selections and `root` joins resolve
-   * deterministically.
-   *
-   * @param {Event} event - Change event of the shared file input.
-   */
-  async function handleInputFilesPick(event) {
-    const input = /** @type {HTMLInputElement | null} */ (event.currentTarget);
-    const picked = input && input.files ? [...input.files] : [];
-    const targetId = activeFilesDraftId;
-    activeFilesDraftId = '';
-    if (input) input.value = '';
-    if (picked.length === 0 || !targetId) return;
-    const draft = draftFor(targetId);
-    if (!draft || draft.shape !== 'files') return;
-    try {
-      const existing = draft.files.map((file) => file.path);
-      const attachments = [];
-      for (const file of picked) {
-        const content = await file.text();
-        const attachment = buildRealmInputAttachment(file.name, content);
-        attachments.push({
-          ...attachment,
-          path: uniqueRealmAttachmentPath(
-            [...existing, ...attachments.map((entry) => entry.path)],
-            attachment.path
-          )
-        });
-      }
-      setInputFiles(draft, [...draft.files, ...attachments]);
-    } catch (err) {
-      validationError = err && err.message ? err.message : 'The attached files could not be read.';
-    }
-  }
-
-  /**
-   * Opens the shared directory picker for one files draft. The `webkitdirectory`
-   * attribute is set imperatively so the template stays attribute-clean; picked
-   * files keep their folder-relative paths.
-   *
-   * @param {import('./realmLauncherHelpers.ts').RealmInputDraft} draft - Target files draft.
-   */
-  function openInputFolderPicker(draft) {
-    if (!draft || draft.shape !== 'files') return;
-    if (folderFilesInput) folderFilesInput.setAttribute('webkitdirectory', '');
-    activeFilesDraftId = draft.id;
-    folderFilesInput?.click();
-  }
-
-  /**
-   * Reads every file picked through the directory picker and appends it to the
-   * active files draft, preserving each file's folder-relative path (made
-   * unique); a picker that reports no relative path falls back to the file name.
-   *
-   * @param {Event} event - Change event of the hidden folder input.
-   */
-  async function handleFolderFilesPick(event) {
-    const input = /** @type {HTMLInputElement | null} */ (event.currentTarget);
-    const picked = input && input.files ? [...input.files] : [];
-    const targetId = activeFilesDraftId;
-    activeFilesDraftId = '';
-    if (input) input.value = '';
-    if (picked.length === 0 || !targetId) return;
-    const draft = draftFor(targetId);
-    if (!draft || draft.shape !== 'files') return;
-    try {
-      const existing = draft.files.map((file) => file.path);
-      const attachments = [];
-      for (const file of picked) {
-        const content = await file.text();
-        const relative = typeof file.webkitRelativePath === 'string' && file.webkitRelativePath.length > 0
-          ? file.webkitRelativePath
-          : file.name;
-        const attachment = buildRealmInputAttachment(relative, content);
-        attachments.push({
-          ...attachment,
-          path: uniqueRealmAttachmentPath(
-            [...existing, ...attachments.map((entry) => entry.path)],
-            attachment.path
-          )
-        });
-      }
-      setInputFiles(draft, [...draft.files, ...attachments]);
-    } catch (err) {
-      validationError = err && err.message ? err.message : 'The attached folder could not be read.';
-    }
-  }
-
-  /**
-   * Opens the hidden single-file picker to replace one attachment in place: the
-   * fileset path (the identity placements resolve against) is kept, only the
-   * body and source name are swapped.
-   *
-   * @param {import('./realmLauncherHelpers.ts').RealmInputDraft} draft - Target files draft.
-   * @param {number} index - Attachment index.
-   */
-  function openReplacementFilePicker(draft, index) {
-    if (!draft || draft.shape !== 'files') return;
-    activeFilesDraftId = draft.id;
-    activeReplaceIndex = index;
-    replaceFileInput?.click();
-  }
-
-  /**
-   * Replaces the active attachment's body with the picked file (path preserved).
-   *
-   * @param {Event} event - Change event of the hidden replace input.
-   */
-  async function handleReplacementFilePick(event) {
-    const input = /** @type {HTMLInputElement | null} */ (event.currentTarget);
-    const file = input && input.files ? input.files[0] : null;
-    const targetId = activeFilesDraftId;
-    const index = activeReplaceIndex;
-    activeFilesDraftId = '';
-    activeReplaceIndex = -1;
-    if (input) input.value = '';
-    if (!file || !targetId || index < 0) return;
-    const draft = draftFor(targetId);
-    if (!draft || draft.shape !== 'files' || index >= draft.files.length) return;
-    try {
-      const content = await file.text();
-      setInputFiles(draft, draft.files.map((entry, position) =>
-        position === index ? { ...entry, content, name: file.name } : entry
-      ));
-    } catch (err) {
-      validationError = err && err.message ? err.message : 'The replacement file could not be read.';
-    }
-  }
-
-  /**
-   * Updates one attachment's fileset path (the identity `path` selections and
-   * `root` placements resolve against).
-   *
-   * @param {import('./realmLauncherHelpers.ts').RealmInputDraft} draft - Files draft.
-   * @param {number} index - Attachment index.
-   * @param {string} path - New fileset-relative path.
-   */
-  function setAttachmentPath(draft, index, path) {
-    if (!draft || draft.shape !== 'files') return;
-    setInputFiles(draft, draft.files.map((file, position) =>
-      position === index ? { ...file, path } : file
-    ));
-  }
-
-  /**
-   * Updates one attachment's body text.
-   *
-   * @param {import('./realmLauncherHelpers.ts').RealmInputDraft} draft - Files draft.
-   * @param {number} index - Attachment index.
-   * @param {string} content - New body.
-   */
-  function setAttachmentContent(draft, index, content) {
-    if (!draft || draft.shape !== 'files') return;
-    setInputFiles(draft, draft.files.map((file, position) =>
-      position === index ? { ...file, content } : file
-    ));
-  }
-
-  /**
-   * Removes one attachment from a files draft.
-   *
-   * @param {import('./realmLauncherHelpers.ts').RealmInputDraft} draft - Files draft.
-   * @param {number} index - Attachment index.
-   */
-  function removeAttachment(draft, index) {
-    if (!draft || draft.shape !== 'files') return;
-    setInputFiles(draft, draft.files.filter((_, position) => position !== index));
-  }
-
-  /**
-   * Resolves the review draft behind one declared input id (history editing
-   * renders an inline editor per referenced input).
-   *
-   * @param {string} inputId - Declared input id.
-   * @returns The draft, or null when the input is not in the review form.
-   */
-  function draftFor(inputId) {
-    return inputDrafts.find((draft) => draft.id === inputId) ?? null;
-  }
-
-  /**
-   * Placement destinations of one input draft (root/path mapping rendered by
-   * the fileset editor).
-   *
-   * @param {import('./realmLauncherHelpers.ts').RealmInputDraft} draft - Input draft.
-   * @returns Derived placement destinations.
-   */
-  function placementDestinationsFor(draft) {
-    return buildRealmInputPlacementDestinations(draft ? draft.usage : null);
-  }
-
-  /**
-   * Per-file attachment rows (size + resolved placement destinations) of one
-   * files draft.
-   *
-   * @param {import('./realmLauncherHelpers.ts').RealmInputDraft} draft - Input draft.
-   * @returns Per-file attachment views.
-   */
-  function attachmentViewsFor(draft) {
-    if (!draft || draft.shape !== 'files') return [];
-    return buildRealmFileAttachmentViews(draft, placementDestinationsFor(draft));
-  }
-
-  /**
-   * Display destination of one placement: a `path` writes its declared path, a
-   * `root` renders the prefix with a `<file path>` join marker.
-   *
-   * @param {import('./realmHydrationHelpers.ts').RealmInputPlacementDestination} placement - Placement destination.
-   * @returns Display text.
-   */
-  function placementPreview(placement) {
-    if (!placement || typeof placement.destination !== 'string') return '';
-    if (placement.mode !== 'root') return placement.destination;
-    const prefix = placement.destination.endsWith('/') ? placement.destination : `${placement.destination}/`;
-    return `${prefix}<file path>`;
-  }
-
-  /**
-   * Counts editable history entries in one editor projection (the template
-   * summary cannot host an arrow-function expression).
-   *
-   * @param {import('./realmReviewHelpers.ts').RealmHistoryEditorProjection} projection - History projection.
-   * @returns Number of entries with at least one source-editable part.
-   */
-  function countEditableHistoryEntries(projection) {
-    return (projection?.entries ?? []).filter((entry) => entry.editable).length;
-  }
-
-  /**
    * Resets one input draft to its template declaration (untouched presence
    * semantics: the reset field is omitted from the explicit payload again).
    *
@@ -1057,7 +753,7 @@
    *
    * @param {import('./realmLauncherHelpers.ts').RealmInputDraft} draft - Draft to reset.
    */
-  function resetInputDraft(draft) {
+  function handleInputReset(draft) {
     const declaration = selectedTemplate?.inputs?.find((input) => input.id === draft.id) ?? null;
     if (!declaration) return;
     const payloadProvidesValue = payloadInputIds.has(draft.id);
@@ -1069,6 +765,25 @@
     clearInputError(draft.id);
   }
 
+  /**
+   * Surfaces one inline input-reading failure (attachment file/folder text).
+   *
+   * @param {string} message - Failure text.
+   */
+  function reportInputError(message) {
+    validationError = message;
+  }
+
+  /**
+   * Records the template-seed toggle (on by default).
+   *
+   * @param {boolean} checked - New toggle state.
+   */
+  function handleSeedToggle(checked) {
+    seedAfterLaunch = checked;
+    clearMessages();
+  }
+
   function addSeedRow() {
     seedRows = [...seedRows, { path: '', content: '' }];
     clearMessages();
@@ -1077,15 +792,13 @@
   // ---- Wave U review handlers (ticket 458e727) ----------------------------
 
   /**
-   * Switches the payload attachment source (`none` / `candidate` / `file`).
-   * Switching away from a candidate/file detaches the current payload; the
-   * review acknowledgement is re-armed because the attached content changed.
+   * Switches the payload attachment source (`none` / `candidate` / `saved` /
+   * `file`). Switching away from a candidate/file detaches the current payload;
+   * the review acknowledgement is re-armed because the attached content changed.
    *
-   * @param {Event} event - Change event from the payload source select.
+   * @param {'none' | 'candidate' | 'saved' | 'file'} value - New source kind.
    */
-  function handlePayloadSourceChange(event) {
-    const select = /** @type {HTMLSelectElement | null} */ (event ? event.currentTarget : null);
-    const value = select ? select.value : 'none';
+  function handlePayloadSourceChange(value) {
     clearMessages();
     reviewAcknowledged = false;
     mismatchConfirmed = false;
@@ -1120,12 +833,9 @@
    * failures are surfaced inline; structural validation happens against the
    * effective template before launch ({@link previewRealmReviewPackage}).
    *
-   * @param {Event} event - Change event of the hidden payload file input.
+   * @param {File} file - Picked package file.
    */
-  async function handlePayloadFilePick(event) {
-    const input = /** @type {HTMLInputElement | null} */ (event.currentTarget);
-    const file = input && input.files ? input.files[0] : null;
-    if (!file) return;
+  async function handlePayloadFile(file) {
     clearMessages();
     payloadSourceKind = 'file';
     payloadFileName = file.name;
@@ -1143,8 +853,6 @@
       payloadFileValue = parsed.value;
     } catch (err) {
       payloadFileError = err && err.message ? err.message : 'The payload file could not be read.';
-    } finally {
-      if (input) input.value = '';
     }
   }
 
@@ -1391,11 +1099,10 @@
    * Toggles the "trust this template" decision persisted on a successful
    * launch (`trustAuthorities: true`).
    *
-   * @param {Event} event - Change event of the trust checkbox.
+   * @param {boolean} checked - New toggle state.
    */
-  function handleTrustToggle(event) {
-    const input = /** @type {HTMLInputElement | null} */ (event ? event.currentTarget : null);
-    trustTemplate = input ? input.checked : false;
+  function handleTrustToggle(checked) {
+    trustTemplate = checked;
     reviewAcknowledged = false;
     clearMessages();
   }
@@ -1415,13 +1122,18 @@
    * Confirms (or revokes) the explicit template-version mismatch override for
    * the attached payload.
    *
-   * @param {Event} event - Change event of the mismatch confirmation checkbox.
+   * @param {boolean} checked - New confirmation state.
    */
-  function handleMismatchConfirm(event) {
-    const input = /** @type {HTMLInputElement | null} */ (event ? event.currentTarget : null);
-    mismatchConfirmed = input ? input.checked : false;
+  function handleMismatchConfirm(checked) {
+    mismatchConfirmed = checked;
     reviewAcknowledged = false;
     clearMessages();
+  }
+
+  /** Records one saved-payload name edit and clears the save error. */
+  function handleSavedName(value) {
+    savedPayloadName = value;
+    savedPayloadError = '';
   }
 
   function openFilesDialog() {
@@ -1668,88 +1380,16 @@
 
     {#if step === 1}
       <form class="launcher-form" onsubmit={handleLaunch} novalidate>
-        <div class="form-group">
-          <label for="realm-template-select">Template <span class="req">*</span></label>
-          <div class="template-picker-row">
-            <select
-              id="realm-template-select"
-              bind:value={selectedTemplateId}
-              onchange={handleTemplateChange}
-              class="select-field"
-            >
-              <option value="">Select a template…</option>
-              {#each catalogEntries as entry (entry.id)}
-                <option value={entry.id}>{entry.name} — {entry.sourceLabel}</option>
-              {/each}
-            </select>
-            <div class="template-picker-actions">
-              <button
-                type="button"
-                class="btn-secondary btn-xs"
-                onclick={() => templateImportInput?.click()}
-                disabled={isImporting}
-              >
-                {isImporting ? 'Importing…' : 'Import…'}
-              </button>
-              <button
-                type="button"
-                class="btn-secondary btn-xs"
-                onclick={handleTemplateExport}
-                disabled={!selectedTemplate}
-              >
-                Export
-              </button>
-            </div>
-          </div>
-          <input
-            bind:this={templateImportInput}
-            class="visually-hidden"
-            type="file"
-            accept="application/json,.json"
-            aria-label="Import realm template bundle"
-            onchange={handleTemplateImport}
-          />
-          {#if selectedTemplateEntry}
-            <span class="template-source-line">
-              Source:
-              <span class="source-badge" class:source-imported={selectedTemplateEntry.source === 'imported'}>
-                {selectedTemplateEntry.sourceLabel}
-              </span>
-              {#if selectedTemplateEntry.templateVersion}
-                <span class="template-version font-mono">{selectedTemplateEntry.templateVersion}</span>
-              {/if}
-            </span>
-          {/if}
-          {#if selectedTemplate}
-            <span class="field-hint">{selectedTemplate.description}</span>
-          {:else}
-            <span class="field-hint">
-              Shipped templates ship with the sandbox; import a canonical bundle JSON to add your own. The agent
-              preview appears once one is selected.
-            </span>
-          {/if}
-          {#if selectedTemplateEntry && selectedTemplateEntry.deletable}
-            {#if templateDeleteConfirming}
-              <div class="template-delete-confirm">
-                <p class="template-delete-copy">{templateDeletePlan.confirmCopy}</p>
-                <div class="template-picker-actions">
-                  <button type="button" class="btn-secondary btn-xs" onclick={() => templateDeleteConfirming = false}>
-                    Cancel
-                  </button>
-                  <button type="button" class="btn-danger btn-xs" onclick={handleTemplateDelete}>
-                    {templateDeletePlan.confirmLabel}
-                  </button>
-                </div>
-              </div>
-            {:else}
-              <div class="template-picker-actions">
-                <button type="button" class="btn-danger-outline btn-xs" onclick={handleTemplateDelete}>
-                  Delete Import…
-                </button>
-              </div>
-            {/if}
-          {/if}
-        </div>
+        <RealmLauncherTemplatePicker
+          entries={catalogEntries}
+          selectedTemplateId={selectedTemplateId}
+          {selectedTemplate}
+          {selectedTemplateEntry}
+          onselect={handleTemplateSelect}
+          onimport={handleTemplateImport}
+          onexport={handleTemplateExport}
+          ondelete={handleTemplateDelete}
+        />
 
         {#if !preview.ok && selectedTemplate}
           <div class="error-banner" role="alert">
@@ -1788,840 +1428,87 @@
             />
           </div>
 
-          {#if inputDrafts.length > 0}
-            <div class="settings-section-card">
-              <div class="section-card-header">
-                <div class="section-title-wrap">
-                  <span class="section-badge">Inputs</span>
-                  <h4 class="section-title">Hydration workspace — inputs ({inputDrafts.length})</h4>
-                </div>
-              </div>
-              <p class="field-hint">
-                Launch-level values shared by every member that references them. An untouched field keeps the
-                attached payload's value, then the template default; an edited field is sent explicitly (clearing a
-                required field blocks the launch). Files inputs carry one or more attached files (or a whole folder),
-                each with its own fileset-relative path and root-mapped placement destinations.
-              </p>
-              <input
-                bind:this={inputFilesInput}
-                class="visually-hidden"
-                type="file"
-                multiple
-                aria-label="Attach files to the selected template input"
-                onchange={handleInputFilesPick}
-              />
-              <input
-                bind:this={folderFilesInput}
-                class="visually-hidden"
-                type="file"
-                multiple
-                aria-label="Attach a folder to the selected template input"
-                onchange={handleFolderFilesPick}
-              />
-              <input
-                bind:this={replaceFileInput}
-                class="visually-hidden"
-                type="file"
-                aria-label="Replace the selected attached file"
-                onchange={handleReplacementFilePick}
-              />
-              {#each inputDrafts as draft (draft.id)}
-                <div class="form-group">
-                  <label for={`realm-input-${draft.id}`}>
-                    {draft.label}{#if draft.required}<span class="req"> *</span>{/if}
-                    <span class="shape-badge">{draft.shape === 'files' ? 'files' : 'text'}</span>
-                  </label>
-                  {#if draft.shape === 'files'}
-                    <div class="fileset-field">
-                      <div class="input-actions">
-                        <button type="button" class="btn-secondary btn-xs" onclick={() => openInputFilePicker(draft)}>
-                          Attach files…
-                        </button>
-                        <button type="button" class="btn-secondary btn-xs" onclick={() => openInputFolderPicker(draft)}>
-                          Attach folder…
-                        </button>
-                        {#if draft.files.length > 0}
-                          <span class="input-dirty-note">
-                            {draft.files.length} file{draft.files.length === 1 ? '' : 's'} attached
-                          </span>
-                        {/if}
-                      </div>
-                      {#if draft.files.length === 0}
-                        <span class="field-hint">No files attached — an absent optional fileset writes nothing.</span>
-                      {/if}
-                      {#if placementDestinationsFor(draft).length > 0}
-                        <ul class="placement-map">
-                          {#each placementDestinationsFor(draft) as placement, placementIndex (placementIndex)}
-                            <li class="placement-row">
-                              <span class="placement-mode">{placement.mode === 'root' ? 'root' : 'path'}</span>
-                              <span class="placement-target">{placement.targetLabel}</span>
-                              <span class="placement-destination font-mono">
-                                {placementPreview(placement)}
-                              </span>
-                            </li>
-                          {/each}
-                        </ul>
-                      {/if}
-                      {#each attachmentViewsFor(draft) as view (view.index)}
-                        <div class="attachment-row">
-                          <div class="attachment-head">
-                            <input
-                              type="text"
-                              class="input-field font-mono"
-                              value={draft.files[view.index].path}
-                              aria-label={`Attachment ${view.index + 1} fileset path`}
-                              oninput={(event) => setAttachmentPath(draft, view.index, event.currentTarget.value)}
-                            />
-                            <button
-                              type="button"
-                              class="btn-secondary btn-xs"
-                              onclick={() => openReplacementFilePicker(draft, view.index)}
-                              aria-label={`Replace attachment ${view.index + 1}`}
-                            >
-                              Replace…
-                            </button>
-                            <button
-                              type="button"
-                              class="btn-row-remove"
-                              onclick={() => removeAttachment(draft, view.index)}
-                              aria-label={`Remove attachment ${view.index + 1}`}
-                            >
-                              Remove
-                            </button>
-                          </div>
-                          <span class="field-hint">
-                            {view.sizeLabel}{view.name ? ` · from ${view.name}` : ' · typed fileset path'}
-                          </span>
-                          {#if view.destinations.length > 0}
-                            <span class="field-hint attachment-destinations">
-                              Writes:
-                              {#each view.destinations as destination, destinationIndex (destinationIndex)}
-                                <span class="font-mono">{destination}</span>{destinationIndex < view.destinations.length - 1 ? ', ' : ''}
-                              {/each}
-                            </span>
-                          {/if}
-                          <details class="attachment-content">
-                            <summary>Content ({draft.files[view.index].content.length} chars)</summary>
-                            <textarea
-                              rows="3"
-                              class="textarea-field font-mono"
-                              value={draft.files[view.index].content}
-                              aria-label={`Attachment ${view.index + 1} content`}
-                              oninput={(event) => setAttachmentContent(draft, view.index, event.currentTarget.value)}
-                            ></textarea>
-                          </details>
-                        </div>
-                      {/each}
-                    </div>
-                  {:else if draft.multiline}
-                    <textarea
-                      id={`realm-input-${draft.id}`}
-                      value={inputDisplayFor(draft.id)}
-                      rows="3"
-                      class="textarea-field"
-                      disabled={!isRealmV2InputEditable(draft)}
-                      oninput={(event) => setInputValue(draft, event.currentTarget.value)}
-                    ></textarea>
-                  {:else}
-                    <input
-                      id={`realm-input-${draft.id}`}
-                      type="text"
-                      value={inputDisplayFor(draft.id)}
-                      class="input-field"
-                      disabled={!isRealmV2InputEditable(draft)}
-                      oninput={(event) => setInputValue(draft, event.currentTarget.value)}
-                    />
-                  {/if}
-                  {#if !draft.dirty && payloadInputIds.has(draft.id)}
-                    <span class="field-hint payload-input-note">
-                      Attached payload value — edit the field to override it explicitly.
-                    </span>
-                  {/if}
-                  {#if draft.brief}
-                    <span class="field-hint hydration-brief">Brief: {draft.brief}</span>
-                  {/if}
-                  {#if draft.help}
-                    <span class="field-hint">{draft.help}</span>
-                  {/if}
-                  {#if draft.shape === 'text' && !draft.defaultResolved}
-                    <span class="field-hint input-warning">
-                      The template's default file is not in the launch bundle — the field starts empty.
-                    </span>
-                  {/if}
-                  <div class="input-actions">
-                    <button type="button" class="btn-secondary btn-xs" onclick={() => resetInputDraft(draft)}>
-                      {draft.shape === 'files' ? 'Clear attached files' : 'Reset to template default'}
-                    </button>
-                    {#if draft.dirty}
-                      <span class="input-dirty-note">Edited — sent explicitly at launch.</span>
-                    {/if}
-                  </div>
-                  <div class="usage-map">
-                    <span class="usage-summary">Usage: {draft.usage.summary}</span>
-                    {#if draft.usage.sites.length > 0}
-                      <ul class="usage-list">
-                        {#each draft.usage.sites as site, index (index)}
-                          <li class="usage-row">
-                            <span class="usage-kind">{site.kind}</span>
-                            <span class="usage-label">{site.label}</span>
-                            {#if site.path}
-                              <span class="usage-path font-mono">{site.path}</span>
-                            {/if}
-                            <span class="usage-detail">{site.detail}</span>
-                          </li>
-                        {/each}
-                      </ul>
-                    {/if}
-                  </div>
-                  {#if inputErrors[draft.id]}
-                    <span class="input-error" role="alert">{inputErrors[draft.id]}</span>
-                  {/if}
-                </div>
-              {/each}
-            </div>
-          {/if}
+          <RealmLauncherInputsPanel
+            drafts={inputDrafts}
+            {inputErrors}
+            effectiveInputs={reviewInputValues}
+            {payloadInputIds}
+            ontext={handleInputText}
+            onfiles={handleInputFiles}
+            onreset={handleInputReset}
+            onerror={reportInputError}
+          />
 
-          {#if selectedTemplate}
-            <div class="settings-section-card">
-              <div class="section-card-header">
-                <div class="section-title-wrap">
-                  <span class="section-badge">Payload</span>
-                  <h4 class="section-title">Instance payload (attach at launch)</h4>
-                </div>
-                {#if attachedPayload}
-                  <span class="payload-attached-badge">attached</span>
-                {/if}
-              </div>
-              <p class="field-hint">
-                The reviewed instance content: declared input values (<code>text</code> or <code>files</code>
-                shape). Attach a submitted session candidate, a named payload from the session library, or a local
-                <code>{buildRealmPayloadFilename(selectedTemplateId)}</code> file. The package is validated against
-                the effective template version before any launch; candidates and saved payloads are session-only.
-                Edited input values win per input over the attached package.
-              </p>
-              <div class="payload-source-row">
-                <select
-                  class="select-field"
-                  value={payloadSourceKind}
-                  onchange={handlePayloadSourceChange}
-                  aria-label="Payload attachment source"
-                >
-                  <option value="none">No payload attached</option>
-                  <option value="candidate" disabled={pendingPayloads.length === 0}>Submitted candidate…</option>
-                  <option value="saved" disabled={savedPayloads.length === 0}>Saved payload…</option>
-                  <option value="file">Local payload file…</option>
-                </select>
-                {#if payloadSourceKind === 'file'}
-                  <button type="button" class="btn-secondary btn-xs" onclick={() => payloadFileInput?.click()}>
-                    Choose file…
-                  </button>
-                {/if}
-                {#if attachedPayload}
-                  <button type="button" class="btn-danger-outline btn-xs" onclick={detachPayload}>Detach</button>
-                {/if}
-              </div>
-              <input
-                bind:this={payloadFileInput}
-                class="visually-hidden"
-                type="file"
-                accept="application/json,.json"
-                aria-label="Attach instance payload file"
-                onchange={handlePayloadFilePick}
-              />
+          <RealmLauncherPayloadPanel
+            templateId={selectedTemplateId}
+            bundleVersion={effectiveBundleVersion}
+            sourceKind={payloadSourceKind}
+            candidateId={payloadCandidateId}
+            savedId={payloadSavedId}
+            {pendingPayloads}
+            {savedPayloads}
+            {attachedPayload}
+            sourceLabel={payloadSourceLabel}
+            fileError={payloadFileError}
+            {payloadPreview}
+            {mismatchConfirmed}
+            {editedFileSlotCount}
+            savedName={savedPayloadName}
+            savedError={savedPayloadError}
+            pinView={hydrationPinView}
+            onsourcechange={handlePayloadSourceChange}
+            onfile={handlePayloadFile}
+            onattachcandidate={attachPayloadCandidate}
+            ondownloadcandidate={downloadPayloadCandidate}
+            onclearcandidate={clearPayloadCandidate}
+            onattachsaved={attachSavedPayload}
+            ondownloadsaved={downloadSavedPayload}
+            ondeletesaved={deleteSavedPayload}
+            ondetach={detachPayload}
+            onmismatch={handleMismatchConfirm}
+            onsavename={handleSavedName}
+            onsave={saveCurrentPayload}
+          />
 
-              {#if payloadSourceKind === 'candidate'}
-                {#if pendingPayloads.length === 0}
-                  <p class="payload-status payload-empty">
-                    No session candidates are pending for this template — submit one with the hydration tool, or
-                    attach a saved or local payload.
-                  </p>
-                {:else}
-                  {#each pendingPayloads as candidate (candidate.templateId)}
-                    <div class="payload-candidate">
-                      <div class="payload-candidate-info">
-                        <span class="payload-candidate-title font-mono">{candidate.templateVersion}</span>
-                        <span class="field-hint">{candidate.summary}</span>
-                      </div>
-                      <div class="template-picker-actions">
-                        <button
-                          type="button"
-                          class="btn-secondary btn-xs"
-                          class:active-candidate={payloadCandidateId === candidate.templateId && Boolean(attachedPayload)}
-                          onclick={() => attachPayloadCandidate(candidate)}
-                        >
-                          {payloadCandidateId === candidate.templateId && attachedPayload ? 'Attached' : 'Attach'}
-                        </button>
-                        <button type="button" class="btn-secondary btn-xs" onclick={() => downloadPayloadCandidate(candidate)}>
-                          Download
-                        </button>
-                        <button type="button" class="btn-danger-outline btn-xs" onclick={() => clearPayloadCandidate(candidate)}>
-                          Clear…
-                        </button>
-                      </div>
-                    </div>
-                  {/each}
-                {/if}
-              {/if}
+          <RealmLauncherSeedPreview
+            {seedSummary}
+            {directiveReview}
+            {fileSlots}
+            {editedFileSlotCount}
+            {conflictedFileSlotCount}
+            {attachedPayload}
+            {seedAfterLaunch}
+            onseedtoggle={handleSeedToggle}
+            onopenfiles={openFilesDialog}
+          />
 
-              {#if payloadSourceKind === 'saved'}
-                {#if savedPayloads.length === 0}
-                  <p class="payload-status payload-empty">
-                    No saved payloads exist for this template yet — assemble inputs and save one below, or attach a
-                    local payload file.
-                  </p>
-                {:else}
-                  {#each savedPayloads as entry (entry.id)}
-                    <div class="payload-candidate">
-                      <div class="payload-candidate-info">
-                        <span class="payload-candidate-title">
-                          {entry.name}
-                          <span class="template-version font-mono">{entry.digest}</span>
-                        </span>
-                        <span class="field-hint">{entry.inputSummary} · saved {formatRealmLaunchTimestamp(entry.savedAt)}</span>
-                      </div>
-                      <div class="template-picker-actions">
-                        <button
-                          type="button"
-                          class="btn-secondary btn-xs"
-                          class:active-candidate={payloadSavedId === entry.id && Boolean(attachedPayload)}
-                          onclick={() => attachSavedPayload(entry)}
-                        >
-                          {payloadSavedId === entry.id && attachedPayload ? 'Attached' : 'Attach'}
-                        </button>
-                        <button type="button" class="btn-secondary btn-xs" onclick={() => downloadSavedPayload(entry)}>
-                          Download
-                        </button>
-                        <button type="button" class="btn-danger-outline btn-xs" onclick={() => deleteSavedPayload(entry)}>
-                          Delete…
-                        </button>
-                      </div>
-                    </div>
-                  {/each}
-                {/if}
-              {/if}
+          <RealmLauncherAgentsPreview
+            {selectedTemplate}
+            rows={preview.rows}
+            {bundleFiles}
+            effectiveInputs={reviewInputValues}
+            drafts={inputDrafts}
+            oneditinput={handleInputText}
+          />
 
-              {#if payloadFileError}
-                <p class="payload-error" role="alert">{payloadFileError}</p>
-              {/if}
-              {#if attachedPayload}
-                <p class="payload-status">
-                  Attached: {payloadSourceLabel}{#if payloadPreview.mismatch} — pins a different template version
-                  (current {effectiveBundleVersion ?? 'unknown'}){/if}.
-                </p>
-                {#if payloadPreview.mismatch}
-                  <label class="seed-toggle">
-                    <input type="checkbox" checked={mismatchConfirmed} onchange={handleMismatchConfirm} />
-                    <span>Allow the template-version mismatch for this payload</span>
-                  </label>
-                {/if}
-              {:else if payloadSourceKind === 'file'}
-                <p class="payload-status">No payload file read yet — choose a package JSON file.</p>
-              {/if}
-              {#if editedFileSlotCount > 0}
-                <p class="payload-status">
-                  {editedFileSlotCount} reviewed file slot{editedFileSlotCount === 1 ? '' : 's'} assembled into the
-                  launch package.
-                </p>
-              {/if}
+          <RealmLauncherAuthoritiesPanel
+            rows={authorityAgents}
+            {unknownAuthorities}
+            {trustView}
+            {trustTemplate}
+            decisionFor={authorityDecision}
+            ondecision={setAuthorityDecision}
+            ontrusttoggle={handleTrustToggle}
+            oncleartrust={clearTemplateTrust}
+          />
 
-              <div class="save-payload-row">
-                <input
-                  type="text"
-                  class="input-field grow"
-                  placeholder="Name this payload (e.g. Act 1 briefs)"
-                  aria-label="Saved payload name"
-                  bind:value={savedPayloadName}
-                  oninput={() => savedPayloadError = ''}
-                />
-                <button type="button" class="btn-secondary btn-xs" onclick={saveCurrentPayload}>
-                  Save payload…
-                </button>
-              </div>
-              {#if savedPayloadError}
-                <p class="payload-error" role="alert">{savedPayloadError}</p>
-              {/if}
-
-              <div class="pin-card">
-                <div class="pin-row">
-                  <span class="pin-label">Template pin</span>
-                  <span class="pin-value font-mono">{hydrationPinView.pin || 'unresolved'}</span>
-                </div>
-                <div class="pin-row">
-                  <span class="pin-label">Payload digest</span>
-                  <span class="pin-value font-mono" class:pin-value-missing={!hydrationPinView.digestOk}>
-                    {hydrationPinView.digestOk ? hydrationPinView.digest : (hydrationPinView.digestError || 'no payload')}
-                  </span>
-                </div>
-                <div class="pin-row">
-                  <span class="pin-label">Content</span>
-                  <span class="pin-value">
-                    {hydrationPinView.sourceLabel} · {hydrationPinView.inputCount} input{hydrationPinView.inputCount === 1 ? '' : 's'}{#if hydrationPinView.fileCount > 0} · {hydrationPinView.fileCount} file{hydrationPinView.fileCount === 1 ? '' : 's'}{/if}
-                  </span>
-                </div>
-              </div>
-            </div>
-          {/if}
-
-          {#if seedSummary.declaresSeed}
-            <div class="settings-section-card">
-              <div class="section-card-header">
-                <div class="section-title-wrap">
-                  <span class="section-badge">Seed</span>
-                  <h4 class="section-title">Template seed</h4>
-                </div>
-              </div>
-              <p class="seed-summary-line">
-                {seedSummary.placementCount ?? seedSummary.fileCount}
-                placement{(seedSummary.placementCount ?? seedSummary.fileCount) === 1 ? '' : 's'} write at launch into
-                {seedSummary.targetLabels.length > 0 ? seedSummary.targetLabels.join(', ') : 'no target'}{#if seedSummary.directiveCount} · {seedSummary.directiveCount} directive{seedSummary.directiveCount === 1 ? '' : 's'}{/if}.
-              </p>
-              {#if directiveReview.entries.length > 0}
-                <div class="directive-review">
-                  <span class="slot-list-title">Directives ({directiveReview.entries.length})</span>
-                  {#each directiveReview.entries as entry, index (index)}
-                    <div class="directive-row">
-                      <span class="directive-target">
-                        → {entry.targetLabel}
-                        {#if entry.source === 'input'}
-                          <span class="field-hint">bound to "{entry.inputLabel}"</span>
-                        {:else}
-                          <span class="field-hint">literal directive</span>
-                        {/if}
-                      </span>
-                      {#if entry.error}
-                        <span class="input-error" role="alert">{entry.error}</span>
-                      {:else if entry.text}
-                        <span class="seed-directive-preview">“{entry.text}”</span>
-                      {:else}
-                        <span class="field-hint">resolves empty — this directive delivers nothing.</span>
-                      {/if}
-                    </div>
-                  {/each}
-                </div>
-              {:else if seedSummary.directive}
-                <p class="seed-summary-line">
-                  First directive → {seedSummary.directive.targetLabel}:
-                  <span class="seed-directive-preview">“{seedSummary.directive.preview}”</span>
-                </p>
-              {/if}
-              {#if fileSlots.length > 0}
-                <div class="slot-list">
-                  <span class="slot-list-title">
-                    Destinations ({fileSlots.length}){#if editedFileSlotCount > 0} · {editedFileSlotCount} edited{/if}{#if conflictedFileSlotCount > 0} · {conflictedFileSlotCount} conflict{conflictedFileSlotCount === 1 ? '' : 's'}{/if}{#if attachedPayload} · payload attached{/if}
-                  </span>
-                  <div class="template-picker-actions">
-                    <button type="button" class="btn-secondary btn-xs" onclick={openFilesDialog}>
-                      Review file contents…
-                    </button>
-                  </div>
-                  <span class="field-hint">
-                    Every declared placement with its resolved content. Bundle-file destinations ship in the bundle;
-                    input destinations resolve from the launch inputs (then the attached payload) and are edited at
-                    the input field above.
-                  </span>
-                </div>
-              {/if}
-              <label class="seed-toggle">
-                <input type="checkbox" bind:checked={seedAfterLaunch} />
-                <span>Seed after launch</span>
-              </label>
-              <span class="field-hint">
-                On by default. Turn it off to launch without the template seed and seed manually afterwards.
-              </span>
-              {#if attachedPayload && !seedAfterLaunch}
-                <span class="field-hint payload-input-note">
-                  Seeding is off — the attached payload's file content will not be written at launch.
-                </span>
-              {/if}
-            </div>
-          {/if}
-
-          <div class="settings-section-card">
-            <div class="section-card-header">
-              <div class="section-title-wrap">
-                <span class="section-badge">Preview</span>
-                <h4 class="section-title">Agents ({preview.rows.length})</h4>
-              </div>
-            </div>
-
-            {#each preview.rows as row (row.key)}
-              {@const spec = agentSpecFor(row.key)}
-              {@const binding = describeRealmPresetBinding(spec?.modelPresetId, catalogPresets, defaultPresetId)}
-              {@const promptPreview = buildRealmPromptPreview(spec?.prompt ?? [], selectedTemplate?.inputs, { inputs: reviewInputValues, bundleFiles })}
-              {@const promptPartViews = buildRealmPartProvenanceViews(spec?.prompt ?? [], selectedTemplate?.inputs, { inputs: reviewInputValues, bundleFiles })}
-              {@const historyEditor = buildRealmHistoryEditorViews(spec, selectedTemplate?.inputs, { inputs: reviewInputValues, bundleFiles })}
-              {@const disclosureRows = buildRealmAgentDisclosureRows(spec, binding.label)}
-              <div class="agent-preview-card">
-                <div class="agent-preview-head">
-                  <div class="agent-preview-identity">
-                    <span class="agent-preview-name">{row.name}</span>
-                    <span class="agent-preview-id font-mono">{row.idPattern}</span>
-                  </div>
-                  <div class="agent-preview-badges">
-                    {#if row.privileged}
-                      <span class="badge badge-sudo" title="Universal Administrative / Sudo Authority">⚡ sudo</span>
-                    {:else}
-                      <span class="badge badge-muted">unprivileged</span>
-                    {/if}
-                    {#if row.wildcard}
-                      <span class="badge badge-wildcard" title="Effective grants include the wildcard '*'">
-                        * wildcard{row.wildcardSource === 'privileged' ? ' · from privilege' : ''}
-                      </span>
-                    {/if}
-                    {#if spec && Array.isArray(spec.authorities) && spec.authorities.length > 0}
-                      <span class="badge badge-authority" title="Declared publishing-authority requests; approved per launch below">
-                        {spec.authorities.length} declared authorit{spec.authorities.length === 1 ? 'y' : 'ies'}
-                      </span>
-                    {/if}
-                  </div>
-                </div>
-                <p class="agent-preview-role">{row.role}</p>
-                <div class="agent-preview-meta">
-                  <div class="meta-line">
-                    <span class="meta-label">Preset</span>
-                    <span class="meta-value font-mono">{row.preset ?? 'custom list'}</span>
-                  </div>
-                  <div class="meta-line">
-                    <span class="meta-label">Model binding</span>
-                    <span class="meta-value font-mono">
-                      {binding.label}{binding.isDefault ? ' · active default' : ''}{binding.known ? '' : ' ⚠'}
-                    </span>
-                  </div>
-                </div>
-
-                <div class="disclosure-grid">
-                  {#each disclosureRows as disclosure (disclosure.key)}
-                    <div class="meta-line disclosure-line">
-                      <span class="meta-label">{disclosure.label}</span>
-                      <span class="meta-value disclosure-value" class:disclosure-empty={!disclosure.present}>
-                        {disclosure.value}
-                      </span>
-                    </div>
-                  {/each}
-                </div>
-
-                {#if row.unrecognized.length > 0}
-                  <p class="unrecognized-note">
-                    Unrecognized grants: {row.unrecognized.join(', ')}
-                  </p>
-                {/if}
-
-                <div class="grant-groups">
-                  <details class="grant-details">
-                    <summary>Mutating tools ({row.mutating.length})</summary>
-                    <div class="chip-wrap">
-                      {#each row.mutating as tool (tool)}
-                        <span class="tool-chip mutating font-mono">{tool}</span>
-                      {/each}
-                    </div>
-                  </details>
-                  <details class="grant-details">
-                    <summary>Read-only tools ({row.readOnly.length})</summary>
-                    <div class="chip-wrap">
-                      {#each row.readOnly as tool (tool)}
-                        <span class="tool-chip readonly font-mono">{tool}</span>
-                      {/each}
-                    </div>
-                  </details>
-                </div>
-                {#if row.wildcard}
-                  <p class="grant-note">
-                    Wildcard capability: the classification above covers the full canonical tool vocabulary
-                    ({row.mutating.length} mutating, {row.readOnly.length} read-only).
-                  </p>
-                {/if}
-
-                <details class="prompt-preview">
-                  <summary>Composed prompt preview — {promptPartViews.parts.length} parts</summary>
-                  {#if promptPreview.ok}
-                    <pre class="prompt-preview-text">{promptPreview.systemPrompt}</pre>
-                    {#if promptPartViews.ok && promptPartViews.parts.length > 0}
-                      <ul class="part-list">
-                        {#each promptPartViews.parts as part (part.index)}
-                          <li class="part-row">
-                            <span class="part-origin" class:origin-fixed={part.origin === 'fixed'} class:origin-user={part.origin === 'user'} class:origin-generated={part.origin === 'generated'}>
-                              {part.origin}
-                            </span>
-                            <span class="part-label">{part.label}</span>
-                            {#if part.editable}
-                              <span class="part-note">editable at source</span>
-                            {/if}
-                            {#if part.empty}
-                              <span class="part-note part-note-empty">contributes nothing</span>
-                            {/if}
-                          </li>
-                        {/each}
-                      </ul>
-                    {/if}
-                    {#if promptPreview.inputProvenance.length > 0}
-                      <p class="prompt-preview-note">
-                        Inputs referenced:
-                        {promptPreview.inputProvenance.map((entry) => `${entry.inputId} (${entry.source})`).join(', ')}.
-                      </p>
-                    {/if}
-                  {:else if promptPreview.bundleUnavailable}
-                    <p class="prompt-preview-note prompt-preview-missing">
-                      Bundle not available — {promptPreview.error}
-                    </p>
-                  {:else}
-                    <p class="prompt-preview-note prompt-preview-missing">{promptPreview.error}</p>
-                  {/if}
-                </details>
-
-                <details class="prompt-preview history-preview">
-                  <summary>
-                    Baked history ({historyEditor.entries.length}){#if countEditableHistoryEntries(historyEditor) > 0} — editable at source{:else} — fixed{/if}
-                  </summary>
-                  {#if historyEditor.ok}
-                    {#if historyEditor.entries.length === 0}
-                      <p class="prompt-preview-note">No baked history is declared for this agent.</p>
-                    {:else}
-                      {#each historyEditor.entries as entry (entry.index)}
-                        <div class="history-entry">
-                          <span class="history-role" class:role-agent={entry.role === 'assistant'}>
-                            {entry.roleLabel}
-                          </span>
-                          <pre class="history-content">{entry.content}</pre>
-                          {#if entry.parts.length > 0}
-                            <ul class="part-list">
-                              {#each entry.parts as part (part.index)}
-                                <li class="part-row">
-                                  <span class="part-origin" class:origin-fixed={part.origin === 'fixed'} class:origin-user={part.origin === 'user'} class:origin-generated={part.origin === 'generated'}>
-                                    {part.origin}
-                                  </span>
-                                  <span class="part-label">{part.label}</span>
-                                  {#if part.editable && draftFor(part.inputId)?.shape === 'text'}
-                                    <textarea
-                                      class="part-input-edit"
-                                      rows="2"
-                                      value={inputDisplayFor(part.inputId)}
-                                      aria-label={`Edit ${part.inputLabel} for this history entry`}
-                                      oninput={(event) => setInputValue(draftFor(part.inputId), event.currentTarget.value)}
-                                    ></textarea>
-                                    <span class="part-note">edits the launch input (source)</span>
-                                  {:else if part.editable && draftFor(part.inputId)?.shape === 'files'}
-                                    <span class="part-note">files input — edit the attached fileset above</span>
-                                  {:else if part.editable}
-                                    <span class="part-note">input not declared in the review form</span>
-                                  {:else}
-                                    <span class="part-note">shipped in the bundle</span>
-                                  {/if}
-                                </li>
-                              {/each}
-                            </ul>
-                          {/if}
-                        </div>
-                      {/each}
-                    {/if}
-                  {:else if historyEditor.bundleUnavailable}
-                    <p class="prompt-preview-note prompt-preview-missing">
-                      Bundle not available — {historyEditor.error}
-                    </p>
-                  {:else}
-                    <p class="prompt-preview-note prompt-preview-missing">{historyEditor.error}</p>
-                  {/if}
-                </details>
-              </div>
-            {/each}
-          </div>
-
-          {#if authorityAgents.length > 0}
-            <div class="settings-section-card">
-              <div class="section-card-header">
-                <div class="section-title-wrap">
-                  <span class="section-badge">Authorities</span>
-                  <h4 class="section-title">Declared publishing authorities</h4>
-                </div>
-                {#if trustView.trusted}
-                  <span class="trust-badge">trusted</span>
-                {/if}
-              </div>
-              <p class="field-hint">
-                Publishing is an explicit operator grant — never implied by privilege or the wildcard. Check a request
-                to approve it for this launch; unchecked requests are declined and the launched agent simply lacks the
-                authority. Approved grants are ordinary revocable operator grants.
-              </p>
-              {#if unknownAuthorities.length > 0}
-                <p class="payload-error" role="alert">
-                  Unknown declared authorit{unknownAuthorities.length === 1 ? 'y' : 'ies'}:
-                  {unknownAuthorities.join(', ')} — this host cannot enforce
-                  {unknownAuthorities.length === 1 ? 'it' : 'them'}, so the launch fails closed.
-                </p>
-              {/if}
-              {#each authorityAgents as row (row.key)}
-                <div class="authority-agent">
-                  <div class="authority-agent-head">
-                    <span class="authority-agent-name">{row.name}</span>
-                    <span class="authority-agent-key font-mono">{row.key}</span>
-                    {#if row.privileged}
-                      <span class="badge badge-sudo" title="Privilege is disclosed separately and never implies these authorities">⚡ sudo</span>
-                    {/if}
-                  </div>
-                  {#each row.declarations as declaration (declaration.authority)}
-                    <label
-                      class="authority-row"
-                      class:authority-row-trusted={authorityTrusted(row.key, declaration.authority)}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={authorityChecked(row.key, declaration.authority)}
-                        disabled={authorityTrusted(row.key, declaration.authority) || !declaration.known}
-                        onchange={(event) => setAuthorityDecision(row.key, declaration.authority, event.currentTarget.checked)}
-                      />
-                      <div class="authority-info">
-                        <div class="authority-title-row">
-                          <span class="authority-title font-mono">{declaration.authority}</span>
-                          <span class="authority-label">{declaration.label}</span>
-                          {#if authorityTrusted(row.key, declaration.authority)}
-                            <span class="trust-badge">trust-auto-approved</span>
-                          {/if}
-                          {#if !declaration.known}
-                            <span class="unknown-badge">unknown to this host</span>
-                          {/if}
-                        </div>
-                        <span class="policy-desc">{declaration.description}</span>
-                      </div>
-                    </label>
-                  {/each}
-                </div>
-              {/each}
-
-              <div class="trust-control">
-                {#if trustView.trusted}
-                  <p class="payload-status">{trustView.summary}</p>
-                  {#if trustView.pairs.length > 0}
-                    <ul class="written-paths">
-                      {#each trustView.pairs as pair (`${pair.agentKey}::${pair.authority}`)}
-                        <li class="font-mono">{pair.agentKey} → {pair.authority}</li>
-                      {/each}
-                    </ul>
-                  {/if}
-                  <div class="template-picker-actions">
-                    <button type="button" class="btn-danger-outline btn-xs" onclick={clearTemplateTrust}>
-                      Clear trust override
-                    </button>
-                  </div>
-                {:else}
-                  <p class="field-hint">No trust override is stored for this template.</p>
-                {/if}
-                <label class="seed-toggle">
-                  <input type="checkbox" checked={trustTemplate} onchange={handleTrustToggle} />
-                  <span>Trust this template for these exact approvals (persisted on a successful launch)</span>
-                </label>
-                <span class="field-hint">
-                  Trust auto-approves only the exact (agent, authority) set approved now; a newly declared authority
-                  re-prompts, and clearing the override revokes it (already-applied grants stay revocable through the
-                  agent settings toggles).
-                </span>
-              </div>
-            </div>
-          {/if}
-
-          {#if extensionRequests.requests.length > 0 || extensionReferences.references.length > 0}
-            <div class="settings-section-card">
-              <div class="section-card-header">
-                <div class="section-title-wrap">
-                  <span class="section-badge">Extensions</span>
-                  <h4 class="section-title">Requested extensions</h4>
-                </div>
-              </div>
-
-              {#if !extensionRequests.ok}
-                <p class="payload-error" role="alert">{extensionRequests.error}</p>
-              {:else if extensionRequests.requests.length > 0}
-                <p class="field-hint">
-                  This template requests these extensions. Approving records an attach approval for the Realm being
-                  created: only globally installed extensions actually attach, and an approved-but-uninstalled request
-                  stays disclosed and listed after the launch. Nothing connects automatically.
-                </p>
-                {#each extensionRequests.requests as request (request.id)}
-                  {@const stateView = describeRealmExtensionState(request.state)}
-                  <div class="extension-request">
-                    <label class="extension-approval">
-                      <input
-                        type="checkbox"
-                        checked={extensionDecisions[request.id] === 'approved'}
-                        onchange={(event) => setExtensionDecision(request.id, event.currentTarget.checked)}
-                      />
-                      <div class="extension-request-info">
-                        <div class="extension-request-title-row">
-                          <span class="extension-request-name font-mono">{request.id}</span>
-                          <span class="kind-chip font-mono">{request.kind}</span>
-                          <span class="status-chip state-{stateView.state} font-mono">{stateView.label}</span>
-                          {#if request.connected}
-                            <span class="live-chip live-connected font-mono">connected · {request.liveToolCount} tools</span>
-                          {:else if request.installed && request.connectionStatus !== 'disconnected'}
-                            <span class="live-chip live-{request.connectionStatus} font-mono">{request.connectionStatus}</span>
-                          {/if}
-                          {#if request.fidelityBadge}
-                            <span class="fidelity-chip font-mono">{request.fidelityBadge}</span>
-                          {/if}
-                          {#if request.installed && request.installSource === 'template-assist'}
-                            <span class="source-chip font-mono">template-assist</span>
-                          {/if}
-                          <span class="third-party-chip font-mono">{request.thirdPartyLabel}</span>
-                        </div>
-                        <span class="extension-request-detail">{stateView.description}</span>
-                        {#if request.disclosure}
-                          <span class="extension-request-disclosure">{request.disclosure}</span>
-                        {/if}
-                        {#if request.declaredTransportSummary}
-                          <span class="extension-request-transport font-mono">{request.declaredTransportSummary}</span>
-                        {/if}
-                        {#if request.approvedUrl}
-                          <span class="extension-request-detail">
-                            approved URL: <code class="font-mono">{request.approvedUrl}</code>
-                          </span>
-                        {/if}
-                        {#if request.credentialId}
-                          <span class="extension-request-detail">
-                            credential: <code class="font-mono">{request.credentialId}</code>
-                          </span>
-                        {/if}
-                      </div>
-                    </label>
-                    {#if !request.installed}
-                      <button type="button" class="btn-secondary btn-xs" onclick={() => openProviderInstallAssist(request.id)}>
-                        Install…
-                      </button>
-                    {/if}
-                  </div>
-                {/each}
-              {/if}
-
-              {#if extensionReferences.references.length > 0}
-                <details class="extension-references">
-                  <summary>
-                    Extension tool references ({extensionReferences.references.length}) — resolved against installed
-                    extensions
-                  </summary>
-                  {#if !extensionReferences.ok}
-                    <p class="payload-error" role="alert">{extensionReferences.error}</p>
-                  {:else}
-                    <ul class="extension-reference-list">
-                      {#each extensionReferences.references as ref, index (`${ref.agentKey}::${ref.reference}::${index}`)}
-                        <li class="extension-reference-row">
-                          <span class="extension-reference-agent">{ref.agentName}</span>
-                          <span class="extension-reference-name font-mono">{ref.callName}</span>
-                          <span class="extension-reference-origin font-mono">{ref.reference}</span>
-                          <span class="ref-state ref-state-{ref.referenceState} font-mono">{ref.referenceState}</span>
-                        </li>
-                      {/each}
-                    </ul>
-                  {/if}
-                </details>
-              {/if}
-
-              <div class="trust-disclosure">
-                <span class="trust-disclosure-title">Third-party trust</span>
-                <ul class="trust-disclosure-list">
-                  {#each REALM_EXTENSION_TRUST_DISCLOSURE as line (line.key)}
-                    <li><span class="trust-disclosure-line-title">{line.title}</span> — {line.body}</li>
-                  {/each}
-                </ul>
-              </div>
-            </div>
-          {/if}
+          <RealmLauncherExtensionsPanel
+            requests={extensionRequests}
+            references={extensionReferences}
+            decisions={extensionDecisions}
+            ondecision={setExtensionDecision}
+            oninstall={openProviderInstallAssist}
+          />
         {/if}
 
         {#if selectedTemplate}
@@ -2647,272 +1534,35 @@
         </div>
       </form>
     {:else}
-      {#if launchReceipt}
-        <div class="launch-receipt" role="status">
-          <div class="receipt-title-row">
-            <span class="badge badge-success">Launched</span>
-            <span class="receipt-title">{launchReceipt.realm.name}</span>
-            <span class="receipt-id font-mono">{launchReceipt.realm.id}</span>
-          </div>
-          <p class="receipt-copy">
-            {launchReceipt.agents.length} member{launchReceipt.agents.length === 1 ? '' : 's'} launched and grouped in the
-            sidebar: {launchReceipt.agents.map((agent) => agent.name).join(', ')}.
-          </p>
-          {#if launchApprovals.length > 0}
-            <p class="receipt-copy">
-              Approved publishing authorities: {launchApprovals.map((entry) => `${entry.agentKey} → ${entry.authority}`).join(', ')}.
-            </p>
-          {/if}
-        </div>
-
-        {#if launchMissingFlow.length > 0}
-          <div class="settings-section-card missing-card">
-            <div class="section-card-header">
-              <div class="section-title-wrap">
-                <span class="section-badge missing-badge">Attention</span>
-                <h4 class="section-title">Missing extensions ({launchMissingFlow.length})</h4>
-              </div>
-            </div>
-            <p class="field-hint">
-              These requested extensions are not available in this Realm. Nothing installs or attaches automatically —
-              the actions below are explicit operator steps; this list follows the live state.
-            </p>
-            <ul class="missing-list">
-              {#each launchMissingFlow as view (view.extensionId)}
-                {@const stateView = describeRealmExtensionState(view.state)}
-                <li class="missing-row">
-                  <div class="missing-info">
-                    <div class="missing-title-row">
-                      <span class="missing-name">{view.displayName || view.extensionId}</span>
-                      <span class="kind-chip font-mono">{view.kind}</span>
-                      <span class="status-chip state-{stateView.state} font-mono">{stateView.label}</span>
-                      <span class="third-party-chip font-mono">{view.thirdPartyLabel}</span>
-                    </div>
-                    <span class="missing-note">{stateView.description}</span>
-                    {#if view.transportHintSummary}
-                      <span class="missing-transport font-mono">{view.transportHintSummary}</span>
-                    {/if}
-                    {#if view.authorComment}
-                      <span class="missing-author">Template note: {view.authorComment}</span>
-                    {/if}
-                  </div>
-                  <div class="missing-actions">
-                    {#if view.canInstall}
-                      <button type="button" class="btn-primary btn-xs" onclick={() => openMissingInstallAssist(view)}>
-                        Install…
-                      </button>
-                    {/if}
-                    {#if view.canAttach}
-                      <button type="button" class="btn-secondary btn-xs" onclick={() => handleAttachMissingExtension(view)}>
-                        Attach to this Realm
-                      </button>
-                    {/if}
-                  </div>
-                </li>
-              {/each}
-            </ul>
-            {#if launchReceipt.warnings && launchReceipt.warnings.length > 0}
-              <details class="launch-warnings">
-                <summary>Launch warnings ({launchReceipt.warnings.length})</summary>
-                <ul class="written-paths">
-                  {#each launchReceipt.warnings as warning, index (index)}
-                    <li>{warning}</li>
-                  {/each}
-                </ul>
-              </details>
-            {/if}
-          </div>
-        {/if}
-
-        {#if seedReceipt}
-          <div class="settings-section-card">
-            <div class="section-card-header">
-              <div class="section-title-wrap">
-                <span class="section-badge">Seed</span>
-                <h4 class="section-title">Seed receipt</h4>
-              </div>
-            </div>
-            <p class="receipt-copy">
-              Wrote {seedReceipt.writtenPaths.length} file{seedReceipt.writtenPaths.length === 1 ? '' : 's'} into
-              {describeSeedWorkspace(seedReceipt.workspace, seedReceipt.realmId)}.
-            </p>
-            <ul class="written-paths">
-              {#each seedReceipt.writtenPaths as path (path)}
-                <li class="font-mono">{path}</li>
-              {/each}
-            </ul>
-            <p class="receipt-copy">
-              {#if seedReceipt.directiveDelivered}
-                Directive delivered to the target member's mailbox (operator-attributed).
-              {:else if seedDirectiveRequested}
-                Directive was NOT delivered — no operator principal may be registered.
-              {:else}
-                No directive was requested.
-              {/if}
-            </p>
-          </div>
-          <div class="modal-footer compact">
-            <button type="button" class="btn-primary" onclick={() => onclose()}>Done</button>
-          </div>
-        {:else}
-          <form class="launcher-form" onsubmit={handleSeed} novalidate>
-            <div class="settings-section-card">
-              <div class="section-card-header">
-                <div class="section-title-wrap">
-                  <span class="section-badge">Seed</span>
-                  <h4 class="section-title">Optional post-launch seed</h4>
-                </div>
-              </div>
-
-              <div class="form-group">
-                <label for="realm-seed-target">Target workspace</label>
-                <select id="realm-seed-target" bind:value={seedTargetId} class="select-field" onchange={clearMessages}>
-                  {#each seedTargetOptions as option (option.value)}
-                    <option value={option.value}>{option.label}</option>
-                  {/each}
-                </select>
-                <span class="field-hint">
-                  Files land in the Realm-global workspace by default, or in the selected member's private workspace.
-                  A directive needs a member recipient.
-                </span>
-              </div>
-
-              <div class="form-group">
-                <span class="label-text">Files</span>
-                {#if seedRows.length === 0}
-                  <p class="rows-empty">No file rows yet — add one to seed, or skip seeding.</p>
-                {/if}
-                {#each seedRows as row, index (index)}
-                  <div class="seed-row">
-                    <div class="seed-row-head">
-                      <span class="seed-row-label">Row {index + 1}</span>
-                      <button type="button" class="btn-row-remove" onclick={() => removeSeedRow(index)} aria-label="Remove row {index + 1}">
-                        Remove
-                      </button>
-                    </div>
-                    <input
-                      type="text"
-                      bind:value={row.path}
-                      placeholder="/notes/brief.md"
-                      class="input-field font-mono"
-                      aria-label="Row {index + 1} file path"
-                      oninput={clearMessages}
-                    />
-                    <textarea
-                      bind:value={row.content}
-                      rows="3"
-                      placeholder="File content (paste supported)"
-                      class="textarea-field font-mono"
-                      aria-label="Row {index + 1} file content"
-                      oninput={clearMessages}
-                    ></textarea>
-                  </div>
-                {/each}
-                <div class="rows-actions">
-                  <button type="button" class="btn-secondary btn-xs" onclick={addSeedRow}>+ Add file row</button>
-                </div>
-              </div>
-
-              <div class="form-group">
-                <label for="realm-seed-directive">Directive <span class="opt">(optional)</span></label>
-                <textarea
-                  id="realm-seed-directive"
-                  bind:value={seedDirective}
-                  rows="3"
-                  placeholder="Operator instruction delivered to the target member's mailbox"
-                  class="textarea-field"
-                  oninput={clearMessages}
-                ></textarea>
-              </div>
-            </div>
-
-            <div class="modal-footer compact">
-              <button type="button" class="btn-secondary" onclick={() => onclose()} disabled={isSeeding}>Skip &amp; Close</button>
-              <button type="submit" class="btn-primary" disabled={isSeeding}>
-                {isSeeding ? 'Seeding…' : 'Seed Realm'}
-              </button>
-            </div>
-          </form>
-        {/if}
-      {/if}
+      <RealmLauncherSeedStep
+        {launchReceipt}
+        {launchApprovals}
+        missingFlow={launchMissingFlow}
+        {seedReceipt}
+        bind:seedRows
+        bind:seedDirective
+        bind:seedTargetId
+        {seedTargetOptions}
+        {seedDirectiveRequested}
+        {isSeeding}
+        onseed={handleSeed}
+        ontargetchange={clearMessages}
+        onaddrow={addSeedRow}
+        onremoverow={removeSeedRow}
+        onclose={() => onclose()}
+        oninstallmissing={openMissingInstallAssist}
+        onattachmissing={handleAttachMissingExtension}
+      />
     {/if}
 
     {#if filesDialogOpen}
-      <div class="files-dialog-backdrop">
-        <div class="files-dialog" role="dialog" aria-modal="true" aria-label="Resolved file contents">
-          <div class="files-dialog-header">
-            <div class="section-title-wrap">
-              <span class="section-badge">Files</span>
-              <h4 class="section-title">Resolved file contents ({fileSlots.length})</h4>
-            </div>
-            <button type="button" class="btn-close" onclick={closeFilesDialog} aria-label="Close files dialog">
-              <svg class="icon-svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <line x1="18" y1="6" x2="6" y2="18"></line>
-                <line x1="6" y1="6" x2="18" y2="18"></line>
-              </svg>
-            </button>
-          </div>
-          <p class="field-hint">
-            Every declared placement with its resolved content. Bundle-file destinations ship in the bundle;
-            input destinations resolve from the launch inputs (then the attached payload) and are edited at the input
-            field — this dialog is read-only.
-          </p>
-          {#if fileSlots.length === 0}
-            <p class="rows-empty">This template declares no placements.</p>
-          {/if}
-          {#each fileSlots as slot (slot.key)}
-            <div class="file-slot" class:file-slot-fixed={slot.source === 'bundle'} class:file-slot-conflict={slot.conflict}>
-              <div class="file-slot-head">
-                <span class="slot-path font-mono">{slot.path}</span>
-                <span
-                  class="slot-origin"
-                  class:origin-generated={slot.origin === 'generated'}
-                  class:origin-user={slot.origin === 'user'}
-                >
-                  {slot.origin}
-                </span>
-                {#if slot.required}
-                  <span class="required-badge">required</span>
-                {/if}
-                {#if slot.conflict}
-                  <span class="unknown-badge">conflict</span>
-                {/if}
-                <span class="file-slot-source">{slot.sourceLabel}</span>
-              </div>
-              <span class="field-hint">
-                {slot.targetLabel}{#if slot.inputLabel} · input "{slot.inputLabel}"{/if}{#if slot.brief} · {slot.brief}{/if}
-              </span>
-              {#if slot.editable}
-                <textarea
-                  rows="4"
-                  class="textarea-field font-mono"
-                  value={slot.content}
-                  aria-label={`Content for ${slot.path}`}
-                  oninput={(event) => setFileEdit(slot, event.currentTarget.value)}
-                ></textarea>
-                <div class="input-actions">
-                  <button type="button" class="btn-secondary btn-xs" disabled={!slot.edited} onclick={() => resetFileEdit(slot)}>
-                    Reset to source
-                  </button>
-                  {#if slot.edited}
-                    <span class="input-dirty-note">Edited — travels in the launch payload.</span>
-                  {/if}
-                </div>
-              {:else}
-                <pre class="file-slot-readonly">{slot.content}</pre>
-                <span class="field-hint">
-                  {slot.source === 'bundle'
-                    ? 'Shipped in the bundle — the format forbids payload overrides for bundle-file destinations.'
-                    : 'Resolved from the input — edit it at the input field above.'}
-                </span>
-              {/if}
-            </div>
-          {/each}
-          <div class="modal-footer compact">
-            <button type="button" class="btn-primary" onclick={closeFilesDialog}>Done</button>
-          </div>
-        </div>
-      </div>
+      <RealmLauncherFilesDialog
+        slots={fileSlots}
+        mismatchUnconfirmed={payloadPreview.mismatch && !mismatchConfirmed}
+        onedit={setFileEdit}
+        onreset={resetFileEdit}
+        onclose={closeFilesDialog}
+      />
     {/if}
 
     {#if installAssist}
@@ -2939,1816 +1589,5 @@
     z-index: 100;
     padding: 1.5rem;
     animation: fade-in 0.2s ease-out;
-  }
-
-  .realm-launcher-modal {
-    width: 100%;
-    max-width: 780px;
-    max-height: 90vh;
-    overflow-y: auto;
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
-    border-radius: 12px;
-    padding: 1.75rem;
-    box-shadow: var(--shadow-lg);
-    display: flex;
-    flex-direction: column;
-    gap: 1rem;
-    position: relative;
-  }
-
-  .modal-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    padding-bottom: 1rem;
-    border-bottom: 1px solid var(--border-subtle);
-  }
-
-  .header-left {
-    display: flex;
-    align-items: center;
-    gap: 0.85rem;
-  }
-
-  .icon-chip {
-    width: 36px;
-    height: 36px;
-    border-radius: 8px;
-    background: var(--accent-primary-subtle);
-    border: 1px solid var(--accent-primary-border);
-    color: var(--accent-primary);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-  }
-
-  .modal-title {
-    font-size: 1.2rem;
-    font-weight: 700;
-    color: var(--text-primary);
-    margin: 0;
-  }
-
-  .modal-sub {
-    font-size: 0.82rem;
-    color: var(--text-secondary);
-    margin: 0.15rem 0 0 0;
-  }
-
-  .btn-close {
-    background: transparent;
-    border: none;
-    color: var(--text-muted);
-    cursor: pointer;
-    padding: 0.35rem;
-    border-radius: 6px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-
-  .btn-close:hover {
-    color: var(--text-primary);
-    background: var(--bg-surface);
-  }
-
-  .step-rail {
-    display: flex;
-    align-items: center;
-    gap: 0.6rem;
-  }
-
-  .step-chip {
-    font-size: 0.74rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--text-muted);
-    background: var(--bg-surface);
-    border: 1px solid var(--border-subtle);
-    border-radius: 999px;
-    padding: 0.25rem 0.7rem;
-  }
-
-  .step-chip.active {
-    color: var(--accent-primary);
-    border-color: var(--accent-primary-border);
-    background: var(--accent-primary-subtle);
-  }
-
-  .step-chip.done {
-    color: #34d399;
-    border-color: rgba(52, 211, 153, 0.35);
-  }
-
-  .step-connector {
-    flex: 1;
-    height: 1px;
-    background: var(--border-subtle);
-  }
-
-  .error-banner,
-  .notice-banner {
-    display: flex;
-    align-items: center;
-    gap: 0.6rem;
-    padding: 0.7rem 0.95rem;
-    border-radius: 8px;
-    font-size: 0.84rem;
-  }
-
-  .error-banner {
-    background: var(--accent-danger-subtle);
-    border: 1px solid var(--accent-danger-border);
-    color: #f87171;
-  }
-
-  .notice-banner {
-    background: rgba(52, 211, 153, 0.1);
-    border: 1px solid rgba(52, 211, 153, 0.35);
-    color: #34d399;
-  }
-
-  .launcher-form {
-    display: flex;
-    flex-direction: column;
-    gap: 1rem;
-  }
-
-  .form-group {
-    display: flex;
-    flex-direction: column;
-    gap: 0.35rem;
-  }
-
-  .form-group.grow {
-    min-width: 0;
-  }
-
-  .color-group {
-    width: 86px;
-  }
-
-  .create-grid {
-    display: grid;
-    grid-template-columns: 1fr auto;
-    gap: 0.85rem;
-    align-items: end;
-  }
-
-  label,
-  .label-text {
-    font-size: 0.8rem;
-    font-weight: 600;
-    color: var(--text-secondary);
-  }
-
-  .req {
-    color: #f87171;
-  }
-
-  .opt {
-    font-weight: normal;
-    font-size: 0.74rem;
-    color: var(--text-muted);
-  }
-
-  .input-field,
-  .select-field,
-  .textarea-field {
-    background: var(--bg-surface);
-    border: 1px solid var(--border-color);
-    color: var(--text-primary);
-    border-radius: 6px;
-    padding: 0.5rem 0.7rem;
-    font-size: 0.86rem;
-    font-family: inherit;
-  }
-
-  .textarea-field {
-    resize: vertical;
-    min-height: 64px;
-  }
-
-  .input-field:focus,
-  .select-field:focus,
-  .textarea-field:focus {
-    outline: none;
-    border-color: var(--border-focus);
-  }
-
-  .color-input {
-    width: 100%;
-    height: 34px;
-    padding: 2px;
-    background: var(--bg-surface);
-    border: 1px solid var(--border-color);
-    border-radius: 6px;
-    cursor: pointer;
-  }
-
-  .field-hint {
-    font-size: 0.73rem;
-    color: var(--text-muted);
-    line-height: 1.4;
-  }
-
-  .settings-section-card {
-    background: var(--bg-surface);
-    border: 1px solid var(--border-color);
-    border-radius: 8px;
-    padding: 1.1rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.9rem;
-  }
-
-  .section-card-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    border-bottom: 1px solid var(--border-subtle);
-    padding-bottom: 0.5rem;
-    gap: 0.75rem;
-  }
-
-  .section-title-wrap {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-  }
-
-  .section-badge {
-    font-size: 0.65rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    padding: 0.12rem 0.45rem;
-    border-radius: 4px;
-    background: var(--accent-primary-subtle);
-    color: var(--accent-primary);
-    border: 1px solid var(--accent-primary-border);
-  }
-
-  .section-title {
-    margin: 0;
-    font-size: 0.92rem;
-    color: var(--text-primary);
-    font-weight: 600;
-  }
-
-  .agent-preview-card {
-    border: 1px solid var(--border-subtle);
-    border-radius: 8px;
-    padding: 0.8rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.55rem;
-    background: var(--bg-secondary);
-  }
-
-  .agent-preview-head {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: 0.75rem;
-    flex-wrap: wrap;
-  }
-
-  .agent-preview-identity {
-    display: flex;
-    flex-direction: column;
-    gap: 0.1rem;
-    min-width: 0;
-  }
-
-  .agent-preview-name {
-    font-size: 0.9rem;
-    font-weight: 700;
-    color: var(--text-primary);
-  }
-
-  .agent-preview-id {
-    font-size: 0.7rem;
-    color: var(--text-muted);
-  }
-
-  .agent-preview-badges {
-    display: flex;
-    gap: 0.35rem;
-    flex-wrap: wrap;
-  }
-
-  .badge {
-    font-size: 0.64rem;
-    font-weight: 700;
-    padding: 0.1rem 0.4rem;
-    border-radius: 4px;
-    border: 1px solid transparent;
-    letter-spacing: 0.02em;
-    line-height: 1.3;
-  }
-
-  .badge-sudo {
-    background: rgba(245, 158, 11, 0.18);
-    color: #f59e0b;
-    border-color: rgba(245, 158, 11, 0.4);
-  }
-
-  .badge-muted {
-    background: var(--bg-base);
-    color: var(--text-muted);
-    border-color: var(--border-subtle);
-  }
-
-  .badge-wildcard {
-    background: var(--accent-danger-subtle);
-    color: #f87171;
-    border-color: var(--accent-danger-border);
-  }
-
-  .badge-success {
-    background: rgba(52, 211, 153, 0.12);
-    color: #34d399;
-    border-color: rgba(52, 211, 153, 0.35);
-  }
-
-  .agent-preview-role {
-    margin: 0;
-    font-size: 0.78rem;
-    color: var(--text-secondary);
-  }
-
-  .agent-preview-meta {
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
-  }
-
-  .meta-line {
-    display: flex;
-    gap: 0.5rem;
-    align-items: baseline;
-    font-size: 0.76rem;
-  }
-
-  .meta-label {
-    color: var(--text-muted);
-    min-width: 90px;
-  }
-
-  .meta-value {
-    color: var(--text-secondary);
-    word-break: break-word;
-  }
-
-  .unrecognized-note {
-    margin: 0;
-    font-size: 0.76rem;
-    color: #f59e0b;
-  }
-
-  .grant-groups {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 0.5rem;
-  }
-
-  .grant-details {
-    border: 1px solid var(--border-subtle);
-    border-radius: 6px;
-    padding: 0.35rem 0.5rem;
-    background: var(--bg-base);
-  }
-
-  .grant-details summary {
-    cursor: pointer;
-    font-size: 0.74rem;
-    font-weight: 600;
-    color: var(--text-secondary);
-  }
-
-  .chip-wrap {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.25rem;
-    padding-top: 0.4rem;
-  }
-
-  .tool-chip {
-    font-size: 0.64rem;
-    padding: 0.08rem 0.3rem;
-    border-radius: 3px;
-    border: 1px solid var(--border-subtle);
-    background: var(--bg-surface);
-    color: var(--text-muted);
-  }
-
-  .tool-chip.mutating {
-    color: #f59e0b;
-    border-color: rgba(245, 158, 11, 0.35);
-    background: rgba(245, 158, 11, 0.08);
-  }
-
-  .tool-chip.readonly {
-    color: #34d399;
-    border-color: rgba(52, 211, 153, 0.3);
-    background: rgba(52, 211, 153, 0.07);
-  }
-
-  .grant-note {
-    margin: 0;
-    font-size: 0.72rem;
-    color: var(--text-muted);
-  }
-
-  .input-actions {
-    display: flex;
-    align-items: center;
-    gap: 0.6rem;
-    flex-wrap: wrap;
-  }
-
-  .input-dirty-note {
-    font-size: 0.72rem;
-    color: var(--text-muted);
-  }
-
-  .input-warning {
-    color: #f59e0b;
-  }
-
-  .input-error {
-    font-size: 0.76rem;
-    color: #f87171;
-  }
-
-  .seed-summary-line {
-    margin: 0;
-    font-size: 0.82rem;
-    color: var(--text-secondary);
-    line-height: 1.5;
-  }
-
-  .seed-directive-preview {
-    color: var(--text-muted);
-    font-style: italic;
-  }
-
-  .seed-toggle {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    font-size: 0.84rem;
-    font-weight: 600;
-    color: var(--text-secondary);
-    cursor: pointer;
-  }
-
-  .seed-toggle input {
-    width: 16px;
-    height: 16px;
-    accent-color: var(--accent-color, #7c9cff);
-    cursor: pointer;
-  }
-
-  .prompt-preview {
-    border: 1px solid var(--border-subtle);
-    border-radius: 6px;
-    padding: 0.35rem 0.5rem;
-    background: var(--bg-base);
-  }
-
-  .prompt-preview summary {
-    cursor: pointer;
-    font-size: 0.74rem;
-    font-weight: 600;
-    color: var(--text-secondary);
-  }
-
-  .prompt-preview-text {
-    margin: 0.4rem 0 0;
-    padding: 0.5rem 0.65rem;
-    background: var(--bg-surface);
-    border: 1px solid var(--border-subtle);
-    border-radius: 6px;
-    font-size: 0.74rem;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    color: var(--text-secondary);
-    white-space: pre-wrap;
-    word-break: break-word;
-    max-height: 180px;
-    overflow-y: auto;
-  }
-
-  .prompt-preview-note {
-    margin: 0.4rem 0 0;
-    font-size: 0.72rem;
-    color: var(--text-muted);
-    line-height: 1.4;
-  }
-
-  .prompt-preview-missing {
-    color: #f59e0b;
-  }
-
-  .launch-receipt {
-    background: rgba(52, 211, 153, 0.08);
-    border: 1px solid rgba(52, 211, 153, 0.3);
-    border-radius: 8px;
-    padding: 0.85rem 1rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.4rem;
-  }
-
-  .receipt-title-row {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    flex-wrap: wrap;
-  }
-
-  .receipt-title {
-    font-size: 0.95rem;
-    font-weight: 700;
-    color: var(--text-primary);
-  }
-
-  .receipt-id {
-    font-size: 0.72rem;
-    color: var(--text-muted);
-  }
-
-  .receipt-copy {
-    margin: 0;
-    font-size: 0.82rem;
-    color: var(--text-secondary);
-    line-height: 1.5;
-  }
-
-  .written-paths {
-    list-style: none;
-    margin: 0;
-    padding: 0.5rem 0.65rem;
-    background: var(--bg-base);
-    border: 1px solid var(--border-subtle);
-    border-radius: 6px;
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
-    max-height: 140px;
-    overflow-y: auto;
-  }
-
-  .written-paths li {
-    font-size: 0.76rem;
-    color: var(--text-secondary);
-    word-break: break-all;
-  }
-
-  .seed-row {
-    display: flex;
-    flex-direction: column;
-    gap: 0.4rem;
-    border: 1px solid var(--border-subtle);
-    border-radius: 6px;
-    padding: 0.6rem;
-    background: var(--bg-secondary);
-  }
-
-  .seed-row-head {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-  }
-
-  .seed-row-label {
-    font-size: 0.72rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--text-muted);
-  }
-
-  .btn-row-remove {
-    background: transparent;
-    border: 1px solid transparent;
-    color: #f87171;
-    font-size: 0.72rem;
-    cursor: pointer;
-    border-radius: 4px;
-    padding: 0.1rem 0.4rem;
-  }
-
-  .btn-row-remove:hover {
-    border-color: var(--accent-danger-border);
-    background: var(--accent-danger-subtle);
-  }
-
-  .rows-empty {
-    margin: 0;
-    font-size: 0.78rem;
-    color: var(--text-muted);
-  }
-
-  .rows-actions {
-    display: flex;
-    justify-content: flex-start;
-  }
-
-  .btn-xs {
-    font-size: 0.72rem;
-    padding: 0.25rem 0.6rem;
-  }
-
-  .modal-footer {
-    display: flex;
-    justify-content: flex-end;
-    gap: 0.6rem;
-    padding-top: 0.85rem;
-    border-top: 1px solid var(--border-subtle);
-  }
-
-  .modal-footer.compact {
-    padding-top: 0;
-    border-top: none;
-  }
-
-  .btn-primary,
-  .btn-secondary,
-  .btn-danger,
-  .btn-danger-outline {
-    border-radius: 6px;
-    padding: 0.45rem 0.9rem;
-    font-size: 0.84rem;
-    font-weight: 600;
-    cursor: pointer;
-    border: 1px solid transparent;
-  }
-
-  .btn-primary {
-    background: var(--accent-primary);
-    color: #fff;
-  }
-
-  .btn-primary:disabled,
-  .btn-secondary:disabled,
-  .btn-danger:disabled,
-  .btn-danger-outline:disabled {
-    opacity: 0.55;
-    cursor: not-allowed;
-  }
-
-  .btn-secondary {
-    background: var(--bg-surface);
-    border-color: var(--border-color);
-    color: var(--text-primary);
-  }
-
-  .btn-danger {
-    background: #dc2626;
-    color: #fff;
-  }
-
-  .btn-danger-outline {
-    background: transparent;
-    border-color: var(--accent-danger-border);
-    color: #f87171;
-  }
-
-  .btn-danger-outline:hover {
-    background: var(--accent-danger-subtle);
-  }
-
-  .template-picker-row {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    flex-wrap: wrap;
-  }
-
-  .template-picker-row .select-field {
-    flex: 1;
-    min-width: 0;
-  }
-
-  .template-picker-actions {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    flex-wrap: wrap;
-  }
-
-  .template-source-line {
-    display: flex;
-    align-items: center;
-    gap: 0.45rem;
-    flex-wrap: wrap;
-    font-size: 0.73rem;
-    color: var(--text-muted);
-  }
-
-  .source-badge {
-    font-size: 0.64rem;
-    font-weight: 700;
-    letter-spacing: 0.02em;
-    padding: 0.1rem 0.4rem;
-    border-radius: 4px;
-    border: 1px solid var(--border-subtle);
-    background: var(--bg-base);
-    color: var(--text-secondary);
-  }
-
-  .source-badge.source-imported {
-    color: #f59e0b;
-    border-color: rgba(245, 158, 11, 0.4);
-    background: rgba(245, 158, 11, 0.12);
-  }
-
-  .template-version {
-    font-size: 0.68rem;
-    color: var(--text-muted);
-    word-break: break-all;
-  }
-
-  .template-delete-confirm {
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-    border: 1px solid var(--accent-danger-border);
-    border-radius: 6px;
-    padding: 0.65rem 0.75rem;
-    background: var(--accent-danger-subtle);
-  }
-
-  .template-delete-copy {
-    margin: 0;
-    font-size: 0.8rem;
-    color: var(--text-secondary);
-    line-height: 1.45;
-  }
-
-  .visually-hidden {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    padding: 0;
-    margin: -1px;
-    overflow: hidden;
-    clip: rect(0, 0, 0, 0);
-    white-space: nowrap;
-    border: 0;
-  }
-
-  .origin-badge {
-    margin-left: 0.4rem;
-    font-size: 0.6rem;
-    font-weight: 700;
-    letter-spacing: 0.03em;
-    text-transform: uppercase;
-    padding: 0.08rem 0.35rem;
-    border-radius: 4px;
-    border: 1px solid rgba(124, 156, 255, 0.4);
-    background: rgba(124, 156, 255, 0.14);
-    color: #9db4ff;
-    vertical-align: middle;
-  }
-
-  .hydration-brief {
-    color: var(--text-secondary);
-  }
-
-  .history-entry {
-    display: flex;
-    flex-direction: column;
-    gap: 0.3rem;
-    padding: 0.5rem 0.6rem;
-    margin-top: 0.4rem;
-    background: var(--bg-surface);
-    border: 1px solid var(--border-subtle);
-    border-radius: 6px;
-  }
-
-  .history-role {
-    align-self: flex-start;
-    font-size: 0.62rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    padding: 0.08rem 0.35rem;
-    border-radius: 4px;
-    border: 1px solid var(--border-subtle);
-    background: var(--bg-base);
-    color: var(--text-muted);
-  }
-
-  .history-role.role-agent {
-    color: #34d399;
-    border-color: rgba(52, 211, 153, 0.35);
-    background: rgba(52, 211, 153, 0.08);
-  }
-
-  .history-content {
-    margin: 0;
-    font-size: 0.74rem;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    color: var(--text-secondary);
-    white-space: pre-wrap;
-    word-break: break-word;
-    max-height: 140px;
-    overflow-y: auto;
-  }
-
-  .slot-list {
-    display: flex;
-    flex-direction: column;
-    gap: 0.4rem;
-  }
-
-  .slot-list-title {
-    font-size: 0.72rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--text-muted);
-  }
-
-  .slot-path {
-    font-size: 0.76rem;
-    color: var(--text-secondary);
-    word-break: break-all;
-  }
-
-  .slot-origin {
-    flex-shrink: 0;
-    font-size: 0.62rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
-    padding: 0.08rem 0.35rem;
-    border-radius: 4px;
-    border: 1px solid var(--border-subtle);
-    background: var(--bg-surface);
-    color: var(--text-muted);
-  }
-
-  .slot-origin.origin-user {
-    color: #f59e0b;
-    border-color: rgba(245, 158, 11, 0.35);
-  }
-
-  .slot-origin.origin-generated {
-    color: #9db4ff;
-    border-color: rgba(124, 156, 255, 0.4);
-  }
-
-  /* Wave U review surfaces (ticket 458e727) */
-
-  .payload-source-row {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    flex-wrap: wrap;
-  }
-
-  .payload-source-row .select-field {
-    flex: 1;
-    min-width: 180px;
-  }
-
-  .payload-attached-badge {
-    font-size: 0.64rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    padding: 0.12rem 0.45rem;
-    border-radius: 999px;
-    background: rgba(52, 211, 153, 0.12);
-    border: 1px solid rgba(52, 211, 153, 0.35);
-    color: #34d399;
-  }
-
-  .payload-candidate {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.6rem;
-    border: 1px solid var(--border-subtle);
-    border-radius: 6px;
-    padding: 0.5rem 0.6rem;
-    background: var(--bg-base);
-    flex-wrap: wrap;
-  }
-
-  .payload-candidate-info {
-    display: flex;
-    flex-direction: column;
-    gap: 0.15rem;
-    min-width: 0;
-  }
-
-  .payload-candidate-title {
-    font-size: 0.72rem;
-    color: var(--text-secondary);
-    word-break: break-all;
-  }
-
-  .btn-secondary.active-candidate {
-    border-color: rgba(52, 211, 153, 0.45);
-    color: #34d399;
-  }
-
-  .payload-status {
-    margin: 0;
-    font-size: 0.76rem;
-    color: var(--text-secondary);
-    word-break: break-word;
-  }
-
-  .payload-status.payload-empty {
-    color: var(--text-muted);
-  }
-
-  .payload-error {
-    margin: 0;
-    font-size: 0.78rem;
-    color: #f87171;
-    word-break: break-word;
-  }
-
-  .payload-input-note {
-    color: #9db4ff;
-  }
-
-  .disclosure-grid {
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
-    padding: 0.5rem 0.6rem;
-    border: 1px dashed var(--border-subtle);
-    border-radius: 6px;
-    background: rgba(0, 0, 0, 0.12);
-  }
-
-  .disclosure-line .meta-label {
-    min-width: 110px;
-  }
-
-  .disclosure-value {
-    word-break: break-word;
-    white-space: pre-wrap;
-  }
-
-  .disclosure-empty {
-    color: var(--text-muted);
-  }
-
-  .badge-authority {
-    background: rgba(168, 85, 247, 0.16);
-    color: #c084fc;
-    border-color: rgba(168, 85, 247, 0.4);
-  }
-
-  .part-list {
-    list-style: none;
-    margin: 0.4rem 0 0 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
-  }
-
-  .part-row {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    flex-wrap: wrap;
-    font-size: 0.72rem;
-    color: var(--text-secondary);
-  }
-
-  .part-origin {
-    flex-shrink: 0;
-    font-size: 0.6rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
-    padding: 0.06rem 0.3rem;
-    border-radius: 4px;
-    border: 1px solid var(--border-subtle);
-    background: var(--bg-surface);
-    color: var(--text-muted);
-  }
-
-  .part-origin.origin-user {
-    color: #f59e0b;
-    border-color: rgba(245, 158, 11, 0.35);
-  }
-
-  .part-origin.origin-generated {
-    color: #9db4ff;
-    border-color: rgba(124, 156, 255, 0.4);
-  }
-
-  .part-label {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    word-break: break-all;
-  }
-
-  .part-note {
-    font-size: 0.68rem;
-    color: var(--text-muted);
-  }
-
-  .part-note-empty {
-    color: #f59e0b;
-  }
-
-  .part-input-edit {
-    width: 100%;
-    background: var(--bg-surface);
-    border: 1px solid var(--border-color);
-    color: var(--text-primary);
-    border-radius: 6px;
-    padding: 0.35rem 0.5rem;
-    font-size: 0.74rem;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    resize: vertical;
-  }
-
-  .authority-agent {
-    display: flex;
-    flex-direction: column;
-    gap: 0.4rem;
-    border: 1px solid var(--border-subtle);
-    border-radius: 8px;
-    padding: 0.6rem 0.7rem;
-    background: var(--bg-base);
-  }
-
-  .authority-agent-head {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    flex-wrap: wrap;
-  }
-
-  .authority-agent-name {
-    font-size: 0.86rem;
-    font-weight: 700;
-    color: var(--text-primary);
-  }
-
-  .authority-agent-key {
-    font-size: 0.7rem;
-    color: var(--text-muted);
-  }
-
-  .authority-row {
-    display: flex;
-    align-items: flex-start;
-    gap: 0.6rem;
-    padding: 0.5rem 0.6rem;
-    border: 1px solid rgba(168, 85, 247, 0.22);
-    border-radius: 6px;
-    background: rgba(168, 85, 247, 0.05);
-    cursor: pointer;
-  }
-
-  .authority-row.authority-row-trusted {
-    border-color: rgba(52, 211, 153, 0.35);
-    background: rgba(52, 211, 153, 0.06);
-    cursor: default;
-  }
-
-  .authority-row input {
-    margin-top: 3px;
-    accent-color: #a855f7;
-    cursor: pointer;
-  }
-
-  .authority-row.authority-row-trusted input {
-    accent-color: #34d399;
-  }
-
-  .authority-info {
-    display: flex;
-    flex-direction: column;
-    gap: 0.2rem;
-    min-width: 0;
-  }
-
-  .authority-title-row {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    flex-wrap: wrap;
-  }
-
-  .authority-title {
-    font-size: 0.78rem;
-    color: var(--text-primary);
-  }
-
-  .authority-label {
-    font-size: 0.74rem;
-    font-weight: 600;
-    color: #c084fc;
-  }
-
-  .trust-badge {
-    font-size: 0.62rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
-    padding: 0.08rem 0.35rem;
-    border-radius: 4px;
-    background: rgba(52, 211, 153, 0.12);
-    border: 1px solid rgba(52, 211, 153, 0.35);
-    color: #34d399;
-  }
-
-  .unknown-badge {
-    font-size: 0.62rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
-    padding: 0.08rem 0.35rem;
-    border-radius: 4px;
-    background: var(--accent-danger-subtle);
-    border: 1px solid var(--accent-danger-border);
-    color: #f87171;
-  }
-
-  .trust-control {
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-    padding-top: 0.5rem;
-    border-top: 1px dashed var(--border-subtle);
-  }
-
-  .review-gate {
-    display: flex;
-    flex-direction: column;
-    gap: 0.4rem;
-  }
-
-  .review-ack {
-    display: flex;
-    align-items: flex-start;
-    gap: 0.6rem;
-    padding: 0.7rem 0.85rem;
-    border: 1px solid rgba(124, 156, 255, 0.35);
-    border-radius: 8px;
-    background: rgba(124, 156, 255, 0.07);
-    font-size: 0.8rem;
-    color: var(--text-secondary);
-    cursor: pointer;
-  }
-
-  .review-ack input {
-    margin-top: 2px;
-    accent-color: #7c9cff;
-    cursor: pointer;
-  }
-
-  .launch-gate-hint {
-    margin: 0;
-    font-size: 0.76rem;
-    color: #f59e0b;
-  }
-
-  .files-dialog-backdrop {
-    position: absolute;
-    inset: 0;
-    background: rgba(12, 13, 14, 0.72);
-    backdrop-filter: blur(4px);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 1rem;
-    border-radius: 12px;
-    z-index: 5;
-  }
-
-  .files-dialog {
-    width: 100%;
-    max-width: 640px;
-    max-height: 85%;
-    overflow-y: auto;
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
-    border-radius: 10px;
-    padding: 1.1rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.7rem;
-    box-shadow: var(--shadow-lg);
-  }
-
-  .files-dialog-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    border-bottom: 1px solid var(--border-subtle);
-    padding-bottom: 0.5rem;
-    gap: 0.6rem;
-  }
-
-  .file-slot {
-    display: flex;
-    flex-direction: column;
-    gap: 0.3rem;
-    border: 1px solid var(--border-subtle);
-    border-radius: 6px;
-    padding: 0.55rem 0.65rem;
-    background: var(--bg-surface);
-  }
-
-  .file-slot.file-slot-fixed {
-    background: var(--bg-base);
-  }
-
-  .file-slot-head {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    flex-wrap: wrap;
-  }
-
-  .file-slot-source {
-    font-size: 0.68rem;
-    color: var(--text-muted);
-  }
-
-  .required-badge {
-    font-size: 0.6rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
-    padding: 0.06rem 0.3rem;
-    border-radius: 4px;
-    border: 1px solid rgba(245, 158, 11, 0.35);
-    background: rgba(245, 158, 11, 0.1);
-    color: #f59e0b;
-  }
-
-  .file-slot-readonly {
-    margin: 0;
-    padding: 0.45rem 0.55rem;
-    border: 1px dashed var(--border-subtle);
-    border-radius: 6px;
-    background: var(--bg-base);
-    font-size: 0.72rem;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    color: var(--text-secondary);
-    white-space: pre-wrap;
-    word-break: break-word;
-    max-height: 160px;
-    overflow-y: auto;
-  }
-
-  /* Format-v2 input requirements and usage map (ticket a71198f) */
-
-  .shape-badge {
-    margin-left: 0.4rem;
-    font-size: 0.6rem;
-    font-weight: 700;
-    letter-spacing: 0.03em;
-    text-transform: uppercase;
-    padding: 0.08rem 0.35rem;
-    border-radius: 4px;
-    border: 1px solid var(--border-subtle);
-    background: var(--bg-base);
-    color: var(--text-muted);
-    vertical-align: middle;
-  }
-
-  .fileset-field {
-    display: flex;
-    flex-direction: column;
-    gap: 0.4rem;
-    border: 1px solid var(--border-subtle);
-    border-radius: 6px;
-    padding: 0.55rem 0.65rem;
-    background: var(--bg-secondary);
-  }
-
-  .attachment-row {
-    display: flex;
-    flex-direction: column;
-    gap: 0.3rem;
-    border: 1px solid var(--border-subtle);
-    border-radius: 6px;
-    padding: 0.45rem 0.55rem;
-    background: var(--bg-base);
-  }
-
-  .attachment-head {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-  }
-
-  .attachment-head .input-field {
-    flex: 1;
-    min-width: 0;
-  }
-
-  .attachment-content summary {
-    cursor: pointer;
-    font-size: 0.72rem;
-    font-weight: 600;
-    color: var(--text-muted);
-  }
-
-  .usage-map {
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
-    border: 1px dashed var(--border-subtle);
-    border-radius: 6px;
-    padding: 0.45rem 0.55rem;
-    background: rgba(0, 0, 0, 0.12);
-  }
-
-  .usage-summary {
-    font-size: 0.72rem;
-    font-weight: 600;
-    color: var(--text-muted);
-  }
-
-  .usage-list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 0.2rem;
-  }
-
-  .usage-row {
-    display: flex;
-    align-items: baseline;
-    gap: 0.4rem;
-    flex-wrap: wrap;
-    font-size: 0.72rem;
-    color: var(--text-secondary);
-  }
-
-  .usage-kind {
-    flex-shrink: 0;
-    font-size: 0.6rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
-    padding: 0.06rem 0.3rem;
-    border-radius: 4px;
-    border: 1px solid var(--border-subtle);
-    background: var(--bg-surface);
-    color: var(--text-muted);
-  }
-
-  .usage-label {
-    font-weight: 600;
-  }
-
-  .usage-path {
-    font-size: 0.7rem;
-    color: var(--text-secondary);
-    word-break: break-all;
-  }
-
-  .usage-detail {
-    color: var(--text-muted);
-  }
-
-  /* Hydration workspace additions (ticket 874182b): placement mapping,
-     per-file destinations, saved payloads, pin/digest card, directives. */
-
-  .placement-map {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 0.2rem;
-  }
-
-  .placement-row {
-    display: flex;
-    align-items: baseline;
-    gap: 0.4rem;
-    flex-wrap: wrap;
-    font-size: 0.72rem;
-    color: var(--text-secondary);
-  }
-
-  .placement-mode {
-    flex-shrink: 0;
-    font-size: 0.6rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
-    padding: 0.06rem 0.3rem;
-    border-radius: 4px;
-    border: 1px solid var(--border-subtle);
-    background: var(--bg-surface);
-    color: var(--text-muted);
-  }
-
-  .placement-target {
-    font-weight: 600;
-  }
-
-  .placement-destination {
-    font-size: 0.7rem;
-    color: var(--text-secondary);
-    word-break: break-all;
-  }
-
-  .attachment-destinations {
-    color: var(--text-secondary);
-  }
-
-  .save-payload-row {
-    display: flex;
-    align-items: center;
-    gap: 0.45rem;
-    margin-top: 0.45rem;
-  }
-
-  .save-payload-row .input-field {
-    flex: 1;
-    min-width: 0;
-  }
-
-  .pin-card {
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
-    margin-top: 0.55rem;
-    border: 1px solid var(--border-subtle);
-    border-radius: 6px;
-    padding: 0.45rem 0.55rem;
-    background: var(--bg-base);
-  }
-
-  .pin-row {
-    display: flex;
-    align-items: baseline;
-    gap: 0.5rem;
-    font-size: 0.72rem;
-  }
-
-  .pin-label {
-    flex-shrink: 0;
-    min-width: 6.5rem;
-    font-weight: 600;
-    color: var(--text-muted);
-  }
-
-  .pin-value {
-    color: var(--text-secondary);
-    word-break: break-all;
-  }
-
-  .pin-value-missing {
-    color: var(--accent-danger);
-  }
-
-  .directive-review {
-    display: flex;
-    flex-direction: column;
-    gap: 0.3rem;
-    margin-top: 0.35rem;
-  }
-
-  .directive-row {
-    display: flex;
-    flex-direction: column;
-    gap: 0.15rem;
-    font-size: 0.72rem;
-    color: var(--text-secondary);
-  }
-
-  .directive-target {
-    font-weight: 600;
-  }
-
-  .file-slot-conflict {
-    border-color: var(--accent-danger-border);
-    background: var(--accent-danger-subtle);
-  }
-
-  /* ---- Extension disclosure, approvals, and missing flow (extension wave) ---- */
-
-  .extension-request {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 0.7rem;
-    padding: 0.6rem 0.7rem;
-    border: 1px solid var(--border-subtle);
-    border-radius: 6px;
-    background: var(--bg-secondary);
-  }
-
-  .extension-approval {
-    display: flex;
-    align-items: flex-start;
-    gap: 0.55rem;
-    cursor: pointer;
-    min-width: 0;
-  }
-
-  .extension-approval input {
-    margin-top: 0.15rem;
-    accent-color: var(--accent-primary);
-  }
-
-  .extension-request-info {
-    display: flex;
-    flex-direction: column;
-    gap: 0.18rem;
-    min-width: 0;
-  }
-
-  .extension-request-title-row,
-  .missing-title-row {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 0.4rem;
-  }
-
-  .extension-request-name {
-    font-size: 0.82rem;
-    color: var(--text-primary);
-    font-weight: 600;
-  }
-
-  .extension-request-detail,
-  .missing-note,
-  .missing-author {
-    font-size: 0.72rem;
-    line-height: 1.4;
-    color: var(--text-muted);
-  }
-
-  .extension-request-transport,
-  .missing-transport {
-    font-size: 0.7rem;
-    color: var(--text-secondary);
-    word-break: break-all;
-  }
-
-  .kind-chip,
-  .status-chip,
-  .source-chip {
-    font-size: 0.65rem;
-    border-radius: 4px;
-    padding: 0.08rem 0.36rem;
-    border: 1px solid var(--border-color);
-    color: var(--text-secondary);
-    background: var(--bg-base);
-  }
-
-  .source-chip {
-    color: var(--accent-primary);
-    border-color: var(--accent-primary-border);
-    background: var(--accent-primary-subtle);
-  }
-
-  .status-chip.state-active {
-    color: #34d399;
-    border-color: rgba(52, 211, 153, 0.4);
-    background: rgba(52, 211, 153, 0.1);
-  }
-
-  .status-chip.state-conflict {
-    color: #f87171;
-    border-color: var(--accent-danger-border);
-    background: var(--accent-danger-subtle);
-  }
-
-  .status-chip.state-unavailable,
-  .status-chip.state-not-attached,
-  .status-chip.state-not-installed {
-    color: #f59e0b;
-    border-color: rgba(245, 158, 11, 0.4);
-    background: rgba(245, 158, 11, 0.1);
-  }
-
-  .live-chip,
-  .fidelity-chip,
-  .third-party-chip {
-    font-size: 0.64rem;
-    border-radius: 4px;
-    padding: 0.08rem 0.36rem;
-    border: 1px solid var(--border-color);
-    color: var(--text-muted);
-    background: var(--bg-base);
-  }
-
-  .live-chip.live-connected {
-    color: #34d399;
-    border-color: rgba(52, 211, 153, 0.4);
-    background: rgba(52, 211, 153, 0.1);
-  }
-
-  .live-chip.live-connecting {
-    color: #fbbf24;
-    border-color: rgba(251, 191, 36, 0.4);
-    background: rgba(251, 191, 36, 0.1);
-  }
-
-  .live-chip.live-conflict,
-  .live-chip.live-error {
-    color: #f87171;
-    border-color: var(--accent-danger-border);
-    background: var(--accent-danger-subtle);
-  }
-
-  .fidelity-chip {
-    color: #fbbf24;
-    border-color: rgba(251, 191, 36, 0.4);
-    background: rgba(251, 191, 36, 0.1);
-  }
-
-  .extension-request-disclosure {
-    font-size: 0.72rem;
-    line-height: 1.4;
-    color: #f59e0b;
-  }
-
-  .extension-references summary {
-    cursor: pointer;
-    font-size: 0.74rem;
-    font-weight: 600;
-    color: var(--text-muted);
-  }
-
-  .extension-reference-list {
-    list-style: none;
-    margin: 0.4rem 0 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
-  }
-
-  .extension-reference-row {
-    display: grid;
-    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1fr) minmax(0, 1.4fr) auto;
-    gap: 0.5rem;
-    align-items: baseline;
-    font-size: 0.72rem;
-    color: var(--text-secondary);
-  }
-
-  .extension-reference-agent {
-    font-weight: 600;
-    color: var(--text-primary);
-  }
-
-  .extension-reference-origin {
-    color: var(--text-muted);
-    word-break: break-all;
-  }
-
-  .ref-state {
-    border-radius: 4px;
-    padding: 0.06rem 0.34rem;
-    border: 1px solid var(--border-color);
-    color: var(--text-muted);
-    text-transform: uppercase;
-    font-size: 0.62rem;
-  }
-
-  .ref-state-resolved {
-    color: #34d399;
-    border-color: rgba(52, 211, 153, 0.4);
-    background: rgba(52, 211, 153, 0.1);
-  }
-
-  .ref-state-missing,
-  .ref-state-excluded {
-    color: #f59e0b;
-    border-color: rgba(245, 158, 11, 0.4);
-    background: rgba(245, 158, 11, 0.1);
-  }
-
-  .trust-disclosure {
-    display: flex;
-    flex-direction: column;
-    gap: 0.3rem;
-    padding: 0.55rem 0.65rem;
-    border: 1px dashed var(--border-subtle);
-    border-radius: 6px;
-    background: rgba(0, 0, 0, 0.12);
-  }
-
-  .trust-disclosure-title {
-    font-size: 0.7rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--text-muted);
-  }
-
-  .trust-disclosure-list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
-    font-size: 0.72rem;
-    line-height: 1.4;
-    color: var(--text-secondary);
-  }
-
-  .trust-disclosure-line-title {
-    color: var(--text-primary);
-    font-weight: 600;
-  }
-
-  .missing-card {
-    border-color: rgba(245, 158, 11, 0.4);
-  }
-
-  .missing-badge {
-    background: rgba(245, 158, 11, 0.13);
-    color: #f59e0b;
-    border-color: rgba(245, 158, 11, 0.4);
-  }
-
-  .missing-list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 0.45rem;
-  }
-
-  .missing-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: 0.7rem;
-    padding: 0.55rem 0.7rem;
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-subtle);
-    border-radius: 6px;
-  }
-
-  .missing-info {
-    display: flex;
-    flex-direction: column;
-    gap: 0.18rem;
-    min-width: 0;
-  }
-
-  .missing-name {
-    font-size: 0.85rem;
-    font-weight: 600;
-    color: var(--text-primary);
-  }
-
-  .missing-actions {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    flex-shrink: 0;
-    flex-wrap: wrap;
-    justify-content: flex-end;
-  }
-
-  .launch-warnings summary {
-    cursor: pointer;
-    font-size: 0.72rem;
-    font-weight: 600;
-    color: var(--text-muted);
-  }
-
-  @keyframes fade-in {
-    from { opacity: 0; }
-    to { opacity: 1; }
-  }
-
-  @media (max-width: 640px) {
-    .create-grid,
-    .grant-groups {
-      grid-template-columns: 1fr;
-    }
-    .color-group {
-      width: 100%;
-    }
   }
 </style>

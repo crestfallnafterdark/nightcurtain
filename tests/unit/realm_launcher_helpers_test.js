@@ -1345,6 +1345,11 @@ test('33. the preview disclosures and operator toggle state project declared fie
     'yes — sudo authority'
   ]);
   assert.deepStrictEqual(rows.map((row) => row.present), [true, true, true, true]);
+  assert.ok(rows.every((row) => row.disclaimer.length > 0), 'every disclosure carries its semantics disclaimer');
+  assert.match(rows[0].disclaimer, /first turn/);
+  assert.match(rows[1].disclaimer, /display only/);
+  assert.match(rows[2].disclaimer, /effective catalog/);
+  assert.match(rows[3].disclaimer, /publishing authorities/);
 
   const empty = buildRealmAgentDisclosureRows(null);
   assert.deepStrictEqual(empty.map((row) => row.present), [false, false, false, true]);
@@ -2621,4 +2626,66 @@ test('53. extension error copy and trust disclosure describe the typed refusals'
   assert.strictEqual(isRealmExtensionStateMissing('conflict'), true);
   assert.strictEqual(describeRealmExtensionState('not-installed').label, 'Not installed');
   assert.match(describeRealmExtensionState('conflict').description, /catalog-time/);
+});
+
+test('54. the files dialog passes the effective currentVersion into payload resolution (a997a8a item 2)', () => {
+  const inputs = {
+    briefing: { text: 'Payload briefing.' },
+    notes: { files: [{ path: 'notes.md', content: 'Payload notes.' }] },
+    roster: { files: [{ path: 'index.md', content: 'Payload index.' }] }
+  };
+  const stale = v2Payload(inputs, 'sha256:stale-revision');
+
+  // While the version mismatch is unconfirmed the attached payload is not yet
+  // accepted content: the review must not resolve its values as reviewed slot
+  // content (the launch gate blocks on the same condition).
+  const unconfirmed = buildRealmReviewFileSlots(V2_TEMPLATE, V2_FILES, {
+    payload: stale,
+    currentVersion: V2_VERSION
+  });
+  assert.ok(
+    unconfirmed.every((slot) => slot.contentSource !== 'payload'),
+    'no slot resolves from a payload whose version pin is unconfirmed'
+  );
+  assert.strictEqual(unconfirmed[1].contentSource, 'absent');
+  assert.strictEqual(unconfirmed[2].contentSource, 'absent');
+
+  // The pin check runs even when another contract error fails the payload
+  // first (the mismatch must not be skipped by validation order).
+  const staleIncomplete = v2Payload(
+    { notes: { files: [{ path: 'notes.md', content: 'Payload notes.' }] } },
+    'sha256:stale-revision'
+  );
+  const withheld = buildRealmReviewFileSlots(V2_TEMPLATE, V2_FILES, {
+    payload: staleIncomplete,
+    currentVersion: V2_VERSION
+  });
+  assert.ok(
+    withheld.every((slot) => slot.contentSource !== 'payload'),
+    'the pin check is not skipped because another contract error fails first'
+  );
+
+  // The explicit mismatch confirmation resolves the payload exactly as before.
+  const allowed = buildRealmReviewFileSlots(V2_TEMPLATE, V2_FILES, {
+    payload: stale,
+    currentVersion: V2_VERSION,
+    allowVersionMismatch: true
+  });
+  assert.strictEqual(allowed[1].content, 'Payload notes.');
+  assert.strictEqual(allowed[1].contentSource, 'payload');
+  assert.strictEqual(allowed[2].content, 'Payload index.');
+  assert.strictEqual(allowed[2].contentSource, 'payload');
+
+  // A payload pinning the effective version needs no confirmation.
+  const matching = buildRealmReviewFileSlots(V2_TEMPLATE, V2_FILES, {
+    payload: v2Payload(inputs),
+    currentVersion: V2_VERSION
+  });
+  assert.strictEqual(matching[1].contentSource, 'payload');
+  assert.strictEqual(matching[1].content, 'Payload notes.');
+
+  // Callers that do not know the effective version keep the legacy permissive
+  // resolution (the version check simply cannot run without a pin).
+  const unversioned = buildRealmReviewFileSlots(V2_TEMPLATE, V2_FILES, { payload: stale });
+  assert.strictEqual(unversioned[1].contentSource, 'payload');
 });
