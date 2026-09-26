@@ -71,7 +71,7 @@ timeout 90 node tests/unit/<suite>.js      # single suite (timeout 180 for heavy
 timeout 90 node tests/audit/repros/<id>.test.js # audit repros (red-before-fix evidence; not part of npm test)
 timeout 600 npm test                       # 104 suites — single-flight: lead runs after each round lands + at convergence (includes contracts_gate_test)
 npm run build
-npm run test:e2e                           # Playwright (9 specs) — outside the main gate
+npm run test:e2e                           # Playwright (10 specs) — outside the main gate
 node tests/qa/seed_vault.mjs               # QA: seed provider keys into the MCP profile (browser closed first)
 node tests/qa/provider_smoke.mjs           # Live pre-flight: 1 minimal completion for NanoGPT + DeepSeek; if it passes, provider-suite failures are code/test defects, not env
 ```

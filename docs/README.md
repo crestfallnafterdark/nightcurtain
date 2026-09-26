@@ -129,7 +129,7 @@ docs/
 | :--- | :--- | :--- |
 | [`testing/testing_strategy.md`](testing/testing_strategy.md) | QA Philosophy | The Zero-Mock Mandate, real DOM execution, prohibition of synthetic AST parsing, 4-stage CI/CD validation gates. |
 | [`testing/unit_and_integration.md`](testing/unit_and_integration.md) | Substrate Tests | 98 Node.js native test suites (52 Unit, 46 Integration), browser-polyfill test environment, runtime/messaging/tool-loop verification. |
-| [`testing/e2e_and_visual.md`](testing/e2e_and_visual.md) | Playwright E2E | 8 browser-driven user journey specs, responsive viewport capture baselines (Desktop 1440x900, Tablet 768x1024, Mobile 375x812). |
+| [`testing/e2e_and_visual.md`](testing/e2e_and_visual.md) | Playwright E2E | 10 browser-driven user journey specs, responsive viewport capture baselines (Desktop 1440x900, Tablet 768x1024, Mobile 375x812). |
 | [`testing/exploratory_qa_plan.md`](testing/exploratory_qa_plan.md) | Agent-Driven Exploratory QA | Playwright MCP browser harness, sandbox-studio charters, live-key budget, vault seeding, secret-handling rules. |
 | [`testing/audit_and_repro.md`](testing/audit_and_repro.md) | Audit Repro Mechanics | Read-only auditors propose failing tests; fixes commit repros test-first (`tests/audit/`), promote them into suites, and run the provider smoke probe before attributing suite failures to code. |
 

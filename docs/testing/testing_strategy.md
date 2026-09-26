@@ -15,7 +15,7 @@ The Agentic Sandbox Studio platform employs a **multi-tier verification architec
 ```mermaid
 graph TD
     subgraph L3["Tier 3: Browser E2E & Visual Verification (Playwright)"]
-        E2E["8 Comprehensive Specs (tests/e2e/)<br/>• Real Chromium Engine<br/>• Responsive Matrix: Desktop / Tablet / Mobile<br/>• Console Error & Page Crash Auditor<br/>• SSE Mock Streaming & Handshake Demos"]
+        E2E["10 Comprehensive Specs (tests/e2e/)<br/>• Real Chromium Engine<br/>• Responsive Matrix: Desktop / Tablet / Mobile<br/>• Console Error & Page Crash Auditor<br/>• SSE Mock Streaming & Handshake Demos"]
     end
 
     subgraph L2["Tier 2: Zero-Mock Subsystem Integration (node --test)"]
@@ -126,7 +126,7 @@ All Node-based test suites import [`tests/test_env.js`](../../tests/test_env.js)
 
 ## 4. Test Suite Inventory & Classification
 
-The project includes **104 native test suites** (55 unit, 49 integration) and **8 browser E2E specs**:
+The project includes **104 native test suites** (55 unit, 49 integration) and **10 browser E2E specs**:
 
 > **Canonical inventory.** This chapter is the single source of truth for test-suite counts and per-file listings; [`unit_and_integration.md`](unit_and_integration.md) cross-links here instead of duplicating it.
 
@@ -254,6 +254,7 @@ The project includes **104 native test suites** (55 unit, 49 integration) and **
 | [`07-settings-modal-parity.spec.js`](../../tests/e2e/07-settings-modal-parity.spec.js) | Catalog Settings Modal & Vault | Preset select/create/edit/activate, credential vault add/set-active, Escape and close behavior. |
 | [`08-responsive-visual-capture.spec.js`](../../tests/e2e/08-responsive-visual-capture.spec.js) | Responsive Capture Matrix | Multi-viewport screenshot generation (Desktop 1440x900, Tablet 768x1024, Mobile 375x812). |
 | [`09-realm-hydration-flow.spec.js`](../../tests/e2e/09-realm-hydration-flow.spec.js) | Hydration Workspace & Rehydrate | Hydration inputs/filesets/digest card, saved-payload lifecycle, launch → Realm Manager reopen → replace with the member roster preserved. |
+| [`10-mcp-extension-cors.spec.js`](../../tests/e2e/10-mcp-extension-cors.spec.js) | MCP Extension Connect & CORS | Self-contained `node:http` MCP fixture; real browser connect over the unauthenticated local path → server/protocol/catalog + projected-schemas badge; reconnect drift disclosure; realm attach with live ceiling; no `Authorization` header on the wire; zero console/page errors. |
 
 ---
 
