@@ -209,14 +209,20 @@ function countRealmKeys(keys, realmId) {
   return count;
 }
 
+/** Engine-derived clock sync files whose content is regenerated on import. */
+const DERIVED_CLOCK_FILES = new Set(['/world_clock.json', '/event_list.json']);
+
 /**
- * Reduces a VFS file map to the design's round-trip projection.
+ * Reduces a VFS file map to the design's round-trip projection, excluding the
+ * engine-derived clock sync files (their bytes are regenerated for the target
+ * realm by the clock import; presence is asserted separately).
  *
  * @param {Record<string, object>} filesByPath - Path → file record.
  * @returns {object[]} Sorted `{path, content, readOnly, owner}` projection.
  */
 function vfsProjection(filesByPath) {
   return Object.values(filesByPath ?? {})
+    .filter((file) => !DERIVED_CLOCK_FILES.has(file.path))
     .map((file) => ({ path: file.path, content: file.content, readOnly: file.readOnly, owner: file.owner }))
     .sort((left, right) => left.path.localeCompare(right.path));
 }
@@ -384,7 +390,7 @@ async function buildRichFixture() {
   assert.equal(sentA.success, true, 'fixture mail A delivers');
   const sentB = store.sendMessage(coordinatorKey, workerKey, 'Handoff B');
   assert.equal(sentB.success, true, 'fixture mail B delivers');
-  const archived = store.markMessageRead(workerKey, sentB.messageId);
+  const archived = harness.messagingBus.readMessage(workerKey, sentB.messageId, { markAsRead: true });
   assert.equal(archived.success, true, 'fixture archives one message');
   const foreignSent = store.sendMessage(
     createAgentIdentityKey(foreign.id, 'coordinator'),
@@ -394,6 +400,23 @@ async function buildRichFixture() {
   assert.equal(foreignSent.success, true, 'fixture foreign mail delivers');
 
   await waitForIdle(runtime, workerKey);
+
+  // Live pre-export counts (AC-REX-3 compares the archive against this
+  // snapshot; later tests import into the same session, so capturing here
+  // keeps the completeness assertion pre-export-authoritative).
+  const busBeforeExport = harness.messagingBus.exportSnapshot();
+  const clockBeforeExport = worldClock.exportSnapshot({ principal: runtime.getOperatorPrincipal() });
+  const vfsBeforeExport = harness.virtualFs.exportSnapshot({ principal: runtime.getOperatorPrincipal() });
+  const liveCounts = {
+    active: runtime.listAgents().filter((agent) => agent.config?.realmId === source.id).length,
+    recycled: runtime.listRecycledAgents().filter((agent) => agent.config?.realmId === source.id).length,
+    schedules: runtime.exportSchedules().filter((schedule) => parseAgentIdentityKey(schedule.agentRef)?.realmId === source.id).length,
+    activeQueueKeys: countRealmKeys(Object.keys(busBeforeExport.activeQueues ?? {}), source.id),
+    archiveKeys: countRealmKeys(Object.keys(busBeforeExport.archives ?? {}), source.id),
+    clockKeys: Object.keys(clockBeforeExport.agentClocks ?? {}).filter((key) => countRealmKeys([key], source.id) === 1),
+    eventKeys: Object.keys(clockBeforeExport.agentEvents ?? {}).filter((key) => countRealmKeys([key], source.id) === 1),
+    realmGlobalFiles: Object.keys(vfsBeforeExport[realmGlobalKey(source.id)] ?? {}).length
+  };
 
   const exportResult = store.exportRealmArchive(source.id);
   assert.equal(exportResult.success, true, `fixture export succeeds (${exportResult.code ?? 'ok'})`);
@@ -405,6 +428,7 @@ async function buildRichFixture() {
     foreign,
     keys: { coordinatorKey, workerKey, extraKey, recycledKey },
     mailIds: { A: sentA.messageId, B: sentB.messageId },
+    liveCounts,
     exportResult,
     envelope: JSON.parse(exportResult.json)
   };
@@ -436,6 +460,12 @@ function getRichImport() {
   if (!richImportPromise) {
     richImportPromise = (async () => {
       const fixture = await getRichFixture();
+      // Release the source realm's pinned workspace so the fresh realm can
+      // claim the same pin verbatim (the D0b fail-closed collision rule makes
+      // an in-session re-claim of a live pin impossible by design).
+      fixture.harness.virtualFs.deleteWorkspace('rex-pinned-workspace', {
+        principal: fixture.harness.runtime.getOperatorPrincipal()
+      });
       const receipt = fixture.harness.store.importRealmArchive(fixture.exportResult.json);
       assert.equal(receipt.success, true, 'rich archive import succeeds');
       const reExport = fixture.harness.store.exportRealmArchive(receipt.realmId);
@@ -481,7 +511,7 @@ test('AC-REX-1 round-trip equality (fresh realm, remapped ids)', async () => {
 
   const newRealm = store.getRealm(newRealmId);
   assert.ok(newRealm, 'the imported realm record exists');
-  assert.equal(newRealm.name, source.name, 'realm name round-trips');
+  assert.equal(newRealm.name.replace(/ \(\d+\)$/, ''), source.name, 'realm name round-trips (collision suffix allowed)');
   assert.equal(newRealm.description, source.description, 'realm description round-trips');
   assert.equal(newRealm.color, source.color, 'realm color round-trips');
   assert.equal(newRealm.templateId, source.templateId, 'realm template id round-trips');
@@ -525,10 +555,18 @@ test('AC-REX-1 round-trip equality (fresh realm, remapped ids)', async () => {
   assert.deepEqual((newRealm.extensions ?? []).map((attachment) => attachment.extensionId), ['rex-ext'], 'attachment round-trips');
   assert.equal(importedEnvelope.template.id, sourceEnvelope.template.id, 'template id round-trips');
   assert.equal(importedEnvelope.template.payload, sourceEnvelope.template.payload, 'template payload round-trips verbatim');
+  // Saved payload equality (payload identities; the same-session import adds a
+  // name-suffixed copy to the shared library, so compare the content set).
+  const payloadProjection = (entry) => JSON.stringify([entry.templateId, entry.templateVersion, entry.payload]);
   assert.deepEqual(
-    importedEnvelope.savedPayloads.map((entry) => [entry.name, entry.templateId, entry.templateVersion, entry.payload]),
-    sourceEnvelope.savedPayloads.map((entry) => [entry.name, entry.templateId, entry.templateVersion, entry.payload]),
-    'realm-scoped saved payload round-trips'
+    [...new Set(importedEnvelope.savedPayloads.map(payloadProjection))].sort(),
+    [...new Set(sourceEnvelope.savedPayloads.map(payloadProjection))].sort(),
+    'the realm-scoped saved payload is carried verbatim'
+  );
+  assert.equal(
+    importedEnvelope.savedPayloads.some((entry) => entry.name.startsWith(sourceEnvelope.savedPayloads[0].name)),
+    true,
+    'the imported payload keeps its name (or a collision-suffixed variant)'
   );
   assert.equal(importedEnvelope.source.realmId, newRealmId, 'the re-export names the new realm as its source');
   assert.equal(
@@ -583,6 +621,23 @@ test('AC-REX-1 round-trip equality (fresh realm, remapped ids)', async () => {
     vfsProjection(sourceEnvelope.vfs.members['rex-pinned-workspace']),
     'pinned workspace files round-trip verbatim'
   );
+  // Derived clock sync files are regenerated for the target realm (content
+  // remap), so they are present but not byte-compared above.
+  if (sourceEnvelope.vfs.realmGlobal['/world_clock.json']) {
+    assert.equal(
+      importedEnvelope.vfs.realmGlobal['/world_clock.json']?.content.includes(newRealmId),
+      true,
+      'derived realm-global clock files are regenerated for the new realm'
+    );
+  }
+  if (sourceEnvelope.vfs.members[keys.coordinatorKey]?.['/event_list.json']) {
+    assert.equal(
+      importedEnvelope.vfs.members[createAgentIdentityKey(newRealmId, 'coordinator')]?.['/event_list.json']
+        ?.content.includes(newRealmId),
+      true,
+      'derived member event files are regenerated for the new realm'
+    );
+  }
 });
 
 // ============================================================================
@@ -632,30 +687,22 @@ test('AC-REX-2 redaction asserted from export bytes', async () => {
 
 test('AC-REX-3 slice completeness', async () => {
   const fixture = await getRichFixture();
-  const { harness, source, keys, envelope } = fixture;
-  const { runtime, messagingBus, worldClock } = harness;
+  const { source, keys, envelope, liveCounts } = fixture;
 
-  // Live pre-export counts (captured after the fixture settled).
-  const liveActive = runtime.listAgents().filter((agent) => agent.config?.realmId === source.id);
-  const liveRecycled = runtime.listRecycledAgents().filter((agent) => agent.config?.realmId === source.id);
-  const liveSchedules = runtime.exportSchedules().filter((schedule) => parseAgentIdentityKey(schedule.agentRef)?.realmId === source.id);
-  const bus = messagingBus.exportSnapshot();
-  const liveClock = worldClock.exportSnapshot({ principal: runtime.getOperatorPrincipal() });
-
-  assert.equal(envelope.members.active.length, liveActive.length, 'active member count equals the live roster');
-  assert.equal(envelope.members.recycled.length, liveRecycled.length, 'recycled member count equals the live recycle bin');
+  assert.equal(envelope.members.active.length, liveCounts.active, 'active member count equals the live roster');
+  assert.equal(envelope.members.recycled.length, liveCounts.recycled, 'recycled member count equals the live recycle bin');
   assert.equal(envelope.members.active.length, 3, 'three active members are exported');
   assert.equal(envelope.members.recycled.length, 1, 'the recycled member is exported');
-  assert.equal(envelope.schedules.length, liveSchedules.length, 'schedule count equals the live per-realm count');
+  assert.equal(envelope.schedules.length, liveCounts.schedules, 'schedule count equals the live per-realm count');
   assert.equal(envelope.schedules.length, 2, 'only the source realm schedules are exported');
   assert.equal(
-    countRealmKeys(Object.keys(bus.activeQueues), source.id),
     Object.keys(envelope.messaging.activeQueues).length,
+    liveCounts.activeQueueKeys,
     'active queue partitions are complete'
   );
   assert.equal(
-    countRealmKeys(Object.keys(bus.archives), source.id),
     Object.keys(envelope.messaging.archives).length,
+    liveCounts.archiveKeys,
     'archive partitions are complete'
   );
   assert.equal(envelope.messaging.terminatedAgents.includes(keys.recycledKey), true, 'terminated agents include the recycled member');
@@ -668,10 +715,8 @@ test('AC-REX-3 slice completeness', async () => {
   );
 
   // Clock partitions: member + realm-global, with events; foreign excluded.
-  const liveClockKeys = Object.keys(liveClock.agentClocks ?? {}).filter((key) => countRealmKeys([key], source.id) === 1);
-  const liveEventKeys = Object.keys(liveClock.agentEvents ?? {}).filter((key) => countRealmKeys([key], source.id) === 1);
-  assert.deepEqual(Object.keys(envelope.worldClock.clocks).sort(), liveClockKeys.sort(), 'clock partitions are complete');
-  assert.deepEqual(Object.keys(envelope.worldClock.events).sort(), liveEventKeys.sort(), 'event partitions are complete');
+  assert.deepEqual(Object.keys(envelope.worldClock.clocks).sort(), [...liveCounts.clockKeys].sort(), 'clock partitions are complete');
+  assert.deepEqual(Object.keys(envelope.worldClock.events).sort(), [...liveCounts.eventKeys].sort(), 'event partitions are complete');
   assert.equal(envelope.worldClock.global.date, 'Day 9', 'the realm-global clock snapshot is carried');
   assert.equal(Object.keys(envelope.worldClock.events).includes(realmGlobalKey(source.id)), true, 'realm-global events are carried');
   assert.equal(
@@ -682,7 +727,8 @@ test('AC-REX-3 slice completeness', async () => {
   );
 
   // VFS: realm-global + member + pinned; foreign excluded.
-  assert.equal(Object.keys(envelope.vfs.realmGlobal).length, 1, 'the realm-global container is complete');
+  assert.equal(Object.keys(envelope.vfs.realmGlobal).length, liveCounts.realmGlobalFiles, 'the realm-global container is complete');
+  assert.equal(Object.keys(envelope.vfs.realmGlobal).includes('/realm/notes.md'), true, 'the realm-global fixture file is included');
   assert.equal(Object.keys(envelope.vfs.members).length, 2, 'member + pinned workspaces are complete');
   assert.equal(Object.keys(envelope.vfs.members).includes('rex-pinned-workspace'), true, 'the pinned workspace is included verbatim');
   assert.equal(Object.keys(envelope.vfs.members).some((key) => key.includes('foreign')), false, 'foreign workspaces are excluded');
@@ -721,7 +767,7 @@ test('AC-REX-4 import default-deny (no authority minting)', async () => {
   );
 
   for (const member of envelope.members.active) {
-    const projection = runtime.getAgentIdentity(member.id, { realmId: newRealmId });
+    const projection = runtime.createAgentIdentityPort().getAgentIdentity(member.id, { realmId: newRealmId });
     assert.ok(projection, `imported member '${member.id}' resolves`);
     assert.equal(projection.privileged, false, `member '${member.id}' imports unprivileged`);
     assert.equal(projection.realmBypass, false, `member '${member.id}' imports without realmBypass`);
