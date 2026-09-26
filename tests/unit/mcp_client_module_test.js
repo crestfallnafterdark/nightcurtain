@@ -360,3 +360,47 @@ test('12. aborting the session-wide signal cancels subsequent calls', async () =
     }
   });
 });
+
+test('13. a duck-typed signal without removeEventListener is rejected during validation', async () => {
+  const stub = createFetchStub();
+  await withFetchStub(stub, async () => {
+    await assert.rejects(
+      () =>
+        createMcpClient({
+          transport: { kind: 'http', url: 'https://mcp.unit.test/mcp' },
+          signal: { aborted: false, addEventListener() {} }
+        }),
+      err => {
+        assert.ok(err instanceof TypeError, `expected TypeError, got ${String(err)}`);
+        assert.match(err.message, /signal/);
+        return true;
+      }
+    );
+  });
+  assert.equal(stub.calls.length, 0);
+});
+
+test('14. a throwing removeEventListener cannot break best-effort teardown', async () => {
+  const stub = createFetchStub();
+  await withFetchStub(stub, async () => {
+    // The official client also invokes a caller signal's removeEventListener
+    // during its own connect-request cleanup, so the throw is armed only after
+    // the session is connected: this pins the module's own teardown path
+    // (F1) without asserting shielding inside the third-party client.
+    let armed = false;
+    const session = await createMcpClient({
+      transport: { kind: 'http', url: 'https://mcp.unit.test/mcp' },
+      signal: {
+        aborted: false,
+        addEventListener() {},
+        removeEventListener() {
+          if (armed) throw new Error('boom');
+        }
+      }
+    });
+    assert.ok(Object.isFrozen(session));
+    armed = true;
+    assert.equal(await session.close(), undefined);
+    assert.equal(await session.close(), undefined);
+  });
+});
