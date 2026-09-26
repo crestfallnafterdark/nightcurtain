@@ -224,6 +224,7 @@ type AuthorityGrantSnapshot = SandboxPersistedState & {
  * - `ERR_STORE_REALM_NOT_EMPTY`: `deleteRealm` was called on a Realm that still has active or recycled members (Wave R; use the recursive override).
  * - `ERR_STORE_REALM_PROTECTED`: `deleteRealm` targeted the seeded Generic default Realm, which can never be deleted.
  * - `ERR_STORE_REALM_DELETE_FAILED`: a recursive Realm deletion could not purge every member, so the record was left in place (fail-closed; the error carries a report).
+ * - `ERR_STORE_REALM_LAUNCH_FAILED`: a template launch failed after the Realm record existed (materialization, a member launch, a placement write, or a directive delivery), so the record and its members were rolled back first; the error carries the rollback report and the original failure as `cause`.
  * - `ERR_TEMPLATE_PROVIDERS_UNSUPPORTED`: retired providers-gate code; `launchRealmFromTemplate` no longer emits it (provider-bearing templates resolve against installed and attached extensions and launch with missing-extension disclosure).
  * - `ERR_TEMPLATE_AUTHORITY_UNSUPPORTED`: `launchRealmFromTemplate` targeted a template declaring a publishing authority id unknown to this host; launch is blocked fail-closed while import/validation/review accept the declaration (providers precedent).
  * - `ERR_STORE_TEMPLATE_TOO_LARGE`: `importRealmTemplate` exceeded the per-bundle or total imported-template byte budget.
@@ -261,6 +262,7 @@ export const SANDBOX_STORE_ERROR_CODES: {
   readonly ERR_STORE_REALM_NOT_EMPTY: 'ERR_STORE_REALM_NOT_EMPTY';
   readonly ERR_STORE_REALM_PROTECTED: 'ERR_STORE_REALM_PROTECTED';
   readonly ERR_STORE_REALM_DELETE_FAILED: 'ERR_STORE_REALM_DELETE_FAILED';
+  readonly ERR_STORE_REALM_LAUNCH_FAILED: 'ERR_STORE_REALM_LAUNCH_FAILED';
   /**
    * @deprecated The providers launch gate was removed: provider-bearing
    * templates resolve against installed and attached extensions and launch
@@ -289,6 +291,7 @@ export const SANDBOX_STORE_ERROR_CODES: {
   ERR_STORE_REALM_NOT_EMPTY: 'ERR_STORE_REALM_NOT_EMPTY',
   ERR_STORE_REALM_PROTECTED: 'ERR_STORE_REALM_PROTECTED',
   ERR_STORE_REALM_DELETE_FAILED: 'ERR_STORE_REALM_DELETE_FAILED',
+  ERR_STORE_REALM_LAUNCH_FAILED: 'ERR_STORE_REALM_LAUNCH_FAILED',
   ERR_TEMPLATE_PROVIDERS_UNSUPPORTED: 'ERR_TEMPLATE_PROVIDERS_UNSUPPORTED',
   ERR_TEMPLATE_AUTHORITY_UNSUPPORTED: 'ERR_TEMPLATE_AUTHORITY_UNSUPPORTED',
   ERR_STORE_TEMPLATE_TOO_LARGE: 'ERR_STORE_TEMPLATE_TOO_LARGE',
@@ -2960,6 +2963,15 @@ function resolveApprovedAuthorities(
       if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
         throw invalidRealmParams(`launchRealmFromTemplate authorityApprovals[${index}] must be an object`);
       }
+      // Closed-shape discipline (ticket be7714b item 2): an approval entry
+      // accepts exactly `{ agentKey, authority }` — any other key is inert
+      // data that could mask a typo, so it is refused fail-closed.
+      const unknownKeys = Object.keys(entry).filter((key) => key !== 'agentKey' && key !== 'authority');
+      if (unknownKeys.length > 0) {
+        throw invalidRealmParams(
+          `launchRealmFromTemplate authorityApprovals[${index}] contains unknown key(s): ${unknownKeys.join(', ')}`
+        );
+      }
       const record = entry as { agentKey?: unknown; authority?: unknown };
       const agentKey = typeof record.agentKey === 'string' ? record.agentKey.trim() : '';
       const authority = typeof record.authority === 'string' ? record.authority.trim() : '';
@@ -3142,6 +3154,15 @@ function resolveApprovedExtensions(
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
       throw invalidRealmParams(`launchRealmFromTemplate extensionApprovals[${index}] must be an object`);
     }
+    // Closed-shape discipline (ticket be7714b item 2): an approval entry
+    // accepts exactly `{ extensionId }` — any other key is inert data that
+    // could mask a typo, so it is refused fail-closed.
+    const unknownKeys = Object.keys(entry).filter((key) => key !== 'extensionId');
+    if (unknownKeys.length > 0) {
+      throw invalidRealmParams(
+        `launchRealmFromTemplate extensionApprovals[${index}] contains unknown key(s): ${unknownKeys.join(', ')}`
+      );
+    }
     const extensionId = typeof (entry as { extensionId?: unknown }).extensionId === 'string'
       ? ((entry as { extensionId: string }).extensionId).trim()
       : '';
@@ -3298,7 +3319,7 @@ function createRealmLaunchFailure(
     + `${failedAgentId ? ` at agent '${failedAgentId}'` : ''}: ${detail}; `
     + `rollback purged ${rollback.terminatedMembers.length} member(s)${evictionSummary} and ${rollbackSummary}`
   ) as RealmLaunchFailureError;
-  error.code = 'ERR_STORE_REALM_LAUNCH_FAILED';
+  error.code = SANDBOX_STORE_ERROR_CODES.ERR_STORE_REALM_LAUNCH_FAILED;
   error.realmId = realmId;
   error.templateId = template.id;
   error.failedAgentId = failedAgentId;
@@ -3838,6 +3859,34 @@ export class SandboxStore {
    * can never silently resolve the default `'all'` against the Realm universe.
    */
   #extensionSweepBlocked: Set<string> = new Set();
+
+  /**
+   * Registration-diff baseline (ticket 9327633): the canonical identity keys
+   * observed by the previous `#syncAgents()` pass. A key that newly enters the
+   * active set is a fresh registration regardless of which launch path created
+   * it — including a child launched through the `spawn_agent` tool's lifecycle
+   * port, which never passes the store's grant-composing launch path — so
+   * `#handleRuntimeEvent` can sweep it with the Realm universe.
+   */
+  #knownAgentIdentityKeys: Set<string> = new Set();
+
+  /**
+   * Registrations that entered the active set and await their Realm-universe
+   * grant sweep (ticket 9327633). Populated by the `#syncAgents()` diff and
+   * drained by `#handleRuntimeEvent` through `#queueExtensionReauthorize`
+   * (idle members apply immediately, busy members apply at `turn_complete`).
+   */
+  #pendingRegistrationSweep: Set<string> = new Set();
+
+  /**
+   * Registration-time sweep suppression (ticket 9327633): canonical identity
+   * keys whose launch already passed the store-computed effective extension
+   * grant set through the runtime's trusted unified-options channel. The
+   * registration diff consumes the mark instead of queueing a redundant sweep
+   * — which, for a template launch, would race its post-success attachment and
+   * provenance write (the Realm universe is not yet readable at registration).
+   */
+  #storeLaunchGrantedKeys: Set<string> = new Set();
 
   /**
    * Session-only pending instance payloads (Wave U candidates, ticket
@@ -4644,18 +4693,39 @@ export class SandboxStore {
       const injectedModel: ModelInterface | null = configWithRuntimeBindings.model
         || (modelFromSecondArg ? initialPrompt as ModelInterface : null);
       const prompt = typeof initialPrompt === 'string' ? initialPrompt : null;
-      const agent = typeof config.id === 'string'
-        ? await this.#runtime.launchAgent({
-            config: launchConfig,
-            model: injectedModel,
-            provider: configWithRuntimeBindings.provider || injectedModel?.provider || null,
-            initialPrompt: prompt,
-            ...(history !== null && history.length > 0 ? { history } : {}),
-            // Trusted store-computed effective grants (extension wave).
-            extensionTools: effectiveExtensionGrants,
-            ...operatorContext
-          })
-        : await this.#runtime.launchAgent(launchConfig, initialPrompt);
+      // Registration-time sweep suppression (ticket 9327633): the unified
+      // launch channel below already carries the store-computed effective
+      // grant set, so the registration diff must not queue a redundant
+      // realm-universe sweep for this key (a template launch has not yet
+      // written the attachments the sweep reads). The mark is consumed by the
+      // next `#syncAgents()` diff, or released here when the launch fails.
+      const launchGrantKey = typeof config.id === 'string'
+        ? createAgentIdentityKey(
+            typeof launchConfig.realmId === 'string' && launchConfig.realmId.trim()
+              ? launchConfig.realmId.trim()
+              : GENERIC_REALM_ID,
+            config.id.trim()
+          )
+        : null;
+      if (launchGrantKey) this.#storeLaunchGrantedKeys.add(launchGrantKey);
+      let agent: Awaited<ReturnType<AgentRuntime['launchAgent']>>;
+      try {
+        agent = typeof config.id === 'string'
+          ? await this.#runtime.launchAgent({
+              config: launchConfig,
+              model: injectedModel,
+              provider: configWithRuntimeBindings.provider || injectedModel?.provider || null,
+              initialPrompt: prompt,
+              ...(history !== null && history.length > 0 ? { history } : {}),
+              // Trusted store-computed effective grants (extension wave).
+              extensionTools: effectiveExtensionGrants,
+              ...operatorContext
+            })
+          : await this.#runtime.launchAgent(launchConfig, initialPrompt);
+      } catch (launchErr) {
+        if (launchGrantKey) this.#storeLaunchGrantedKeys.delete(launchGrantKey);
+        throw launchErr;
+      }
       this.#syncAgents();
       this.#syncMessages();
       this.#syncFsSnapshot();
@@ -8360,6 +8430,9 @@ export class SandboxStore {
    */
   #dropPendingExtensionReauthorize(agentRef: string): void {
     this.#pendingExtensionReauthorize.delete(agentRef);
+    // A registration that left the active set before its first sweep is never
+    // swept later (ticket 9327633).
+    this.#pendingRegistrationSweep.delete(agentRef);
   }
 
   // ==========================================================================
@@ -10019,8 +10092,13 @@ export class SandboxStore {
     this.#hydrating = true;
     // Extension wave (P2.4): a hydration pass rebuilds the active registry, so
     // the safe-state sweep queue and the fail-closed guard start clean.
+    // Ticket 9327633: the registration diff's baseline and pending sweep are
+    // rebuilt by the sync passes below (hydration owns the restored members'
+    // grant application through its explicit sweep).
     this.#pendingExtensionReauthorize.clear();
     this.#extensionSweepBlocked.clear();
+    this.#pendingRegistrationSweep.clear();
+    this.#storeLaunchGrantedKeys.clear();
     // Extension wave (P3.1): hydration is a restore boundary — live sessions
     // and catalogs belong to the topology being replaced, and the restored
     // state is by contract not-connected (no auto-connect here or later).
@@ -10041,6 +10119,8 @@ export class SandboxStore {
         this.legacyWorkspaceRemapReport = null;
         this.#pendingExtensionReauthorize.clear();
         this.#extensionSweepBlocked.clear();
+        this.#pendingRegistrationSweep.clear();
+        this.#storeLaunchGrantedKeys.clear();
         this.#syncAgents();
         this.#syncRecycleBin();
         this.#syncMessages();
@@ -10271,9 +10351,13 @@ export class SandboxStore {
     // Extension wave: a reset drops the safe-state sweep queue and the
     // fail-closed sweep guard (no agent survives a runtime reset), and it
     // tears down every live extension connection (session-only state never
-    // outlives the topology it was opened against).
+    // outlives the topology it was opened against). Ticket 9327633: the
+    // registration baseline/pending sets are rebuilt by the sync below and no
+    // launch mark can survive the reset.
     this.#pendingExtensionReauthorize.clear();
     this.#extensionSweepBlocked.clear();
+    this.#pendingRegistrationSweep.clear();
+    this.#storeLaunchGrantedKeys.clear();
     this.#teardownExtensionConnections();
     // Wave I: a reset drops the last legacy-workspace remap report too.
     this.legacyWorkspaceRemapReport = null;
@@ -12233,6 +12317,7 @@ export class SandboxStore {
       }
     }
     // Clone properties to ensure reactive propagation
+    const currentIdentityKeys = new Set<string>();
     this.agents = rawList.map(agent => {
       const rawRealmId = typeof agent.config?.realmId === 'string' && agent.config.realmId ? agent.config.realmId : '';
       const canonicalKey = canonicalKeys.get(`${rawRealmId}\u0000${agent.id}`) || null;
@@ -12244,6 +12329,7 @@ export class SandboxStore {
       // (the same map the mailbox badge resolution already builds), so
       // selection and actions address this exact registration.
       const identityKey = canonicalKey || createAgentIdentityKey(rawRealmId || null, agent.id);
+      currentIdentityKeys.add(identityKey);
 
       return {
         id: agent.id,
@@ -12293,6 +12379,23 @@ export class SandboxStore {
         unreadCount
       };
     });
+
+    // Registration diff (ticket 9327633): a canonical key that newly enters
+    // the active set is a fresh registration regardless of its launch path —
+    // including a child launched through the `spawn_agent` tool's lifecycle
+    // port, which never passes the store's grant-composing launch path. A
+    // store-launched registration is consumed by its launch mark (its grants
+    // already traveled the trusted unified-options channel, and a template
+    // launch has not yet written the Realm attachments/provenance the sweep
+    // reads); a hydration rebuild primes the baseline only, because the
+    // explicit hydration sweep owns restored members' grants.
+    for (const memberKey of currentIdentityKeys) {
+      if (this.#knownAgentIdentityKeys.has(memberKey)) continue;
+      const storeLaunched = this.#storeLaunchGrantedKeys.delete(memberKey);
+      if (storeLaunched || this.#hydrating) continue;
+      this.#pendingRegistrationSweep.add(memberKey);
+    }
+    this.#knownAgentIdentityKeys = currentIdentityKeys;
 
     // Selection reconciliation (defect 7d2c314): `selectedAgent` already
     // resolves the key exactly (or a unique legacy bare ref); when nothing
@@ -12567,6 +12670,20 @@ export class SandboxStore {
     }
     this.#syncAgents();
     this.#syncRecycleBin();
+    // Registration sweep (ticket 9327633): a registration that newly entered
+    // the active set — including a child launched through the `spawn_agent`
+    // tool's lifecycle port, which never passes the store's grant-composing
+    // launch path — receives its Realm-universe grants at its first safe
+    // state (an idle registration applies now; a busy one waits for its
+    // `turn_complete`). Store-launched and hydration-rebuilt registrations are
+    // consumed/primed by the diff and never queue here.
+    if (this.#pendingRegistrationSweep.size > 0) {
+      const pendingRegistrations = [...this.#pendingRegistrationSweep];
+      this.#pendingRegistrationSweep.clear();
+      for (const memberKey of pendingRegistrations) {
+        this.#queueExtensionReauthorize(memberKey);
+      }
+    }
     if (
       event.type === 'schedule_registered' ||
       event.type === 'schedule_triggered' ||

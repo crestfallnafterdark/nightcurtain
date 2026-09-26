@@ -6100,13 +6100,21 @@ test('76. [9327633] a lifecycle-port registration (spawn-tool path) receives the
 
 test('77. [be7714b] the store error-code dictionary covers every emitted store code', () => {
   // Static contract scan: every literal `ERR_*` code assignment in the store
-  // source is an emission and must be a value of the frozen dictionary.
+  // source is an emission and must be a value of the frozen dictionary. After
+  // the fix the scan is expected to be empty (all emissions go through the
+  // dictionary), so the scanner itself is probed first.
+  const emittedCodePattern = /\.code\s*=\s*'(ERR_[A-Z0-9_]+)'/g;
+  const scannerProbe = [..."err.code = 'ERR_SYNTHETIC_PROBE';".matchAll(emittedCodePattern)];
+  assert.deepStrictEqual(
+    scannerProbe.map((match) => match[1]),
+    ['ERR_SYNTHETIC_PROBE'],
+    'the emission scanner must recognize a literal code assignment'
+  );
+
   const contractSource = fs.readFileSync(CONTRACT_PATH, 'utf-8');
   const emitted = new Set(
-    [...contractSource.matchAll(/\.code\s*=\s*'(ERR_[A-Z0-9_]+)'/g)].map((match) => match[1])
+    [...contractSource.matchAll(emittedCodePattern)].map((match) => match[1])
   );
-  assert.ok(emitted.size > 0, 'the emitted-code scan must find literal store emissions');
-
   const declared = new Set(Object.values(SANDBOX_STORE_ERROR_CODES));
   for (const code of emitted) {
     assert.ok(
