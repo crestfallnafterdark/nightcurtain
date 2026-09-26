@@ -432,8 +432,16 @@ async function runEpic16TestSuite() {
       const timeRes = await unprivilegedDispatcher.executeTool('get_current_time', {});
       assert.equal(timeRes.success, true);
 
-      const descRes = await unprivilegedDispatcher.executeTool('describe_tool', { toolName: 'virtualFs_readFile' });
-      assert.equal(descRes.success, true);
+      // describe_tool exposure mirrors authorization (ec397bf): innate
+      // primitives are describable for every caller, while a baked tool the
+      // caller cannot invoke is withheld with the uniform TOOL_NOT_FOUND
+      // receipt (no existence oracle, no capability advertisement).
+      const innateDesc = await unprivilegedDispatcher.executeTool('describe_tool', { toolName: 'whoami' });
+      assert.equal(innateDesc.success, true, 'describe_tool documents the universally authorized innate baseline');
+
+      const bakedDesc = await unprivilegedDispatcher.executeTool('describe_tool', { toolName: 'virtualFs_readFile' });
+      assert.equal(bakedDesc.success, false, 'a null-allowlist caller is not advertised a baked tool it cannot invoke');
+      assert.equal(bakedDesc.code, 'TOOL_NOT_FOUND', 'the withheld descriptor uses the uniform TOOL_NOT_FOUND receipt');
     }
   );
 
