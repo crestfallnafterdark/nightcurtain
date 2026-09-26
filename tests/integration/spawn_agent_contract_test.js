@@ -126,6 +126,38 @@ test('R1b: role never selects the child tool policy', async () => {
   }
 });
 
+test('R1c: role is a pure label for direct lifecycle launches too', async () => {
+  const runtime = new AgentRuntime({ autoBootstrapDirector: false });
+  try {
+    await runtime.ensureDirector();
+
+    // A principal-less host launch keeps the legacy default (`[]`) whatever
+    // the role says: role is never a capability fallback.
+    const hostAgent = await runtime.launchAgent({ id: 'host_role_label', role: 'collaborator' });
+    assert.deepStrictEqual(
+      hostAgent.config.allowedTools,
+      [],
+      "role 'collaborator' must not resolve the collaborator preset for a host launch"
+    );
+    assert.equal(hostAgent.config.role, 'collaborator', 'the role is stored as a display label');
+
+    // A resolved agent caller gets the ratified default, never the role preset.
+    await runtime.launchAgent({ id: 'spawner_role_src', realmId: REALM, allowedTools: ['read_file', 'write_file'] });
+    const child = await runtime.launchAgent({
+      config: { id: 'child_role_label', role: 'manager' },
+      callerContext: { callerAgentId: 'spawner_role_src' }
+    });
+    assert.deepStrictEqual(
+      child.config.allowedTools,
+      ['read_file'],
+      "role 'manager' must not grant the manager preset (default intersection wins)"
+    );
+    assert.equal(child.config.role, 'manager', 'the role stays a label on the child');
+  } finally {
+    runtime.destroy();
+  }
+});
+
 test('R2: allowedTools and toolPreset are honored end-to-end in every documented spelling', async () => {
   const { runtime, dispatcher } = await createSpawnerFixture({ id: 'spawner_r2' });
   try {

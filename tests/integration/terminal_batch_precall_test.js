@@ -491,7 +491,8 @@ await recordTest('AC-EPIC12-03.1', 'Immediate termination on successful single-t
 
   const agent = await runtime.launchAgent({
     id: 'solo-term-agent',
-    role: 'collaborator'
+    role: 'collaborator',
+    allowedTools: 'collaborator'
   }, createMockModel(async () => {
     completionCallCount++;
     return {
@@ -530,7 +531,8 @@ await recordTest('AC-EPIC12-03.2', 'Immediate termination on multi-tool batch wi
 
   const author = await runtime.launchAgent({
     id: 'story-author',
-    role: 'collaborator'
+    role: 'collaborator',
+    allowedTools: 'collaborator'
   }, createMockModel(async () => {
     authorCompletionCalls++;
     return {
@@ -574,7 +576,8 @@ await recordTest('AC-EPIC12-03.2', 'Immediate termination on multi-tool batch wi
 
   const reviewer = await runtime.launchAgent({
     id: 'reviewer-agent',
-    role: 'collaborator'
+    role: 'collaborator',
+    allowedTools: 'collaborator'
   }, createMockModel(async () => ({ role: 'assistant', content: 'Noted.' })));
 
   const turnResult = await runtime.executeAgentTurn('story-author', 'Write opening and notify reviewer');
@@ -617,7 +620,8 @@ await recordTest('AC-EPIC12-04.1', 'Turn does NOT terminate if ANOTHER tool in t
 
   const agent = await runtime.launchAgent({
     id: 'error-guard-agent',
-    role: 'collaborator'
+    role: 'collaborator',
+    allowedTools: 'collaborator'
   }, createMockModel(async (options) => {
     completionCallCount++;
     if (completionCallCount === 1) {
@@ -681,7 +685,8 @@ await recordTest('AC-EPIC12-04.2', 'Turn does NOT terminate if runtime_batchPrec
 
   const agent = await runtime.launchAgent({
     id: 'self-healing-agent',
-    role: 'collaborator'
+    role: 'collaborator',
+    allowedTools: 'collaborator'
   }, createMockModel(async () => {
     completionCallCount++;
     if (completionCallCount === 1) {
@@ -826,7 +831,8 @@ await recordTest('AC-EPIC12-05.1', 'Summary argument is preserved in agent state
 
   const agent = await runtime.launchAgent({
     id: 'narrator',
-    role: 'collaborator'
+    role: 'collaborator',
+    allowedTools: 'collaborator'
   }, createMockModel(async () => ({
     role: 'assistant',
     content: '',
@@ -886,7 +892,8 @@ await recordTest('AC-EPIC12-06.1', 'Validated precalls cleanly queued in agent.p
 
   const agent = await runtime.launchAgent({
     id: 'observer-agent',
-    role: 'collaborator'
+    role: 'collaborator',
+    allowedTools: 'collaborator'
   }, createMockModel(async () => ({
     role: 'assistant',
     content: '',
@@ -923,7 +930,8 @@ await recordTest('AC-EPIC12-06.2', 'Subsequent standard turn after terminal batc
 
   const agent = await runtime.launchAgent({
     id: 'multi-turn-agent',
-    role: 'collaborator'
+    role: 'collaborator',
+    allowedTools: 'collaborator'
   }, createMockModel(async () => {
     turnNumber++;
     if (turnNumber === 1) {
@@ -978,6 +986,7 @@ await recordTest('AC-EPIC12-06.3', 'Repeated failing terminal batch is bounded b
   const agent = await runtime.launchAgent({
     id: 'bounded-failure-agent',
     role: 'collaborator',
+    allowedTools: 'collaborator',
     maxTurns: 2
   }, createMockModel(async () => {
     completionCallCount++;
@@ -1027,7 +1036,8 @@ await recordTest('AC-EPIC12-07.1', 'terminalStops increments monotonically acros
 
   const agent = await runtime.launchAgent({
     id: 'telemetry-agent',
-    role: 'collaborator'
+    role: 'collaborator',
+    allowedTools: 'collaborator'
   }, createMockModel(async () => ({
     role: 'assistant',
     content: '',
@@ -1076,7 +1086,8 @@ await recordTest('AC-EPIC12-08.1', 'killAgent and purgeAgent cleanly clear pendi
 
   const agent = await runtime.launchAgent({
     id: 'mortal-agent',
-    role: 'collaborator'
+    role: 'collaborator',
+    allowedTools: 'collaborator'
   }, createMockModel(async () => ({
     role: 'assistant',
     content: '',
@@ -1122,7 +1133,8 @@ await recordTest('AC-EPIC12-08.2', 'Persistence preserves lastSummary, pendingPr
 
   const agent = await runtime.launchAgent({
     id: 'persistent-agent',
-    role: 'collaborator'
+    role: 'collaborator',
+    allowedTools: 'collaborator'
   }, createMockModel(async () => ({
     role: 'assistant',
     content: '',

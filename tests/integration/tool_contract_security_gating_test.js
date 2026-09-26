@@ -678,7 +678,7 @@ async function runEpic16TestSuite() {
   await runTestScenario(
     'AC16-04.1',
     'AC-EPIC16-04',
-    'Every id is ordinary (Wave I, c02d0b9): "admin"/"director"/"system" spawn without privilege, while privileged spawn stays denied',
+    'Every id is ordinary (Wave I, c02d0b9): "admin"/"director"/"system" spawn without privilege, while a direct privileged claim stays denied',
     'SEC-1 Ordinary-id protection',
     async () => {
       for (const ordinaryId of ['admin', 'director', 'SYSTEM']) {
@@ -700,9 +700,34 @@ async function runEpic16TestSuite() {
       runtime.purgeAgent('director', { principal: runtime.getOperatorPrincipal() });
       assert.equal(runtime.getAgent('director'), null, 'the ordinary director id is freed for the bootstrap');
 
+      // Ratified parameter surface (f41f838 follow-up): `privileged` is
+      // authority-adjacent and stripped at the tool boundary, so the spawn
+      // itself succeeds WITHOUT escalation and names the ignored key.
       const spawnPrivileged = await collaboratorDispatcher.executeTool('runtime_spawnAgent', { id: 'worker_1', privileged: true });
-      assert.equal(spawnPrivileged.success, false);
-      assert.equal(spawnPrivileged.code, 'PERMISSION_DENIED');
+      assert.equal(spawnPrivileged.success, true, 'the stripped claim spawns an ordinary child');
+      assert.notEqual(runtime.getAgent('worker_1').config.privileged, true, 'a stripped privileged claim never elevates the child');
+      assert.equal(
+        runtime.createAgentIdentityPort().getAgentIdentity('worker_1').realmBypass,
+        false,
+        'the strip grants no realmBypass'
+      );
+      assert.deepEqual(
+        spawnPrivileged.warnings,
+        ["ignored unknown parameter 'privileged'"],
+        'the ignored authority key is named for the model'
+      );
+
+      // Authority claims that still travel the trusted lifecycle path stay
+      // fail-closed: a direct non-authority privileged launch is denied.
+      await assert.rejects(
+        () => runtime.launchAgent({
+          config: { id: 'worker_denied', privileged: true },
+          callerContext: { callerAgentId: 'agent_collab' }
+        }),
+        (err) => err?.code === 'PERMISSION_DENIED',
+        'the lifecycle privilege gate still refuses a direct escalation claim'
+      );
+      assert.equal(runtime.getAgent('worker_denied'), null, 'the denied privileged launch registers nothing');
     }
   );
 

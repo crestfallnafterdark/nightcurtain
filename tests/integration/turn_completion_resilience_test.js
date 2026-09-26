@@ -691,8 +691,8 @@ console.log('\n--- [AC-EPIC17-10] Accurate Kill Reporting & Spawn Cleanup ---');
 await runTestScenario(
   'AC17-10.1',
   'AC-EPIC17-10',
-  'Terminating non-existent agent returns EXECUTION_FAILED; failed spawn cleanly unwinds runtime registration',
-  'TURN-11 & TURN-10: Accurate kill reporting and no live orphan agents on spawn failure',
+  'Terminating non-existent agent returns EXECUTION_FAILED; a failed initial turn keeps the registered child with an observable error',
+  'TURN-11 & TURN-10: Accurate kill reporting and registration-only rollback on launch',
   async () => {
     const vfs = new VirtualFS();
     const bus = new MessagingBus();
@@ -715,7 +715,9 @@ await runTestScenario(
     assert.equal(killRes.code, 'EXECUTION_FAILED');
     assert.ok(killRes.error.includes('not found'));
 
-    // 2. Spawn failure unwinding
+    // 2. Failed initial turn: registration-only rollback (ratified prompt
+    // contract, ticket 4692014). The turn error propagates to the caller, but
+    // the registered child stays and the failure is observable on it.
     const initialTurnFailFn = async () => {
       throw new Error('LLM Provider Outage during launch');
     };
@@ -733,15 +735,21 @@ await runTestScenario(
     }
 
     assert.equal(spawnThrew, true, 'launchAgent should have thrown on turn failure');
-    assert.equal(runtime.getAgent('failing-agent'), null, 'Failed agent must NOT remain in runtime.agents');
-    assert.equal(bus.isRegistered('failing-agent'), false, 'Failed agent must NOT remain registered in messagingBus');
-    assert.equal(bus.getPolicy('failing-agent'), undefined, 'Failed agent must have no live bus policy after unwind');
+    const failing = runtime.getAgent('failing-agent');
+    assert.ok(failing, 'a failed initial turn keeps the registered child (no destructive rollback)');
+    assert.equal(failing.config.name, 'Failing Agent', 'the child keeps its launch config');
+    assert.ok(
+      String(failing.lastError).includes('LLM Provider Outage'),
+      'the failure is recorded observably on the child'
+    );
+    assert.equal(failing.stateDetail, 'Initial prompt turn failed', 'the failure is visible in the state detail');
 
-    // Observable no-subscription outcome: mail cannot be accepted and no inbox remains.
-    const postUnwindPing = bus.sendMessage({ from: 'test-harness', to: 'failing-agent', content: 'post-unwind probe' });
-    assert.equal(postUnwindPing.success, false, 'Failed agent must not accept messages after spawn unwind');
-    assert.equal(postUnwindPing.code, 'RECIPIENT_NOT_FOUND', 'Failed agent must be reported as an unknown recipient');
-    assert.equal(bus.getUnreadCount('failing-agent'), 0, 'Failed agent must have no live mailbox awaiting delivery');
+    // The registration stays live on the bus (canonical registration key).
+    const failingIdentity = runtime.createAgentIdentityPort().getAgentIdentity('failing-agent');
+    assert.ok(failingIdentity, 'the surviving child resolves a registry identity');
+    assert.equal(bus.isRegistered(failingIdentity.key), true, 'the registered child keeps its bus registration');
+    assert.notEqual(bus.getPolicy(failingIdentity.key), undefined, 'the registered child keeps a live bus policy');
+    assert.equal(bus.getUnreadCount(failingIdentity.key), 0, 'no phantom mail is invented by the failure');
   }
 );
 

@@ -206,7 +206,7 @@ await recordTest('AC-EPIC13-01.2', 'Injection mode deposits input into inbox and
   // Registered same-realm sender (Wave I, d57cbc1): an agent-labelled
   // injection resolves its sender realm exactly; an unregistered label cannot
   // reach a realm-bound target (one-way bypass, Realm wave A).
-  await runtime.launchAgent({ id: 'commander', role: 'collaborator' });
+  await runtime.launchAgent({ id: 'commander', role: 'collaborator', allowedTools: 'collaborator' });
 
   await runtime.executeAgentTurn('injection-agent', 'Emergency broadcast: All units hold position.', {
     mode: 'injection',
@@ -579,7 +579,8 @@ await recordTest('AC-EPIC13-05.2', 'Coalescing: Injected mail calls and precalls
 
   const agent = await runtime.launchAgent({
     id: 'merger',
-    role: 'manager'
+    role: 'manager',
+    allowedTools: 'manager'
   }, createMockModel(async () => ({ role: 'assistant', content: 'Turn finished.' })));
 
   // Manually prime a pending precall on the agent
@@ -945,7 +946,8 @@ await recordTest('AC-EPIC13-08.2', 'Persistence serialization and hydration pres
 
   const agent = await runtime1.launchAgent({
     id: 'persist-agent',
-    role: 'manager'
+    role: 'manager',
+    allowedTools: 'manager'
   });
 
   agent.telemetry.injectedDeliveries = 7;
@@ -957,7 +959,7 @@ await recordTest('AC-EPIC13-08.2', 'Persistence serialization and hydration pres
   ];
 
   // Also kill an agent to test recycleBin serialization
-  const recycled = await runtime1.launchAgent({ id: 'recycled-agent', role: 'collaborator' });
+  const recycled = await runtime1.launchAgent({ id: 'recycled-agent', role: 'collaborator', allowedTools: 'collaborator' });
   recycled.telemetry.injectedDeliveries = 2;
   recycled.telemetry.precallCount = 1;
   recycled.telemetry.terminalStops = 1;
@@ -1001,7 +1003,7 @@ await recordTest('AC-EPIC13-08.3', 'SandboxStore reactive store exposes efficien
     autoHydrate: false
   });
 
-  const agent = await runtime.launchAgent({ id: 'store-agent', role: 'collaborator' });
+  const agent = await runtime.launchAgent({ id: 'store-agent', role: 'collaborator', allowedTools: 'collaborator' });
   agent.telemetry.injectedDeliveries = 5;
   agent.telemetry.precallCount = 3;
   agent.telemetry.terminalStops = 2;
@@ -1035,7 +1037,8 @@ await recordTest('AC-EPIC13-08.4', 'Snapshot restore runtime execution: pendingP
 
   const agent1 = await runtime1.launchAgent({
     id: 'exec-restore-agent',
-    role: 'manager'
+    role: 'manager',
+    allowedTools: 'manager'
   });
 
   agent1.telemetry.injectedDeliveries = 2;
