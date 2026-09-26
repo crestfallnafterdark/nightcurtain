@@ -1,7 +1,7 @@
 /**
  * @packageDocumentation
  * Module `tools/descriptors`.
- * Master catalog aggregating all 35 canonical tool descriptors and the frozen
+ * Master catalog aggregating all 36 canonical tool descriptors and the frozen
  * `TOOL_REGISTRY` table, plus the separate Wave U publishing meta-tool
  * registry (`PUBLISHING_TOOL_REGISTRY`: the two explicit-grant-only tools that
  * are never part of the canonical taxonomy and never wildcard-exposed).
@@ -17,7 +17,7 @@
  * @decision Identity-only caller scope: invocation, lifecycle, and scheduler handlers forward only the dispatcher-bound subject id plus the identity-port principal; per-call caller identity, privilege flags, and role aliases are never read
  * @decision `invoke_agent` pins recursion depth from the trusted bound `currentDepth`, never from a per-call `depth` key
  * @decision VFS and messaging sanitizers strip caller-supplied identity and mailbox-routing keys from the fresh sanitized parameter copy
- * @decision Realm publishing meta tools stay outside the canonical taxonomy (35 names) so no wildcard, preset, or `toolProfile` selector can expose or authorize them; descriptors resolve exclusively through `PUBLISHING_TOOL_REGISTRY`, and the dispatcher consults the caller's frozen authority descriptor for the exact explicit authority
+ * @decision Realm publishing meta tools stay outside the canonical taxonomy (36 names) so no wildcard, preset, or `toolProfile` selector can expose or authorize them; descriptors resolve exclusively through `PUBLISHING_TOOL_REGISTRY`, and the dispatcher consults the caller's frozen authority descriptor for the exact explicit authority
  */
 
 import { vfsToolDescriptors } from './vfsTools.ts';
@@ -118,7 +118,10 @@ export {
   invoke_agent,
   waitForInvocationDescriptor,
   waitForInvocation,
-  wait_for_invocation
+  wait_for_invocation,
+  waitForAgentDescriptor,
+  waitForAgent,
+  wait_for_agent
 } from './invocationTools.ts';
 
 export {
@@ -173,7 +176,7 @@ export {
 export type { PublishingToolDescriptor } from './realmTools.ts';
 
 /**
- * Array of all 35 Canonical Tool Descriptors
+ * Array of all 36 Canonical Tool Descriptors
  */
 export const ALL_TOOL_DESCRIPTORS: readonly ToolDescriptor[] = Object.freeze([
   ...vfsToolDescriptors,
