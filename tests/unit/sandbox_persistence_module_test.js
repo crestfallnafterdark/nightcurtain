@@ -25,6 +25,14 @@ import {
   SAVED_INSTANCE_PAYLOAD_MAX_BYTES,
   SAVED_INSTANCE_PAYLOAD_MAX_ENTRIES,
   PERSISTENCE_ERROR_CODES,
+  REALM_ARCHIVE_FORMAT,
+  REALM_ARCHIVE_FORMAT_VERSION,
+  buildRealmArchiveFilename,
+  isSafeRealmArchiveEndpointUrl,
+  parseRealmArchive,
+  serializeRealmArchive,
+  serializeRealmArchiveAgent,
+  validateRealmArchive,
   validateSandboxState,
   serializeRuntimeEnvironment,
   restoreRuntimeEnvironment,
@@ -55,19 +63,28 @@ test('1. Strict Export Whitelist & Constants', () => {
   const exportedKeys = Object.keys(PersistenceModule).sort();
   const expectedKeys = [
     'PERSISTENCE_ERROR_CODES',
+    'REALM_ARCHIVE_FORMAT',
+    'REALM_ARCHIVE_FORMAT_VERSION',
     'SANDBOX_PERSISTENCE_VERSION',
     'SANDBOX_STATE_STORAGE_KEY',
     'SAVED_INSTANCE_PAYLOAD_MAX_BYTES',
     'SAVED_INSTANCE_PAYLOAD_MAX_ENTRIES',
+    'buildRealmArchiveFilename',
     'clearSandboxState',
     'createDebouncedSave',
     'hasPersistedState',
+    'isSafeRealmArchiveEndpointUrl',
     'loadSandboxState',
+    'parseRealmArchive',
     'resetSaveLockQueue',
     'restoreRuntimeEnvironment',
     'saveSandboxState',
     'saveSandboxStateLocked',
+    'serializeRealmArchive',
+    'serializeRealmArchiveAgent',
+    'serializeRealmArchiveRecycledAgent',
     'serializeRuntimeEnvironment',
+    'validateRealmArchive',
     'validateSandboxState'
   ].sort();
 
@@ -2623,4 +2640,200 @@ test('28. saved instance payloads: malformed entries, duplicates, caps, and over
   assert.strictEqual(loadSandboxState().savedInstancePayloads, undefined);
 
   sharedLocalStorage.clear();
+});
+
+// ============================================================================
+// 15. Realm Archive Envelope (D0b, ticket 3fe5221)
+// ============================================================================
+
+/**
+ * Minimal valid `RealmArchiveEnvelope` v1 fixture for the archive boundary
+ * tests.
+ *
+ * @param {object} [overrides] - Top-level field overrides.
+ * @returns {object} Archive envelope fixture.
+ */
+function realmArchiveFixture(overrides = {}) {
+  return {
+    format: REALM_ARCHIVE_FORMAT,
+    formatVersion: REALM_ARCHIVE_FORMAT_VERSION,
+    archiveId: 'archive-fixture-1',
+    exportedAt: '2026-09-27T00:00:00.000Z',
+    persistenceVersion: SANDBOX_PERSISTENCE_VERSION,
+    source: { realmId: 'realm_fixture' },
+    realm: { id: 'realm_fixture', name: 'Fixture Realm', createdAt: 1700000000000 },
+    members: {
+      active: [{ id: 'coordinator', config: { id: 'coordinator', realmId: 'realm_fixture' }, history: [], redoStack: [] }],
+      recycled: []
+    },
+    authority: { hostGrants: [], members: {} },
+    messaging: { activeQueues: {}, archives: {}, registeredAgents: [], terminatedAgents: [], auditLog: [] },
+    schedules: [],
+    worldClock: { global: { totalSeconds: 0, date: 'Day 1' }, clocks: {}, events: {} },
+    vfs: { realmGlobal: {}, members: {} },
+    ...overrides
+  };
+}
+
+test('15. Realm archive validation is fail-closed and drops unknown fields', () => {
+  const valid = validateRealmArchive(realmArchiveFixture({ unknownField: 'dropped' }));
+  assert.strictEqual(valid.valid, true, 'a well-formed envelope validates');
+  assert.strictEqual(valid.envelope.format, REALM_ARCHIVE_FORMAT);
+  assert.strictEqual(valid.envelope.formatVersion, REALM_ARCHIVE_FORMAT_VERSION);
+  assert.strictEqual(valid.envelope.unknownField, undefined, 'unknown top-level fields are dropped');
+  assert.deepStrictEqual(valid.envelope.members.active[0].config.realmId, 'realm_fixture');
+
+  const badFormat = validateRealmArchive(realmArchiveFixture({ format: 'ai-story.other' }));
+  assert.strictEqual(badFormat.valid, false);
+  assert.strictEqual(badFormat.code, 'ERR_ARCHIVE_FORMAT');
+
+  const badVersion = validateRealmArchive(realmArchiveFixture({ formatVersion: 2 }));
+  assert.strictEqual(badVersion.valid, false);
+  assert.strictEqual(badVersion.code, 'ERR_ARCHIVE_VERSION');
+
+  const malformedClock = realmArchiveFixture();
+  malformedClock.worldClock = { global: { totalSeconds: 'nope', date: 'Day 1' }, clocks: {}, events: {} };
+  const clockResult = validateRealmArchive(malformedClock);
+  assert.strictEqual(clockResult.valid, false);
+  assert.strictEqual(clockResult.code, 'ERR_ARCHIVE_INVALID');
+
+  const malformedMembers = realmArchiveFixture();
+  malformedMembers.members.active = [{ config: {}, history: [] }];
+  assert.strictEqual(validateRealmArchive(malformedMembers).valid, false, 'member without an id rejects');
+
+  const polluted = JSON.parse(`{"format":"${REALM_ARCHIVE_FORMAT}","formatVersion":1,"__proto__":{"polluted":true}}`);
+  const pollutedResult = validateRealmArchive(polluted);
+  assert.strictEqual(pollutedResult.valid, false);
+  assert.strictEqual(pollutedResult.code, 'ERR_ARCHIVE_INVALID');
+
+  assert.strictEqual(parseRealmArchive('not json').code, 'ERR_ARCHIVE_UNPARSEABLE');
+  assert.strictEqual(parseRealmArchive('').code, 'ERR_ARCHIVE_UNPARSEABLE');
+});
+
+test('16. Realm archive serialization is canonical, byte-stable, and omission-rule aware', () => {
+  const validated = validateRealmArchive(realmArchiveFixture());
+  assert.strictEqual(validated.valid, true);
+  const firstBytes = serializeRealmArchive(validated.envelope);
+  const revalidated = parseRealmArchive(firstBytes);
+  assert.strictEqual(revalidated.valid, true, 'the serialized archive re-parses');
+  const secondBytes = serializeRealmArchive(revalidated.envelope);
+  assert.strictEqual(firstBytes, secondBytes, 'canonical serialization is byte-stable');
+  assert.ok(firstBytes.indexOf('"authority"') < firstBytes.indexOf('"format"'), 'keys are recursively sorted');
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(validated.envelope, 'template'), false, 'empty optional sections are omitted');
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(validated.envelope, 'warnings'), false);
+  assert.strictEqual(validated.envelope.savedPayloads, undefined);
+
+  const withOptional = realmArchiveFixture({
+    template: { id: 'demo', version: 'sha256:x', payload: '{}' },
+    warnings: ['fixture warning']
+  });
+  const optionalValidated = validateRealmArchive(withOptional);
+  assert.strictEqual(optionalValidated.envelope.template.id, 'demo');
+  assert.deepStrictEqual([...optionalValidated.envelope.warnings], ['fixture warning']);
+  assert.strictEqual(
+    buildRealmArchiveFilename('My Realm!', 'ABCDEF12-3456'),
+    'my-realm-realm-ABCDEF12.realm.json',
+    'filenames follow the canonical realm-archive shape'
+  );
+});
+
+test('17. Archive member redaction drops keyId and credential-shaped endpoint URLs', () => {
+  const agent = new Agent({
+    id: 'archive_redaction_probe',
+    name: 'Redaction Probe',
+    modelConfig: {
+      providerId: 'openai',
+      modelId: 'probe-model',
+      keyId: 'vault_ref_probe',
+      apiKey: 'rex-alpha-01',
+      url: 'https://user:pass@example.com/v1?token=abc'
+    }
+  });
+  const snapshot = serializeRealmArchiveAgent(agent);
+  assert.strictEqual(snapshot.config.modelConfig.keyId, undefined, 'keyId is dropped');
+  assert.strictEqual(snapshot.config.modelConfig.url, undefined, 'credential-shaped URLs are dropped');
+  assert.strictEqual(snapshot.config.modelConfig.apiKey, undefined, 'the snapshot strip set still applies');
+
+  const safeAgent = new Agent({
+    id: 'archive_redaction_safe',
+    name: 'Safe Probe',
+    modelConfig: { providerId: 'openai', modelId: 'probe-model', url: 'https://api.example.com/v1' }
+  });
+  const safeSnapshot = serializeRealmArchiveAgent(safeAgent);
+  assert.strictEqual(safeSnapshot.config.modelConfig.url, 'https://api.example.com/v1', 'safe endpoint references are retained');
+  assert.strictEqual(isSafeRealmArchiveEndpointUrl('https://api.example.com/v1'), true);
+  assert.strictEqual(isSafeRealmArchiveEndpointUrl('https://user:pass@example.com/v1'), false);
+  assert.strictEqual(isSafeRealmArchiveEndpointUrl('https://example.com/v1?api_key=abc'), false);
+  assert.strictEqual(isSafeRealmArchiveEndpointUrl('ftp://example.com/v1'), false);
+  assert.strictEqual(isSafeRealmArchiveEndpointUrl('not a url'), false);
+
+  // S2 verifier F-2: well-known presigned URL credential params must fail the
+  // safe-endpoint predicate (they are bearer credentials in query shape).
+  assert.strictEqual(
+    isSafeRealmArchiveEndpointUrl('https://bucket.s3.amazonaws.com/obj?X-Amz-Signature=deadbeef&X-Amz-Credential=AKIAEXAMPLE'),
+    false,
+    'AWS presigned signature/credential params are rejected'
+  );
+  assert.strictEqual(
+    isSafeRealmArchiveEndpointUrl('https://storage.googleapis.com/obj?X-Goog-Signature=deadbeef&X-Goog-Credential=svc'),
+    false,
+    'Google signed URL params are rejected'
+  );
+  assert.strictEqual(
+    isSafeRealmArchiveEndpointUrl('https://host/v1?AWSAccessKeyId=AKIAEXAMPLE'),
+    false,
+    'a bare AWS access key id param is rejected'
+  );
+  assert.strictEqual(isSafeRealmArchiveEndpointUrl('https://host/v1?sig=abcdef'), false, 'the `sig` param is rejected');
+  assert.strictEqual(isSafeRealmArchiveEndpointUrl('https://host/v1?access_token=abcdef'), false, 'access_token is rejected');
+});
+
+test('17b. Archive member redaction walks nested config channels recursively (F-1)', () => {
+  const settingsAgent = new Agent({
+    id: 'archive_redaction_settings',
+    name: 'Nested Settings Probe',
+    modelConfig: { providerId: 'openai', modelId: 'probe-model' },
+    settings: {
+      modelConfig: {
+        providerId: 'openai',
+        modelId: 'legacy-model',
+        keyId: 'vault_ref_probe_settings',
+        url: 'https://probeuser:probe-secret-value@example.com/v1?token=probe-secret-value'
+      }
+    }
+  });
+  const snapshot = serializeRealmArchiveAgent(settingsAgent);
+  assert.strictEqual(snapshot.config.settings.modelConfig.keyId, undefined, 'the nested keyId is dropped');
+  assert.strictEqual(snapshot.config.settings.modelConfig.url, undefined, 'the nested credential URL is dropped');
+  assert.strictEqual(snapshot.config.settings.modelConfig.providerId, 'openai', 'benign nested fields are retained');
+  const bytes = JSON.stringify(snapshot);
+  assert.strictEqual(bytes.includes('vault_ref_probe_settings'), false, 'the nested keyId never reaches serialized bytes');
+  assert.strictEqual(bytes.includes('probe-secret-value'), false, 'the nested credential material never reaches serialized bytes');
+  assert.strictEqual(bytes.includes('keyId'), false, 'no keyId key survives the recursive walk');
+
+  // A benign nested URL is retained; a nested URL with any credential-shaped
+  // query param is dropped wholesale.
+  const safeNested = new Agent({
+    id: 'archive_redaction_nested_safe',
+    name: 'Nested Safe Probe',
+    settings: { endpoints: { primary: { baseUrl: 'https://api.example.com/v1' } } }
+  });
+  const safeNestedSnapshot = serializeRealmArchiveAgent(safeNested);
+  assert.strictEqual(
+    safeNestedSnapshot.config.settings.endpoints.primary.baseUrl,
+    'https://api.example.com/v1',
+    'benign nested endpoint references are retained'
+  );
+
+  const unsafeNested = new Agent({
+    id: 'archive_redaction_nested_unsafe',
+    name: 'Nested Unsafe Probe',
+    settings: { endpoints: { primary: { baseUrl: 'https://api.example.com/v1?X-Amz-Signature=deadbeef' } } }
+  });
+  const unsafeNestedSnapshot = serializeRealmArchiveAgent(unsafeNested);
+  assert.strictEqual(
+    unsafeNestedSnapshot.config.settings.endpoints.primary.baseUrl,
+    undefined,
+    'credential-bearing nested endpoint references are dropped'
+  );
 });

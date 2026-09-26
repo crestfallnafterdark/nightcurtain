@@ -99,7 +99,7 @@ export {
 } from './compose.ts';
 export { summarizeAgentCapabilities } from './capabilities.ts';
 export { parseTemplateBundle, serializeTemplateBundle } from './transport.ts';
-export { templateBundleVersion } from './version.ts';
+export { canonicalJsonStringify, templateBundleVersion } from './version.ts';
 export { hashText } from './sha256.ts';
 export { payloadDigest, validatePayload } from './hydration.ts';
 export { normalizeTemplate } from './legacy.ts';

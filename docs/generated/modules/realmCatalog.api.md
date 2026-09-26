@@ -129,6 +129,9 @@ export interface BakedTemplateBundle {
 export type BundleFiles = Readonly<Record<string, string>>;
 
 // @public
+export function canonicalJsonStringify(value: unknown): string;
+
+// @public
 export type CapabilityWildcardSource = 'profile' | 'privileged' | 'none';
 
 // @public
@@ -617,6 +620,24 @@ Bundle files are the only source for those references — the catalog performs n
 ### `BundleFiles` — type alias
 
 Bundle file bodies keyed by bundle-relative path (or hydration file content keyed by slot path when a caller composes history against hydrated content).
+
+### `canonicalJsonStringify` — function
+
+Renders a JSON value canonically: object keys recursively sorted, no insignificant whitespace, JSON-standard string escaping.
+
+Only plain JSON data is accepted (finite numbers, strings, booleans, null, arrays, plain objects); `undefined` object members are omitted like `JSON.stringify` does and array holes become `null`.
+
+#### Parameters
+
+- `value` — Value to render
+
+#### Returns
+
+The canonical JSON text
+
+#### Throws
+
+- `Error` - When the value is not plain finite JSON data
 
 ### `CapabilityWildcardSource` — type alias
 
@@ -1569,9 +1590,9 @@ The validated template reference
 
 ## Doc coverage
 
-- Top-level exports: 73
-- Declarations (exports + members): 226
-- Documented declarations: 226 / 226 (100%)
+- Top-level exports: 74
+- Declarations (exports + members): 227
+- Documented declarations: 227 / 227 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): `ToolPresetName`, `TriggerPolicy`

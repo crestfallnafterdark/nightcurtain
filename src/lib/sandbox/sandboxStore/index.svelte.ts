@@ -89,16 +89,16 @@
  */
 
 import { AgentRuntime, createAgentIdentityKey, parseAgentIdentityKey } from '../runtime/index.ts';
-import type { AgentConfig, AgentConfigUpdate, AgentIdentityPort, AgentIdentityProjection, AgentIdentityScope, AgentState, AuthorityDescriptor, InternalPrincipal, LaunchHistoryEntry, ScheduleResult, TurnExecutionOptions, TurnExecutionResult, TurnInput, UnsubscribeFn } from '../runtime/index.ts';
+import type { AgentConfig, AgentConfigUpdate, AgentIdentityPort, AgentIdentityProjection, AgentIdentityScope, AgentState, AuthorityDescriptor, InternalPrincipal, LaunchHistoryEntry, RealmSliceImportInput, ScheduleResult, TurnExecutionOptions, TurnExecutionResult, TurnInput, UnsubscribeFn } from '../runtime/index.ts';
 import type { Agent, TurnBundle } from '../runtime/agent/index.ts';
 import type { ModelInterface, ProviderInterface } from '../inference/index.ts';
 import { AGENT_STATES } from '../runtime/agentLifecycle/index.ts';
 import { VirtualFS, isReservedWorkspaceKey, normalizeVirtualPath, resolveAgentPrivateWorkspaceKey } from '../virtualFs/index.ts';
-import type { FileRecord, WriteReceipt, CopyReceipt, GrepMatch, GrepOptions, VfsWriteOptions, VfsCopyOptions } from '../virtualFs/index.ts';
+import type { FileRecord, WriteReceipt, CopyReceipt, GrepMatch, GrepOptions, VfsWriteOptions, VfsCopyOptions, VirtualFsSnapshot } from '../virtualFs/index.ts';
 import { MessagingBus } from '../messagingBus/index.ts';
 import type { BusMessageEnvelope, InboxHeader, InboxListOptions, ReadMessageResult, SendMessageReceipt } from '../messagingBus/index.ts';
 import { WorldClock } from '../worldClock/index.ts';
-import type { AdvanceClockSuccess, NarrativeEvent, TimeState } from '../worldClock/index.ts';
+import type { AdvanceClockSuccess, NarrativeEvent, PartitionClockSnapshot, TimeState, WorldClockSnapshot, WorldEvent } from '../worldClock/index.ts';
 import { CredentialVault, createBrowserCredentialStorage, normalizeProviderId } from '../credentialVault/index.ts';
 import type { CredentialResolverPort, CredentialStoragePort } from '../credentialVault/index.ts';
 import { createPresetCatalog } from '../presetCatalog/index.ts';
@@ -192,6 +192,21 @@ import type {
 } from '../tools/extensionTools/index.ts';
 import { createDebouncedSave, saveSandboxState, loadSandboxState, clearSandboxState, hasPersistedState, serializeRuntimeEnvironment, restoreRuntimeEnvironment, SAVED_INSTANCE_PAYLOAD_MAX_BYTES, SAVED_INSTANCE_PAYLOAD_MAX_ENTRIES } from '../sandboxPersistence/index.ts';
 import type { DebouncedSaveCoordinator, PersistedImportedRealmTemplate, PersistedSavedInstancePayload, SandboxPersistedState } from '../sandboxPersistence/index.ts';
+import {
+  REALM_ARCHIVE_FORMAT,
+  buildRealmArchiveFilename,
+  parseRealmArchive,
+  serializeRealmArchive,
+  serializeRealmArchiveAgent,
+  serializeRealmArchiveRecycledAgent,
+  SANDBOX_PERSISTENCE_VERSION
+} from '../sandboxPersistence/index.ts';
+import type {
+  RealmArchiveAuthorityHostGrant,
+  RealmArchiveAuthorityMemberProjection,
+  RealmArchiveEnvelope,
+  VirtualFsPersistedFile
+} from '../sandboxPersistence/index.ts';
 import { downloadSingleFile, downloadFilesSeparately, downloadFolderAsArchive, processUploadedFiles } from '../fsDownloadUtils/index.ts';
 import type { ArchiveDownloadReceipt, BatchDownloadFailure, CreateArchiveOptions, DownloadReceipt, ProcessUploadOptions } from '../fsDownloadUtils/index.ts';
 
@@ -275,6 +290,7 @@ const PUBLISHING_AUTHORITY_ID_SET: ReadonlySet<string> = new Set<string>([
  * - `ERR_STORE_REALM_PROTECTED`: `deleteRealm` targeted the seeded Generic default Realm, which can never be deleted.
  * - `ERR_STORE_REALM_DELETE_FAILED`: a recursive Realm deletion could not purge every member, so the record was left in place (fail-closed; the error carries a report).
  * - `ERR_STORE_REALM_LAUNCH_FAILED`: a template launch failed after the Realm record existed (materialization, a member launch, a placement write, or a directive delivery), so the record and its members were rolled back first; the error carries the rollback report and the original failure as `cause`.
+ * - `ERR_STORE_REALM_NOT_FOUND`: `exportRealmArchive` targeted a realm id the registry does not hold (nothing was read or written).
  * - `ERR_TEMPLATE_PROVIDERS_UNSUPPORTED`: retired providers-gate code; `launchRealmFromTemplate` no longer emits it (provider-bearing templates resolve against installed and attached extensions and launch with missing-extension disclosure).
  * - `ERR_TEMPLATE_AUTHORITY_UNSUPPORTED`: `launchRealmFromTemplate` targeted a template declaring a publishing authority id unknown to this host; launch is blocked fail-closed while import/validation/review accept the declaration (providers precedent).
  * - `ERR_STORE_TEMPLATE_TOO_LARGE`: `importRealmTemplate` exceeded the per-bundle or total imported-template byte budget.
@@ -291,6 +307,8 @@ const PUBLISHING_AUTHORITY_ID_SET: ReadonlySet<string> = new Set<string>([
  * - `ERR_STORE_EXTENSION_CONNECT_FAILED`: the error code of an unclassified operational connection failure (a classified MCP client failure keeps its own `ERR_MCP_*` code); never thrown by the pre-connection gates.
  * - `ERR_STORE_PAYLOAD_LIBRARY_FULL`: `saveInstancePayload` targeted a library already holding `SAVED_INSTANCE_PAYLOAD_MAX_ENTRIES` entries; delete one before saving another.
  * - `ERR_STORE_PAYLOAD_LIBRARY_TOO_LARGE`: `saveInstancePayload` targeted a payload whose serialized size exceeds `SAVED_INSTANCE_PAYLOAD_MAX_BYTES`.
+ * - `ERR_STORE_ARCHIVE_FAILED`: a realm archive export failed unexpectedly while projecting live state (read-only; nothing was mutated).
+ * - `ERR_STORE_REALM_IMPORT_FAILED`: a realm archive import failed after validation; the error carries a rollback report (`realmId`, `failedStage`, `rolledBack`, `terminatedMembers`, `evictedFiles`, `failures`).
  * 
  * @example
  * ```typescript
@@ -315,6 +333,7 @@ export const SANDBOX_STORE_ERROR_CODES: {
   readonly ERR_STORE_REALM_PROTECTED: 'ERR_STORE_REALM_PROTECTED';
   readonly ERR_STORE_REALM_DELETE_FAILED: 'ERR_STORE_REALM_DELETE_FAILED';
   readonly ERR_STORE_REALM_LAUNCH_FAILED: 'ERR_STORE_REALM_LAUNCH_FAILED';
+  readonly ERR_STORE_REALM_NOT_FOUND: 'ERR_STORE_REALM_NOT_FOUND';
   /**
    * @deprecated The providers launch gate was removed: provider-bearing
    * templates resolve against installed and attached extensions and launch
@@ -336,6 +355,8 @@ export const SANDBOX_STORE_ERROR_CODES: {
   readonly ERR_STORE_EXTENSION_CONNECT_FAILED: 'ERR_STORE_EXTENSION_CONNECT_FAILED';
   readonly ERR_STORE_PAYLOAD_LIBRARY_FULL: 'ERR_STORE_PAYLOAD_LIBRARY_FULL';
   readonly ERR_STORE_PAYLOAD_LIBRARY_TOO_LARGE: 'ERR_STORE_PAYLOAD_LIBRARY_TOO_LARGE';
+  readonly ERR_STORE_ARCHIVE_FAILED: 'ERR_STORE_ARCHIVE_FAILED';
+  readonly ERR_STORE_REALM_IMPORT_FAILED: 'ERR_STORE_REALM_IMPORT_FAILED';
 } = Object.freeze({
   ERR_STORE_AGENT_NOT_FOUND: 'ERR_STORE_AGENT_NOT_FOUND',
   ERR_STORE_NO_AGENT_SELECTED: 'ERR_STORE_NO_AGENT_SELECTED',
@@ -346,6 +367,7 @@ export const SANDBOX_STORE_ERROR_CODES: {
   ERR_STORE_REALM_PROTECTED: 'ERR_STORE_REALM_PROTECTED',
   ERR_STORE_REALM_DELETE_FAILED: 'ERR_STORE_REALM_DELETE_FAILED',
   ERR_STORE_REALM_LAUNCH_FAILED: 'ERR_STORE_REALM_LAUNCH_FAILED',
+  ERR_STORE_REALM_NOT_FOUND: 'ERR_STORE_REALM_NOT_FOUND',
   ERR_TEMPLATE_PROVIDERS_UNSUPPORTED: 'ERR_TEMPLATE_PROVIDERS_UNSUPPORTED',
   ERR_TEMPLATE_AUTHORITY_UNSUPPORTED: 'ERR_TEMPLATE_AUTHORITY_UNSUPPORTED',
   ERR_STORE_TEMPLATE_TOO_LARGE: 'ERR_STORE_TEMPLATE_TOO_LARGE',
@@ -361,7 +383,9 @@ export const SANDBOX_STORE_ERROR_CODES: {
   ERR_STORE_EXTENSION_CREDENTIAL_UNRESOLVED: 'ERR_STORE_EXTENSION_CREDENTIAL_UNRESOLVED',
   ERR_STORE_EXTENSION_CONNECT_FAILED: 'ERR_STORE_EXTENSION_CONNECT_FAILED',
   ERR_STORE_PAYLOAD_LIBRARY_FULL: 'ERR_STORE_PAYLOAD_LIBRARY_FULL',
-  ERR_STORE_PAYLOAD_LIBRARY_TOO_LARGE: 'ERR_STORE_PAYLOAD_LIBRARY_TOO_LARGE'
+  ERR_STORE_PAYLOAD_LIBRARY_TOO_LARGE: 'ERR_STORE_PAYLOAD_LIBRARY_TOO_LARGE',
+  ERR_STORE_ARCHIVE_FAILED: 'ERR_STORE_ARCHIVE_FAILED',
+  ERR_STORE_REALM_IMPORT_FAILED: 'ERR_STORE_REALM_IMPORT_FAILED'
 });
 
 /**
@@ -1963,6 +1987,97 @@ export interface RealmSeedReceipt {
   readonly writtenPaths: ReadonlyArray<string>;
   /** Whether an operator-attributed directive was delivered to the target. */
   readonly directiveDelivered: boolean;
+}
+
+/**
+ * Receipt returned by `SandboxStore.exportRealmArchive()` (S2 realm-export
+ * lane, ticket 3fe5221). `success: false` carries one of the typed codes
+ * `ERR_STORE_REALM_NOT_FOUND` / `ERR_STORE_INVALID_PARAMS` /
+ * `ERR_STORE_ARCHIVE_FAILED` and never throws for a read-only projection.
+ */
+export interface RealmArchiveExportResult {
+  /** True when the archive was serialized. */
+  readonly success: boolean;
+  /** Archive id (present on success). */
+  readonly archiveId?: string;
+  /** Canonical archive JSON text (present on success). */
+  readonly json?: string;
+  /** Suggested download filename (present on success). */
+  readonly filename?: string;
+  /** Export-time completeness disclosures. */
+  readonly warnings: readonly string[];
+  /** Typed failure code when `success` is false. */
+  readonly code?: string;
+}
+
+/**
+ * One dropped-authority record of a realm archive import: the bare member id
+ * plus every descriptive authority item the archive carried but import never
+ * re-applied (the operator re-grants through the ordinary grant APIs).
+ */
+export interface RealmArchiveDroppedAuthority {
+  /** Bare realm-local member id. */
+  readonly memberId: string;
+  /** Dropped items (`'privileged'`, `'realmBypass'`, `'*'`, exact authority ids). */
+  readonly authorities: readonly string[];
+}
+
+/**
+ * Receipt returned by `SandboxStore.importRealmArchive()` (S2 realm-export
+ * lane, ticket 3fe5221): the fresh realm plus per-section import counters and
+ * every dropped authority / disclosure. Post-validation failures throw an
+ * `ERR_STORE_REALM_IMPORT_FAILED` error carrying a rollback report instead.
+ */
+export interface RealmArchiveImportReceipt {
+  /** True when the realm slice was installed. */
+  readonly success: boolean;
+  /** Fresh realm id the slice was remapped onto. */
+  readonly realmId: string | null;
+  /** Fresh realm display name. */
+  readonly realmName: string | null;
+  /** Source archive id. */
+  readonly archiveId: string | null;
+  /** Count of imported ACTIVE members. */
+  readonly membersImported: number;
+  /** Count of imported recycled members. */
+  readonly membersRecycled: number;
+  /** Count of VFS files written. */
+  readonly filesImported: number;
+  /** Count of merged scheduled timers. */
+  readonly schedulesImported: number;
+  /** Count of realm extension attachments re-attached. */
+  readonly attachmentsImported: number;
+  /** Count of attachments skipped (extension not installed locally). */
+  readonly attachmentsSkipped: number;
+  /** True when the archive's template payload was imported. */
+  readonly templateImported: boolean;
+  /** Count of imported saved hydration payloads. */
+  readonly payloadsImported: number;
+  /** Descriptive authority items the archive carried but import never re-applied. */
+  readonly droppedAuthority: readonly RealmArchiveDroppedAuthority[];
+  /** Import-time disclosures (skipped attachments, wildcard drops, ...). */
+  readonly warnings: readonly string[];
+  /** Typed failure code reserved for receipt-shaped failure surfaces. */
+  readonly code?: string;
+}
+
+/**
+ * Rollback report carried by an `ERR_STORE_REALM_IMPORT_FAILED` error
+ * (mirrors the realm deletion/launch rollback reports).
+ */
+export interface RealmArchiveImportRollbackReport {
+  /** Target realm id (`null` for preflight failures before the record existed). */
+  readonly realmId: string | null;
+  /** Stage that failed (`vfs-preflight`, `vfs`, `template`, `payloads`, `runtime-slice`, ...). */
+  readonly failedStage: string;
+  /** True when every mutation was rolled back. */
+  readonly rolledBack: boolean;
+  /** Member ids terminated/purged by the rollback. */
+  readonly terminatedMembers: readonly string[];
+  /** File paths evicted by the rollback. */
+  readonly evictedFiles: readonly string[];
+  /** Rollback failures (best-effort steps that could not complete). */
+  readonly failures: readonly string[];
 }
 
 /**
@@ -7540,6 +7655,1086 @@ export class SandboxStore {
     }
 
     return this.#realmRegistry.removeRealm(id);
+  }
+
+  // ==========================================================================
+  // Realm Archive Export / Import (S2 realm-export lane, ticket 3fe5221)
+  // ==========================================================================
+
+  /**
+   * Exports one Realm as a complete, portable `RealmArchiveEnvelope` v1
+   * archive (operator-only; a read-only projection with zero mutation).
+   *
+   * The slice follows the D0b completeness checklist: the realm record +
+   * provenance + attachments; active and recycled member entity snapshots
+   * (histories, redo stacks, telemetry, interrupted turns, pending precalls,
+   * member configs); the realm's bus partitions and attributable audit trail;
+   * per-agent schedules; member + realm-global world-clock partitions/events;
+   * the realm-global VFS container plus resolved member workspaces (explicit
+   * pins verbatim); the launch template payload; realm-scoped saved payloads;
+   * and a **descriptive-only** authority projection. Redaction reuses the
+   * persistence strip set plus archive-only drops (model-config `keyId`,
+   * credential-shaped endpoint URLs, extension install records, host session
+   * state, foreign-realm keys/bytes). Unknown template ids export without a
+   * `template` section and disclose a warning instead of failing.
+   *
+   * @param realmId - Registered Realm id to export.
+   * @returns Export receipt: canonical JSON text, filename, and disclosures.
+   *
+   * @example
+   * ```typescript
+   * const result = sandboxStore.exportRealmArchive('realm_demo');
+   * if (result.success) downloadText(result.filename, result.json);
+   * ```
+   */
+  exportRealmArchive(realmId: string): RealmArchiveExportResult {
+    try {
+      const id = typeof realmId === 'string' ? realmId.trim() : '';
+      if (!id) {
+        return Object.freeze({
+          success: false,
+          warnings: Object.freeze([]),
+          code: SANDBOX_STORE_ERROR_CODES.ERR_STORE_INVALID_PARAMS
+        });
+      }
+      const realm = this.#realmRegistry.getRealm(id);
+      if (!realm) {
+        return Object.freeze({
+          success: false,
+          warnings: Object.freeze([]),
+          code: SANDBOX_STORE_ERROR_CODES.ERR_STORE_REALM_NOT_FOUND
+        });
+      }
+      const { envelope, warnings } = this.#buildRealmArchiveEnvelope(realm);
+      const json = serializeRealmArchive(envelope);
+      return Object.freeze({
+        success: true,
+        archiveId: envelope.archiveId,
+        json,
+        filename: buildRealmArchiveFilename(realm.name, envelope.archiveId),
+        warnings: Object.freeze([...warnings])
+      });
+    } catch (err) {
+      console.warn('[SandboxStore] realm archive export failed:', sanitizeDiagnosticError(err) || 'export-failed');
+      return Object.freeze({
+        success: false,
+        warnings: Object.freeze([]),
+        code: SANDBOX_STORE_ERROR_CODES.ERR_STORE_ARCHIVE_FAILED
+      });
+    }
+  }
+
+  /**
+   * Imports one realm archive into the live session as a **fresh realm**
+   * (operator-only, additive; D0b import semantics).
+   *
+   * Every canonical key is remapped from the archive's source realm id onto a
+   * newly minted realm id; bare member ids and explicit workspace pins are
+   * preserved. Member hydration is default-deny — archived privilege,
+   * `realmBypass`, publishing grants, and wildcard authority are never
+   * consumed (they are receipted through `droppedAuthority` for the operator
+   * to re-grant) — while archived tool selectors are re-applied through the
+   * operator capability path. Import validates fail-closed, preflights member
+   * ids/keys/workspace collisions before any mutation, and rolls the whole
+   * slice back (record, files, template, payloads; runtime pre-state restored
+   * internally) on a post-validation failure. Re-importing the same archive
+   * mints an independent realm each time.
+   *
+   * @param text - Archive JSON text emitted by {@link SandboxStore.exportRealmArchive}.
+   * @param options - Optional realm display-name override.
+   * @returns Import receipt (fresh realm id, counters, dropped authority, warnings).
+   * @throws Error with code `'ERR_STORE_INVALID_PARAMS'` for malformed archives and `'ERR_STORE_REALM_IMPORT_FAILED'` for post-validation failures (the error carries `report`).
+   *
+   * @example
+   * ```typescript
+   * const receipt = sandboxStore.importRealmArchive(archiveJson, { name: 'Imported Realm' });
+   * console.log(receipt.realmId, receipt.membersImported, receipt.droppedAuthority);
+   * ```
+   */
+  importRealmArchive(text: string, options: { name?: string } = {}): RealmArchiveImportReceipt {
+    const parsed = parseRealmArchive(text);
+    if (!parsed.valid || !parsed.envelope) {
+      throw invalidRealmParams(`importRealmArchive: ${parsed.error ?? 'invalid realm archive'}`);
+    }
+    const envelope = parsed.envelope;
+    const sourceRealmId = envelope.source.realmId;
+    const warnings: string[] = [];
+
+    // ---- Preflight (zero mutation) -----------------------------------------
+    const memberIds = new Set<string>();
+    for (const entry of [...envelope.members.active, ...envelope.members.recycled]) {
+      const memberId = typeof entry.id === 'string' ? entry.id.trim() : '';
+      if (!memberId) throw invalidRealmParams('importRealmArchive: member entry carries an empty id');
+      if (memberIds.has(memberId)) {
+        throw invalidRealmParams(`importRealmArchive: duplicate member id '${memberId}' inside the archive`);
+      }
+      memberIds.add(memberId);
+    }
+    this.#assertRealmArchiveSliceKeys(envelope, memberIds);
+
+    // Workspace preflight: source-key resolution + pin collisions. Target keys
+    // are composed after the fresh realm id exists.
+    const pendingMembers: Array<{
+      memberId: string;
+      pinned: string | null;
+      sourceKey: string | null;
+    }> = [];
+    const claimedSourceKeys = new Set<string>();
+    const pinnedOpaqueKeys = new Set<string>();
+    const pinnedCanonicalTargets = new Set<string>();
+    for (const entry of [...envelope.members.active, ...envelope.members.recycled]) {
+      const memberId = entry.id.trim();
+      const config = (entry.config ?? {}) as Record<string, unknown>;
+      const candidates = this.#realmArchiveWorkspaceCandidates(config, memberId, sourceRealmId);
+      const sourceKey = candidates.find((key) => envelope.vfs.members[key] !== undefined) ?? null;
+      const pinned = this.#realmArchiveMemberPin(config, memberId);
+      if (pinned && isReservedWorkspaceKey(pinned)) {
+        throw invalidRealmParams(`importRealmArchive: member '${memberId}' resolves to the reserved workspace '${pinned}'`);
+      }
+      if (pinned) {
+        const parsedPin = parseAgentIdentityKey(pinned);
+        if (parsedPin) {
+          // Canonical pins are remapped into the fresh realm namespace. A pin
+          // referencing a realm/agent outside the archive realm scope is
+          // refused fail-closed up front — never resolved against live
+          // workspace materialization, which is lazy and therefore absent for
+          // an unclaimed victim workspace (S2 verifier F-4).
+          if (parsedPin.realmId !== sourceRealmId || !memberIds.has(parsedPin.agentId)) {
+            throw invalidRealmParams(
+              `importRealmArchive: member '${memberId}' pins workspace '${pinned}' outside the archive realm scope`
+            );
+          }
+          if (pinnedCanonicalTargets.has(parsedPin.agentId)) {
+            throw invalidRealmParams(`importRealmArchive: members share the workspace key '${pinned}' — refusing to merge tenants`);
+          }
+          pinnedCanonicalTargets.add(parsedPin.agentId);
+        } else {
+          if (pinnedOpaqueKeys.has(pinned)) {
+            throw invalidRealmParams(`importRealmArchive: members share the workspace key '${pinned}' — refusing to merge tenants`);
+          }
+          if (this.#virtualFs.hasWorkspace(pinned)) {
+            const err = this.#realmArchiveImportFailure(
+              `importRealmArchive: pinned workspace '${pinned}' already exists — refusing to merge tenants`,
+              'vfs-preflight',
+              null,
+              false
+            );
+            throw err;
+          }
+          pinnedOpaqueKeys.add(pinned);
+        }
+      }
+      if (sourceKey) claimedSourceKeys.add(sourceKey);
+      pendingMembers.push({ memberId, pinned, sourceKey });
+    }
+    for (const key of Object.keys(envelope.vfs.members)) {
+      if (!claimedSourceKeys.has(key)) {
+        throw invalidRealmParams(`importRealmArchive: vfs.members['${key}'] does not resolve to a slice member`);
+      }
+    }
+
+    // ---- Reserve the fresh realm record ------------------------------------
+    const requestedName = typeof options?.name === 'string' && options.name.trim()
+      ? options.name.trim()
+      : envelope.realm.name;
+    const newRealm = this.createRealm({
+      name: this.#uniqueRealmName(requestedName),
+      ...(typeof envelope.realm.description === 'string' ? { description: envelope.realm.description } : {}),
+      ...(typeof envelope.realm.color === 'string' ? { color: envelope.realm.color } : {}),
+      ...(envelope.template?.id || envelope.realm.templateId
+        ? { templateId: envelope.template?.id ?? envelope.realm.templateId }
+        : {})
+    });
+    const newRealmId = newRealm.id;
+
+    // Target workspace plan: canonical source-family pins remap onto the fresh
+    // realm id, opaque pins are preserved verbatim, and unpinned members use
+    // the fresh realm's canonical member key.
+    const workspacePlan = pendingMembers
+      .filter((member) => member.sourceKey !== null)
+      .map((member) => ({
+        memberId: member.memberId,
+        targetKey: this.#realmArchiveTargetWorkspaceKey(member.pinned, sourceRealmId, newRealmId)
+          ?? createAgentIdentityKey(newRealmId, member.memberId),
+        files: Object.values(envelope.vfs.members[member.sourceKey as string] ?? {})
+      }));
+
+    const writtenFiles: Array<{ path: string; workspaceId: string }> = [];
+    const importedPayloadIds: string[] = [];
+    let importedTemplateId: string | null = null;
+    let tornDown = false;
+
+    try {
+      // ---- Provenance + VFS writes (per-file operator writes; VFS lands
+      // before the clock import, which syncs world_clock.json/event_list.json
+      // into workspaces) -----------------------------------------------------
+      try {
+        if (envelope.realm.instance) {
+          this.#realmRegistry.updateRealm(newRealmId, {
+            instance: cloneRealmInstanceProvenance(
+              envelope.realm.instance as unknown as RealmInstanceProvenance
+            )
+          });
+        }
+        const realmGlobalKey = realmGlobalWorkspaceKey(newRealmId);
+        for (const plan of workspacePlan) {
+          for (const file of plan.files) {
+            this.writeFile(file.path, file.content, {
+              workspaceId: plan.targetKey,
+              ...(typeof file.readOnly === 'boolean' ? { readOnly: file.readOnly } : {}),
+              ...(typeof file.owner === 'string' && file.owner ? { owner: file.owner } : {})
+            });
+            writtenFiles.push({ path: file.path, workspaceId: plan.targetKey });
+          }
+        }
+        for (const file of Object.values(envelope.vfs.realmGlobal)) {
+          this.writeFile(file.path, file.content, {
+            workspaceId: realmGlobalKey,
+            ...(typeof file.readOnly === 'boolean' ? { readOnly: file.readOnly } : {}),
+            ...(typeof file.owner === 'string' && file.owner ? { owner: file.owner } : {})
+          });
+          writtenFiles.push({ path: file.path, workspaceId: realmGlobalKey });
+        }
+      } catch (err) {
+        const rolledBack = this.#rollbackRealmArchiveImport({
+          realmId: newRealmId,
+          writtenFiles,
+          importedPayloadIds: [],
+          importedTemplateId: null,
+          terminatedMembers: [],
+          failures: []
+        });
+        throw this.#realmArchiveImportFailure(
+          `importRealmArchive: VFS import failed (${thrownMessage(err, 'vfs-failed')})`,
+          'vfs',
+          newRealmId,
+          rolledBack,
+          [],
+          writtenFiles.map((written) => written.path)
+        );
+      }
+
+      // ---- Template: import only when the id is absent locally ---------------
+      let templateImported = false;
+      if (envelope.template) {
+        if (this.getRealmTemplateBundle(envelope.template.id)) {
+          warnings.push(`template '${envelope.template.id}' is already known locally — the local revision was kept`);
+        } else {
+          try {
+            this.importRealmTemplate(envelope.template.payload);
+            importedTemplateId = envelope.template.id;
+            templateImported = true;
+          } catch (err) {
+            throw this.#realmArchiveImportFailure(
+              `importRealmArchive: template import failed (${thrownMessage(err, 'template-failed')})`,
+              'template',
+              newRealmId,
+              false
+            );
+          }
+        }
+      }
+
+      // ---- Saved payloads (name collisions suffixed) -------------------------
+      for (const payload of envelope.savedPayloads ?? []) {
+        try {
+          const saved = this.saveInstancePayload({
+            name: this.#uniqueSavedPayloadName(payload.name),
+            templateId: payload.templateId,
+            templateVersion: payload.templateVersion,
+            payload: payload.payload as Record<string, unknown>
+          });
+          importedPayloadIds.push(saved.id);
+        } catch (err) {
+          throw this.#realmArchiveImportFailure(
+            `importRealmArchive: saved-payload import failed (${thrownMessage(err, 'payload-failed')})`,
+            'payloads',
+            newRealmId,
+            false
+          );
+        }
+      }
+
+      // ---- Runtime slice install (members + bus + schedules + clock) ---------
+      try {
+        this.#runtime.importRealmSlice(
+          this.#buildRealmSliceImportInput(envelope, newRealmId),
+          this.#operatorContext()
+        );
+      } catch (err) {
+        tornDown = true;
+        const installedMembers = [...envelope.members.active, ...envelope.members.recycled].map((entry) => entry.id);
+        const rolledBack = this.#rollbackRealmArchiveImport({
+          realmId: newRealmId,
+          writtenFiles,
+          importedPayloadIds,
+          importedTemplateId,
+          terminatedMembers: [...installedMembers],
+          failures: []
+        });
+        throw this.#realmArchiveImportFailure(
+          `importRealmArchive: runtime slice install failed (${thrownMessage(err, 'slice-failed')})`,
+          'runtime-slice',
+          newRealmId,
+          rolledBack,
+          installedMembers
+        );
+      }
+
+      // ---- Extension attachments (locally resolvable only) -------------------
+      let attachmentsImported = 0;
+      let attachmentsSkipped = 0;
+      for (const attachment of envelope.realm.extensions ?? []) {
+        if (this.#extensionRegistry.getExtension(attachment.extensionId)) {
+          try {
+            this.attachExtension(newRealmId, attachment.extensionId, {
+              toolSelection: attachment.toolSelection
+            });
+            attachmentsImported += 1;
+          } catch (err) {
+            attachmentsSkipped += 1;
+            warnings.push(
+              `extension '${attachment.extensionId}' could not be re-attached (${thrownMessage(err, 'attach-failed')})`
+            );
+          }
+        } else {
+          attachmentsSkipped += 1;
+          warnings.push(`extension '${attachment.extensionId}' is not installed locally — the attachment was skipped`);
+        }
+      }
+
+      // ---- Capability re-application (R5, operator path only) ----------------
+      this.#reapplyRealmArchiveMemberSelectors(envelope, newRealmId, warnings, attachmentsSkipped === 0);
+
+      // ---- Receipt + reactive projections ------------------------------------
+      const droppedAuthority = this.#computeDroppedRealmArchiveAuthority(envelope);
+      this.#syncAgents();
+      this.#syncMessages();
+      this.#syncFsSnapshot();
+      this.#syncClockSnapshot();
+      this.#syncRealms();
+      this.#syncScheduledTimers();
+      this.#scheduleAutoSave();
+
+      return Object.freeze({
+        success: true,
+        realmId: newRealmId,
+        realmName: this.#realmRegistry.getRealm(newRealmId)?.name ?? newRealm.name,
+        archiveId: envelope.archiveId,
+        membersImported: envelope.members.active.length,
+        membersRecycled: envelope.members.recycled.length,
+        filesImported: writtenFiles.length,
+        schedulesImported: envelope.schedules.length,
+        attachmentsImported,
+        attachmentsSkipped,
+        templateImported,
+        payloadsImported: importedPayloadIds.length,
+        droppedAuthority: Object.freeze(
+          droppedAuthority.map((entry) => Object.freeze({
+            memberId: entry.memberId,
+            authorities: Object.freeze([...entry.authorities])
+          }))
+        ),
+        warnings: Object.freeze([...warnings])
+      });
+    } catch (err) {
+      const typed = Boolean(
+        err
+        && typeof err === 'object'
+        && (err as { code?: string }).code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_REALM_IMPORT_FAILED
+      );
+      let rolledBack = false;
+      if (!tornDown && this.#realmRegistry.getRealm(newRealmId)) {
+        rolledBack = this.#rollbackRealmArchiveImport({
+          realmId: newRealmId,
+          writtenFiles,
+          importedPayloadIds,
+          importedTemplateId,
+          terminatedMembers: [],
+          failures: []
+        });
+      }
+      if (typed) {
+        const coded = err as Error & { report?: RealmArchiveImportRollbackReport };
+        if (coded.report) {
+          coded.report = Object.freeze({
+            ...coded.report,
+            rolledBack: coded.report.rolledBack || rolledBack
+          });
+        }
+        throw coded;
+      }
+      throw this.#realmArchiveImportFailure(
+        `importRealmArchive: ${thrownMessage(err, 'import-failed')}`,
+        'import',
+        newRealmId,
+        rolledBack,
+        [],
+        writtenFiles.map((written) => written.path)
+      );
+    }
+  }
+
+  /**
+   * Builds the descriptive archive envelope for one realm record. Read-only.
+   *
+   * @param realm - Frozen realm record to project.
+   * @returns Envelope plus export-time disclosures.
+   * @internal
+   */
+  #buildRealmArchiveEnvelope(realm: RealmRecord): { envelope: RealmArchiveEnvelope; warnings: string[] } {
+    const realmId = realm.id;
+    const warnings: string[] = [];
+    const realmGlobalKey = realmGlobalWorkspaceKey(realmId);
+    const inRealmFamily = (key: string): boolean => {
+      if (key === realmGlobalKey) return true;
+      const parsed = parseAgentIdentityKey(key);
+      return parsed ? parsed.realmId === realmId : false;
+    };
+
+    const liveActive = this.#runtime.listAgents().filter((agent) => resolveMemberRealmId(agent) === realmId);
+    const liveRecycled = this.#runtime.listRecycledAgents().filter((agent) => resolveMemberRealmId(agent) === realmId);
+    const active = liveActive.map((agent) => serializeRealmArchiveAgent(agent));
+    const recycled = liveRecycled.map((agent) => serializeRealmArchiveRecycledAgent(agent));
+    const memberIds = new Set(active.map((entry) => entry.id));
+
+    // Authority (descriptive only).
+    const hostGrants: RealmArchiveAuthorityHostGrant[] = [];
+    const hostGrantKeys = new Set<string>();
+    const pushHostGrant = (authorityId: string, ref: string): void => {
+      const parsed = parseAgentIdentityKey(ref);
+      if (!parsed || parsed.realmId !== realmId || !memberIds.has(parsed.agentId)) return;
+      const dedupeKey = `${authorityId}\u0000${parsed.agentId}`;
+      if (hostGrantKeys.has(dedupeKey)) return;
+      hostGrantKeys.add(dedupeKey);
+      hostGrants.push({ authorityId, memberId: parsed.agentId });
+    };
+    for (const [authorityId, refs] of Object.entries(this.#runtime.listAuthorityGrants())) {
+      for (const ref of refs) pushHostGrant(authorityId, ref);
+    }
+    for (const ref of this.#runtime.listRealmBypassGrants()) pushHostGrant('realmBypass', ref);
+    const authorityMembers: Record<string, RealmArchiveAuthorityMemberProjection> = {};
+    for (const agent of liveActive) {
+      const projection = this.#identityPort
+        ? this.#identityPort.getAgentIdentity(agent.id, { realmId })
+        : null;
+      const descriptor = projection?.authority;
+      const allowedTools = Array.isArray(agent.config?.allowedTools) ? agent.config.allowedTools : [];
+      authorityMembers[agent.id] = {
+        kind: descriptor ? descriptor.kind : 'agent',
+        visibility: descriptor ? descriptor.visibility : 'self',
+        privileged: projection ? projection.privileged === true : agent.config?.privileged === true,
+        allow: descriptor ? [...descriptor.allow] : [...allowedTools],
+        extensions: descriptor ? [...descriptor.extensions] : [],
+        realmBypass: projection ? projection.realmBypass === true : false
+      };
+    }
+
+    // Messaging slice.
+    const bus = this.#messagingBus.exportSnapshot();
+    const inRealmKey = (key: string): boolean => {
+      const parsed = parseAgentIdentityKey(key);
+      return parsed ? parsed.realmId === realmId : memberIds.has(key);
+    };
+    const pickQueues = (map: Record<string, BusMessageEnvelope[]> | undefined): Record<string, BusMessageEnvelope[]> => {
+      const picked: Record<string, BusMessageEnvelope[]> = {};
+      for (const [key, list] of Object.entries(map ?? {})) {
+        if (inRealmKey(key) && Array.isArray(list)) picked[key] = list;
+      }
+      return picked;
+    };
+    const activeQueues = pickQueues(bus.activeQueues);
+    const archives = pickQueues(bus.archives);
+    const registeredAgents = Object.keys(bus.registeredAgents ?? {}).filter(inRealmKey);
+    const terminatedAgents = (bus.terminatedAgents ?? []).filter((key) => typeof key === 'string' && inRealmKey(key));
+    const exportedMessageIds = new Set<string>();
+    for (const list of [...Object.values(activeQueues), ...Object.values(archives)]) {
+      for (const envelope of list) {
+        if (typeof envelope?.id === 'string') exportedMessageIds.add(envelope.id);
+        if (typeof envelope?.messageId === 'string') exportedMessageIds.add(envelope.messageId);
+      }
+    }
+    const auditLog = (bus.auditLog ?? []).filter((entry) => {
+      if (!entry || typeof entry !== 'object') return false;
+      if (exportedMessageIds.has(entry.id) || exportedMessageIds.has(entry.messageId)) return true;
+      if (!this.#identityPort || typeof entry.to !== 'string' || typeof entry.from !== 'string') return false;
+      // Fail-closed attribution: the recipient must resolve realm-exactly and
+      // the sender must resolve unambiguously into the same realm. An
+      // ambiguous same-literal-id sender (two realms) excludes the entry —
+      // never mis-attributed to the source realm.
+      const recipient = this.#identityPort.getAgentIdentity(entry.to, { realmId });
+      if (!recipient) return false;
+      const sender = this.#identityPort.getAgentIdentity(entry.from);
+      return sender !== null && sender.realmId === realmId;
+    });
+
+    // Schedules slice.
+    const schedules = this.#runtime.exportSchedules().filter((schedule) => {
+      const ref = typeof schedule?.agentRef === 'string' && schedule.agentRef ? schedule.agentRef : '';
+      const parsed = ref ? parseAgentIdentityKey(ref) : null;
+      if (parsed) return parsed.realmId === realmId;
+      return memberIds.has(schedule?.agentId);
+    });
+
+    // World-clock slice.
+    const clockRaw = this.#worldClock.exportSnapshot(this.#operatorSubstrateContext());
+    if (!clockRaw || (clockRaw as { success?: boolean }).success === false) {
+      throw new Error('realm archive export: the world clock refused its snapshot');
+    }
+    const clockSnapshot = clockRaw as WorldClockSnapshot;
+    const clocks: Record<string, PartitionClockSnapshot> = {};
+    for (const [key, clock] of Object.entries(clockSnapshot.agentClocks ?? {})) {
+      if (inRealmFamily(key)) clocks[key] = clock;
+    }
+    const events: Record<string, WorldEvent[]> = {};
+    for (const [key, list] of Object.entries(clockSnapshot.agentEvents ?? {})) {
+      if (inRealmFamily(key)) events[key] = list;
+    }
+    const globalClock = clocks[realmGlobalKey] ?? {
+      totalSeconds: typeof clockSnapshot.totalSeconds === 'number' ? clockSnapshot.totalSeconds : 0,
+      date: typeof clockSnapshot.date === 'string' && clockSnapshot.date ? clockSnapshot.date : 'Day 1',
+      lastSync: Date.now()
+    };
+
+    // VFS slice.
+    const vfsSnapshot: VirtualFsSnapshot = this.#virtualFs.exportSnapshot(this.#operatorSubstrateContext());
+    const realmGlobalFiles: Record<string, VirtualFsPersistedFile> = {};
+    for (const file of Object.values(vfsSnapshot[realmGlobalKey] ?? {})) {
+      realmGlobalFiles[file.path] = file;
+    }
+    const memberFiles: Record<string, Record<string, VirtualFsPersistedFile>> = {};
+    for (const entry of [...active, ...recycled]) {
+      const candidates = this.#realmArchiveWorkspaceCandidates(
+        (entry.config ?? {}) as Record<string, unknown>,
+        entry.id,
+        realmId
+      );
+      // Reserved shared workspaces (global/public, realm-global partitions)
+      // and canonical keys outside the source realm family never leave the
+      // host (D0b §3.1 "excluded", §3.2 assertion 3): they are filtered before
+      // any bytes are collected, and each omission is disclosed.
+      for (const key of candidates) {
+        if (key === realmGlobalKey || vfsSnapshot[key] === undefined) continue;
+        if (isReservedWorkspaceKey(key) || !this.#realmArchiveWorkspaceKeyInRealmFamily(key, realmId)) {
+          warnings.push(
+            `member '${entry.id}' workspace '${key}' is outside the exportable workspace scope — its bytes were not exported`
+          );
+        }
+      }
+      const present = candidates.filter((key) => key !== realmGlobalKey
+        && !isReservedWorkspaceKey(key)
+        && this.#realmArchiveWorkspaceKeyInRealmFamily(key, realmId)
+        && vfsSnapshot[key] !== undefined);
+      const chosen = present.find((key) => Object.keys(vfsSnapshot[key] ?? {}).length > 0) ?? null;
+      if (!chosen) continue;
+      if (chosen === entry.id && chosen !== candidates[0]) {
+        warnings.push(`member '${entry.id}' only has a legacy bare-key workspace '${chosen}' — exported with a fallback warning`);
+      }
+      if (memberFiles[chosen]) {
+        warnings.push(`members share the workspace '${chosen}' — exported once`);
+        continue;
+      }
+      const files: Record<string, VirtualFsPersistedFile> = {};
+      for (const file of Object.values(vfsSnapshot[chosen] ?? {})) {
+        files[file.path] = file;
+      }
+      memberFiles[chosen] = files;
+    }
+
+    // Template slice (absent + warned when unresolvable).
+    let template: RealmArchiveEnvelope['template'];
+    if (typeof realm.templateId === 'string' && realm.templateId.trim()) {
+      const templateId = realm.templateId.trim();
+      const version = this.#effectiveTemplateVersion(templateId);
+      if (version === null) {
+        warnings.push(`template '${templateId}' is not resolvable in the effective catalog — the template section was omitted`);
+      } else {
+        try {
+          template = { id: templateId, version, payload: this.exportRealmTemplate(templateId) };
+        } catch (err) {
+          warnings.push(`template '${templateId}' could not be exported (${thrownMessage(err, 'template-export-failed')})`);
+        }
+      }
+    }
+
+    // Realm-scoped saved payloads (S1 library), only for the realm template.
+    const savedPayloads = typeof realm.templateId === 'string' && realm.templateId
+      ? this.#savedInstancePayloads
+        .filter((entry) => entry.templateId === realm.templateId)
+        .map((entry) => ({
+          id: entry.id,
+          name: entry.name,
+          templateId: entry.templateId,
+          templateVersion: entry.templateVersion,
+          savedAt: entry.savedAt,
+          payload: entry.payload
+        }))
+      : [];
+
+    const archiveId = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `archive_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+
+    const envelope: RealmArchiveEnvelope = {
+      format: REALM_ARCHIVE_FORMAT,
+      formatVersion: 1,
+      archiveId,
+      exportedAt: new Date().toISOString(),
+      persistenceVersion: SANDBOX_PERSISTENCE_VERSION,
+      source: { realmId },
+      realm: {
+        id: realm.id,
+        name: realm.name,
+        ...(typeof realm.description === 'string' ? { description: realm.description } : {}),
+        ...(typeof realm.color === 'string' ? { color: realm.color } : {}),
+        ...(typeof realm.templateId === 'string' ? { templateId: realm.templateId } : {}),
+        ...(realm.instance ? { instance: realm.instance } : {}),
+        ...(realm.extensions ? { extensions: realm.extensions } : {}),
+        createdAt: realm.createdAt
+      },
+      ...(template ? { template } : {}),
+      ...(savedPayloads.length > 0 ? { savedPayloads } : {}),
+      members: { active, recycled },
+      authority: { hostGrants, members: authorityMembers },
+      messaging: { activeQueues, archives, registeredAgents, terminatedAgents, auditLog },
+      schedules,
+      worldClock: { global: globalClock, clocks, events },
+      vfs: { realmGlobal: realmGlobalFiles, members: memberFiles },
+      ...(warnings.length > 0 ? { warnings } : {})
+    };
+    return { envelope, warnings };
+  }
+
+  /**
+   * Resolves the workspace-key candidates of one archived member, most
+   * specific first: an explicit pin (verbatim), the realm-qualified canonical
+   * key, then the legacy bare id.
+   *
+   * @param config - Member config projection.
+   * @param memberId - Bare member id.
+   * @param realmId - Realm id used to compose the canonical key.
+   * @returns Ordered unique candidate keys.
+   * @internal
+   */
+  #realmArchiveWorkspaceCandidates(config: Record<string, unknown>, memberId: string, realmId: string): string[] {
+    const pin = this.#realmArchiveMemberPin(config, memberId);
+    const canonical = createAgentIdentityKey(realmId, memberId);
+    const candidates: string[] = [];
+    for (const candidate of [pin, canonical, memberId]) {
+      if (typeof candidate === 'string' && candidate && !candidates.includes(candidate)) candidates.push(candidate);
+    }
+    return candidates;
+  }
+
+  /**
+   * Extracts an explicit member workspace pin (`config.workspaceId` or the
+   * `config.workspace` alias), or `null`. A value equal to the bare member id
+   * is the entity's normalized fallback, not an explicit pin (the VFS-owned
+   * `resolveAgentPrivateWorkspaceKey` rule: only a value differing from the
+   * bare id is preserved verbatim; otherwise the realm-qualified canonical key
+   * is used).
+   *
+   * @param config - Member config projection.
+   * @param memberId - Bare member id.
+   * @returns Explicit pin string, or `null`.
+   * @internal
+   */
+  #realmArchiveMemberPin(config: Record<string, unknown>, memberId: string): string | null {
+    const workspaceId = config?.workspaceId;
+    if (typeof workspaceId === 'string' && workspaceId && workspaceId !== memberId) return workspaceId;
+    const workspace = config?.workspace;
+    if (typeof workspace === 'string' && workspace && workspace !== memberId) return workspace;
+    return null;
+  }
+
+  /**
+   * Tests whether one archived member workspace key is exportable from the
+   * source realm: opaque legacy/bare keys and canonical identity keys that
+   * belong to the source realm pass; canonical keys of any other realm (or the
+   * system scope) are foreign and must never leave the host (S2 verifier F-4
+   * export-side exclusion). Reserved shared keys are classified separately by
+   * `isReservedWorkspaceKey`.
+   *
+   * @param workspaceKey - Candidate workspace key.
+   * @param realmId - Source realm id.
+   * @returns True when the key is inside the source realm family.
+   * @internal
+   */
+  #realmArchiveWorkspaceKeyInRealmFamily(workspaceKey: string, realmId: string): boolean {
+    const parsed = parseAgentIdentityKey(workspaceKey);
+    if (!parsed) return true;
+    return parsed.realmId === realmId;
+  }
+
+  /**
+   * Resolves the import-time target workspace key of one explicit member pin:
+   * a canonical key inside the source realm family is remapped onto the fresh
+   * realm id (never preserved as a stale source key that could name another
+   * live realm's workspace); opaque pins are preserved verbatim. Out-of-scope
+   * canonical pins are rejected in preflight, so only in-family canonical keys
+   * reach the remap branch here.
+   *
+   * @param pinned - Explicit member pin, or `null`.
+   * @param sourceRealmId - Archive source realm id.
+   * @param newRealmId - Fresh target realm id.
+   * @returns Target workspace key, or `null` when the member carries no pin.
+   * @internal
+   */
+  #realmArchiveTargetWorkspaceKey(pinned: string | null, sourceRealmId: string, newRealmId: string): string | null {
+    if (!pinned) return null;
+    const parsed = parseAgentIdentityKey(pinned);
+    if (parsed && parsed.realmId === sourceRealmId) return createAgentIdentityKey(newRealmId, parsed.agentId);
+    return pinned;
+  }
+
+  /**
+   * Fail-closed preflight of the archive's messaging/clock/schedule keys:
+   * every partition key must resolve to a slice member (active or recycled) or
+   * the source realm-global key.
+   *
+   * @param envelope - Validated archive envelope.
+   * @param memberIds - Slice member ids.
+   * @internal
+   */
+  #assertRealmArchiveSliceKeys(envelope: RealmArchiveEnvelope, memberIds: ReadonlySet<string>): void {
+    const sourceRealmId = envelope.source.realmId;
+    const globalKey = realmGlobalWorkspaceKey(sourceRealmId);
+    const resolves = (key: string): boolean => {
+      if (key === globalKey) return true;
+      const parsed = parseAgentIdentityKey(key);
+      if (parsed) return parsed.realmId === sourceRealmId && memberIds.has(parsed.agentId);
+      return memberIds.has(key);
+    };
+    const keys = [
+      ...Object.keys(envelope.messaging.activeQueues),
+      ...Object.keys(envelope.messaging.archives),
+      ...envelope.messaging.registeredAgents,
+      ...envelope.messaging.terminatedAgents,
+      ...Object.keys(envelope.worldClock.clocks),
+      ...Object.keys(envelope.worldClock.events)
+    ];
+    for (const key of keys) {
+      if (typeof key !== 'string' || !resolves(key)) {
+        throw invalidRealmParams(`importRealmArchive: slice key '${String(key)}' does not resolve to a slice member`);
+      }
+    }
+    for (const schedule of envelope.schedules) {
+      const ref = typeof schedule.agentRef === 'string' && schedule.agentRef ? schedule.agentRef : schedule.agentId;
+      if (!resolves(ref)) {
+        throw invalidRealmParams(`importRealmArchive: schedule '${schedule.id}' does not resolve to a slice member`);
+      }
+    }
+  }
+
+  /**
+   * Builds the runtime slice input from an archive envelope, remapping every
+   * source canonical key onto the fresh realm id (bare member ids and pins
+   * preserved; envelope fields never passed through raw).
+   *
+   * @param envelope - Validated archive envelope.
+   * @param newRealmId - Fresh target realm id.
+   * @returns Remapped runtime slice input.
+   * @internal
+   */
+  #buildRealmSliceImportInput(envelope: RealmArchiveEnvelope, newRealmId: string): RealmSliceImportInput {
+    const sourceRealmId = envelope.source.realmId;
+    const remapKey = (key: string): string => {
+      const parsed = parseAgentIdentityKey(key);
+      if (parsed && parsed.realmId === sourceRealmId) return createAgentIdentityKey(newRealmId, parsed.agentId);
+      return key;
+    };
+    const remapMember = (entry: RealmArchiveEnvelope['members']['active'][number]): RealmArchiveEnvelope['members']['active'][number] => {
+      const config: Record<string, unknown> = { ...(entry.config ?? {}), realmId: newRealmId };
+      // Canonical workspace pins inside the source family are remapped with
+      // every other canonical key so the hydrated member resolves exactly the
+      // fresh-namespace workspace its files were written to.
+      for (const alias of ['workspaceId', 'workspace']) {
+        const pin = config[alias];
+        if (typeof pin !== 'string' || !pin) continue;
+        const parsedPin = parseAgentIdentityKey(pin);
+        if (parsedPin && parsedPin.realmId === sourceRealmId) {
+          config[alias] = createAgentIdentityKey(newRealmId, parsedPin.agentId);
+        }
+      }
+      return { ...entry, config: config as typeof entry.config };
+    };
+    const remapQueues = (
+      map: Readonly<Record<string, readonly BusMessageEnvelope[]>>
+    ): Record<string, BusMessageEnvelope[]> => {
+      const remapped: Record<string, BusMessageEnvelope[]> = {};
+      for (const [key, list] of Object.entries(map ?? {})) remapped[remapKey(key)] = [...list];
+      return remapped;
+    };
+    const remapClocks = (
+      map: Readonly<Record<string, PartitionClockSnapshot>>
+    ): Record<string, PartitionClockSnapshot> => {
+      const remapped: Record<string, PartitionClockSnapshot> = {};
+      for (const [key, clock] of Object.entries(map ?? {})) remapped[remapKey(key)] = clock;
+      return remapped;
+    };
+    const remapEvents = (
+      map: Readonly<Record<string, readonly WorldEvent[]>>
+    ): Record<string, WorldEvent[]> => {
+      const remapped: Record<string, WorldEvent[]> = {};
+      for (const [key, list] of Object.entries(map ?? {})) {
+        remapped[remapKey(key)] = list.map((event) => this.#remapRealmArchiveEventKeys(event, remapKey));
+      }
+      return remapped;
+    };
+    return {
+      realmId: newRealmId,
+      members: {
+        // Persistence and runtime declare structurally equivalent
+        // `SerializedAgent` projections; the persistence copy's `modelConfig`
+        // widening is narrowed here at the module seam.
+        active: envelope.members.active.map(remapMember) as unknown as RealmSliceImportInput['members']['active'],
+        recycled: envelope.members.recycled.map(remapMember) as unknown as RealmSliceImportInput['members']['recycled']
+      },
+      messaging: {
+        activeQueues: remapQueues(envelope.messaging.activeQueues),
+        archives: remapQueues(envelope.messaging.archives),
+        registeredAgents: envelope.messaging.registeredAgents.map(remapKey),
+        terminatedAgents: envelope.messaging.terminatedAgents.map(remapKey),
+        auditLog: [...envelope.messaging.auditLog]
+      },
+      schedules: envelope.schedules.map((schedule) => ({
+        ...schedule,
+        ...(typeof schedule.agentRef === 'string' && schedule.agentRef ? { agentRef: remapKey(schedule.agentRef) } : {})
+      })),
+      worldClock: {
+        global: envelope.worldClock.global,
+        clocks: remapClocks(envelope.worldClock.clocks),
+        events: remapEvents(envelope.worldClock.events)
+      }
+    };
+  }
+
+  /**
+   * Remaps the canonical-key-bearing owner fields of one archived world event
+   * (`ownerId`/`createdBy`/`resolvedBy`/`cancelledBy`); bare member ids and
+   * non-key labels pass through verbatim. Event metadata is user-authored
+   * content and stays verbatim (delivered-content fidelity).
+   *
+   * @param event - Archived event record.
+   * @param remapKey - Canonical-key remap function.
+   * @returns Event copy with remapped ownership references.
+   * @internal
+   */
+  #remapRealmArchiveEventKeys(event: WorldEvent, remapKey: (key: string) => string): WorldEvent {
+    const remapRef = (value: unknown): unknown => (typeof value === 'string' && value ? remapKey(value) : value);
+    return {
+      ...event,
+      ownerId: remapRef(event.ownerId) as string,
+      createdBy: remapRef(event.createdBy) as string,
+      resolvedBy: remapRef(event.resolvedBy) as string | null,
+      cancelledBy: remapRef(event.cancelledBy) as string | null
+    };
+  }
+
+  /**
+   * Re-applies archived capability selectors for imported active members
+   * through the operator-gated capability path (R5): `allowedTools`/`tools`/
+   * `toolPreset` resolve to concrete tool names (the wildcard `'*'` is never
+   * re-minted), and the per-agent `extensionTools` selector is re-applied only
+   * when every archived attachment resolved locally. Failures and drops are
+   * disclosed, never fatal.
+   *
+   * @param envelope - Validated archive envelope.
+   * @param newRealmId - Fresh realm id.
+   * @param warnings - Warning accumulator.
+   * @param extensionSelectorsSafe - True when no archived attachment was skipped.
+   * @internal
+   */
+  #reapplyRealmArchiveMemberSelectors(
+    envelope: RealmArchiveEnvelope,
+    newRealmId: string,
+    warnings: string[],
+    extensionSelectorsSafe: boolean
+  ): void {
+    for (const member of envelope.members.active) {
+      const config = (member.config ?? {}) as Record<string, unknown>;
+      const rawSelector = config.allowedTools !== undefined
+        ? config.allowedTools
+        : (config.tools !== undefined
+          ? config.tools
+          : (config.toolPreset !== undefined ? config.toolPreset : config.tool_preset));
+      const targetRef = createAgentIdentityKey(newRealmId, member.id);
+      try {
+        if (typeof rawSelector === 'string' || Array.isArray(rawSelector)) {
+          const resolved = resolveToolPreset(rawSelector as string | readonly string[]);
+          const concrete = resolved.filter((tool) => tool !== '*');
+          if (resolved.includes('*')) {
+            warnings.push(`member '${member.id}' wildcard tool selector was not re-applied (capability is operator-granted, never archive-restored)`);
+          }
+          if (concrete.length > 0) {
+            this.#runtime.updateAgentConfig(targetRef, { allowedTools: [...concrete] }, this.#operatorContext());
+          }
+        }
+        const selector = config.extensionTools;
+        const selectorValid = selector === 'all' || Array.isArray(selector);
+        if (selectorValid && extensionSelectorsSafe) {
+          this.#runtime.updateAgentConfig(
+            targetRef,
+            { extensionTools: selector === 'all' ? 'all' : [...(selector as unknown[])].map((entry) => String(entry)) },
+            this.#operatorContext()
+          );
+        } else if (selectorValid && !extensionSelectorsSafe) {
+          warnings.push(`member '${member.id}' extension selector was not re-applied (an archived attachment is missing locally)`);
+        }
+      } catch (err) {
+        warnings.push(`member '${member.id}' capability selectors were not re-applied (${thrownMessage(err, 'selector-failed')})`);
+      }
+    }
+  }
+
+  /**
+   * Computes the descriptive authority items import never re-applied, per
+   * member: `privileged`, `realmBypass`, the wildcard `'*'`, exact authority
+   * ids in the archived descriptor allow set, and every archived host grant.
+   *
+   * @param envelope - Validated archive envelope.
+   * @returns Per-member dropped authority records (members with drops only).
+   * @internal
+   */
+  #computeDroppedRealmArchiveAuthority(
+    envelope: RealmArchiveEnvelope
+  ): Array<{ memberId: string; authorities: string[] }> {
+    const dropped: Array<{ memberId: string; authorities: string[] }> = [];
+    for (const [memberId, projection] of Object.entries(envelope.authority.members)) {
+      const authorities = new Set<string>();
+      if (projection.privileged) authorities.add('privileged');
+      if (projection.realmBypass) authorities.add('realmBypass');
+      for (const entry of projection.allow) {
+        if (entry === '*') authorities.add('*');
+        else if (typeof entry === 'string' && entry.startsWith('@')) authorities.add(entry);
+      }
+      for (const grant of envelope.authority.hostGrants) {
+        if (grant.memberId === memberId) authorities.add(grant.authorityId);
+      }
+      if (authorities.size > 0) dropped.push({ memberId, authorities: [...authorities] });
+    }
+    return dropped;
+  }
+
+  /**
+   * Suffixes a realm name until it is unique in the registry (`Name (2)`, ...).
+   *
+   * @param baseName - Requested display name.
+   * @returns Unique realm display name.
+   * @internal
+   */
+  #uniqueRealmName(baseName: string): string {
+    const existing = new Set(this.#realmRegistry.listRealms().map((realm) => realm.name));
+    if (!existing.has(baseName)) return baseName;
+    let suffix = 2;
+    while (existing.has(`${baseName} (${suffix})`)) suffix += 1;
+    return `${baseName} (${suffix})`;
+  }
+
+  /**
+   * Suffixes a saved-payload name until the library has no case-insensitive
+   * collision (`Name (2)`, ...).
+   *
+   * @param baseName - Archived payload name.
+   * @returns Unique library name.
+   * @internal
+   */
+  #uniqueSavedPayloadName(baseName: string): string {
+    const used = new Set(this.#savedInstancePayloads.map((entry) => entry.name.toLowerCase()));
+    if (!used.has(baseName.toLowerCase())) return baseName;
+    let suffix = 2;
+    while (used.has(`${baseName} (${suffix})`.toLowerCase())) suffix += 1;
+    return `${baseName} (${suffix})`;
+  }
+
+  /**
+   * Best-effort rollback of a failed realm import: the record (recursive purge
+   * of any member that slipped in), every written file, imported payloads, and
+   * the imported template. Never throws.
+   *
+   * @param params - Rollback inventory.
+   * @returns True when every rollback step completed.
+   * @internal
+   */
+  #rollbackRealmArchiveImport(params: {
+    realmId: string | null;
+    writtenFiles: ReadonlyArray<{ path: string; workspaceId: string }>;
+    importedPayloadIds: readonly string[];
+    importedTemplateId: string | null;
+    terminatedMembers: readonly string[];
+    failures: string[];
+  }): boolean {
+    let rolledBack = true;
+    if (params.realmId && this.#realmRegistry.getRealm(params.realmId)) {
+      try {
+        this.deleteRealm(params.realmId, { recursive: true });
+      } catch (err) {
+        rolledBack = false;
+        params.failures.push(`realm rollback failed: ${thrownMessage(err, 'delete-failed')}`);
+      }
+    }
+    for (const written of params.writtenFiles) {
+      try {
+        this.deleteFile(written.path, written.workspaceId);
+      } catch (err) {
+        rolledBack = false;
+        params.failures.push(`file rollback failed for '${written.path}': ${thrownMessage(err, 'delete-failed')}`);
+      }
+    }
+    for (const payloadId of params.importedPayloadIds) {
+      try {
+        this.deleteSavedInstancePayload(payloadId);
+      } catch (err) {
+        rolledBack = false;
+        params.failures.push(`payload rollback failed for '${payloadId}': ${thrownMessage(err, 'delete-failed')}`);
+      }
+    }
+    if (params.importedTemplateId) {
+      try {
+        this.deleteRealmTemplate(params.importedTemplateId);
+      } catch (err) {
+        rolledBack = false;
+        params.failures.push(`template rollback failed for '${params.importedTemplateId}': ${thrownMessage(err, 'delete-failed')}`);
+      }
+    }
+    return rolledBack;
+  }
+
+  /**
+   * Builds the typed `ERR_STORE_REALM_IMPORT_FAILED` error with its rollback
+   * report (the store passes the report through to the caller unchanged).
+   *
+   * @param message - Human-readable failure message.
+   * @param failedStage - Stage label the failure occurred at.
+   * @param realmId - Target realm id, or `null` for preflight failures.
+   * @param rolledBack - Whether the mutations were rolled back.
+   * @param terminatedMembers - Member ids the rollback purged.
+   * @param evictedFiles - File paths the rollback evicted (optional).
+   * @returns Coded error carrying the frozen report.
+   * @internal
+   */
+  #realmArchiveImportFailure(
+    message: string,
+    failedStage: string,
+    realmId: string | null,
+    rolledBack: boolean,
+    terminatedMembers: readonly string[] = [],
+    evictedFiles: readonly string[] = []
+  ): Error & { code: string; report: RealmArchiveImportRollbackReport } {
+    const err = new Error(message) as Error & {
+      code: string;
+      report: RealmArchiveImportRollbackReport;
+    };
+    err.code = SANDBOX_STORE_ERROR_CODES.ERR_STORE_REALM_IMPORT_FAILED;
+    err.report = Object.freeze({
+      realmId,
+      failedStage,
+      rolledBack,
+      terminatedMembers: Object.freeze([...terminatedMembers]),
+      evictedFiles: Object.freeze([...evictedFiles]),
+      failures: Object.freeze([])
+    });
+    return err;
   }
 
   // ==========================================================================
