@@ -25,9 +25,11 @@
  *   5. Legacy ungrouped parity: operator and agent sends to ungrouped agents
  *      keep their established delivery semantics.
  *
- * Fixture note: each store performs at most one injection-mode `triggerTurn`.
- * Two consecutive injection triggers on one store do not settle today (a
- * pre-existing quirk, reproduced on unmodified code), and a queued injection
+ * Fixture note: each store performs at most one injection-mode `triggerTurn`
+ * (a fixture simplification: consecutive injection triggers settle on current
+ * code — verified under deterministic stubs and a live provider; the earlier
+ * "second trigger never settles" observation was explained by a
+ * never-completing harness stub or by the drop below). A queued injection
  * whose explicit foreign-agent sender is dropped by the trigger queue's Realm
  * confinement now rejects its store waiter with a `TURN_DROPPED` coded error
  * instead of leaving it unsettled (the previously stranded-waiter quirk is
