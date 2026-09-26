@@ -14054,13 +14054,14 @@ export class SandboxStore {
   }
 
   /**
-   * Emits one extension audit event on the runtime event stream (the same
-   * channel the publishing-grant events use), so host subscribers observe
-   * install/attach/detach decisions. Emission is observational: a missing or
-   * throwing emit port never fails the mutation, and the payload carries ids
-   * and non-secret metadata only.
+   * Emits one store audit event on the runtime event stream (the same channel
+   * the publishing-grant events use): extension lifecycle/connection events
+   * and the M3 realm-admin inspection/update events, so host subscribers
+   * observe install/attach/detach and realm decisions. Emission is
+   * observational: a missing or throwing emit port never fails the mutation,
+   * and the payload carries ids, display labels, and non-secret metadata only.
    *
-   * @param type - Event type (`extension_installed`/`extension_removed`/`extension_attached`/`extension_detached`).
+   * @param type - Event type (`extension_installed`/`extension_removed`/`extension_attached`/`extension_detached`/`extension_tool_selection_updated`/`realm_inspected`/`realm_updated`).
    * @param payload - Non-secret event payload.
    */
   #emitExtensionAuditEvent(type: string, payload: Record<string, unknown>): void {
