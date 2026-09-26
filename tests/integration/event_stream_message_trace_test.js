@@ -6,6 +6,7 @@ import { AgentRuntime } from '../../src/lib/sandbox/runtime/index.ts';
 import { AGENT_STATES } from '../../src/lib/sandbox/runtime/agentLifecycle/index.ts';
 import { VirtualFS } from '../../src/lib/sandbox/virtualFs/index.ts';
 import { SandboxStore } from '../../src/lib/sandbox/sandboxStore/index.svelte.ts';
+import { createSandboxToolDispatcher } from '../../src/lib/sandbox/toolDefinitions/index.ts';
 import { formatMessagesWithToolHygiene } from '../../src/lib/sandbox/runtime/messageHygiene/index.ts';
 import { createWiredRuntime } from '../helpers/wired_identity_fixture.js';
 
@@ -722,6 +723,65 @@ test('Suite 3.4: Multi-Turn Tool Loop - Stream Buffer Isolation & Event Sequence
   assert.strictEqual(eventTypes.includes('stream_start'), false, 'ANOMALY CONFIRMED: stream_start is NOT emitted by AgentRuntime');
   assert.strictEqual(eventTypes.includes('stream_delta'), false, 'ANOMALY CONFIRMED: event type is "stream", not "stream_delta"');
   assert.strictEqual(eventTypes.includes('tool_result'), false, 'ANOMALY CONFIRMED: tool result is wrapped in "tool_end", not "tool_result"');
+});
+
+// ============================================================================
+// SUITE 6: Invocation execution metadata opacity
+// ============================================================================
+test('9aca63c: invocation turn metadata never carries realm vocabulary into the child turn', async () => {
+  const { runtime } = createWiredRuntime();
+  const REALM = 'realm_invocation_metadata_probe';
+  const providerPayloads = [];
+  const childModel = createMockModel(async (opts) => {
+    providerPayloads.push(opts.messages);
+    return { content: 'metadata checked' };
+  });
+  try {
+    // The invoker is launched through a realm-exact dispatcher, so the tool
+    // path supplies its canonical identity key as the invocation reference.
+    await runtime.launchAgent({
+      config: { id: 'meta_invoker', realmId: REALM, allowedTools: ['invoke_agent', 'wait_for_invocation'] }
+    });
+    // The target is parented to the invoker, so the ordinary parent relation
+    // authorizes the invocation without wildcard capability.
+    await runtime.launchAgent({
+      config: { id: 'meta_target', realmId: REALM, allowedTools: ['read_file'] },
+      model: childModel,
+      callerContext: { callerAgentId: 'meta_invoker' }
+    });
+
+    const dispatcher = createSandboxToolDispatcher({ runtime, agentId: 'meta_invoker', realmId: REALM });
+    const invoked = await dispatcher.executeTool('invoke_agent', { agent_id: 'meta_target', prompt: 'report' });
+    assert.strictEqual(invoked.success, true, `invoke_agent failed: ${invoked.error}`);
+    const awaited = await dispatcher.executeTool('wait_for_invocation', {
+      invocation_ids: [invoked.invocationId],
+      timeout_ms: 5000
+    });
+    assert.strictEqual(awaited.success, true, `wait_for_invocation failed: ${awaited.error}`);
+
+    // 1. The child's own history metadata (INV-7 surface).
+    const historyMetadata = runtime.getAgent('meta_target').history
+      .filter((message) => message.metadata)
+      .map((message) => message.metadata);
+    assert.ok(historyMetadata.length >= 1, 'the invocation turn wrote metadata onto the child history');
+    const serializedMetadata = JSON.stringify(historyMetadata);
+    assert.strictEqual(
+      /realm:/.test(serializedMetadata),
+      false,
+      `history message metadata must not carry realm vocabulary: ${serializedMetadata}`
+    );
+
+    // 2. The provider payload the child model actually saw (messageHygiene
+    //    preserves metadata onto the emitted messages).
+    assert.ok(providerPayloads.length >= 1, 'the child turn reached the provider');
+    assert.strictEqual(
+      /realm:/.test(JSON.stringify(providerPayloads)),
+      false,
+      'the provider payload must not carry realm vocabulary in message metadata'
+    );
+  } finally {
+    runtime.destroy();
+  }
 });
 
 // ============================================================================
