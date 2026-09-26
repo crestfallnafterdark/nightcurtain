@@ -1374,6 +1374,21 @@ test('23. batch_precall rejects missing/non-array calls and reports explicit den
     assert.strictEqual(res.code, TOOL_SYSTEM_ERROR_CODES.INVALID_ARGUMENTS, `${label}: argument code`);
   }
 
+  // The terminal-close carrier shape: a non-empty summary with no `calls` is a
+  // valid precall-free close (the turn engine closes the turn on it).
+  const terminalClose = await dispatcher.executeTool('batch_precall', { summary: 'Closed without precalls.' });
+  assert.strictEqual(terminalClose.success, true);
+  assert.strictEqual(terminalClose.partial, false);
+  assert.strictEqual(terminalClose.count, 0);
+  assert.strictEqual(terminalClose.executed, 0);
+  assert.strictEqual(terminalClose.denied, 0);
+  assert.deepStrictEqual(terminalClose.results, []);
+
+  // An empty or non-string summary without calls is not a close carrier.
+  const emptySummary = await dispatcher.executeTool('batch_precall', { summary: '   ' });
+  assert.strictEqual(emptySummary.success, false);
+  assert.strictEqual(emptySummary.code, TOOL_SYSTEM_ERROR_CODES.INVALID_ARGUMENTS);
+
   // An empty array is a valid zero-call batch with explicit accounting.
   const empty = await dispatcher.executeTool('batch_precall', { calls: [] });
   assert.strictEqual(empty.success, true);

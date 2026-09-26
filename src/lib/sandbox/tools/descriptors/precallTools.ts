@@ -59,11 +59,16 @@ const batchPrecallParamAliasMap = Object.freeze({
 /**
  * `batch_precall` descriptor — execute an ordered batch of allowlisted precalls.
  *
- * Args: `calls` (required), each `{name, arguments}`. Unresolved or
- * non-allowlisted names fail closed with `PRECALL_FORBIDDEN` and never reach
- * `context.executeTool()`; returns `{success, count, results}` of per-item
- * `{name, result}` receipts or structured denials; throws when `executeTool` is
- * missing.
+ * Args: `calls` (required), each `{name, arguments}`; the terminal-close
+ * carrier shape `{summary}` without `calls` is admitted as a precall-free
+ * close. Any other missing or non-array `calls` fails closed with
+ * `INVALID_ARGUMENTS` (no false-success envelope).
+ * Unresolved or non-allowlisted names fail closed with `PRECALL_FORBIDDEN` and
+ * never reach `context.executeTool()`. Every batch carries explicit accounting
+ * (`count`, `executed`, `denied`, `partial`); a batch in which every entry was
+ * denied reports `success:false` with the denial code (and still carries the
+ * per-item receipts), while a partly executed batch keeps `success:true` with
+ * `partial:true`. Throws when `executeTool` is missing.
  */
 export const batchPrecallDescriptor = Object.freeze({
   name: SANDBOX_TOOLS.BATCH_PRECALL,
@@ -101,11 +106,44 @@ export const batchPrecallDescriptor = Object.freeze({
       throw new Error('executeTool service is not available in execution context');
     }
 
-    const calls: readonly PrecallCallEntry[] = Array.isArray(params?.calls) ? params.calls : [];
+    // Envelope truth (ticket eba7c76): the schema declares `calls` required and
+    // an array, so a missing/non-array payload must fail closed with
+    // INVALID_ARGUMENTS instead of the legacy `{success:true,count:0}` receipt.
+    //
+    // Terminal-close carrier (runtime/turnExecutionEngine): the same tool also
+    // carries the closing summary of a terminal turn, where a non-empty
+    // `summary` argument with no `calls` at all is a valid precall-free close.
+    // Only that exact shape is admitted; an explicitly non-array `calls` (or a
+    // payload with neither `calls` nor a summary) stays invalid.
+    const rawCalls = params?.calls;
+    const terminalClose = typeof params?.summary === 'string' && params.summary.trim() !== '';
+    if (!Array.isArray(rawCalls)) {
+      if ((rawCalls === undefined || rawCalls === null) && terminalClose) {
+        return {
+          success: true,
+          partial: false,
+          count: 0,
+          executed: 0,
+          denied: 0,
+          results: []
+        };
+      }
+      return {
+        success: false,
+        error: "batch_precall: 'calls' is required and must be an array of { name, arguments } objects.",
+        code: TOOL_SYSTEM_ERROR_CODES.INVALID_ARGUMENTS
+      };
+    }
+
+    const calls: readonly PrecallCallEntry[] = rawCalls;
     const results: unknown[] = [];
+    let denied = 0;
+    let malformed = 0;
 
     for (const call of calls) {
       if (!call || typeof call !== 'object' || !call.name) {
+        denied++;
+        malformed++;
         results.push({
           success: false,
           error: "Precall item must be an object containing a valid string 'name'",
@@ -119,6 +157,7 @@ export const batchPrecallDescriptor = Object.freeze({
       // stricter `!canonName || !allowed` precall gate (runtime/turnExecutionEngine/index.ts).
       const canonName = getCanonToolName(call.name);
       if (!canonName || !precallAllowlist.has(canonName)) {
+        denied++;
         results.push({
           success: false,
           error: `Tool '${formatToolName(call.name)}' is forbidden during precall batch execution.`,
@@ -132,9 +171,36 @@ export const batchPrecallDescriptor = Object.freeze({
       results.push({ name: call.name, result: res });
     }
 
+    const count = results.length;
+    const executed = count - denied;
+    // A fully denied batch is a self-validation failure, not a success: it must
+    // not report `success:true` (the turn engine's terminal-close guard reads
+    // the outer discriminator). The code distinguishes an all-malformed payload
+    // from a policy denial; per-item receipts stay in `results`.
+    if (count > 0 && executed === 0) {
+      const allMalformed = malformed === denied;
+      return {
+        success: false,
+        error: allMalformed
+          ? `batch_precall: all ${count} call entries were malformed; none executed.`
+          : `batch_precall: all ${count} call entries were denied by the precall allowlist; none executed.`,
+        code: allMalformed
+          ? TOOL_SYSTEM_ERROR_CODES.INVALID_ARGUMENTS
+          : TOOL_SYSTEM_ERROR_CODES.PRECALL_FORBIDDEN,
+        partial: false,
+        count,
+        executed,
+        denied,
+        results
+      };
+    }
+
     return {
       success: true,
-      count: results.length,
+      partial: denied > 0,
+      count,
+      executed,
+      denied,
       results
     };
   }

@@ -391,7 +391,6 @@ await recordTest('AC-EPIC12-02.3', 'Rejection of non-array or malformed precall 
     });
     assert.equal(res.success, false);
     assert.equal(res.code, 'INVALID_ARGUMENTS');
-    assert.equal(res.count, 0, `Calls value ${JSON.stringify(val)} must execute zero precalls`);
   }
 
   // Null or non-object item in calls array produces a per-item INVALID_ARGUMENTS result
