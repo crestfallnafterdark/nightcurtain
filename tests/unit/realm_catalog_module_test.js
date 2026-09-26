@@ -173,6 +173,7 @@ test('1. runtime surface exports the demo template, the baked bundles, and the p
     'REALM_CATALOG_ERROR_CODES',
     'REALM_CONTENT_VERSION',
     'RealmCatalogError',
+    'canonicalJsonStringify',
     'composeAgentHistory',
     'composeSystemPrompt',
     'deriveToolCallName',
