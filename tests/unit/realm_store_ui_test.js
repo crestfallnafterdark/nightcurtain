@@ -36,6 +36,12 @@
  *   live missing-tools flow over a real launch's disclosure, and the
  *   provenance rows plus the realm-card badge for recorded extension
  *   resolution (`extensionUiHelpers.ts` + `realmGroups.ts`).
+ *
+ *   Ticket 9472417 adds the attach-editor ceiling state model
+ *   (`describeRealmAttachCeilingEditor`): the stale "No live catalog is
+ *   connected yet" claim must not render while nothing is selected (a catalog
+ *   may be connected), while the selected-without-catalog recording copy
+ *   stays.
  */
 
 import '../test_env.js';
@@ -70,6 +76,7 @@ import {
   describeExtensionConnectionError,
   describeExtensionConnectionStatus,
   describeExtensionRemovalError,
+  describeRealmAttachCeilingEditor,
   describeRealmExtensionLiveIndicator,
   EXTENSION_THIRD_PARTY_LABEL,
   formatExtensionConnectionTimestamp
@@ -2027,4 +2034,98 @@ test('26. review disclosures carry third-party labels, live fidelity, and realm-
     attachments: []
   });
   assert.strictEqual(flow[0].thirdPartyLabel, EXTENSION_THIRD_PARTY_LABEL);
+});
+
+test('27. the attach-editor ceiling model keeps state-accurate copy per selection (ticket 9472417)', () => {
+  const connection = extensionConnectionFixture();
+
+  // No extension picked yet: the editor must never claim a live catalog is
+  // missing — the ticket repro showed exactly that claim while an attached
+  // extension's catalog was live.
+  const unselected = describeRealmAttachCeilingEditor({ extensionId: '', connections: [connection] });
+  assert.deepStrictEqual(
+    [unselected.state, unselected.showLiveCatalog, unselected.catalogNames],
+    ['no-selection', false, []]
+  );
+  assert.doesNotMatch(unselected.allToolsHint, /No live catalog is connected yet/);
+  assert.doesNotMatch(unselected.customNamesHint, /No live catalog is connected yet/);
+  assert.match(unselected.allToolsHint, /Choose an extension/);
+
+  // Selected + live conflict-free catalog: the checkbox editor applies and
+  // carries the catalog names in catalog order.
+  const live = describeRealmAttachCeilingEditor({ extensionId: 'acme-scoring', connections: [connection] });
+  assert.deepStrictEqual(
+    [live.state, live.showLiveCatalog, live.catalogNames],
+    ['live-catalog', true, ['similarity', 'flagged']]
+  );
+
+  // Selected with no live session: the legitimate recording-for-later-connect
+  // copy stays verbatim.
+  const offline = describeRealmAttachCeilingEditor({ extensionId: 'acme-scoring', connections: [] });
+  assert.deepStrictEqual(
+    [offline.state, offline.showLiveCatalog, offline.catalogNames],
+    ['no-live-catalog', false, []]
+  );
+  assert.strictEqual(
+    offline.allToolsHint,
+    'No live catalog is connected yet — the ceiling stays "all tools" until a connect.'
+  );
+  assert.strictEqual(
+    offline.customNamesHint,
+    'Sanitized model-facing call names (the derived form), comma-separated. No live catalog is connected yet, '
+      + 'so names are recorded as the ceiling for a later connect.'
+  );
+
+  // A connecting/errored/conflicting session still counts as no live catalog.
+  for (const status of ['connecting', 'error', 'conflict']) {
+    const busy = describeRealmAttachCeilingEditor({
+      extensionId: 'acme-scoring',
+      connections: [extensionConnectionFixture({
+        status,
+        ...(status === 'conflict'
+          ? { conflicts: [{ callName: 'similarity', otherExtensionId: 'zzz-winner' }] }
+          : {})
+      })]
+    });
+    assert.deepStrictEqual([busy.state, busy.showLiveCatalog], ['no-live-catalog', false], status);
+  }
+
+  // A connected catalog that lists no tools is still connected: never the
+  // stale claim, and not the checkbox editor either.
+  const empty = describeRealmAttachCeilingEditor({
+    extensionId: 'acme-scoring',
+    connections: [extensionConnectionFixture({ catalog: {} })]
+  });
+  assert.deepStrictEqual(
+    [empty.state, empty.showLiveCatalog, empty.catalogNames],
+    ['empty-live-catalog', false, []]
+  );
+  assert.match(empty.allToolsHint, /lists no tools/);
+  assert.doesNotMatch(empty.allToolsHint, /No live catalog is connected yet/);
+  assert.doesNotMatch(empty.customNamesHint, /No live catalog is connected yet/);
+
+  // Another extension's live connection never leaks into this selection.
+  const other = describeRealmAttachCeilingEditor({
+    extensionId: 'acme-docs',
+    connections: [
+      connection,
+      extensionConnectionFixture({ extensionId: 'acme-docs', status: 'error', catalog: null, error: { code: 'ERR_MCP_TIMEOUT' } })
+    ]
+  });
+  assert.deepStrictEqual([other.state, other.showLiveCatalog], ['no-live-catalog', false]);
+
+  // A connected projection still carrying conflicts stays out of the editor
+  // (defense in depth: the connected status alone never lights a ceiling).
+  const conflicted = describeRealmAttachCeilingEditor({
+    extensionId: 'acme-scoring',
+    connections: [extensionConnectionFixture({
+      status: 'connected',
+      conflicts: [{ callName: 'similarity', otherExtensionId: 'zzz-winner' }]
+    })]
+  });
+  assert.deepStrictEqual([conflicted.state, conflicted.showLiveCatalog], ['no-live-catalog', false]);
+
+  // Missing/invalid options read as no selection (structural guard).
+  const bare = describeRealmAttachCeilingEditor();
+  assert.deepStrictEqual([bare.state, bare.showLiveCatalog, bare.catalogNames], ['no-selection', false, []]);
 });
