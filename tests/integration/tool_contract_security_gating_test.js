@@ -36,6 +36,7 @@ import {
 } from '../../src/lib/sandbox/toolDefinitions/index.ts';
 import { normalizeToolName } from '../../src/lib/sandbox/tools/normalizers/index.ts';
 import {
+  ALL_TOOL_DESCRIPTORS,
   PUBLISHING_TOOL_REGISTRY,
   getPublishingToolSchemas
 } from '../../src/lib/sandbox/tools/descriptors/index.ts';
@@ -211,6 +212,48 @@ async function runEpic16TestSuite() {
       assert.ok(INNATE_TOOLS.includes(SANDBOX_TOOLS.GET_CURRENT_TIME), 'Must include get_current_time');
       assert.ok(INNATE_TOOLS.includes(SANDBOX_TOOLS.DESCRIBE_TOOL), 'Must include describe_tool');
       assert.ok(INNATE_TOOLS.includes(SANDBOX_TOOLS.BATCH_PRECALL), 'Must include batch_precall');
+    }
+  );
+
+  await runTestScenario(
+    'AC16-11.5',
+    'AC-EPIC16-11',
+    'Root-level oneOf constraints survive schema projection for baked and publishing tools',
+    'CON-1 / HYG-1 Schema Projection Fidelity (d872723 F7)',
+    async () => {
+      const schemas = getSandboxToolsSchema('all');
+      const byName = new Map(ALL_TOOL_DESCRIPTORS.map((descriptor) => [descriptor.name, descriptor]));
+      const docDispatcher = createSandboxToolDispatcher({ privileged: true, allowedTools: ['*'] });
+      for (const name of ['write_file', 'replace_file_content', 'write_json']) {
+        const emitted = schemas.find((definition) => definition.function?.name === name);
+        assert.ok(emitted, `emitted schema must exist for '${name}'`);
+        assert.deepEqual(
+          emitted.function.parameters.oneOf,
+          byName.get(name).schema.oneOf,
+          `'${name}' emitted schema must carry the descriptor's exactly-one-of constraint`
+        );
+        const doc = await docDispatcher.executeTool('describe_tool', { toolName: name });
+        assert.equal(doc.success, true, `describe_tool must resolve '${name}'`);
+        assert.deepEqual(
+          doc.schema.oneOf,
+          emitted.function.parameters.oneOf,
+          `describe_tool and the call schema must agree on '${name}' root oneOf`
+        );
+      }
+      for (const descriptor of Object.values(PUBLISHING_TOOL_REGISTRY)) {
+        const exposed = getPublishingToolSchemas([descriptor.authority]);
+        assert.equal(exposed.length, 1, `'${descriptor.name}' is exposed for its exact authority`);
+        assert.deepEqual(
+          exposed[0].function.parameters.oneOf,
+          descriptor.schema.oneOf,
+          `'${descriptor.name}' emitted schema must carry the exactly-one manifest form`
+        );
+        assert.deepEqual(
+          exposed[0].function.parameters.required,
+          [],
+          `'${descriptor.name}' has no unconditionally required property`
+        );
+      }
     }
   );
 
