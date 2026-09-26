@@ -24,6 +24,12 @@
  *  9. Launch-time resolution × live conflict: the conflicted resolved
  *     extension loses the member's grants and regains them on re-arbitration.
  * 10. No auto-connect at hydration/launch; reset/destroy drop session state.
+ * 11. F1: a disconnected attachment stays unavailable across unrelated
+ *     registry saves until an explicit reconnect.
+ * 12. F2: reconnect gate rejections keep the previous session/catalog/resolver.
+ * 13. removeExtension drops a live session, audits it, and never redials.
+ * 14. `connecting` never churns attachment status during a registry save.
+ * 15. A disconnect during a reconnect handshake cancels it, no resurrect.
  */
 
 import '../test_env.js';
@@ -125,6 +131,19 @@ function auditEvent(events, type, extensionId) {
  */
 function initializeCount(fixture) {
   return fixture.requests.filter((entry) => entry.method === 'initialize').length;
+}
+
+/**
+ * Reads the Generic-realm attachment statuses of one extension.
+ *
+ * @param {object} store Store under test.
+ * @param {string} extensionId Extension id.
+ * @returns {string[]} Attachment statuses (empty when unattached).
+ */
+function attachmentStatuses(store, extensionId) {
+  return store.getRealm(GENERIC_REALM_ID).extensions
+    .filter((entry) => entry.extensionId === extensionId)
+    .map((entry) => entry.status);
 }
 
 // ============================================================================
@@ -740,6 +759,219 @@ test('10. nothing auto-connects at launch or hydration, and reset/destroy drop l
     unsubscribe();
     store.destroy();
     await fixture.close();
+    sharedLocalStorage.clear();
+  }
+});
+
+// ============================================================================
+// 11. F1: disconnect marker survives the install-only heal
+// ============================================================================
+
+test('11. a disconnected attachment stays unavailable across unrelated registry saves until an explicit reconnect', async () => {
+  sharedLocalStorage.clear();
+  const fixture = await createMcpFixtureServer({ tools: FIXTURE_TOOLS_A });
+  const unrelated = await createMcpFixtureServer({ tools: [{ name: 'other_tool' }] });
+  const { store, unsubscribe } = createHarness();
+  try {
+    installMcp(store, 'ext-a', fixture);
+    store.attachExtension(GENERIC_REALM_ID, 'ext-a');
+    await store.connectExtension('ext-a');
+    assert.strictEqual(await store.disconnectExtension('ext-a'), true);
+    assert.deepStrictEqual(attachmentStatuses(store, 'ext-a'), ['unavailable']);
+
+    // An unrelated registry install flows through the persistence-seam heal:
+    // the in-memory disconnect marker must keep the attachment unavailable.
+    installMcp(store, 'ext-b', unrelated);
+    assert.deepStrictEqual(
+      attachmentStatuses(store, 'ext-a'),
+      ['unavailable'],
+      'the install-only heal must not flip a disconnected attachment back to active'
+    );
+    assert.strictEqual(store.getExtensionConnection('ext-a'), null);
+    assert.strictEqual(store.resolveExtensionCallName('shared_tool'), null);
+
+    // A second unrelated registry save (removal) keeps it unavailable too.
+    assert.strictEqual(store.removeExtension('ext-b'), true);
+    assert.deepStrictEqual(attachmentStatuses(store, 'ext-a'), ['unavailable']);
+
+    // The explicit reconnect is the only path back to active.
+    const reconnected = await store.connectExtension('ext-a');
+    assert.strictEqual(reconnected.status, 'connected');
+    assert.deepStrictEqual(attachmentStatuses(store, 'ext-a'), ['active']);
+    assert.deepStrictEqual(store.resolveExtensionCallName('shared_tool'), { extensionId: 'ext-a', serverToolName: 'shared_tool' });
+  } finally {
+    unsubscribe();
+    store.destroy();
+    await fixture.close();
+    await unrelated.close();
+    sharedLocalStorage.clear();
+  }
+});
+
+// ============================================================================
+// 12. F2: reconnect gates run before the previous session is torn down
+// ============================================================================
+
+test('12. a reconnect gate rejection keeps the previous live connection, catalog, and resolver entry', async () => {
+  sharedLocalStorage.clear();
+  const fixture = await createMcpFixtureServer({ tools: FIXTURE_TOOLS_A });
+  const { store, unsubscribe } = createHarness();
+  try {
+    installMcp(store, 'ext-a', fixture);
+    store.attachExtension(GENERIC_REALM_ID, 'ext-a');
+    const first = await store.connectExtension('ext-a');
+    const digest = first.digest;
+
+    // Invalid option: rejected before any teardown.
+    await assert.rejects(
+      () => store.reconnectExtension('ext-a', { requestTimeoutMs: -1 }),
+      (err) => err.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_INVALID_PARAMS
+    );
+    const afterInvalidOptions = store.getExtensionConnection('ext-a');
+    assert.ok(afterInvalidOptions, 'the previous session must survive an invalid reconnect option');
+    assert.strictEqual(afterInvalidOptions.status, 'connected');
+    assert.strictEqual(afterInvalidOptions.digest, digest);
+    assert.deepStrictEqual(store.resolveExtensionCallName('shared_tool'), { extensionId: 'ext-a', serverToolName: 'shared_tool' });
+    assert.strictEqual(initializeCount(fixture), 1, 'the rejected reconnect performed no teardown and no redial');
+
+    // Record-level approval gate: same guarantee.
+    store.getExtensionRegistry().reconcile([{
+      ...store.getExtension('ext-a'),
+      approvedUrl: 'https://approved.example.com/mcp'
+    }]);
+    await assert.rejects(
+      () => store.reconnectExtension('ext-a'),
+      (err) => err.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_INVALID_ENDPOINT
+    );
+    const afterApprovalMismatch = store.getExtensionConnection('ext-a');
+    assert.ok(afterApprovalMismatch, 'the previous session must survive a refused approval boundary');
+    assert.strictEqual(afterApprovalMismatch.status, 'connected');
+    assert.strictEqual(afterApprovalMismatch.digest, digest);
+    assert.strictEqual(initializeCount(fixture), 1, 'the refused reconnect never dialled');
+    assert.deepStrictEqual(attachmentStatuses(store, 'ext-a'), ['active']);
+  } finally {
+    unsubscribe();
+    store.destroy();
+    await fixture.close();
+    sharedLocalStorage.clear();
+  }
+});
+
+// ============================================================================
+// 13. removeExtension closes a live session
+// ============================================================================
+
+test('13. removeExtension drops a live session, audits the close, and never redials', async () => {
+  sharedLocalStorage.clear();
+  const fixture = await createMcpFixtureServer({ tools: FIXTURE_TOOLS_A });
+  const { store, events, unsubscribe } = createHarness();
+  try {
+    installMcp(store, 'ext-a', fixture);
+    await store.connectExtension('ext-a');
+
+    assert.strictEqual(store.removeExtension('ext-a'), true);
+    assert.strictEqual(store.getExtensionConnection('ext-a'), null);
+    assert.deepStrictEqual(store.extensionConnections, []);
+    assert.strictEqual(store.resolveExtensionCallName('shared_tool'), null);
+    const closeAudit = events.filter(
+      (event) => event.type === 'extension_disconnected'
+        && event.payload?.extensionId === 'ext-a'
+        && event.payload.reason === 'removed'
+    );
+    assert.strictEqual(closeAudit.length, 1, 'the removal close is audited');
+    assert.strictEqual(initializeCount(fixture), 1, 'removal never redials');
+  } finally {
+    unsubscribe();
+    store.destroy();
+    await fixture.close();
+    sharedLocalStorage.clear();
+  }
+});
+
+// ============================================================================
+// 14. `connecting` never churns attachment status
+// ============================================================================
+
+test('14. a connecting session never churns attachment status during a registry save', async () => {
+  sharedLocalStorage.clear();
+  const delayed = await createMcpFixtureServer({ tools: FIXTURE_TOOLS_A, initializeDelayMs: 600 });
+  const plain = await createMcpFixtureServer({ tools: [{ name: 'plain_tool' }] });
+  const { store, unsubscribe } = createHarness();
+  try {
+    installMcp(store, 'ext-a', delayed);
+    store.attachExtension(GENERIC_REALM_ID, 'ext-a');
+
+    // First connect: the approved-active attachment must not churn while the
+    // handshake is in flight (`connecting` imposes no attachment constraint).
+    const pending = store.connectExtension('ext-a');
+    assert.strictEqual(await waitFor(() => delayed.requests.some((entry) => entry.method === 'initialize')), true);
+    assert.strictEqual(store.getExtensionConnection('ext-a').status, 'connecting');
+    installMcp(store, 'plain-ext', plain);
+    assert.deepStrictEqual(attachmentStatuses(store, 'ext-a'), ['active'], 'connecting never churns an active attachment');
+    const connected = await pending;
+    assert.strictEqual(connected.status, 'connected');
+    assert.deepStrictEqual(attachmentStatuses(store, 'ext-a'), ['active']);
+
+    // Reconnect after an explicit disconnect: the disconnected marker keeps
+    // the attachment unavailable while the replacement handshake is in flight.
+    assert.strictEqual(await store.disconnectExtension('ext-a'), true);
+    assert.deepStrictEqual(attachmentStatuses(store, 'ext-a'), ['unavailable']);
+    const reconnecting = store.reconnectExtension('ext-a');
+    assert.strictEqual(await waitFor(() => initializeCount(delayed) === 2), true);
+    assert.strictEqual(store.getExtensionConnection('ext-a').status, 'connecting');
+    installMcp(store, 'plain-ext-2', plain);
+    assert.deepStrictEqual(
+      attachmentStatuses(store, 'ext-a'),
+      ['unavailable'],
+      'a reconnect stays unavailable while connecting'
+    );
+    const reconnected = await reconnecting;
+    assert.strictEqual(reconnected.status, 'connected');
+    assert.deepStrictEqual(attachmentStatuses(store, 'ext-a'), ['active']);
+  } finally {
+    unsubscribe();
+    store.destroy();
+    await delayed.close();
+    await plain.close();
+    sharedLocalStorage.clear();
+  }
+});
+
+// ============================================================================
+// 15. disconnect during a reconnect handshake
+// ============================================================================
+
+test('15. a disconnect during a reconnect handshake cancels it and leaves no live state', async () => {
+  sharedLocalStorage.clear();
+  const delayed = await createMcpFixtureServer({ tools: FIXTURE_TOOLS_A, initializeDelayMs: 600 });
+  const { store, unsubscribe } = createHarness();
+  try {
+    installMcp(store, 'ext-a', delayed);
+    store.attachExtension(GENERIC_REALM_ID, 'ext-a');
+    await store.connectExtension('ext-a');
+
+    const reconnecting = store.reconnectExtension('ext-a');
+    assert.strictEqual(await waitFor(() => initializeCount(delayed) === 2), true);
+    assert.strictEqual(store.getExtensionConnection('ext-a').status, 'connecting');
+
+    assert.strictEqual(await store.disconnectExtension('ext-a'), true);
+    const cancelled = await reconnecting;
+    assert.strictEqual(cancelled.status, 'error');
+    assert.strictEqual(cancelled.error.code, 'ERR_MCP_CANCELLED');
+    assert.strictEqual(store.getExtensionConnection('ext-a'), null);
+    assert.deepStrictEqual(store.extensionConnections, []);
+    assert.strictEqual(store.resolveExtensionCallName('shared_tool'), null);
+    assert.deepStrictEqual(attachmentStatuses(store, 'ext-a'), ['unavailable']);
+    assert.strictEqual(await waitFor(() => delayed.abortedRequests.count >= 1), true, 'the fixture observed the abort');
+
+    // Nothing resurrects once the dust settles.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.strictEqual(store.getExtensionConnection('ext-a'), null);
+    assert.deepStrictEqual(store.listExtensionConnections(), []);
+  } finally {
+    unsubscribe();
+    store.destroy();
+    await delayed.close();
     sharedLocalStorage.clear();
   }
 });

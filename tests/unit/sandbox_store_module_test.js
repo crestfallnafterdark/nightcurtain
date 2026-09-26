@@ -5770,12 +5770,24 @@ test('73. [P3.1] connection pre-flight gates are typed, fail closed, and never t
   const fixture = await createMcpFixtureServer({ tools: [{ name: 'echo' }] });
   const GATE_SECRET = 'p31-store-gate-secret-9f2a';
 
+  const vault = store.getCredentialVault();
+
   try {
-    const seeded = store.getCredentialVault().addCredential({
+    const seeded = vault.addCredential({
       label: 'P3.1 gate probe',
       providerId: 'acme',
       apiKey: GATE_SECRET
     });
+
+    // Vault-read spy (real resolver port over the real vault): counts
+    // `getCredential` calls so the "refuse before any vault read" ordering is
+    // instrumented in-suite, not inferred.
+    const originalGetCredential = vault.getCredential.bind(vault);
+    let vaultReads = 0;
+    vault.getCredential = (id) => {
+      vaultReads += 1;
+      return originalGetCredential(id);
+    };
 
     // Unknown id: connect, disconnect, and reconnect all fail closed.
     await assert.rejects(
@@ -5824,6 +5836,7 @@ test('73. [P3.1] connection pre-flight gates are typed, fail closed, and never t
         && !String(err.message).includes(GATE_SECRET)
       )
     );
+    assert.strictEqual(vaultReads, 0, 'the plaintext gate refuses before any vault read');
 
     // Missing credential on an https endpoint: fail closed before any network.
     store.installExtension({
@@ -5836,6 +5849,7 @@ test('73. [P3.1] connection pre-flight gates are typed, fail closed, and never t
       () => store.connectExtension('missing-cred-ext'),
       (err) => err.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_CREDENTIAL_UNRESOLVED
     );
+    assert.strictEqual(vaultReads, 1, 'the unresolvable credential performs exactly the one resolving vault read');
 
     // Options validation happens before any network (an honest http record
     // still refuses a non-positive timeout).
@@ -5864,7 +5878,9 @@ test('73. [P3.1] connection pre-flight gates are typed, fail closed, and never t
       !events.some((event) => String(event.type).startsWith('extension_connect')),
       'a refused gate emits no connection audit event'
     );
+    assert.strictEqual(vaultReads, 1, 'no later refusal performed an extra vault read');
   } finally {
+    delete vault.getCredential;
     unsubscribe();
     store.destroy();
     await fixture.close();

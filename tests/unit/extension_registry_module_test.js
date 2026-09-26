@@ -1052,3 +1052,57 @@ test('19. diffExtensionCatalogs discloses added/removed/changed/shadows/order wi
     (error) => error.code === EXTENSION_REGISTRY_ERROR_CODES.ERR_EXTENSION_INVALID_CATALOG
   );
 });
+
+// ============================================================================
+// 20. Prototype-named wire keys (F3): own data properties, never prototypes
+// ============================================================================
+
+test('20. prototype-named wire keys are preserved as own data properties and never install as prototypes', () => {
+  // The wire payload carries own __proto__/constructor/prototype members
+  // (JSON.parse creates own data properties, so these are genuinely on the
+  // wire and must survive the catalog copy byte-faithfully).
+  const wire = JSON.parse(
+    '{"__proto__":{"type":"object","properties":{}},"constructor":{"kind":"ctor"},"prototype":{"kind":"proto"},"title":"real"}'
+  );
+  const catalog = indexExtensionCatalog({ extensionId: 'proto-ext', tools: [{ name: 't', inputSchema: wire }] });
+  const schema = catalog.tools[0].inputSchema;
+
+  assert.strictEqual(Object.hasOwn(schema, '__proto__'), true, 'an own __proto__ member survives as own data');
+  assert.strictEqual(Object.getPrototypeOf(schema), Object.prototype, 'wire data is never installed as the prototype');
+  assert.strictEqual(Object.hasOwn(Object.getPrototypeOf(schema), 'type'), false, 'Object.prototype stays untouched');
+  assert.strictEqual(schema.type, undefined, 'no inherited read of the wire __proto__ member');
+  assert.deepStrictEqual(schema.__proto__, { type: 'object', properties: {} }, 'the own value is readable as data');
+  assert.strictEqual(Object.hasOwn(schema, 'constructor'), true, 'an own constructor member survives as own data');
+  assert.strictEqual(Object.hasOwn(schema, 'prototype'), true, 'an own prototype member survives as own data');
+  assert.strictEqual(schema.title, 'real');
+  assert.ok(Object.isFrozen(schema));
+  assert.ok(Object.isFrozen(schema.__proto__));
+  assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(schema)),
+    wire,
+    'serialization round-trips the wire payload exactly (no dropped keys)'
+  );
+
+  // Nested prototype-named keys are handled the same way.
+  const nested = indexExtensionCatalog({
+    extensionId: 'proto-ext',
+    tools: [{ name: 't', inputSchema: { type: 'object', properties: JSON.parse('{"__proto__":{"type":"string"}}') } }]
+  }).tools[0].inputSchema;
+  assert.strictEqual(Object.hasOwn(nested.properties, '__proto__'), true);
+  assert.strictEqual(Object.getPrototypeOf(nested.properties), Object.prototype);
+  assert.strictEqual(nested.properties.type, undefined, 'no inherited read at the nested level either');
+
+  // The digest distinguishes a __proto__-bearing payload from an empty one
+  // (distinct wire payloads must never collapse to one digest).
+  const withProto = indexExtensionCatalog({
+    extensionId: 'ext-x',
+    tools: [{ name: 't', inputSchema: JSON.parse('{"__proto__":{"a":1}}') }]
+  });
+  const empty = indexExtensionCatalog({ extensionId: 'ext-x', tools: [{ name: 't', inputSchema: {} }] });
+  assert.notStrictEqual(withProto.digest, empty.digest, 'the digest sees the own __proto__ member');
+
+  // The drift diff sees a __proto__-only difference too.
+  const diff = diffExtensionCatalogs(empty, withProto);
+  assert.deepStrictEqual(diff.changed, ['t'], 'a __proto__-only change is disclosed as changed');
+  assert.notStrictEqual(diff.digests.previous, diff.digests.next);
+});
