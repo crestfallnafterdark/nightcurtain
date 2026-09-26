@@ -686,6 +686,77 @@ await runTestScenario(
 );
 
 // -----------------------------------------------------------------------------
+// [AC-EPIC17-REG] Denied-tool loop guard (ticket 677b0c2)
+// -----------------------------------------------------------------------------
+console.log('\n--- [AC-EPIC17-REG] Denied-tool loop guard (ticket 677b0c2) ---');
+
+await runTestScenario(
+  'AC17-REG.1',
+  '677b0c2',
+  'Zero-tool agent with default maxTurns: the denied-tool loop fails fast with NO_PROGRESS while timers keep firing',
+  'NO-PROGRESS guard: a model that keeps dispatching denied tool calls is bounded, and a single agent loop cannot starve the event loop',
+  async () => {
+    // Origin scenario (spawn follow-up sweep): a zero-tool agent + denied tool
+    // calls + `maxTurns` unset hung the suite because the unbounded loop ran
+    // entirely on the microtask queue and swallowed the test timer.
+    const { runtime } = createWiredRuntime();
+    let modelCalls = 0;
+    const agent = await runtime.launchAgent({
+      id: 'no-tool-loop-agent',
+      name: 'No Tool Loop Agent',
+      role: 'collaborator',
+      allowedTools: []
+    }, createMockModel(async () => {
+      modelCalls++;
+      return {
+        role: 'assistant',
+        content: '',
+        tool_calls: [{
+          id: `call_denied_${modelCalls}`,
+          type: 'function',
+          function: {
+            name: 'virtualFs_writeFile',
+            arguments: JSON.stringify({ filePath: `/denied-${modelCalls}.txt`, content: 'blocked' })
+          }
+        }]
+      };
+    }));
+
+    assert.equal(agent.config.maxTurns, undefined, 'precondition: default open-ended turn budget');
+
+    let timerFired = false;
+    const timer = setTimeout(() => { timerFired = true; }, 0);
+    let turnError = null;
+    try {
+      await runtime.executeAgentTurn(agent.id, 'Keep calling a denied tool');
+    } catch (err) {
+      turnError = err;
+    } finally {
+      clearTimeout(timer);
+    }
+
+    assert.ok(turnError, 'turn must fail instead of looping without progress');
+    assert.equal(turnError.code, 'NO_PROGRESS', 'typed NO_PROGRESS error code');
+    assert.equal(modelCalls, 5, 'guard trips after exactly 5 consecutive all-denied iterations');
+    assert.equal(timerFired, true, 'a timer scheduled before the loop must fire (no event-loop starvation)');
+    assert.equal(agent.state, AGENT_STATES.ERRORED, 'no-progress turn settles ERRORED');
+    assert.ok(
+      String(agent.lastError).toLowerCase().includes('progress'),
+      'failure is observable in agent.lastError'
+    );
+
+    const toolMsgs = agent.history.filter(m => m.role === 'tool');
+    assert.ok(toolMsgs.length >= 5, 'denial receipts stay model-visible in history');
+    assert.ok(
+      toolMsgs.every(m => JSON.parse(m.content).code === 'PERMISSION_DENIED'),
+      'every dispatch was denied with PERMISSION_DENIED'
+    );
+
+    runtime.destroy();
+  }
+);
+
+// -----------------------------------------------------------------------------
 // [AC-EPIC17-10] Accurate Kill Reporting & Spawn Cleanup
 // -----------------------------------------------------------------------------
 console.log('\n--- [AC-EPIC17-10] Accurate Kill Reporting & Spawn Cleanup ---');

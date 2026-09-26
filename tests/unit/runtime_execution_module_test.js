@@ -933,6 +933,107 @@ test('7.5 maxTurns cap: natural conclusion on the final permitted iteration stil
   assert.strictEqual(runtime.events.find(e => e.type === 'error'), undefined);
 });
 
+test('7.6 denied-tool loop with default maxTurns: NO_PROGRESS guard bounds the loop and the event loop keeps yielding', async () => {
+  // Origin regression (ticket 677b0c2): a zero-tool agent whose model keeps
+  // emitting dispatch-denied tool calls with `maxTurns` unset (open-ended by
+  // design, QUIRK-001) must not loop forever — the consecutive-denial guard
+  // fails the turn with the typed `NO_PROGRESS` code, and each loop iteration
+  // yields to the macrotask queue so timers cannot be starved by the loop.
+  const agent = createMockAgent('denied_guard_agent', {
+    allowedTools: [],
+    maxTurns: undefined
+  });
+  let modelCalls = 0;
+  agent.model = {
+    async *stream() {
+      modelCalls++;
+      const toolCalls = [{
+        id: `call_denied_${modelCalls}`,
+        type: 'function',
+        function: { name: 'read_file', arguments: '{"path":"/denied.txt"}' }
+      }];
+      yield { type: 'tool_call', toolCalls };
+      yield { type: 'finish', content: '', toolCalls };
+    }
+  };
+
+  const agents = new Map([[agent.id, agent]]);
+  const runtime = createMockRuntime(agents);
+  const engine = new TurnExecutionEngine({ runtime, virtualFs: createMockVirtualFS() });
+
+  // Timer scheduled *before* the loop: pre-fix, the unbounded microtask-only
+  // loop starves it (this is the starvation regression); post-fix it fires
+  // during one of the cooperative macrotask yields, before the turn settles.
+  let timerFired = false;
+  const timer = setTimeout(() => { timerFired = true; }, 0);
+  try {
+    await assert.rejects(
+      () => engine.executeAgentTurn(agent.id, 'Keep calling denied tools'),
+      (err) => {
+        assert.strictEqual(err.code, EXECUTION_ERROR_CODES.NO_PROGRESS);
+        assert.ok(/progress/i.test(err.message), 'error message must name the non-progress condition');
+        assert.ok(/denied/i.test(err.message), 'error message must name the denied-tool condition');
+        return true;
+      }
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+
+  assert.strictEqual(modelCalls, 5, 'guard trips after exactly 5 consecutive all-denied tool-loop iterations');
+  assert.strictEqual(timerFired, true, 'a timer scheduled before the loop must fire (no event-loop starvation)');
+  assert.strictEqual(agent.state, AGENT_STATES.ERRORED, 'no-progress turn must settle errored, not completed');
+  assert.strictEqual(agent.turnCount, 0, 'no-progress turn must not count as a completed turn');
+  assert.strictEqual(agent.currentTurnPromise, null);
+
+  const denialReceipts = agent.history.filter(m => m.role === 'tool' && String(m.content).includes('PERMISSION_DENIED'));
+  assert.strictEqual(denialReceipts.length, 5, 'every denied dispatch must remain model-visible in history');
+
+  const errorEvent = runtime.events.find(e => e.type === 'error');
+  assert.ok(errorEvent, 'no-progress turn must emit an error event');
+  assert.strictEqual(errorEvent.payload.code, EXECUTION_ERROR_CODES.NO_PROGRESS);
+});
+
+test('7.7 denied-tool streak resets on any executed tool call and does not trip below the threshold', async () => {
+  // Semantics pin: only *consecutive all-denied* iterations count. An iteration
+  // that executes at least one tool (success or execution failure) resets the
+  // streak, and up to 4 consecutive denied iterations stay below the guard.
+  const deniedCall = (n) => ({
+    id: `call_denied_${n}`,
+    type: 'function',
+    function: { name: 'write_file', arguments: JSON.stringify({ path: `/denied-${n}.txt`, content: 'x' }) }
+  });
+  const allowedCall = {
+    id: 'call_allowed',
+    type: 'function',
+    function: { name: 'read_file', arguments: '{"path":"/ok.txt"}' }
+  };
+
+  const agent = createMockAgent('denied_guard_reset_agent', {
+    allowedTools: ['read_file'],
+    maxTurns: undefined
+  }, [
+    { toolCalls: [deniedCall(1)] },                      // streak 1
+    { toolCalls: [deniedCall(2)] },                      // streak 2
+    { toolCalls: [deniedCall(3), allowedCall] },         // executed -> reset 0
+    { toolCalls: [deniedCall(4)] },                      // streak 1
+    { toolCalls: [deniedCall(5)] },                      // streak 2
+    { toolCalls: [deniedCall(6)] },                      // streak 3
+    { toolCalls: [deniedCall(7)] },                      // streak 4 (below threshold 5)
+    { content: 'Concluded before the guard tripped.' }   // natural completion
+  ]);
+
+  const agents = new Map([[agent.id, agent]]);
+  const runtime = createMockRuntime(agents);
+  const engine = new TurnExecutionEngine({ runtime, virtualFs: createMockVirtualFS({ '/ok.txt': 'ok' }) });
+
+  const receipt = await engine.executeAgentTurn(agent.id, 'Try, recover, then conclude');
+  assert.strictEqual(receipt.status, EXECUTION_STATUS.COMPLETED);
+  assert.strictEqual(receipt.output, 'Concluded before the guard tripped.');
+  assert.strictEqual(agent.turnCount, 1);
+  assert.strictEqual(runtime.events.find(e => e.type === 'error'), undefined, 'no NO_PROGRESS trip below the threshold');
+});
+
 // ============================================================================
 // 8. Deterministic Stream Cleanup & Cooperative Cancellation (Invariant 6)
 // ============================================================================
