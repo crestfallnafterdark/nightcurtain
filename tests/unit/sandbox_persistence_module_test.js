@@ -2206,6 +2206,66 @@ test('authority fields: prototype-carried records reject as pollution and own re
   assert.deepStrictEqual(validated.state.templateAuthorityTrust, own.templateAuthorityTrust);
 });
 
+test('authority fields: generic authorityGrants validates, round-trips, and fails closed (M1)', () => {
+  const withGeneric = authoritySnapshot({
+    authorityGrants: {
+      '@agent:inspect': ['realm:r1:watcher'],
+      '@realm:edit': ['realm:r1:admin', 'realm:r2:admin']
+    }
+  });
+  const validated = validateSandboxState(withGeneric);
+  assert.strictEqual(validated.valid, true);
+  assert.strictEqual(validated.state, withGeneric, 'valid generic snapshots keep their identity');
+  assert.deepStrictEqual(validated.state.authorityGrants, withGeneric.authorityGrants);
+
+  // Empty and mixed forms are valid; the legacy pair may coexist.
+  assert.strictEqual(validateSandboxState(authoritySnapshot({ authorityGrants: {} })).valid, true);
+  assert.strictEqual(
+    validateSandboxState(authoritySnapshot({
+      authorityGrants: { '@agent:edit': ['realm:r1:parent'] },
+      metaAuthorityGrants: { template: ['realm:r1:architect'] }
+    })).valid,
+    true
+  );
+
+  // Legacy snapshots stay byte-compatible with the field absent.
+  const legacy = validateSandboxState(authoritySnapshot()).state;
+  assert.strictEqual('authorityGrants' in legacy, false);
+
+  const malformed = [
+    { authorityGrants: 'nope' },
+    { authorityGrants: [] },
+    { authorityGrants: { '@agent:edit': 'nope' } },
+    { authorityGrants: { '@agent:edit': [42] } },
+    { authorityGrants: { '@agent:edit': [''] } },
+    { authorityGrants: { '': ['realm:r1:a'] } }
+  ];
+  for (const extra of malformed) {
+    const result = validateSandboxState(authoritySnapshot(extra));
+    assert.strictEqual(result.valid, false, `expected invalid for ${JSON.stringify(extra)}`);
+    assert.strictEqual(result.code, PERSISTENCE_ERROR_CODES.INVALID_STATE);
+  }
+
+  // Prototype-pollution keys anywhere in the generic record fail closed.
+  const polluted = JSON.parse(`{
+    "version": "1.0.0",
+    "timestamp": ${Date.now()},
+    "agents": [],
+    "authorityGrants": { "__proto__": ["realm:r1:a"] }
+  }`);
+  const pollutedResult = validateSandboxState(polluted);
+  assert.strictEqual(pollutedResult.valid, false);
+  assert.strictEqual(pollutedResult.code, PERSISTENCE_ERROR_CODES.PROTOTYPE_POLLUTION_DETECTED);
+
+  // A prototype-carried generic record rejects as pollution; an own record
+  // still round-trips.
+  const hostile = Object.create({ authorityGrants: { '@agent:edit': ['realm:r1:a'] } });
+  Object.assign(hostile, authoritySnapshot());
+  const hostileResult = validateSandboxState(hostile);
+  assert.strictEqual(hostileResult.valid, false);
+  assert.strictEqual(hostileResult.code, PERSISTENCE_ERROR_CODES.PROTOTYPE_POLLUTION_DETECTED);
+});
+
 // ============================================================================
 // 25. Extension wave: install records round-trip, drop invalid, stay absent
 // ============================================================================

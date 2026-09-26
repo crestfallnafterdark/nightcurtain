@@ -44,6 +44,7 @@
  */
 
 import '../test_env.js';
+import { sharedLocalStorage } from '../test_env.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -51,6 +52,7 @@ import { AgentRuntime } from '../../src/lib/sandbox/runtime/index.ts';
 import { SandboxStore, SANDBOX_STORE_ERROR_CODES } from '../../src/lib/sandbox/sandboxStore/index.svelte.ts';
 import {
   AGENT_AUTHORITIES,
+  AUTHORITY_IDS,
   KNOWN_AGENT_AUTHORITIES,
   RealmCatalogError,
   materializeTemplate,
@@ -62,8 +64,11 @@ import {
 } from '../../src/lib/sandbox/realmCatalog/index.ts';
 import {
   ALL_TOOL_DESCRIPTORS,
+  AUTHORITY_TOOL_REGISTRY,
   PUBLISHING_TOOL_REGISTRY,
   TOOL_REGISTRY,
+  getAuthorityToolDescriptors,
+  getAuthorityToolSchemas,
   getPublishingToolSchemas
 } from '../../src/lib/sandbox/tools/descriptors/index.ts';
 import { PUBLISHING_TOOLS } from '../../src/lib/sandbox/tools/constants/index.ts';
@@ -73,7 +78,7 @@ import {
 } from '../../src/lib/sandbox/toolDefinitions/index.ts';
 import { VirtualFS } from '../../src/lib/sandbox/virtualFs/index.ts';
 import { MessagingBus } from '../../src/lib/sandbox/messagingBus/index.ts';
-import { validateSandboxState } from '../../src/lib/sandbox/sandboxPersistence/index.ts';
+import { validateSandboxState, saveSandboxState } from '../../src/lib/sandbox/sandboxPersistence/index.ts';
 
 /** Fixture template id used by most publishing cases. */
 const FIXTURE_ID = 'up-publishing-fixture';
@@ -1791,4 +1796,266 @@ test('25. launch and spawn configs cannot propagate the authority ids to childre
   assert.equal(childAllow.includes(AGENT_AUTHORITIES.HYDRATION), false);
   assert.equal(child.config.allowedTools.includes(AGENT_AUTHORITIES.TEMPLATE), false, 'the selector is scrubbed');
   assert.ok(child.config.templateAuthority !== true, 'the caller config claim is inert (never a descriptor grant)');
+});
+
+// ============================================================================
+// 9. M1 authority-set generalization (invisible, migration-only)
+// ============================================================================
+
+test('26. [M1] AUTHORITY_IDS is the runtime vocabulary; KNOWN_AGENT_AUTHORITIES stays the template-declarable pair', () => {
+  assert.ok(Object.isFrozen(AUTHORITY_IDS));
+  assert.deepEqual([...AUTHORITY_IDS], [
+    '@template:authority',
+    '@hydration:authority',
+    '@agent:inspect',
+    '@agent:edit',
+    '@realm:inspect',
+    '@realm:edit',
+    '@extensions:authority'
+  ]);
+  assert.deepEqual([...KNOWN_AGENT_AUTHORITIES], ['@template:authority', '@hydration:authority']);
+  for (const id of AUTHORITY_IDS) {
+    const declarable = id === AGENT_AUTHORITIES.TEMPLATE || id === AGENT_AUTHORITIES.HYDRATION;
+    assert.equal(KNOWN_AGENT_AUTHORITIES.includes(id), declarable, `${id} declarability matches the split (A15)`);
+  }
+  // The registry maps every known id to exactly one authority tool (M1: the
+  // publishing pair; M2+ append their descriptors to the same table).
+  assert.deepEqual(
+    Object.keys(AUTHORITY_TOOL_REGISTRY).sort(),
+    [PUBLISHING_TOOLS.IMPORT_REALM_TEMPLATE, PUBLISHING_TOOLS.SUBMIT_HYDRATION_PACKAGE]
+  );
+});
+
+test('27. [M1] generic tool-schema exposure filters by exact id membership only', () => {
+  assert.deepEqual(getAuthorityToolSchemas([]), []);
+  assert.deepEqual(getAuthorityToolSchemas(['*']), [], 'the wildcard is never an authority id');
+  assert.deepEqual(getAuthorityToolSchemas(AUTHORITY_IDS).map((def) => def.function.name).sort(), [
+    PUBLISHING_TOOLS.IMPORT_REALM_TEMPLATE,
+    PUBLISHING_TOOLS.SUBMIT_HYDRATION_PACKAGE
+  ], 'only ids with a registered descriptor expose a schema');
+  assert.deepEqual(
+    getAuthorityToolSchemas([AGENT_AUTHORITIES.REALM_INSPECT]),
+    [],
+    'a descriptor-less non-publishing id exposes nothing'
+  );
+  assert.deepEqual(
+    getAuthorityToolSchemas([AGENT_AUTHORITIES.TEMPLATE, AGENT_AUTHORITIES.REALM_INSPECT]).map((def) => def.function.name),
+    [PUBLISHING_TOOLS.IMPORT_REALM_TEMPLATE],
+    'the generic filter is exact-id membership (REALM_INSPECT adds nothing)'
+  );
+  assert.deepEqual(
+    getPublishingToolSchemas(KNOWN_AGENT_AUTHORITIES),
+    getAuthorityToolSchemas(KNOWN_AGENT_AUTHORITIES),
+    'getPublishingToolSchemas remains a delegation alias'
+  );
+  assert.equal(
+    getAuthorityToolDescriptors([AGENT_AUTHORITIES.TEMPLATE, AGENT_AUTHORITIES.REALM_INSPECT]).length,
+    1,
+    'the descriptor filter mirrors the schema filter'
+  );
+  assert.equal(getAuthorityToolDescriptors([]).length, 0);
+  assert.equal(getAuthorityToolDescriptors(['*']).length, 0);
+});
+
+test('28. [M1] the store serves every known authority id through the generic grant API', async () => {
+  const { runtime, store } = createFixtureStore();
+  const launched = await launchFixture(store);
+  const architect = launched.agents.find((agent) => agent.id === `${FIXTURE_ID}-architect`);
+  const identityPort = runtime.createAgentIdentityPort();
+  const operatorContext = { principal: runtime.getOperatorPrincipal() };
+
+  // Unknown ids and malformed scopes reject before any mutation.
+  await assert.rejects(
+    () => store.grantAuthority(architect.id, '@future:authority', null),
+    (err) => err?.code === 'INVALID_CONFIG'
+  );
+  await assert.rejects(
+    () => store.grantAuthority(architect.id, AGENT_AUTHORITIES.AGENT_EDIT, { bogus: true }),
+    (err) => err?.code === 'INVALID_CONFIG'
+  );
+  await assert.rejects(
+    () => store.revokeAuthority(architect.id, ''),
+    (err) => err?.code === 'INVALID_CONFIG'
+  );
+  assert.deepEqual(store.listAuthorityGrants(), {});
+
+  // Every known id round-trips through the generic API; scopes stay
+  // registry-side (frozen records read through the lifecycle accessor).
+  const scope = { ownSpawns: true, fields: ['tools', 'prompt'] };
+  const descriptor = await store.grantAuthority(architect.id, AGENT_AUTHORITIES.AGENT_EDIT, scope);
+  assert.ok(descriptor.allow.has(AGENT_AUTHORITIES.AGENT_EDIT));
+  const canonical = `realm:${launched.realm.id}:${architect.id}`;
+  assert.deepEqual(store.listAuthorityGrants(), { [AGENT_AUTHORITIES.AGENT_EDIT]: [canonical] });
+  const grants = runtime.getAuthorityGrants(canonical);
+  assert.deepEqual(grants, [{ id: AGENT_AUTHORITIES.AGENT_EDIT, scope }]);
+  assert.ok(Object.isFrozen(grants));
+  assert.ok(Object.isFrozen(grants[0]));
+  assert.ok(Object.isFrozen(grants[0].scope));
+  assert.ok(Object.isFrozen(grants[0].scope.fields));
+
+  // The scope never reaches the descriptor or the identity projection.
+  const descriptorKeys = Object.keys(descriptor).sort();
+  assert.deepEqual(descriptorKeys, ['allow', 'extensions', 'kind', 'realmBypass', 'subject', 'visibility']);
+  const identity = identityPort.getAgentIdentity(architect.id, { realmId: launched.realm.id });
+  assert.equal(JSON.stringify(identity).includes('ownSpawns'), false, 'scopes never leak onto identity projections');
+
+  // The wildcard never implies an authority id.
+  await runtime.launchAgent({ config: { id: 'm1-wild-peer', privileged: true }, principal: operatorContext.principal });
+  assert.deepEqual(runtime.getAuthorityGrants('m1-wild-peer'), []);
+  assert.deepEqual(store.listAuthorityGrants(), { [AGENT_AUTHORITIES.AGENT_EDIT]: [canonical] });
+
+  // Revoke drops the id from allow and the grant record.
+  const revoked = await store.revokeAuthority(architect.id, AGENT_AUTHORITIES.AGENT_EDIT);
+  assert.equal(revoked.allow.has(AGENT_AUTHORITIES.AGENT_EDIT), false);
+  assert.deepEqual(store.listAuthorityGrants(), {});
+  assert.deepEqual(runtime.getAuthorityGrants(canonical), []);
+});
+
+test('29. [M1] snapshots partition publishing grants (legacy field) from the rest (authorityGrants)', async () => {
+  sharedLocalStorage.clear();
+  const { runtime, store } = createFixtureStore();
+  importFixture(store, createFixtureTemplate());
+  const launched = await launchFixture(store, FIXTURE_ID, {
+    authorityApprovals: [{ agentKey: 'architect', authority: AGENT_AUTHORITIES.TEMPLATE }]
+  });
+  const architect = launched.agents.find((agent) => agent.id === `${FIXTURE_ID}-architect`);
+  const genesis = launched.agents.find((agent) => agent.id === `${FIXTURE_ID}-genesis`);
+  const canonical = `realm:${launched.realm.id}:${architect.id}`;
+
+  // Publishing-only session: legacy field only, byte-compatible shape.
+  const publishingOnly = store.serialize();
+  assert.deepEqual(publishingOnly.metaAuthorityGrants, { template: [canonical] });
+  assert.equal('authorityGrants' in publishingOnly, false, 'a publishing-only session emits no generic field');
+  assert.equal(validateSandboxState(publishingOnly).valid, true);
+
+  // Mixed session: both fields; the generic field carries only non-publishing ids.
+  await store.grantAuthority(genesis.id, AGENT_AUTHORITIES.AGENT_INSPECT, { realmMembers: true });
+  const genesisKey = `realm:${launched.realm.id}:${genesis.id}`;
+  const mixed = store.serialize();
+  assert.deepEqual(mixed.metaAuthorityGrants, { template: [canonical] });
+  assert.deepEqual(mixed.authorityGrants, { [AGENT_AUTHORITIES.AGENT_INSPECT]: [genesisKey] });
+  assert.equal(validateSandboxState(mixed).valid, true);
+
+  // Generic-only session.
+  await store.revokeTemplateAuthority(canonical);
+  const genericOnly = store.serialize();
+  assert.equal('metaAuthorityGrants' in genericOnly, false);
+  assert.deepEqual(genericOnly.authorityGrants, { [AGENT_AUTHORITIES.AGENT_INSPECT]: [genesisKey] });
+
+  // Hydration restores both partitions into one generic listing.
+  assert.equal(store.saveToStorage(), true);
+  const restored = createFixtureStore({ autoHydrate: true });
+  assert.deepEqual(restored.store.listAuthorityGrants(), {
+    [AGENT_AUTHORITIES.AGENT_INSPECT]: [genesisKey]
+  });
+  assert.deepEqual(restored.store.listMetaAuthorityGrants(), { template: [], hydration: [] });
+
+  // A snapshot carrying only the legacy field still hydrates equivalently.
+  sharedLocalStorage.clear();
+  const legacyOnly = { ...store.serialize() };
+  delete legacyOnly.authorityGrants;
+  legacyOnly.metaAuthorityGrants = { template: [canonical], hydration: [] };
+  assert.equal(saveSandboxState(legacyOnly), true);
+  const legacyRestored = createFixtureStore({ autoHydrate: true });
+  assert.deepEqual(legacyRestored.store.listMetaAuthorityGrants(), { template: [canonical], hydration: [] });
+  assert.deepEqual(legacyRestored.store.listAuthorityGrants(), { [AGENT_AUTHORITIES.TEMPLATE]: [canonical] });
+
+  // Malformed generic fields reject the snapshot; prototype-carried records
+  // reject as pollution (never ignored into a grant).
+  const malformed = { ...legacyOnly, authorityGrants: { [AGENT_AUTHORITIES.AGENT_EDIT]: 'nope' } };
+  const malformedResult = validateSandboxState(malformed);
+  assert.equal(malformedResult.valid, false);
+  assert.equal(malformedResult.code, 'ERR_PERSISTENCE_INVALID_STATE');
+  const hostile = Object.create({ authorityGrants: { [AGENT_AUTHORITIES.AGENT_EDIT]: [canonical] } });
+  Object.assign(hostile, legacyOnly);
+  const hostileResult = validateSandboxState(hostile);
+  assert.equal(hostileResult.valid, false);
+  assert.equal(hostileResult.code, 'ERR_PERSISTENCE_PROTOTYPE_POLLUTION');
+
+  // Grant-free sessions emit neither field.
+  runtime.killAgent(architect.id, 'm1 drop', { principal: runtime.getOperatorPrincipal() });
+  runtime.killAgent(genesis.id, 'm1 drop', { principal: runtime.getOperatorPrincipal() });
+  const dropped = store.serialize();
+  assert.equal('metaAuthorityGrants' in dropped, false);
+  assert.equal('authorityGrants' in dropped, false);
+});
+
+test('30. [M1] kill/purge drops every grant; restore skips unknown, recycled, and unknown-id refs', async () => {
+  const { runtime, store } = createFixtureStore();
+  importFixture(store, createFixtureTemplate());
+  const launched = await launchFixture(store, FIXTURE_ID, {
+    authorityApprovals: [{ agentKey: 'architect', authority: AGENT_AUTHORITIES.TEMPLATE }]
+  });
+  const architect = launched.agents.find((agent) => agent.id === `${FIXTURE_ID}-architect`);
+  await store.grantAuthority(architect.id, AGENT_AUTHORITIES.AGENT_INSPECT, { ownSpawns: true });
+  const operatorContext = { principal: runtime.getOperatorPrincipal() };
+  const canonical = `realm:${launched.realm.id}:${architect.id}`;
+  assert.ok(store.listAuthorityGrants()[AGENT_AUTHORITIES.TEMPLATE]);
+  assert.ok(store.listAuthorityGrants()[AGENT_AUTHORITIES.AGENT_INSPECT]);
+
+  runtime.killAgent(architect.id, 'm1 recycle', operatorContext);
+  assert.deepEqual(store.listAuthorityGrants(), {}, 'soft-kill drops every grant');
+  runtime.restoreAgent(architect.id, operatorContext);
+  assert.deepEqual(store.listAuthorityGrants(), {}, 'a restored record stays default-deny until re-granted');
+
+  await store.grantAuthority(architect.id, AGENT_AUTHORITIES.AGENT_EDIT, null);
+  runtime.purgeAgent(architect.id, operatorContext);
+  assert.deepEqual(store.listAuthorityGrants(), {});
+
+  // Restore skips unknown ids, unknown/unresolvable refs, and malformed lists.
+  const restoredRefs = runtime.restoreAuthorityGrants(
+    {
+      '@future:authority': [canonical],
+      [AGENT_AUTHORITIES.AGENT_INSPECT]: ['realm:ghost:ghost', 'recycled-agent', 42, ''],
+      [AGENT_AUTHORITIES.TEMPLATE]: 'nope'
+    },
+    { principal: runtime.getOperatorPrincipal() }
+  );
+  assert.deepEqual(restoredRefs, {}, 'unknown ids and unresolvable refs mint nothing');
+  assert.deepEqual(store.listAuthorityGrants(), {});
+
+  // The restore path is operator-only and its generic shape is the
+  // composition-root currency.
+  assert.throws(
+    () => runtime.restoreAuthorityGrants({ [AGENT_AUTHORITIES.AGENT_EDIT]: [canonical] }, null),
+    (err) => err?.code === 'PERMISSION_DENIED'
+  );
+});
+
+test('31. [M1] audit vocabulary: generic events for the rest, legacy names for the publishing pair', async () => {
+  const { runtime, store } = createFixtureStore();
+  const events = [];
+  runtime.subscribe((event) => events.push(event));
+  importFixture(store, createFixtureTemplate());
+  const launched = await launchFixture(store, FIXTURE_ID, {
+    authorityApprovals: [{ agentKey: 'architect', authority: AGENT_AUTHORITIES.TEMPLATE }]
+  });
+  const architect = launched.agents.find((agent) => agent.id === `${FIXTURE_ID}-architect`);
+
+  await store.grantAuthority(architect.id, AGENT_AUTHORITIES.AGENT_EDIT, { targets: ['child-1'], fields: ['tools'] });
+  await store.revokeAuthority(architect.id, AGENT_AUTHORITIES.AGENT_EDIT);
+
+  const legacyGrant = events.find((event) => event.type === 'template_authority_granted' && event.agentId === architect.id);
+  assert.ok(legacyGrant, 'the publishing pair keeps its legacy event name');
+  assert.deepEqual(Object.keys(legacyGrant.payload).sort(), ['agentId', 'authority', 'by', 'enabled']);
+  assert.equal(legacyGrant.payload.authority, AGENT_AUTHORITIES.TEMPLATE);
+  assert.equal(legacyGrant.payload.enabled, true);
+
+  const genericGrant = events.find((event) => event.type === 'authority_granted');
+  assert.ok(genericGrant, 'non-publishing grants emit authority_granted');
+  assert.equal(genericGrant.agentId, architect.id);
+  assert.deepEqual(Object.keys(genericGrant.payload).sort(), ['authorityId', 'by', 'enabled', 'scopePresent']);
+  assert.equal(genericGrant.payload.authorityId, AGENT_AUTHORITIES.AGENT_EDIT);
+  assert.equal(genericGrant.payload.enabled, true);
+  assert.equal(genericGrant.payload.scopePresent, true);
+  assert.equal(genericGrant.payload.by, runtime.getOperatorPrincipal().subject);
+
+  const genericRevoke = events.find((event) => event.type === 'authority_revoked');
+  assert.ok(genericRevoke, 'non-publishing revokes emit authority_revoked');
+  assert.equal(genericRevoke.payload.enabled, false);
+  assert.equal(genericRevoke.payload.scopePresent, false);
+
+  const serializedEvents = JSON.stringify(events);
+  assert.equal(serializedEvents.includes('child-1'), false, 'audit never carries scope values');
+  assert.equal(/realm:/.test(serializedEvents), false, 'audit payloads stay realm-opaque');
 });

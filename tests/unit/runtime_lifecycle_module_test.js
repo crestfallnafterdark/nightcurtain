@@ -36,6 +36,7 @@ import {
 import { AgentLifecycleManager } from '../../src/lib/sandbox/runtime/agentLifecycle/index.ts';
 import { HistoryManager } from '../../src/lib/sandbox/runtime/historyManager/index.ts';
 import { createAgentRuntime, createAgentIdentityKey } from '../../src/lib/sandbox/runtime/index.ts';
+import { AGENT_AUTHORITIES, AUTHORITY_IDS } from '../../src/lib/sandbox/realmCatalog/index.ts';
 import { VirtualFS } from '../../src/lib/sandbox/virtualFs/index.ts';
 import { InferenceError } from '../../src/lib/sandbox/inference/index.ts';
 import { getDefaultModelConfig } from '../../src/lib/sandbox/modelConfig/index.ts';
@@ -2722,4 +2723,298 @@ test('18. [P2.4-O2] the entity descriptor axis sanitizes explicit extension sele
     [],
     'the trusted channel (absent here) still decides the registry axis; a config selector never grants'
   );
+});
+
+// ============================================================================
+// 19. M1 authority-set generalization: one generic grant core
+// ============================================================================
+
+test('19. [M1] the generic grant core serves every AUTHORITY_IDS id with frozen scope records', async () => {
+  const lifecycle = new AgentLifecycleManager({ emit: { emit: () => {} }, internalPrincipal: TEST_PRINCIPAL });
+  await lifecycle.launchAgent({ config: { id: 'auth_core', allowedTools: ['read_file'] }, principal: TEST_PRINCIPAL });
+  const operator = { principal: TEST_PRINCIPAL };
+
+  // Unknown ids and non-operator callers reject before any mutation.
+  assert.throws(
+    () => lifecycle.grantAuthority('auth_core', '@future:authority', null, operator),
+    (err) => err?.code === 'INVALID_CONFIG'
+  );
+  assert.throws(
+    () => lifecycle.grantAuthority('auth_core', AGENT_AUTHORITIES.AGENT_INSPECT, null, null),
+    (err) => err?.code === 'PERMISSION_DENIED'
+  );
+  assert.deepStrictEqual(lifecycle.getAuthorityGrants('auth_core'), []);
+
+  for (const id of AUTHORITY_IDS) {
+    const scope = id === AGENT_AUTHORITIES.AGENT_EDIT
+      ? { ownSpawns: true, fields: ['tools', 'prompt'] }
+      : null;
+    const descriptor = lifecycle.grantAuthority('auth_core', id, scope, operator);
+    assert.ok(descriptor.allow.has(id), `${id} is appended to the descriptor allow set`);
+    const grants = lifecycle.getAuthorityGrants('auth_core');
+    assert.deepStrictEqual(
+      grants.filter((record) => record.id === id),
+      scope ? [{ id, scope }] : [{ id }],
+      `${id} is recorded as the frozen grant shape`
+    );
+    assert.ok(Object.isFrozen(grants), `${id}: the grant list is frozen`);
+    if (scope) {
+      const record = grants.find((entry) => entry.id === id);
+      assert.ok(Object.isFrozen(record), `${id}: the record is frozen`);
+      assert.ok(Object.isFrozen(record.scope), `${id}: the scope record is frozen`);
+      assert.ok(Object.isFrozen(record.scope.fields), `${id}: scope list members are frozen`);
+    }
+    const revoked = lifecycle.revokeAuthority('auth_core', id, operator);
+    assert.strictEqual(revoked.allow.has(id), false, `${id} revoke drops the id`);
+    assert.deepStrictEqual(lifecycle.getAuthorityGrants('auth_core'), []);
+  }
+
+  // The capability selector axis is never touched by grant/revoke.
+  assert.deepStrictEqual([...lifecycle.getAuthorityDescriptor('auth_core').allow], ['read_file']);
+  assert.deepStrictEqual([...lifecycle.getAuthorityInputs('auth_core').allowedTools], ['read_file']);
+
+  // The listing groups canonical identity keys per id and omits empty ids.
+  lifecycle.grantAuthority('auth_core', AGENT_AUTHORITIES.AGENT_INSPECT, { ownSpawns: true }, operator);
+  assert.deepStrictEqual(lifecycle.listAuthorityGrants(), {
+    [AGENT_AUTHORITIES.AGENT_INSPECT]: [createAgentIdentityKey('realm_generic', 'auth_core')]
+  });
+  assert.deepStrictEqual(lifecycle.listMetaAuthorityGrants(), { template: [], hydration: [] });
+});
+
+test('20. [M1] malformed, class-invalid, and prototype scopes reject with INVALID_CONFIG and no partial grant', async () => {
+  const lifecycle = new AgentLifecycleManager({ emit: { emit: () => {} }, internalPrincipal: TEST_PRINCIPAL });
+  await lifecycle.launchAgent({ config: { id: 'auth_scope' }, principal: TEST_PRINCIPAL });
+  const operator = { principal: TEST_PRINCIPAL };
+
+  const malformed = [
+    [AGENT_AUTHORITIES.AGENT_EDIT, { bogus: true }],
+    [AGENT_AUTHORITIES.AGENT_EDIT, { targets: 'nope' }],
+    [AGENT_AUTHORITIES.AGENT_EDIT, { targets: [''] }],
+    [AGENT_AUTHORITIES.AGENT_EDIT, { targets: ['a', 'a'] }],
+    [AGENT_AUTHORITIES.AGENT_EDIT, { targets: [42] }],
+    [AGENT_AUTHORITIES.AGENT_EDIT, { ownSpawns: 'yes' }],
+    [AGENT_AUTHORITIES.AGENT_EDIT, { ownSpawns: true, fields: ['bogus'] }],
+    [AGENT_AUTHORITIES.AGENT_INSPECT, { fields: ['tools'] }],
+    [AGENT_AUTHORITIES.TEMPLATE, { ownSpawns: true }],
+    [AGENT_AUTHORITIES.REALM_EDIT, { ownSpawns: true }],
+    [AGENT_AUTHORITIES.REALM_EDIT, { realms: ['realm_other'] }],
+    [AGENT_AUTHORITIES.AGENT_EDIT, { targets: ['__proto__'] }],
+    [AGENT_AUTHORITIES.AGENT_EDIT, { fields: ['constructor'] }]
+  ];
+  for (const [id, scope] of malformed) {
+    assert.throws(
+      () => lifecycle.grantAuthority('auth_scope', id, scope, operator),
+      (err) => err?.code === 'INVALID_CONFIG',
+      `expected INVALID_CONFIG for ${id} scope ${JSON.stringify(scope)}`
+    );
+  }
+  assert.deepStrictEqual(lifecycle.getAuthorityGrants('auth_scope'), [], 'rejections leave no partial grant');
+
+  // Valid realm scope stores frozen.
+  const realmDescriptor = lifecycle.grantAuthority(
+    'auth_scope',
+    AGENT_AUTHORITIES.REALM_EDIT,
+    { targets: ['realm_a'], fields: ['name', 'color'] },
+    operator
+  );
+  assert.ok(realmDescriptor.allow.has(AGENT_AUTHORITIES.REALM_EDIT));
+  const stored = lifecycle.getAuthorityGrants('auth_scope').find((record) => record.id === AGENT_AUTHORITIES.REALM_EDIT);
+  assert.deepStrictEqual(stored, {
+    id: AGENT_AUTHORITIES.REALM_EDIT,
+    scope: { targets: ['realm_a'], fields: ['name', 'color'] }
+  });
+  assert.ok(Object.isFrozen(stored.scope.targets));
+});
+
+test('21. [M1] every known authority id is stripped from selectors on launch, spawn, update, and reauthorize', async () => {
+  const lifecycle = new AgentLifecycleManager({ emit: { emit: () => {} }, internalPrincipal: TEST_PRINCIPAL });
+  const operator = { principal: TEST_PRINCIPAL };
+
+  const launched = await lifecycle.launchAgent({
+    config: { id: 'strip_launch', allowedTools: ['read_file', ...AUTHORITY_IDS] },
+    principal: TEST_PRINCIPAL
+  });
+  assert.deepStrictEqual([...lifecycle.getAuthorityDescriptor('strip_launch').allow], ['read_file']);
+  assert.deepStrictEqual([...lifecycle.getAuthorityInputs('strip_launch').allowedTools], ['read_file']);
+  assert.deepStrictEqual(
+    launched.config.allowedTools.filter((tool) => AUTHORITY_IDS.includes(tool)),
+    [],
+    'the launch selector is scrubbed'
+  );
+
+  const updated = lifecycle.updateAgentConfig(
+    'strip_launch',
+    { allowedTools: ['write_file', ...AUTHORITY_IDS] },
+    operator
+  );
+  assert.deepStrictEqual([...lifecycle.getAuthorityDescriptor('strip_launch').allow], ['write_file']);
+  assert.deepStrictEqual(
+    updated.authority.allow.has(AGENT_AUTHORITIES.AGENT_EDIT),
+    false,
+    'an update selector cannot mint a grant'
+  );
+
+  const reauthorized = lifecycle.reauthorizeAgent(
+    'strip_launch',
+    { allowedTools: ['read_file', ...AUTHORITY_IDS] },
+    operator
+  );
+  assert.deepStrictEqual([...reauthorized.allow], ['read_file']);
+
+  const child = await lifecycle.launchAgent({
+    config: { id: 'strip_child', allowedTools: ['read_file', ...AUTHORITY_IDS] },
+    principal: TEST_PRINCIPAL
+  });
+  for (const id of AUTHORITY_IDS) {
+    assert.strictEqual(child.authority.allow.has(id), false, `${id} never reaches a spawn descriptor`);
+  }
+
+  // Authority-key claims are denied for every caller, operator included.
+  for (const id of AUTHORITY_IDS) {
+    assert.throws(
+      () => lifecycle.updateAgentConfig('strip_launch', { [id]: true }, operator),
+      (err) => err?.code === 'PERMISSION_DENIED',
+      `updateAgentConfig denies the '${id}' key`
+    );
+    assert.throws(
+      () => lifecycle.reauthorizeAgent('strip_launch', { [id]: true }, operator),
+      (err) => err?.code === 'PERMISSION_DENIED',
+      `reauthorizeAgent denies the '${id}' key`
+    );
+  }
+  assert.throws(
+    () => lifecycle.updateAgentConfig('strip_launch', { authorities: [{ id: AGENT_AUTHORITIES.AGENT_EDIT }] }, operator),
+    (err) => err?.code === 'PERMISSION_DENIED'
+  );
+  assert.throws(
+    () => lifecycle.reauthorizeAgent('strip_launch', { authorities: [] }, operator),
+    (err) => err?.code === 'PERMISSION_DENIED'
+  );
+});
+
+test('22. [M1] the wildcard and privilege never imply an authority id and scopes never reach the descriptor', async () => {
+  const lifecycle = new AgentLifecycleManager({ emit: { emit: () => {} }, internalPrincipal: TEST_PRINCIPAL });
+  const wild = await lifecycle.launchAgent({ config: { id: 'auth_wild', privileged: true }, principal: TEST_PRINCIPAL });
+  assert.ok(wild.authority.allow.has('*'));
+  assert.deepStrictEqual(lifecycle.getAuthorityGrants('auth_wild'), [], 'privilege composes no grant');
+
+  const descriptor = lifecycle.grantAuthority(
+    'auth_wild',
+    AGENT_AUTHORITIES.AGENT_EDIT,
+    { ownSpawns: true, fields: ['prompt'] },
+    { principal: TEST_PRINCIPAL }
+  );
+  assert.ok(descriptor.allow.has('*'));
+  assert.ok(descriptor.allow.has(AGENT_AUTHORITIES.AGENT_EDIT));
+  assert.deepStrictEqual(
+    Object.keys(descriptor).sort(),
+    ['allow', 'extensions', 'kind', 'realmBypass', 'subject', 'visibility'],
+    'the descriptor shape stays frozen (no scope member)'
+  );
+  assert.strictEqual(JSON.stringify(descriptor).includes('ownSpawns'), false, 'scopes are registry-side only');
+});
+
+test('23. [M1] audit vocabulary: legacy publishing names retained, authority_granted/revoked for the rest', async () => {
+  const events = [];
+  const lifecycle = new AgentLifecycleManager({
+    emit: { emit: (event) => events.push(event) },
+    internalPrincipal: TEST_PRINCIPAL
+  });
+  await lifecycle.launchAgent({ config: { id: 'auth_audit' }, principal: TEST_PRINCIPAL });
+  const operator = { principal: TEST_PRINCIPAL };
+
+  lifecycle.grantAuthority('auth_audit', AGENT_AUTHORITIES.TEMPLATE, null, operator);
+  lifecycle.revokeAuthority('auth_audit', AGENT_AUTHORITIES.TEMPLATE, operator);
+  lifecycle.grantAuthority('auth_audit', AGENT_AUTHORITIES.AGENT_EDIT, { targets: ['child'], fields: ['tools'] }, operator);
+  lifecycle.revokeAuthority('auth_audit', AGENT_AUTHORITIES.AGENT_EDIT, operator);
+
+  assert.deepStrictEqual(
+    events.slice(-4).map((event) => event.type),
+    ['template_authority_granted', 'template_authority_revoked', 'authority_granted', 'authority_revoked']
+  );
+  const legacyGrant = events.find((event) => event.type === 'template_authority_granted');
+  assert.deepStrictEqual(legacyGrant.payload, {
+    agentId: 'auth_audit',
+    authority: AGENT_AUTHORITIES.TEMPLATE,
+    enabled: true,
+    by: TEST_PRINCIPAL.subject
+  });
+  const genericGrant = events.find((event) => event.type === 'authority_granted');
+  assert.strictEqual(genericGrant.agentId, 'auth_audit');
+  assert.deepStrictEqual(genericGrant.payload, {
+    authorityId: AGENT_AUTHORITIES.AGENT_EDIT,
+    enabled: true,
+    by: TEST_PRINCIPAL.subject,
+    scopePresent: true
+  });
+  const genericRevoke = events.find((event) => event.type === 'authority_revoked');
+  assert.deepStrictEqual(Object.keys(genericRevoke.payload).sort(), ['authorityId', 'by', 'enabled', 'scopePresent']);
+  assert.strictEqual(genericRevoke.payload.enabled, false);
+  assert.strictEqual(genericRevoke.payload.scopePresent, false);
+  assert.strictEqual(JSON.stringify(events).includes('child'), false, 'audit carries no scope values');
+});
+
+test('24. [M1] kill, restore, and purge drop every grant; unknown refs resolve none', async () => {
+  const lifecycle = new AgentLifecycleManager({ emit: { emit: () => {} }, internalPrincipal: TEST_PRINCIPAL });
+  await lifecycle.launchAgent({ config: { id: 'auth_kill' }, principal: TEST_PRINCIPAL });
+  const operator = { principal: TEST_PRINCIPAL };
+  lifecycle.grantAuthority('auth_kill', AGENT_AUTHORITIES.AGENT_INSPECT, { ownSpawns: true }, operator);
+  lifecycle.grantAuthority('auth_kill', AGENT_AUTHORITIES.TEMPLATE, null, operator);
+  assert.deepStrictEqual(
+    Object.keys(lifecycle.listAuthorityGrants()).sort(),
+    [AGENT_AUTHORITIES.AGENT_INSPECT, AGENT_AUTHORITIES.TEMPLATE].sort()
+  );
+
+  lifecycle.killAgent('auth_kill', 'm1 recycle', operator);
+  assert.deepStrictEqual(lifecycle.listAuthorityGrants(), {}, 'soft-kill drops every grant');
+  assert.deepStrictEqual(lifecycle.getAuthorityGrants('auth_kill'), []);
+
+  lifecycle.restoreAgent('auth_kill', operator);
+  assert.deepStrictEqual(lifecycle.listAuthorityGrants(), {}, 'a restored record carries no grant');
+
+  lifecycle.grantAuthority('auth_kill', AGENT_AUTHORITIES.AGENT_EDIT, null, operator);
+  lifecycle.purgeAgent('auth_kill', operator);
+  assert.deepStrictEqual(lifecycle.listAuthorityGrants(), {});
+  assert.deepStrictEqual(lifecycle.getAuthorityGrants('auth_kill'), []);
+  assert.deepStrictEqual(lifecycle.getAuthorityGrants('ghost'), []);
+  assert.deepStrictEqual(lifecycle.getAuthorityGrants(''), []);
+});
+
+test('25. [M1] launch composes grants only on the engine path; caller claims stay inert', async () => {
+  const lifecycle = new AgentLifecycleManager({ emit: { emit: () => {} }, internalPrincipal: TEST_PRINCIPAL });
+
+  const engineChild = await lifecycle.launchAgent({
+    config: {
+      id: 'auth_engine',
+      authorities: [AGENT_AUTHORITIES.AGENT_INSPECT, '@future:authority'],
+      templateAuthority: true,
+      hydrationAuthority: true
+    },
+    principal: TEST_PRINCIPAL
+  });
+  assert.ok(engineChild.authority.allow.has(AGENT_AUTHORITIES.AGENT_INSPECT));
+  assert.ok(engineChild.authority.allow.has(AGENT_AUTHORITIES.TEMPLATE), 'legacy aliases map to the same records');
+  assert.ok(engineChild.authority.allow.has(AGENT_AUTHORITIES.HYDRATION));
+  assert.deepStrictEqual(
+    lifecycle.getAuthorityGrants('auth_engine').map((record) => record.id).sort(),
+    [AGENT_AUTHORITIES.TEMPLATE, AGENT_AUTHORITIES.HYDRATION, AGENT_AUTHORITIES.AGENT_INSPECT].sort(),
+    'unknown ids are skipped fail-closed'
+  );
+
+  const spawner = await lifecycle.launchAgent({
+    config: { id: 'auth_spawner', privileged: true },
+    principal: TEST_PRINCIPAL
+  });
+  const claimed = await lifecycle.launchAgent({
+    config: {
+      id: 'auth_claim',
+      authorities: [AGENT_AUTHORITIES.AGENT_EDIT],
+      templateAuthority: true,
+      hydrationAuthority: true
+    },
+    principal: spawner.authority
+  });
+  assert.deepStrictEqual(lifecycle.getAuthorityGrants('auth_claim'), [], 'non-engine claims compose nothing');
+  assert.strictEqual(claimed.authority.allow.has(AGENT_AUTHORITIES.AGENT_EDIT), false);
+  assert.strictEqual(claimed.config.authorities, undefined, 'the claim never lands on the entity config');
 });

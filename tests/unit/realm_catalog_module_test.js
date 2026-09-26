@@ -47,6 +47,8 @@ import path from 'node:path';
 import * as RealmCatalogModule from '../../src/lib/sandbox/realmCatalog/index.ts';
 import {
   AGENT_AUTHORITIES,
+  AUTHORITY_IDS,
+  AUTHORITY_SCOPE_FIELDS,
   BAKED_TEMPLATE_BUNDLES,
   DEMO_TEMPLATE,
   KNOWN_AGENT_AUTHORITIES,
@@ -159,6 +161,8 @@ function template(overrides = {}) {
 test('1. runtime surface exports the demo template, the baked bundles, and the pure helpers', () => {
   assert.deepStrictEqual(Object.keys(RealmCatalogModule).sort(), [
     'AGENT_AUTHORITIES',
+    'AUTHORITY_IDS',
+    'AUTHORITY_SCOPE_FIELDS',
     'BAKED_TEMPLATE_BUNDLES',
     'DEMO_TEMPLATE',
     'KNOWN_AGENT_AUTHORITIES',
@@ -2261,6 +2265,43 @@ test('19a. authority vocabulary is frozen and lists the v1 known set', () => {
   assert.deepStrictEqual([...KNOWN_AGENT_AUTHORITIES], ['@template:authority', '@hydration:authority']);
   assert.strictEqual(AGENT_AUTHORITIES.TEMPLATE, '@template:authority');
   assert.strictEqual(AGENT_AUTHORITIES.HYDRATION, '@hydration:authority');
+
+  // M1 vocabulary split: AUTHORITY_IDS is the runtime set (7 ids, declaration
+  // order) while KNOWN_AGENT_AUTHORITIES keeps the template-declarable pair
+  // (A15); AUTHORITY_SCOPE_FIELDS declares the per-id field-token vocabulary.
+  assert.ok(Object.isFrozen(AUTHORITY_IDS));
+  assert.deepStrictEqual([...AUTHORITY_IDS], [
+    '@template:authority',
+    '@hydration:authority',
+    '@agent:inspect',
+    '@agent:edit',
+    '@realm:inspect',
+    '@realm:edit',
+    '@extensions:authority'
+  ]);
+  assert.strictEqual(AGENT_AUTHORITIES.AGENT_INSPECT, '@agent:inspect');
+  assert.strictEqual(AGENT_AUTHORITIES.AGENT_EDIT, '@agent:edit');
+  assert.strictEqual(AGENT_AUTHORITIES.REALM_INSPECT, '@realm:inspect');
+  assert.strictEqual(AGENT_AUTHORITIES.REALM_EDIT, '@realm:edit');
+  assert.strictEqual(AGENT_AUTHORITIES.EXTENSIONS, '@extensions:authority');
+  for (const id of AUTHORITY_IDS) {
+    assert.strictEqual(
+      KNOWN_AGENT_AUTHORITIES.includes(id),
+      id === '@template:authority' || id === '@hydration:authority',
+      `${id} declarability matches the split`
+    );
+  }
+  assert.ok(Object.isFrozen(AUTHORITY_SCOPE_FIELDS));
+  assert.deepStrictEqual(
+    [...AUTHORITY_SCOPE_FIELDS[AGENT_AUTHORITIES.AGENT_EDIT]],
+    ['tools', 'privilege', 'policy', 'prompt'],
+    'the parental editable field tokens are the A18 set'
+  );
+  assert.deepStrictEqual(
+    [...AUTHORITY_SCOPE_FIELDS[AGENT_AUTHORITIES.REALM_EDIT]],
+    ['attachments', 'ceiling', 'name', 'description', 'color']
+  );
+  assert.ok(Object.isFrozen(AUTHORITY_SCOPE_FIELDS[AGENT_AUTHORITIES.AGENT_EDIT]));
 });
 
 test('19b. authorities shape: unique non-empty strings, duplicates rejected, unknown ids accepted', () => {

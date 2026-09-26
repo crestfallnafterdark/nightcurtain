@@ -6479,3 +6479,135 @@ test('81. [81d8267] the saved-payload library round-trips through storage with s
     sharedLocalStorage.clear();
   }
 });
+
+// ============================================================================
+// 29. M1 authority-set generalization: generic store wrappers + snapshot path
+// ============================================================================
+
+test('29. [M1] generic authority grants: wrappers, snapshot partitions, and hydration merge', async () => {
+  sharedLocalStorage.clear();
+  const vfs = new VirtualFS();
+  const bus = new MessagingBus();
+  const runtime = new AgentRuntime({ virtualFs: vfs, messagingBus: bus, autoBootstrapDirector: false });
+  const store = new SandboxStore({
+    runtime,
+    virtualFs: vfs,
+    messagingBus: bus,
+    autoBootstrapDirector: false,
+    autoHydrate: false
+  });
+  const alphaKey = createAgentIdentityKey('realm_generic', 'm1-alpha');
+  const betaKey = createAgentIdentityKey('realm_generic', 'm1-beta');
+  try {
+    await runtime.launchAgent({ config: { id: 'm1-alpha', allowedTools: ['read_file'] } });
+    await runtime.launchAgent({ config: { id: 'm1-beta', allowedTools: ['read_file'] } });
+
+    // Wrapper validation: empty ids fail typed; the runtime stays the
+    // vocabulary/scope authority (unknown ids and malformed scopes reject).
+    await assert.rejects(
+      () => store.grantAuthority('   ', AGENT_AUTHORITIES.AGENT_EDIT),
+      (err) => err?.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_INVALID_PARAMS
+    );
+    await assert.rejects(
+      () => store.grantAuthority('m1-alpha', '@future:authority'),
+      (err) => err?.code === 'INVALID_CONFIG'
+    );
+    await assert.rejects(
+      () => store.grantAuthority('m1-alpha', AGENT_AUTHORITIES.AGENT_EDIT, { ownSpawns: 'nope' }),
+      (err) => err?.code === 'INVALID_CONFIG'
+    );
+    await assert.rejects(
+      () => store.revokeAuthority('', AGENT_AUTHORITIES.AGENT_EDIT),
+      (err) => err?.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_INVALID_PARAMS
+    );
+    assert.deepStrictEqual(store.listAuthorityGrants(), {});
+
+    const descriptor = await store.grantAuthority(
+      'm1-alpha',
+      AGENT_AUTHORITIES.AGENT_EDIT,
+      { ownSpawns: true, fields: ['tools'] }
+    );
+    assert.ok(descriptor.allow.has(AGENT_AUTHORITIES.AGENT_EDIT));
+    const listing = store.listAuthorityGrants();
+    assert.deepStrictEqual(listing, { [AGENT_AUTHORITIES.AGENT_EDIT]: [alphaKey] });
+    assert.ok(Object.isFrozen(listing));
+    assert.ok(Object.isFrozen(listing[AGENT_AUTHORITIES.AGENT_EDIT]));
+
+    // Generic-only sessions emit the additive field and nothing legacy.
+    let snapshot = store.serialize();
+    assert.deepStrictEqual(snapshot.authorityGrants, { [AGENT_AUTHORITIES.AGENT_EDIT]: [alphaKey] });
+    assert.strictEqual('metaAuthorityGrants' in snapshot, false, 'the publishing pair stays out of the generic field');
+
+    // Mixed sessions emit both partitions exactly.
+    await store.grantTemplateAuthority('m1-beta');
+    snapshot = store.serialize();
+    assert.deepStrictEqual(snapshot.metaAuthorityGrants, { template: [betaKey] });
+    assert.deepStrictEqual(snapshot.authorityGrants, { [AGENT_AUTHORITIES.AGENT_EDIT]: [alphaKey] });
+    assert.strictEqual(store.saveToStorage(), true);
+
+    // A generic-only snapshot hydrates through the generic restore path.
+    const restoredVfs = new VirtualFS();
+    const restoredBus = new MessagingBus();
+    const restoredRuntime = new AgentRuntime({
+      virtualFs: restoredVfs,
+      messagingBus: restoredBus,
+      autoBootstrapDirector: false
+    });
+    const restored = new SandboxStore({
+      runtime: restoredRuntime,
+      virtualFs: restoredVfs,
+      messagingBus: restoredBus,
+      autoBootstrapDirector: false,
+      autoHydrate: true
+    });
+    try {
+      assert.deepStrictEqual(restored.listAuthorityGrants(), {
+        [AGENT_AUTHORITIES.AGENT_EDIT]: [alphaKey],
+        [AGENT_AUTHORITIES.TEMPLATE]: [betaKey]
+      });
+      assert.deepStrictEqual(restored.listMetaAuthorityGrants(), { template: [betaKey], hydration: [] });
+    } finally {
+      restored.destroy();
+      restoredRuntime.destroy();
+    }
+
+    // Generic wins per id on a tampered mixed snapshot: the same id in both
+    // fields restores only the generic list, and malformed refs fail closed.
+    const merged = JSON.parse(JSON.stringify(snapshot));
+    merged.authorityGrants[AGENT_AUTHORITIES.TEMPLATE] = ['realm_generic:m1-alpha'];
+    merged.authorityGrants[AGENT_AUTHORITIES.AGENT_INSPECT] = ['realm:ghost:ghost', 42, ''];
+    sharedLocalStorage.setItem('ai_storyteller_sandbox_state_v1', JSON.stringify(merged));
+
+    const mergeVfs = new VirtualFS();
+    const mergeBus = new MessagingBus();
+    const mergeRuntime = new AgentRuntime({
+      virtualFs: mergeVfs,
+      messagingBus: mergeBus,
+      autoBootstrapDirector: false
+    });
+    const mergedStore = new SandboxStore({
+      runtime: mergeRuntime,
+      virtualFs: mergeVfs,
+      messagingBus: mergeBus,
+      autoBootstrapDirector: false,
+      autoHydrate: true
+    });
+    try {
+      assert.deepStrictEqual(
+        mergedStore.listAuthorityGrants(),
+        {
+          [AGENT_AUTHORITIES.AGENT_EDIT]: [alphaKey],
+          [AGENT_AUTHORITIES.TEMPLATE]: ['realm_generic:m1-alpha']
+        },
+        'the generic field wins per id and unresolvable refs mint nothing'
+      );
+    } finally {
+      mergedStore.destroy();
+      mergeRuntime.destroy();
+    }
+  } finally {
+    store.destroy();
+    runtime.destroy();
+    sharedLocalStorage.clear();
+  }
+});

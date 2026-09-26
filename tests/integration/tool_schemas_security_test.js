@@ -14,12 +14,15 @@ import {
 import { TOOL_ALIAS_MAP, normalizeToolName } from '../../src/lib/sandbox/tools/normalizers/index.ts';
 import {
   ALL_TOOL_DESCRIPTORS,
+  AUTHORITY_TOOL_REGISTRY,
   TOOL_REGISTRY,
   PUBLISHING_TOOL_REGISTRY,
+  getAuthorityToolDescriptors,
+  getAuthorityToolSchemas,
   getPublishingToolSchemas
 } from '../../src/lib/sandbox/tools/descriptors/index.ts';
 import { PUBLISHING_TOOLS, TOOL_PRESETS, INNATE_TOOLS } from '../../src/lib/sandbox/tools/constants/index.ts';
-import { AGENT_AUTHORITIES } from '../../src/lib/sandbox/realmCatalog/index.ts';
+import { AGENT_AUTHORITIES, AUTHORITY_IDS, KNOWN_AGENT_AUTHORITIES } from '../../src/lib/sandbox/realmCatalog/index.ts';
 import { VirtualFS, PermissionDeniedError, FileNotFoundError } from '../../src/lib/sandbox/virtualFs/index.ts';
 import { MessagingBus } from '../../src/lib/sandbox/messagingBus/index.ts';
 import { WorldClock } from '../../src/lib/sandbox/worldClock/index.ts';
@@ -782,6 +785,102 @@ async function runEpic6UnitTests() {
       'an exact authority holder can describe its publishing tool'
     );
     assert(authorityDescribe.schema?.type === 'object', 'the authority descriptor is describable with its schema');
+
+    // --- SECTION 12: generic authority-set exposure (M1) ---
+    console.log('\n--- 12. Generic authority-set exposure (M1) ---');
+    assert(
+      Object.keys(AUTHORITY_TOOL_REGISTRY).sort().join(',')
+        === [PUBLISHING_TOOLS.IMPORT_REALM_TEMPLATE, PUBLISHING_TOOLS.SUBMIT_HYDRATION_PACKAGE].sort().join(','),
+      'AUTHORITY_TOOL_REGISTRY is the full authority name->descriptor table (the publishing pair in M1)'
+    );
+    assert(
+      getAuthorityToolSchemas(KNOWN_AGENT_AUTHORITIES).length === getPublishingToolSchemas(KNOWN_AGENT_AUTHORITIES).length,
+      'getPublishingToolSchemas remains a delegation alias of getAuthorityToolSchemas'
+    );
+    assert(getAuthorityToolSchemas(['*']).length === 0, 'the wildcard is never an authority id in the generic filter');
+    assert(getAuthorityToolSchemas([]).length === 0, 'no ids expose no schemas');
+    assert(
+      getAuthorityToolSchemas(AUTHORITY_IDS).length === 2
+        && getAuthorityToolSchemas(AUTHORITY_IDS).every((def) => def.function.name !== undefined),
+      'only ids with a registered descriptor expose a schema (the publishing pair)'
+    );
+    assert(
+      getAuthorityToolSchemas([AGENT_AUTHORITIES.REALM_INSPECT]).length === 0,
+      'a descriptor-less non-publishing id exposes nothing'
+    );
+    assert(
+      getAuthorityToolSchemas([AGENT_AUTHORITIES.TEMPLATE, AGENT_AUTHORITIES.REALM_INSPECT]).length === 1,
+      'the generic filter is exact-id membership'
+    );
+    assert(
+      getAuthorityToolDescriptors([AGENT_AUTHORITIES.TEMPLATE, AGENT_AUTHORITIES.REALM_INSPECT]).length === 1
+        && getAuthorityToolDescriptors([]).length === 0
+        && getAuthorityToolDescriptors(['*']).length === 0,
+      'the descriptor filter mirrors the schema filter'
+    );
+
+    // A non-publishing exact holder gains no publishing surface, and the
+    // wildcard/privileged channels never satisfy an authority tool.
+    await exposureRuntime.launchAgent({
+      config: { id: 'exposure_scoped', allowedTools: null },
+      principal: exposureOperator
+    });
+    exposureRuntime.grantAuthority('exposure_scoped', AGENT_AUTHORITIES.REALM_INSPECT, null, {
+      principal: exposureRuntime.getOperatorPrincipal()
+    });
+    await exposureRuntime.launchAgent({
+      config: { id: 'exposure_wild_authority', privileged: true },
+      principal: exposureOperator
+    });
+    const scopedDispatcher = createSandboxToolDispatcher({ runtime: exposureRuntime, agentId: 'exposure_scoped' });
+    const wildAuthorityDispatcher = createSandboxToolDispatcher({
+      runtime: exposureRuntime,
+      agentId: 'exposure_wild_authority'
+    });
+    const scopedCross = await scopedDispatcher.executeTool('import_realm_template', {});
+    assert(
+      scopedCross.success === false && scopedCross.code === 'PERMISSION_DENIED',
+      'a descriptor-less non-publishing holder gains no publishing tool'
+    );
+    const wildAuthority = await wildAuthorityDispatcher.executeTool('import_realm_template', {});
+    assert(
+      wildAuthority.success === false && wildAuthority.code === 'PERMISSION_DENIED',
+      'wildcard/privileged never satisfies an authority tool'
+    );
+
+    // Emitted schema surfaces follow the same filter: a non-publishing exact
+    // holder (REALM_INSPECT) gains no publishing schema, an exact publishing
+    // holder does.
+    const scopedProbe = createSingleToolCallModel('whoami');
+    await exposureRuntime.launchAgent({
+      config: { id: 'exposure_scoped_schema', allowedTools: null },
+      principal: exposureOperator,
+      model: scopedProbe.model
+    });
+    exposureRuntime.grantAuthority('exposure_scoped_schema', AGENT_AUTHORITIES.REALM_INSPECT, null, {
+      principal: exposureRuntime.getOperatorPrincipal()
+    });
+    await exposureRuntime.executeAgentTurn('exposure_scoped_schema', 'list the emitted schema');
+    assert(scopedProbe.captured.toolNames.length > 0, 'the scoped holder turn emitted a schema surface');
+    assert(
+      scopedProbe.captured.toolNames.includes(PUBLISHING_TOOLS.IMPORT_REALM_TEMPLATE) === false,
+      'a non-publishing exact holder gains no publishing schema'
+    );
+
+    const publishingProbe = createSingleToolCallModel('whoami');
+    await exposureRuntime.launchAgent({
+      config: { id: 'exposure_publishing_schema', allowedTools: null },
+      principal: exposureOperator,
+      model: publishingProbe.model
+    });
+    exposureRuntime.grantTemplateAuthority('exposure_publishing_schema', {
+      principal: exposureRuntime.getOperatorPrincipal()
+    });
+    await exposureRuntime.executeAgentTurn('exposure_publishing_schema', 'list the emitted schema');
+    assert(
+      publishingProbe.captured.toolNames.includes(PUBLISHING_TOOLS.IMPORT_REALM_TEMPLATE),
+      'an exact publishing holder sees its authority schema'
+    );
   } finally {
     exposureRuntime.destroy();
   }
