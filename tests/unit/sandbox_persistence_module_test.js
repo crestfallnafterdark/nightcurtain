@@ -745,13 +745,24 @@ test('5. restoreRuntimeEnvironment performs topological hydration, IDLE normaliz
   // identity key (Wave I, d57cbc1): a recycled registration is not resolvable
   // through the identity port (active-only), so the canonical key is what the
   // bus can classify as terminated.
+  const deadLetterKey = createAgentIdentityKey(recycled.config?.realmId ?? null, 'fallen_companion');
   const deadLetterSend = bus.sendMessage({
     from: 'hero_agent',
-    to: createAgentIdentityKey(recycled.config?.realmId ?? null, 'fallen_companion'),
+    to: deadLetterKey,
     content: 'Wake up'
   });
   assert.strictEqual(deadLetterSend.success, false);
   assert.strictEqual(deadLetterSend.code, 'AGENT_TERMINATED', 'Recycled agent must be marked terminated on MessagingBus');
+  // Ticket 1754637: the recycled-only canonical registration is known only
+  // from the hydrated snapshot, so the denial and the terminated listing must
+  // project the bare id from the canonical key itself.
+  assert.ok(
+    deadLetterSend.error.includes('fallen_companion'),
+    `the dead-letter error names the bare id: ${deadLetterSend.error}`
+  );
+  assert.strictEqual(deadLetterSend.error.includes(deadLetterKey), false, 'the canonical key never echoes');
+  assert.strictEqual(deadLetterSend.error.includes('realm:'), false, 'no internal realm vocabulary echoes');
+  assert.deepStrictEqual(bus.getTerminatedAgents(), ['fallen_companion'], 'terminated listings project the bare id');
 
   // Verify event emission
   assert.strictEqual(stateRestoredEvents.length, 1);

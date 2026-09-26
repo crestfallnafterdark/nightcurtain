@@ -461,11 +461,19 @@ await runTest('Restored recycled agents are not registered as active listeners o
 
   assert.equal(receipt.success, false);
   assert.equal(receipt.code, 'AGENT_TERMINATED');
-  // The dead-letter message names the target id. The current bus message
-  // echoes the canonical registration key for a projection-less terminated
-  // classification — a bus-side opacity seam reported by this lane; assert the
-  // id is named without pinning the echo form here.
-  assert.ok(receipt.error.includes('recycled-target'), 'the dead-letter error names the target id');
+  // Ticket 1754637: the recycled-only canonical registration is known only
+  // from the hydrated terminated set (the in-memory registration memo does not
+  // survive the snapshot and the active-only identity port cannot resolve a
+  // recycled registration), so the denial must project the bare id from the
+  // canonical key itself — never echo the key or realm vocabulary.
+  assert.ok(receipt.error.includes('recycled-target'), 'the dead-letter error names the bare target id');
+  assert.equal(receipt.error.includes(recycledTargetKey), false, 'the canonical key never echoes in the denial');
+  assert.equal(receipt.error.includes('realm:'), false, 'no internal realm vocabulary echoes in the denial');
+  assert.deepEqual(
+    busRestored.getTerminatedAgents(),
+    ['recycled-target'],
+    'terminated listings project the bare id after hydration'
+  );
 
   // Verify no broadcast reaches the recycled target (no live subscription)
   const broadcast = busRestored.sendMessage({
