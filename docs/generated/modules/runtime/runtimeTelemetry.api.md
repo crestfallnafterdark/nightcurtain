@@ -23,7 +23,7 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 - `INV-1` — Telemetry state exists exclusively within private instance storage; external callers interact via immutable or defensive snapshots (frozen metric snapshots whose `lastSentContext` entries are capture-owned copies — arrays and plain objects deep-frozen, `Map`/`Set`/`Date` copies frozen with their mutators neutralized — and shallow-cloned trace arrays).
 - `INV-2` — Historical execution traces and context window snapshots are bounded by fixed-capacity FIFO ring buffers with O(1) push and deterministic oldest-first eviction; zero unbounded array growth.
 - `INV-3` — All cumulative metric counters are strictly non-negative integers and monotonic across turns until an explicit reset; seeding from a snapshot floors finite seed values to non-negative integers and never lowers an already-recorded value.
-- `INV-4` — Turn token consumption follows a strict two-tier resolution hierarchy: explicit overrides, then provider usage metadata; when neither is present, turn token counts are reported as zero.
+- `INV-4` — Turn token consumption follows a strict two-tier resolution hierarchy: explicit overrides, then provider usage metadata; when neither is present, turn token counts are reported as zero. Prompt tokens split into uncached and cached tiers: the cached count resolves explicit `turnCachedPromptTokens` → provider cache metadata (`prompt_tokens_details.cached_tokens`, `prompt_cache_hit_tokens`, `cache_read_input_tokens`, or `promptTotal - prompt_cache_miss_tokens` when the miss count is finite) → 0, is floored and clamped to the resolved prompt total, and the uncached count is the remaining prompt total, so `totalTokens` always equals uncached + cached + output.
 - `INV-5` — Subscriptions and external sinks are isolated within `try`/`catch` boundaries; a throwing observer is logged (`ERR_TELEMETRY_SUBSCRIBER_EXCEPTION`/`ERR_TELEMETRY_SINK_DISPATCH_FAILED`) and cannot interrupt caller execution.
 - `INV-6` — Context snapshots record message count, the sum of reported per-message token counts (0 when unreported), and role distributions with configurable head/tail pruning and per-message text truncation; both send paths (`recordTurnUsage` array payloads and `recordContextSnapshot`) bound `lastSentContext`, so raw context is never retained unbounded.
 - Identifier-resolving methods (metrics queries/resets and the operational `record*` methods except `recordEvent`, which normalizes a missing `agentId` to `'global'`) reject null, undefined, or empty/whitespace ids with a `TypeError` carrying code `ERR_TELEMETRY_INVALID_AGENT_ID`; the legacy facade methods `initializeTelemetry`, `getAgentTelemetry`, and `clearAgentTelemetry` are exempt and return `null`/`false` for invalid identifiers instead.
@@ -50,8 +50,10 @@ export interface AgentTelemetryAccessor {
 // @public
 export interface AgentTelemetryMetrics {
     readonly agentId: string;
+    readonly cachedInputTokens: number;
     readonly injectedDeliveries: number;
     readonly inputTokens: number;
+    readonly lastCachedPromptTokens: number;
     readonly lastCompletionTokens: number;
     readonly lastPromptTokens: number;
     readonly lastSentContext: ReadonlyArray<unknown>;
@@ -85,6 +87,7 @@ export function createTelemetryCollector(options?: TelemetryCollectorOptions): R
 // @public
 export interface RuntimeAggregateMetrics {
     readonly activeAgentsCount: number;
+    readonly cumulativeCachedInputTokens: number;
     readonly cumulativeInputTokens: number;
     readonly cumulativeOutputTokens: number;
     readonly cumulativeTotalTokens: number;
@@ -181,6 +184,7 @@ export type TelemetryEvent = {
         readonly turnNumber: number;
         readonly durationMs: number;
         readonly turnPromptTokens: number;
+        readonly turnCachedPromptTokens: number;
         readonly turnCompletionTokens: number;
     };
 } | {
@@ -194,6 +198,7 @@ export type TelemetryEvent = {
     readonly timestamp: number;
     readonly payload: {
         readonly turnPromptTokens: number;
+        readonly turnCachedPromptTokens: number;
         readonly turnCompletionTokens: number;
         readonly cumulativeTotalTokens: number;
     };
@@ -237,6 +242,7 @@ export type TelemetryEvent = {
     readonly payload: {
         readonly telemetry: AgentTelemetryMetrics;
         readonly turnPromptTokens: number;
+        readonly turnCachedPromptTokens: number;
         readonly turnCompletionTokens: number;
     };
 };
@@ -284,6 +290,7 @@ export interface TurnUsagePayload {
     readonly formattedMessages?: readonly unknown[] | string | null;
     readonly responseContent?: string | null;
     readonly responseReasoning?: string | null;
+    readonly turnCachedPromptTokens?: number | null;
     readonly turnCompletionTokens?: number | null;
     readonly turnPromptTokens?: number | null;
     readonly turnUsage?: {
@@ -293,12 +300,19 @@ export interface TurnUsagePayload {
         readonly promptTokens?: number | null;
         readonly completionTokens?: number | null;
         readonly totalTokens?: number | null;
+        readonly prompt_tokens_details?: {
+            readonly cached_tokens?: number | null;
+        } | null;
+        readonly prompt_cache_hit_tokens?: number | null;
+        readonly prompt_cache_miss_tokens?: number | null;
+        readonly cache_read_input_tokens?: number | null;
     } | null;
 }
 
 // @public
 export interface TurnUsageResult {
     readonly telemetry: AgentTelemetryMetrics;
+    readonly turnCachedPromptTokens: number;
     readonly turnCompletionTokens: number;
     readonly turnPromptTokens: number;
 }
@@ -331,17 +345,19 @@ console.log(`Total tokens used: ${metrics.totalTokens} across ${metrics.turnCoun
 #### Members
 
 - **`agentId`** — Unique identifier of the agent.
+- **`cachedInputTokens`** — Cumulative cached prompt/input tokens consumed across all turns ($n ≥ 0$).
 - **`injectedDeliveries`** — Number of injected message deliveries received into prompt context.
-- **`inputTokens`** — Cumulative prompt/input tokens consumed across all turns ($n ≥ 0$).
+- **`inputTokens`** — Cumulative uncached prompt/input tokens consumed across all turns ($n ≥ 0$).
+- **`lastCachedPromptTokens`** — Cached input tokens consumed in the most recent turn.
 - **`lastCompletionTokens`** — Completion tokens generated in the most recent turn.
-- **`lastPromptTokens`** — Input tokens consumed in the most recent turn.
+- **`lastPromptTokens`** — Uncached input tokens consumed in the most recent turn.
 - **`lastSentContext`** — Bounded defensive copy of the most recently sent context message descriptors (latest-wins: every send path replaces the previous record). Retained entries are pruned and their string `content` truncated. Every object is a capture-owned copy, never a caller alias: arrays and plain objects are cloned structurally and deep-frozen, while non-plain values are cloned via `structuredClone` (class instances flatten to plain data objects; uncloneable values normalize to own-enumerable snapshots) and captured `Map`/`Set`/`Date` copies are frozen with their mutators neutralized. The array itself is frozen, so mutating the returned reference cannot alter internal telemetry state.
 - **`lastUpdated`** — Unix epoch timestamp (ms) of the most recent metric mutation.
 - **`outputTokens`** — Cumulative completion/output tokens generated across all turns ($n ≥ 0$).
 - **`precallCount`** — Number of precall tool executions performed prior to model inference.
 - **`terminalStops`** — Number of times the agent completed execution via a terminal stop condition.
 - **`toolExecutionCount`** — Cumulative number of tool executions performed by this agent.
-- **`totalTokens`** — Cumulative total tokens (`inputTokens + outputTokens`).
+- **`totalTokens`** — Cumulative total tokens (`inputTokens + cachedInputTokens + outputTokens`).
 - **`turnCount`** — Cumulative execution turns completed by the agent ($n ≥ 0$).
 
 ### `ContextSnapshotOptions` — interface
@@ -427,9 +443,10 @@ console.log(`Active agents: ${runtimeMetrics.activeAgentsCount}, sandbox total t
 #### Members
 
 - **`activeAgentsCount`** — Total number of unique agents currently tracked in telemetry ($n ≥ 0$).
-- **`cumulativeInputTokens`** — Cumulative input tokens across all registered agents ($n ≥ 0$).
+- **`cumulativeCachedInputTokens`** — Cumulative cached input tokens across all registered agents ($n ≥ 0$).
+- **`cumulativeInputTokens`** — Cumulative uncached input tokens across all registered agents ($n ≥ 0$).
 - **`cumulativeOutputTokens`** — Cumulative output tokens across all registered agents ($n ≥ 0$).
-- **`cumulativeTotalTokens`** — Cumulative total tokens across all registered agents (`cumulativeInputTokens + cumulativeOutputTokens`).
+- **`cumulativeTotalTokens`** — Cumulative total tokens across all registered agents (`cumulativeInputTokens + cumulativeCachedInputTokens + cumulativeOutputTokens`).
 - **`lastUpdated`** — Unix epoch timestamp (ms) of the most recent metric mutation.
 - **`totalInjectedDeliveries`** — Cumulative injected mail deliveries across all agents ($n ≥ 0$).
 - **`totalPrecallCount`** — Cumulative precall tool dispatches across all agents ($n ≥ 0$).
@@ -443,7 +460,7 @@ Primary telemetry, auditing, and token accounting engine for the sandbox runtime
 
 Encapsulates sovereign metric storage, bounded FIFO ring buffers, universal token accounting, and exception-shielded event broadcasting.
 
-Architectural Invariants: - Sovereign Encapsulation (INV-1): Metrics are managed strictly inside private instance maps; external queries return defensive snapshots whose context entries are deep-frozen copies. - Bounded FIFO Buffers (INV-2): Ring buffers bound per-agent and global audit trace histories with O(1) push operations and deterministic eviction. - Monotonic Counters (INV-3): Cumulative counters are non-negative integers that never decrease unless explicitly reset, including across snapshot seeding (finite seeds are floored). - Two-Tier Token Accounting (INV-4): Explicit overrides, then provider usage metadata; absent counts resolve to zero. - Observer Exception Shielding (INV-5): Subscriber errors are caught and logged; caller execution is never interrupted. - Safe Context Auditing (INV-6): Context window snapshots are bounded, pruned, and truncated on every send path without raw text payload bloat.
+Architectural Invariants: - Sovereign Encapsulation (INV-1): Metrics are managed strictly inside private instance maps; external queries return defensive snapshots whose context entries are deep-frozen copies. - Bounded FIFO Buffers (INV-2): Ring buffers bound per-agent and global audit trace histories with O(1) push operations and deterministic eviction. - Monotonic Counters (INV-3): Cumulative counters are non-negative integers that never decrease unless explicitly reset, including across snapshot seeding (finite seeds are floored). - Two-Tier Token Accounting (INV-4): Explicit overrides, then provider usage metadata; absent counts resolve to zero, and prompt tokens split into a cached tier (clamped to the prompt total) and an uncached remainder. - Observer Exception Shielding (INV-5): Subscriber errors are caught and logged; caller execution is never interrupted. - Safe Context Auditing (INV-6): Context window snapshots are bounded, pruned, and truncated on every send path without raw text payload bloat.
 
 #### Examples
 
@@ -475,7 +492,7 @@ console.log(`Cumulative total tokens: ${usageResult.telemetry.totalTokens}`);
 - **`EVENT_TYPES`** — Canonical static dictionary of event types.
 - **`getAgentMetrics`** — Retrieves an immutable defensive copy of cumulative telemetry metrics for an agent. If the agent has never been tracked, lazily initializes a zero-metric record, stores it in internal storage, and returns a defensive snapshot. When an accessor is injected, the record is seeded from the agent's existing telemetry snapshot; finite seed values are floored to non-negative integers and seeding only raises counters, never lowers recorded values.
 - **`getAgentTelemetry`** — Legacy alias for `getAgentMetrics`. Accepts an agent object (resolving `.id`) or string ID.
-- **`getRuntimeMetrics`** — Retrieves aggregate cumulative metrics across all registered agents in the sandbox. Provides O(1) query access to cumulative input/output/total tokens, turn counts, terminal stops, precall counts, tool executions, and active agent counts.
+- **`getRuntimeMetrics`** — Retrieves aggregate cumulative metrics across all registered agents in the sandbox. Provides O(1) query access to cumulative uncached/cached input, output, and total tokens, turn counts, terminal stops, precall counts, tool executions, and active agent counts.
 - **`getTrace`** — Queries the bounded trace ring buffer for historical execution events. Ring Buffer Mechanics (INV-2): Queries either an individual agent's dedicated ring buffer or the global sandbox buffer. Returns a shallow-cloned array of event objects; nested `payload` references are shared with the ring buffers, so callers must not mutate them. Filters apply in order: `type`, then `sinceTimestamp` (inclusive), then `order`, then `limit`. Because ordering precedes limiting, `order: 'desc'` with a `limit` returns the newest events. When `limit` is omitted, the result is capped at 100 matching events (`order: 'desc'` therefore yields the newest 100).
 - **`initializeTelemetry`** — Initializes (or seeds) telemetry metrics for an agent and returns a frozen metrics snapshot. Creates the tracking record when absent, so the active-agent count grows. Agent telemetry is never mutated directly: when the collector was constructed with an AgentTelemetryAccessor, snapshot sync flows through it. In standalone legacy mode (no accessor) an object argument is backfilled in place without overwriting existing telemetry numbers, and agent-facing `lastSentContext` arrays are always fresh copies (never aliases of internal storage). Seeding and backfill hydrate `lastSentContext` only when it is absent or empty, and the hydrated entries are deep-copied and deep-frozen under the default retention bound; a non-empty context already captured in this process is retained (sends are latest-wins).
 - **`recordContextSnapshot`** — Safely captures a bounded summary snapshot of an agent's active context window. Algorithm & Memory Protection (INV-6): 1. Prunes messages to `maxMessagesToRetain`: when over the limit, the first two and the most recent messages are kept (only the tail when the limit is 2 or fewer). 2. Truncates individual string message `content` to `truncateContentAt` (default: 2000 chars), appending a `... [truncated N chars]` marker. 3. Calculates role distribution (`{ system: N, user: N, assistant: N, tool: N }`), counting messages without a string `role` as `'unknown'`. 4. Sums reported per-message token counts across the entire pre-pruning context window, using a finite non-negative numeric `tokenCount` when present; messages without one contribute 0. 5. Updates `agentMetrics.lastSentContext` with the pruned, truncated array of deep-copied and deep-frozen entries (arrays/plain objects structurally, non-plain objects via `structuredClone`, never by reference), syncs the owning agent, and dispatches `CONTEXT_SNAPSHOT`; the returned record carries its own frozen array over the same frozen entries. Both options are normalized before use: finite values are floored and clamped (`maxMessagesToRetain` ≥ 1, `truncateContentAt` ≥ 10), while non-finite or non-numeric values fall back to the defaults (50 and 2000).
@@ -484,8 +501,8 @@ console.log(`Cumulative total tokens: ${usageResult.telemetry.totalTokens}`);
 - **`recordPrecall`** — Records the execution of precall tool dispatches prior to model inference. Increments `precallCount` by `count` on the agent record and `totalPrecallCount` on the aggregate record (only when `count` is positive), then dispatches a `PRECALL_DISPATCH` event carrying the recorded count and the new cumulative value.
 - **`recordTerminalStop`** — Records a terminal stop completion event for an agent. Monotonically increments `terminalStops` on the agent record and `totalTerminalStops` on the aggregate record, syncs the owning agent, and pushes a `TERMINAL_STOP` event into the agent and global ring buffers before broadcasting it.
 - **`recordToolExecution`** — Records execution of a tool, tracking duration, outcome status, and payload sizes. Monotonically increments `toolExecutionCount` on the agent metric record and `totalToolExecutions` on the aggregate record, appends a `TOOL_EXECUTION` audit event to ring buffers, and broadcasts to subscribers.
-- **`recordTurnUsage`** — Calculates turn token consumption, increments cumulative counters, updates aggregate metrics, records audit trace events, and dispatches a `telemetry_update` event. Resolution Flow (INV-4): 1. Resolves `promptTokens`: explicit `turnPromptTokens` -> provider `turnUsage.prompt_tokens`; zero when neither is present. 2. Resolves `completionTokens`: explicit `turnCompletionTokens` -> provider `turnUsage.completion_tokens`; zero when neither is present. 3. Atomically updates cumulative agent and sandbox aggregate counters. 4. Pushes `TOKEN_USAGE` and `TURN_COMPLETE` events into the agent and global ring buffers. 5. Dispatches `telemetry_update` to subscribers, sinks, and the emit port; unlike the other two events it is not appended to ring buffers. Explicit and provider-supplied counts are floored and clamped to a minimum of 0. Dispatch order is `TOKEN_USAGE`, then `TURN_COMPLETE`, then `telemetry_update`. When `formattedMessages` is an array, its entries are deep-copied into `lastSentContext` — arrays/plain objects structurally, non-plain objects via `structuredClone`, never by reference — pruned to the default retention bound (head 2 + tail, 50 entries max) and truncated at the default content limit (2000 chars), replacing any previous capture (latest-wins); the captured entries are deep-frozen (with captured `Map`/`Set`/`Date` copies frozen and their mutators neutralized), so truncation and later caller-side mutation cannot alter internal state. Non-array payloads leave the recorded array untouched.
-- **`resetAgentMetrics`** — Resets cumulative telemetry metrics for a specific agent back to zero. Zeroes all token and lifecycle counters (`inputTokens = 0`, `outputTokens = 0`, `totalTokens = 0`, `turnCount = 0`, `terminalStops = 0`, `injectedDeliveries = 0`, `precallCount = 0`, `toolExecutionCount = 0`), updates `lastUpdated = Date.now()`, syncs the owning agent, appends a `telemetry_reset` event to the agent and global ring buffers, and dispatches it to subscribers, sinks, and the emit port. `lastSentContext` is retained.
+- **`recordTurnUsage`** — Calculates turn token consumption, increments cumulative counters, updates aggregate metrics, records audit trace events, and dispatches a `telemetry_update` event. Resolution Flow (INV-4): 1. Resolves the prompt total: explicit `turnPromptTokens` -> provider `turnUsage.prompt_tokens`/`promptTokens`; zero when none is present. 2. Resolves cached prompt tokens: explicit `turnCachedPromptTokens` -> provider `prompt_tokens_details.cached_tokens`/`prompt_cache_hit_tokens`/`cache_read_input_tokens` -> miss-derived `promptTotal - prompt_cache_miss_tokens` (only when the miss count is finite) -> 0; floored and clamped to the resolved prompt total. The reported uncached prompt count is the remaining prompt total. 3. Resolves `completionTokens`: explicit `turnCompletionTokens` -> provider `turnUsage.completion_tokens`; zero when neither is present. 4. Atomically updates cumulative agent and sandbox aggregate counters (`inputTokens` counters are uncached, `cachedInputTokens` counters are cached, and `totalTokens` equals uncached + cached + output). 5. Pushes `TOKEN_USAGE` and `TURN_COMPLETE` events into the agent and global ring buffers. 6. Dispatches `telemetry_update` to subscribers, sinks, and the emit port; unlike the other two events it is not appended to ring buffers. Explicit and provider-supplied counts are floored and clamped to a minimum of 0; the cached count is additionally clamped to the resolved prompt total. Dispatch order is `TOKEN_USAGE`, then `TURN_COMPLETE`, then `telemetry_update`. When `formattedMessages` is an array, its entries are deep-copied into `lastSentContext` — arrays/plain objects structurally, non-plain objects via `structuredClone`, never by reference — pruned to the default retention bound (head 2 + tail, 50 entries max) and truncated at the default content limit (2000 chars), replacing any previous capture (latest-wins); the captured entries are deep-frozen (with captured `Map`/`Set`/`Date` copies frozen and their mutators neutralized), so truncation and later caller-side mutation cannot alter internal state. Non-array payloads leave the recorded array untouched.
+- **`resetAgentMetrics`** — Resets cumulative telemetry metrics for a specific agent back to zero. Zeroes all token and lifecycle counters (`inputTokens = 0`, `cachedInputTokens = 0`, `outputTokens = 0`, `totalTokens = 0`, `turnCount = 0`, `terminalStops = 0`, `injectedDeliveries = 0`, `precallCount = 0`, `toolExecutionCount = 0`), updates `lastUpdated = Date.now()`, syncs the owning agent, appends a `telemetry_reset` event to the agent and global ring buffers, and dispatches it to subscribers, sinks, and the emit port. `lastSentContext` is retained.
 - **`subscribe`** — Subscribes an observer callback to receive all dispatched telemetry events. Exception Shielding Invariant (INV-5): Observer execution is wrapped in a try/catch boundary. If a subscriber throws an uncaught error, the exception is captured, logged as `ERR_TELEMETRY_SUBSCRIBER_EXCEPTION`, and execution continues without interrupting the agent turn execution pipeline.
 
 ### `RuntimeTelemetryTracker` — variable
@@ -720,7 +737,9 @@ const events = telemetry.getTrace('agent_coder', options);
 
 Input payload schema for recording turn token consumption.
 
-Resolution Hierarchy (INV-4): 1. Tier 1: Explicit overrides (`turnPromptTokens`, `turnCompletionTokens`). 2. Tier 2: Provider usage metadata (`turnUsage.prompt_tokens` / `promptTokens`, `completion_tokens` / `completionTokens`).
+Resolution Hierarchy (INV-4): 1. Tier 1: Explicit overrides (`turnPromptTokens`, `turnCachedPromptTokens`, `turnCompletionTokens`). 2. Tier 2: Provider usage metadata (`turnUsage.prompt_tokens` / `promptTokens`, the cache fields, `completion_tokens` / `completionTokens`).
+
+Cached prompt tokens resolve explicit `turnCachedPromptTokens`, then `turnUsage.prompt_tokens_details.cached_tokens`, then `turnUsage.prompt_cache_hit_tokens`, then `turnUsage.cache_read_input_tokens`, then the miss-derived share (`promptTotal - prompt_cache_miss_tokens`, only when the miss count is finite), then zero; the resolved value is floored and clamped to the resolved prompt total, and the reported uncached prompt count is the remaining prompt total.
 
 When neither tier supplies a count, the turn counts resolve to zero; text payloads never contribute to token accounting.
 
@@ -729,7 +748,7 @@ When neither tier supplies a count, the turn counts resolve to zero; text payloa
 ```typescript
 // Tier 2 Provider Usage example:
 const payload: TurnUsagePayload = {
-  turnUsage: { prompt_tokens: 120, completion_tokens: 45, total_tokens: 165 },
+  turnUsage: { prompt_tokens: 120, completion_tokens: 45, total_tokens: 165, prompt_tokens_details: { cached_tokens: 80 } },
   responseContent: 'Hello world'
 };
 ```
@@ -740,9 +759,10 @@ const payload: TurnUsagePayload = {
 - **`formattedMessages`** — Formatted prompt messages array or string; array payloads are captured into `lastSentContext` for context auditing and never contribute to token accounting.
 - **`responseContent`** — Generated model response text content; retained for payload compatibility and never contributes to token accounting.
 - **`responseReasoning`** — Generated model reasoning/thinking text content; retained for payload compatibility and never contributes to token accounting.
+- **`turnCachedPromptTokens`** — Explicit cached prompt token count if known by caller. Overrides provider cache metadata.
 - **`turnCompletionTokens`** — Explicit completion token count if known by caller. Overrides provider usage.
-- **`turnPromptTokens`** — Explicit prompt token count if known by caller. Overrides provider usage.
-- **`turnUsage`** — Standard provider usage metadata object if supplied by model adapter; only the prompt/completion counts are consumed (total fields are ignored).
+- **`turnPromptTokens`** — Explicit uncached prompt token count if known by caller. Overrides provider usage.
+- **`turnUsage`** — Standard provider usage metadata object if supplied by model adapter; the prompt/completion counts and the cache-usage fields below are consumed (total fields are ignored).
 
 ### `TurnUsageResult` — interface
 
@@ -761,14 +781,15 @@ console.log(`Turn prompt tokens: ${result.turnPromptTokens}, cumulative agent to
 #### Members
 
 - **`telemetry`** — Defensive copy of updated cumulative agent telemetry metrics.
+- **`turnCachedPromptTokens`** — Computed cached prompt tokens consumed in this turn.
 - **`turnCompletionTokens`** — Computed completion tokens generated in this turn.
-- **`turnPromptTokens`** — Computed prompt tokens consumed in this turn.
+- **`turnPromptTokens`** — Computed uncached prompt tokens consumed in this turn.
 
 ## Doc coverage
 
 - Top-level exports: 21
-- Declarations (exports + members): 104
-- Documented declarations: 104 / 104 (100%)
+- Declarations (exports + members): 109
+- Documented declarations: 109 / 109 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): none

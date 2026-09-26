@@ -7,7 +7,7 @@
  * @invariant INV-1: Telemetry state exists exclusively within private instance storage; external callers interact via immutable or defensive snapshots (frozen metric snapshots whose `lastSentContext` entries are capture-owned copies — arrays and plain objects deep-frozen, `Map`/`Set`/`Date` copies frozen with their mutators neutralized — and shallow-cloned trace arrays).
  * @invariant INV-2: Historical execution traces and context window snapshots are bounded by fixed-capacity FIFO ring buffers with O(1) push and deterministic oldest-first eviction; zero unbounded array growth.
  * @invariant INV-3: All cumulative metric counters are strictly non-negative integers and monotonic across turns until an explicit reset; seeding from a snapshot floors finite seed values to non-negative integers and never lowers an already-recorded value.
- * @invariant INV-4: Turn token consumption follows a strict two-tier resolution hierarchy: explicit overrides, then provider usage metadata; when neither is present, turn token counts are reported as zero.
+ * @invariant INV-4: Turn token consumption follows a strict two-tier resolution hierarchy: explicit overrides, then provider usage metadata; when neither is present, turn token counts are reported as zero. Prompt tokens split into uncached and cached tiers: the cached count resolves explicit `turnCachedPromptTokens` → provider cache metadata (`prompt_tokens_details.cached_tokens`, `prompt_cache_hit_tokens`, `cache_read_input_tokens`, or `promptTotal - prompt_cache_miss_tokens` when the miss count is finite) → 0, is floored and clamped to the resolved prompt total, and the uncached count is the remaining prompt total, so `totalTokens` always equals uncached + cached + output.
  * @invariant INV-5: Subscriptions and external sinks are isolated within `try`/`catch` boundaries; a throwing observer is logged (`ERR_TELEMETRY_SUBSCRIBER_EXCEPTION`/`ERR_TELEMETRY_SINK_DISPATCH_FAILED`) and cannot interrupt caller execution.
  * @invariant INV-6: Context snapshots record message count, the sum of reported per-message token counts (0 when unreported), and role distributions with configurable head/tail pruning and per-message text truncation; both send paths (`recordTurnUsage` array payloads and `recordContextSnapshot`) bound `lastSentContext`, so raw context is never retained unbounded.
  * @invariant Identifier-resolving methods (metrics queries/resets and the operational `record*` methods except `recordEvent`, which normalizes a missing `agentId` to `'global'`) reject null, undefined, or empty/whitespace ids with a `TypeError` carrying code `ERR_TELEMETRY_INVALID_AGENT_ID`; the legacy facade methods `initializeTelemetry`, `getAgentTelemetry`, and `clearAgentTelemetry` are exempt and return `null`/`false` for invalid identifiers instead.
@@ -151,16 +151,20 @@ export type TelemetryErrorCode =
 export interface AgentTelemetryMetrics {
   /** Unique identifier of the agent. */
   readonly agentId: string;
-  /** Cumulative prompt/input tokens consumed across all turns ($n ≥ 0$). */
+  /** Cumulative uncached prompt/input tokens consumed across all turns ($n ≥ 0$). */
   readonly inputTokens: number;
+  /** Cumulative cached prompt/input tokens consumed across all turns ($n ≥ 0$). */
+  readonly cachedInputTokens: number;
   /** Cumulative completion/output tokens generated across all turns ($n ≥ 0$). */
   readonly outputTokens: number;
-  /** Cumulative total tokens (`inputTokens + outputTokens`). */
+  /** Cumulative total tokens (`inputTokens + cachedInputTokens + outputTokens`). */
   readonly totalTokens: number;
   /** Cumulative execution turns completed by the agent ($n ≥ 0$). */
   readonly turnCount: number;
-  /** Input tokens consumed in the most recent turn. */
+  /** Uncached input tokens consumed in the most recent turn. */
   readonly lastPromptTokens: number;
+  /** Cached input tokens consumed in the most recent turn. */
+  readonly lastCachedPromptTokens: number;
   /** Completion tokens generated in the most recent turn. */
   readonly lastCompletionTokens: number;
   /** Number of times the agent completed execution via a terminal stop condition. */
@@ -202,11 +206,13 @@ export interface AgentTelemetryMetrics {
  * ```
  */
 export interface RuntimeAggregateMetrics {
-  /** Cumulative input tokens across all registered agents ($n ≥ 0$). */
+  /** Cumulative uncached input tokens across all registered agents ($n ≥ 0$). */
   readonly cumulativeInputTokens: number;
+  /** Cumulative cached input tokens across all registered agents ($n ≥ 0$). */
+  readonly cumulativeCachedInputTokens: number;
   /** Cumulative output tokens across all registered agents ($n ≥ 0$). */
   readonly cumulativeOutputTokens: number;
-  /** Cumulative total tokens across all registered agents (`cumulativeInputTokens + cumulativeOutputTokens`). */
+  /** Cumulative total tokens across all registered agents (`cumulativeInputTokens + cumulativeCachedInputTokens + cumulativeOutputTokens`). */
   readonly cumulativeTotalTokens: number;
   /** Cumulative turn count across all agents ($n ≥ 0$). */
   readonly totalTurnCount: number;
@@ -232,8 +238,16 @@ export interface RuntimeAggregateMetrics {
  * Input payload schema for recording turn token consumption.
  *
  * Resolution Hierarchy (INV-4):
- * 1. Tier 1: Explicit overrides (`turnPromptTokens`, `turnCompletionTokens`).
- * 2. Tier 2: Provider usage metadata (`turnUsage.prompt_tokens` / `promptTokens`, `completion_tokens` / `completionTokens`).
+ * 1. Tier 1: Explicit overrides (`turnPromptTokens`, `turnCachedPromptTokens`, `turnCompletionTokens`).
+ * 2. Tier 2: Provider usage metadata (`turnUsage.prompt_tokens` / `promptTokens`, the cache fields, `completion_tokens` / `completionTokens`).
+ *
+ * Cached prompt tokens resolve explicit `turnCachedPromptTokens`, then
+ * `turnUsage.prompt_tokens_details.cached_tokens`, then
+ * `turnUsage.prompt_cache_hit_tokens`, then `turnUsage.cache_read_input_tokens`,
+ * then the miss-derived share (`promptTotal - prompt_cache_miss_tokens`, only
+ * when the miss count is finite), then zero; the resolved value is floored and
+ * clamped to the resolved prompt total, and the reported uncached prompt count
+ * is the remaining prompt total.
  *
  * When neither tier supplies a count, the turn counts resolve to zero; text
  * payloads never contribute to token accounting.
@@ -242,17 +256,23 @@ export interface RuntimeAggregateMetrics {
  * ```typescript
  * // Tier 2 Provider Usage example:
  * const payload: TurnUsagePayload = {
- *   turnUsage: { prompt_tokens: 120, completion_tokens: 45, total_tokens: 165 },
+ *   turnUsage: { prompt_tokens: 120, completion_tokens: 45, total_tokens: 165, prompt_tokens_details: { cached_tokens: 80 } },
  *   responseContent: 'Hello world'
  * };
  * ```
  */
 export interface TurnUsagePayload {
-  /** Explicit prompt token count if known by caller. Overrides provider usage. */
+  /** Explicit uncached prompt token count if known by caller. Overrides provider usage. */
   readonly turnPromptTokens?: number | null;
+  /** Explicit cached prompt token count if known by caller. Overrides provider cache metadata. */
+  readonly turnCachedPromptTokens?: number | null;
   /** Explicit completion token count if known by caller. Overrides provider usage. */
   readonly turnCompletionTokens?: number | null;
-  /** Standard provider usage metadata object if supplied by model adapter; only the prompt/completion counts are consumed (total fields are ignored). */
+  /**
+   * Standard provider usage metadata object if supplied by model adapter; the
+   * prompt/completion counts and the cache-usage fields below are consumed
+   * (total fields are ignored).
+   */
   readonly turnUsage?: {
     readonly prompt_tokens?: number | null;
     readonly completion_tokens?: number | null;
@@ -260,6 +280,14 @@ export interface TurnUsagePayload {
     readonly promptTokens?: number | null;
     readonly completionTokens?: number | null;
     readonly totalTokens?: number | null;
+    /** OpenAI-style nested prompt cache details; `cached_tokens` is the cached share of the prompt total. */
+    readonly prompt_tokens_details?: { readonly cached_tokens?: number | null } | null;
+    /** DeepSeek-style cached prompt token count. */
+    readonly prompt_cache_hit_tokens?: number | null;
+    /** DeepSeek-style uncached prompt token count; `promptTotal - miss` derives the cached share when no direct cache field is present. */
+    readonly prompt_cache_miss_tokens?: number | null;
+    /** Anthropic-style cached prompt (cache read) token count. */
+    readonly cache_read_input_tokens?: number | null;
   } | null;
   /** Formatted prompt messages array or string; array payloads are captured into `lastSentContext` for context auditing and never contribute to token accounting. */
   readonly formattedMessages?: readonly unknown[] | string | null;
@@ -289,8 +317,10 @@ export interface TurnUsagePayload {
  * ```
  */
 export interface TurnUsageResult {
-  /** Computed prompt tokens consumed in this turn. */
+  /** Computed uncached prompt tokens consumed in this turn. */
   readonly turnPromptTokens: number;
+  /** Computed cached prompt tokens consumed in this turn. */
+  readonly turnCachedPromptTokens: number;
   /** Computed completion tokens generated in this turn. */
   readonly turnCompletionTokens: number;
   /** Defensive copy of updated cumulative agent telemetry metrics. */
@@ -453,6 +483,7 @@ export type TelemetryEvent =
         readonly turnNumber: number;
         readonly durationMs: number;
         readonly turnPromptTokens: number;
+        readonly turnCachedPromptTokens: number;
         readonly turnCompletionTokens: number;
       };
     }
@@ -468,6 +499,7 @@ export type TelemetryEvent =
       readonly timestamp: number;
       readonly payload: {
         readonly turnPromptTokens: number;
+        readonly turnCachedPromptTokens: number;
         readonly turnCompletionTokens: number;
         readonly cumulativeTotalTokens: number;
       };
@@ -509,6 +541,7 @@ export type TelemetryEvent =
       readonly payload: {
         readonly telemetry: AgentTelemetryMetrics;
         readonly turnPromptTokens: number;
+        readonly turnCachedPromptTokens: number;
         readonly turnCompletionTokens: number;
       };
     };
@@ -646,6 +679,43 @@ function normalizeBoundedOption(value: unknown, min: number, fallback: number): 
 }
 
 /**
+ * Reads a candidate token count as a finite, floored, non-negative integer.
+ * Non-finite numbers, strings, null, and undefined resolve to `null` so the
+ * call site can fall through to the next resolution tier.
+ * @param value - Candidate count from an explicit override or provider usage field.
+ */
+function readTokenCount(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return Math.max(0, Math.floor(value));
+  }
+  return null;
+}
+
+/**
+ * Resolves the cached share of a turn's prompt tokens (INV-4). Resolution
+ * order: explicit `turnCachedPromptTokens` → `prompt_tokens_details.cached_tokens`
+ * → `prompt_cache_hit_tokens` → `cache_read_input_tokens` →
+ * `promptTotal - prompt_cache_miss_tokens` (miss-derivation only when the miss
+ * count is finite) → 0. The result is floored at 0 and clamped to `promptTotal`.
+ * @param payload - Turn usage payload carrying explicit and provider cache fields.
+ * @param promptTotal - Resolved (floored, clamped) prompt token total for the turn.
+ */
+function resolveCachedPromptTokens(payload: TurnUsagePayload, promptTotal: number): number {
+  const explicit = readTokenCount(payload?.turnCachedPromptTokens);
+  if (explicit !== null) return Math.min(explicit, promptTotal);
+
+  const usage = payload?.turnUsage;
+  const direct = readTokenCount(usage?.prompt_tokens_details?.cached_tokens)
+    ?? readTokenCount(usage?.prompt_cache_hit_tokens)
+    ?? readTokenCount(usage?.cache_read_input_tokens);
+  if (direct !== null) return Math.min(direct, promptTotal);
+
+  const miss = readTokenCount(usage?.prompt_cache_miss_tokens);
+  const derived = miss === null ? 0 : Math.max(0, promptTotal - miss);
+  return Math.min(derived, promptTotal);
+}
+
+/**
  * Bounded FIFO ring buffer providing O(1) push and fixed memory footprint.
  */
 class BoundedRingBuffer<T = unknown> {
@@ -702,10 +772,12 @@ class BoundedRingBuffer<T = unknown> {
 interface InternalAgentMetrics {
   agentId: string;
   inputTokens: number;
+  cachedInputTokens: number;
   outputTokens: number;
   totalTokens: number;
   turnCount: number;
   lastPromptTokens: number;
+  lastCachedPromptTokens: number;
   lastCompletionTokens: number;
   terminalStops: number;
   injectedDeliveries: number;
@@ -729,7 +801,7 @@ interface InternalAgentMetrics {
  * - Sovereign Encapsulation (INV-1): Metrics are managed strictly inside private instance maps; external queries return defensive snapshots whose context entries are deep-frozen copies.
  * - Bounded FIFO Buffers (INV-2): Ring buffers bound per-agent and global audit trace histories with O(1) push operations and deterministic eviction.
  * - Monotonic Counters (INV-3): Cumulative counters are non-negative integers that never decrease unless explicitly reset, including across snapshot seeding (finite seeds are floored).
- * - Two-Tier Token Accounting (INV-4): Explicit overrides, then provider usage metadata; absent counts resolve to zero.
+ * - Two-Tier Token Accounting (INV-4): Explicit overrides, then provider usage metadata; absent counts resolve to zero, and prompt tokens split into a cached tier (clamped to the prompt total) and an uncached remainder.
  * - Observer Exception Shielding (INV-5): Subscriber errors are caught and logged; caller execution is never interrupted.
  * - Safe Context Auditing (INV-6): Context window snapshots are bounded, pruned, and truncated on every send path without raw text payload bloat.
  *
@@ -776,6 +848,7 @@ export class RuntimeTelemetry {
   #emitPort: { emit(event: { type: string; timestamp: number; payload?: unknown }): void } | null = null;
   #runtimeAggregate = {
     cumulativeInputTokens: 0,
+    cumulativeCachedInputTokens: 0,
     cumulativeOutputTokens: 0,
     cumulativeTotalTokens: 0,
     totalTurnCount: 0,
@@ -1170,10 +1243,12 @@ export class RuntimeTelemetry {
   #declaredTelemetryFromMetrics(metrics: InternalAgentMetrics): Record<string, unknown> {
     return {
       inputTokens: metrics.inputTokens,
+      cachedInputTokens: metrics.cachedInputTokens,
       outputTokens: metrics.outputTokens,
       totalTokens: metrics.totalTokens,
       turnCount: metrics.turnCount,
       lastPromptTokens: metrics.lastPromptTokens,
+      lastCachedPromptTokens: metrics.lastCachedPromptTokens,
       lastCompletionTokens: metrics.lastCompletionTokens,
       terminalStops: metrics.terminalStops,
       injectedDeliveries: metrics.injectedDeliveries,
@@ -1241,10 +1316,12 @@ export class RuntimeTelemetry {
     const source = snapshot as Record<string, unknown>;
     const numericFields = [
       'inputTokens',
+      'cachedInputTokens',
       'outputTokens',
       'totalTokens',
       'turnCount',
       'lastPromptTokens',
+      'lastCachedPromptTokens',
       'lastCompletionTokens',
       'terminalStops',
       'injectedDeliveries',
@@ -1276,10 +1353,12 @@ export class RuntimeTelemetry {
       metrics = {
         agentId: resolvedId,
         inputTokens: 0,
+        cachedInputTokens: 0,
         outputTokens: 0,
         totalTokens: 0,
         turnCount: 0,
         lastPromptTokens: 0,
+        lastCachedPromptTokens: 0,
         lastCompletionTokens: 0,
         terminalStops: 0,
         injectedDeliveries: 0,
@@ -1308,10 +1387,12 @@ export class RuntimeTelemetry {
     return Object.freeze({
       agentId: this.#publicAgentId(metrics.agentId),
       inputTokens: metrics.inputTokens,
+      cachedInputTokens: metrics.cachedInputTokens,
       outputTokens: metrics.outputTokens,
       totalTokens: metrics.totalTokens,
       turnCount: metrics.turnCount,
       lastPromptTokens: metrics.lastPromptTokens,
+      lastCachedPromptTokens: metrics.lastCachedPromptTokens,
       lastCompletionTokens: metrics.lastCompletionTokens,
       terminalStops: metrics.terminalStops,
       injectedDeliveries: metrics.injectedDeliveries,
@@ -1390,7 +1471,7 @@ export class RuntimeTelemetry {
   /**
    * Resets cumulative telemetry metrics for a specific agent back to zero.
    *
-   * Zeroes all token and lifecycle counters (`inputTokens = 0`, `outputTokens = 0`, `totalTokens = 0`,
+   * Zeroes all token and lifecycle counters (`inputTokens = 0`, `cachedInputTokens = 0`, `outputTokens = 0`, `totalTokens = 0`,
    * `turnCount = 0`, `terminalStops = 0`, `injectedDeliveries = 0`, `precallCount = 0`, `toolExecutionCount = 0`),
    * updates `lastUpdated = Date.now()`, syncs the owning agent, appends a `telemetry_reset`
    * event to the agent and global ring buffers, and dispatches it to subscribers, sinks,
@@ -1417,10 +1498,12 @@ export class RuntimeTelemetry {
     }
 
     metrics.inputTokens = 0;
+    metrics.cachedInputTokens = 0;
     metrics.outputTokens = 0;
     metrics.totalTokens = 0;
     metrics.turnCount = 0;
     metrics.lastPromptTokens = 0;
+    metrics.lastCachedPromptTokens = 0;
     metrics.lastCompletionTokens = 0;
     metrics.terminalStops = 0;
     metrics.injectedDeliveries = 0;
@@ -1450,7 +1533,7 @@ export class RuntimeTelemetry {
   /**
    * Retrieves aggregate cumulative metrics across all registered agents in the sandbox.
    *
-   * Provides O(1) query access to cumulative input/output/total tokens, turn counts,
+   * Provides O(1) query access to cumulative uncached/cached input, output, and total tokens, turn counts,
    * terminal stops, precall counts, tool executions, and active agent counts.
    *
    * @returns Defensive snapshot of aggregate runtime metrics.
@@ -1488,6 +1571,7 @@ export class RuntimeTelemetry {
     this.#globalRingBuffer.clear();
     this.#runtimeAggregate = {
       cumulativeInputTokens: 0,
+      cumulativeCachedInputTokens: 0,
       cumulativeOutputTokens: 0,
       cumulativeTotalTokens: 0,
       totalTurnCount: 0,
@@ -1507,14 +1591,22 @@ export class RuntimeTelemetry {
    * metrics, records audit trace events, and dispatches a `telemetry_update` event.
    *
    * Resolution Flow (INV-4):
-   * 1. Resolves `promptTokens`: explicit `turnPromptTokens` -\> provider `turnUsage.prompt_tokens`; zero when neither is present.
-   * 2. Resolves `completionTokens`: explicit `turnCompletionTokens` -\> provider `turnUsage.completion_tokens`; zero when neither is present.
-   * 3. Atomically updates cumulative agent and sandbox aggregate counters.
-   * 4. Pushes `TOKEN_USAGE` and `TURN_COMPLETE` events into the agent and global ring buffers.
-   * 5. Dispatches `telemetry_update` to subscribers, sinks, and the emit port; unlike the
+   * 1. Resolves the prompt total: explicit `turnPromptTokens` -\> provider `turnUsage.prompt_tokens`/`promptTokens`; zero when none is present.
+   * 2. Resolves cached prompt tokens: explicit `turnCachedPromptTokens` -\> provider
+   *    `prompt_tokens_details.cached_tokens`/`prompt_cache_hit_tokens`/`cache_read_input_tokens`
+   *    -\> miss-derived `promptTotal - prompt_cache_miss_tokens` (only when the miss count is
+   *    finite) -\> 0; floored and clamped to the resolved prompt total. The reported uncached
+   *    prompt count is the remaining prompt total.
+   * 3. Resolves `completionTokens`: explicit `turnCompletionTokens` -\> provider `turnUsage.completion_tokens`; zero when neither is present.
+   * 4. Atomically updates cumulative agent and sandbox aggregate counters (`inputTokens`
+   *    counters are uncached, `cachedInputTokens` counters are cached, and `totalTokens`
+   *    equals uncached + cached + output).
+   * 5. Pushes `TOKEN_USAGE` and `TURN_COMPLETE` events into the agent and global ring buffers.
+   * 6. Dispatches `telemetry_update` to subscribers, sinks, and the emit port; unlike the
    *    other two events it is not appended to ring buffers.
    *
-   * Explicit and provider-supplied counts are floored and clamped to a minimum of 0.
+   * Explicit and provider-supplied counts are floored and clamped to a minimum of 0; the
+   * cached count is additionally clamped to the resolved prompt total.
    * Dispatch order is `TOKEN_USAGE`, then
    * `TURN_COMPLETE`, then `telemetry_update`. When `formattedMessages` is an array,
    * its entries are deep-copied into `lastSentContext` — arrays/plain objects
@@ -1528,16 +1620,15 @@ export class RuntimeTelemetry {
    *
    * @param agentId - Unique identifier of the agent. Must be a non-empty string.
    * @param payload - Optional turn usage metadata, provider usage, prompt messages, or generated text; defaults to an empty payload.
-   * @returns Turn calculation result containing prompt tokens, completion tokens, and updated cumulative metrics.
+   * @returns Turn calculation result containing uncached prompt tokens, cached prompt tokens, completion tokens, and updated cumulative metrics.
    * @throws `TypeError` - Throws `ERR_TELEMETRY_INVALID_AGENT_ID` when `agentId` is not a non-blank string.
    *
    * @example
    * ```typescript
    * const result = telemetry.recordTurnUsage('agent_writer', {
-   *   turnUsage: { prompt_tokens: 210, completion_tokens: 95 },
-   *   responseContent: 'Summary of discussion.'
+   *   turnUsage: { prompt_tokens: 210, completion_tokens: 95, prompt_tokens_details: { cached_tokens: 160 } }
    * });
-   * console.log(`Turn Prompt: ${result.turnPromptTokens}, Turn Completion: ${result.turnCompletionTokens}`);
+   * console.log(`Turn Uncached: ${result.turnPromptTokens}, Turn Cached: ${result.turnCachedPromptTokens}`);
    * console.log(`Agent Cumulative: ${result.telemetry.totalTokens}`);
    * ```
    */
@@ -1565,11 +1656,19 @@ export class RuntimeTelemetry {
       calculatedCompletion = Math.max(0, Math.floor(payload.turnUsage.completionTokens));
     }
 
+    // 3. Cached prompt tokens resolution (explicit tier, then provider cache metadata),
+    //    with the uncached prompt count as the remaining prompt total.
+    const promptTotal = calculatedPrompt;
+    const calculatedCachedPrompt = resolveCachedPromptTokens(payload, promptTotal);
+    const calculatedUncachedPrompt = promptTotal - calculatedCachedPrompt;
+
     const metrics = this.#getOrCreateAgentMetrics(resolvedId);
-    metrics.inputTokens += calculatedPrompt;
+    metrics.inputTokens += calculatedUncachedPrompt;
+    metrics.cachedInputTokens += calculatedCachedPrompt;
     metrics.outputTokens += calculatedCompletion;
-    metrics.totalTokens = metrics.inputTokens + metrics.outputTokens;
-    metrics.lastPromptTokens = calculatedPrompt;
+    metrics.totalTokens = metrics.inputTokens + metrics.cachedInputTokens + metrics.outputTokens;
+    metrics.lastPromptTokens = calculatedUncachedPrompt;
+    metrics.lastCachedPromptTokens = calculatedCachedPrompt;
     metrics.lastCompletionTokens = calculatedCompletion;
     metrics.turnCount += 1;
     metrics.lastUpdated = Date.now();
@@ -1584,9 +1683,10 @@ export class RuntimeTelemetry {
 
     this.#publishMetrics(agentId, metrics);
 
-    this.#runtimeAggregate.cumulativeInputTokens += calculatedPrompt;
+    this.#runtimeAggregate.cumulativeInputTokens += calculatedUncachedPrompt;
+    this.#runtimeAggregate.cumulativeCachedInputTokens += calculatedCachedPrompt;
     this.#runtimeAggregate.cumulativeOutputTokens += calculatedCompletion;
-    this.#runtimeAggregate.cumulativeTotalTokens += (calculatedPrompt + calculatedCompletion);
+    this.#runtimeAggregate.cumulativeTotalTokens += (calculatedUncachedPrompt + calculatedCachedPrompt + calculatedCompletion);
     this.#runtimeAggregate.totalTurnCount += 1;
     this.#runtimeAggregate.lastUpdated = metrics.lastUpdated;
 
@@ -1597,7 +1697,8 @@ export class RuntimeTelemetry {
       agentId: this.#publicAgentId(resolvedId),
       timestamp: now,
       payload: {
-        turnPromptTokens: calculatedPrompt,
+        turnPromptTokens: calculatedUncachedPrompt,
+        turnCachedPromptTokens: calculatedCachedPrompt,
         turnCompletionTokens: calculatedCompletion,
         cumulativeTotalTokens: metrics.totalTokens
       }
@@ -1612,7 +1713,8 @@ export class RuntimeTelemetry {
       payload: {
         turnNumber: metrics.turnCount,
         durationMs: typeof payload?.durationMs === 'number' ? Math.max(0, payload.durationMs) : 0,
-        turnPromptTokens: calculatedPrompt,
+        turnPromptTokens: calculatedUncachedPrompt,
+        turnCachedPromptTokens: calculatedCachedPrompt,
         turnCompletionTokens: calculatedCompletion
       }
     };
@@ -1627,14 +1729,16 @@ export class RuntimeTelemetry {
       timestamp: now,
       payload: {
         telemetry: snapshot,
-        turnPromptTokens: calculatedPrompt,
+        turnPromptTokens: calculatedUncachedPrompt,
+        turnCachedPromptTokens: calculatedCachedPrompt,
         turnCompletionTokens: calculatedCompletion
       }
     };
     this.#dispatchEvent(updateEvent);
 
     return {
-      turnPromptTokens: calculatedPrompt,
+      turnPromptTokens: calculatedUncachedPrompt,
+      turnCachedPromptTokens: calculatedCachedPrompt,
       turnCompletionTokens: calculatedCompletion,
       telemetry: snapshot
     };

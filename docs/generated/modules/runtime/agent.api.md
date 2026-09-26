@@ -257,8 +257,10 @@ export type AgentState = typeof AGENT_STATES[keyof typeof AGENT_STATES];
 
 // @public
 export interface AgentTelemetry {
+    cachedInputTokens: number;
     injectedDeliveries: number;
     inputTokens: number;
+    lastCachedPromptTokens: number;
     lastCompletionTokens: number;
     lastPromptTokens: number;
     lastSentContext: unknown[];
@@ -687,19 +689,21 @@ Valid state string union derived from AGENT_STATES.
 
 Token and execution telemetry counters for a single agent.
 
-Metrics are produced by the runtime telemetry subsystem and applied to `Agent.telemetry` through `Agent.applyTelemetrySnapshot()`; token counters are cumulative, while `last*` fields describe the most recent turn.
+Metrics are produced by the runtime telemetry subsystem and applied to `Agent.telemetry` through `Agent.applyTelemetrySnapshot()`; token counters are cumulative, while `last*` fields describe the most recent turn. Prompt tokens split into an uncached tier (`inputTokens`/`lastPromptTokens`) and a cached tier (`cachedInputTokens`/`lastCachedPromptTokens`); `totalTokens` is the sum of the uncached, cached, and output counters.
 
 #### Members
 
+- **`cachedInputTokens`** — Cumulative cached prompt tokens processed
 - **`injectedDeliveries`** — Injected trigger deliveries
-- **`inputTokens`** — Cumulative prompt tokens processed
+- **`inputTokens`** — Cumulative uncached prompt tokens processed
+- **`lastCachedPromptTokens`** — Cached prompt tokens in the most recent turn
 - **`lastCompletionTokens`** — Completion tokens in the most recent turn
-- **`lastPromptTokens`** — Prompt tokens in the most recent turn
+- **`lastPromptTokens`** — Uncached prompt tokens in the most recent turn
 - **`lastSentContext`** — Context snapshot sent in the most recent LLM request
 - **`outputTokens`** — Cumulative completion tokens generated
 - **`precallCount`** — Tool precall hook invocations
 - **`terminalStops`** — Number of turns terminated via stop conditions
-- **`totalTokens`** — Total tokens consumed (input + output)
+- **`totalTokens`** — Total tokens consumed (uncached input + cached input + output)
 - **`turnCount`** — Total completed conversational turns
 
 ### `AuthorityDowngradeRecord` — interface
@@ -1113,8 +1117,8 @@ const result: UndoTurnResult = {
 ## Doc coverage
 
 - Top-level exports: 28
-- Declarations (exports + members): 222
-- Documented declarations: 222 / 222 (100%)
+- Declarations (exports + members): 224
+- Documented declarations: 224 / 224 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): `AuthorityDescriptor`, `CredentialResolverPort`, `ModelInterface`, `ModelPresetSourcePort`, `ProviderInterface`

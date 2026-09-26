@@ -336,8 +336,10 @@ export type AgentState = typeof AGENT_STATES[keyof typeof AGENT_STATES];
 // @public
 export interface AgentTelemetry {
     readonly agentId: string;
+    readonly cachedInputTokens: number;
     readonly injectedDeliveries: number;
     readonly inputTokens: number;
+    readonly lastCachedPromptTokens: number;
     readonly lastCompletionTokens: number;
     readonly lastPromptTokens: number;
     readonly lastSentContext: ReadonlyArray<unknown>;
@@ -1145,17 +1147,19 @@ console.log(`Total tokens used: ${metrics.totalTokens} across ${metrics.turnCoun
 #### Members
 
 - **`agentId`** — Unique identifier of the agent.
+- **`cachedInputTokens`** — Cumulative cached prompt/input tokens consumed across all turns ($n ≥ 0$).
 - **`injectedDeliveries`** — Number of injected message deliveries received into prompt context.
-- **`inputTokens`** — Cumulative prompt/input tokens consumed across all turns ($n ≥ 0$).
+- **`inputTokens`** — Cumulative uncached prompt/input tokens consumed across all turns ($n ≥ 0$).
+- **`lastCachedPromptTokens`** — Cached input tokens consumed in the most recent turn.
 - **`lastCompletionTokens`** — Completion tokens generated in the most recent turn.
-- **`lastPromptTokens`** — Input tokens consumed in the most recent turn.
+- **`lastPromptTokens`** — Uncached input tokens consumed in the most recent turn.
 - **`lastSentContext`** — Bounded defensive copy of the most recently sent context message descriptors (latest-wins: every send path replaces the previous record). Retained entries are pruned and their string `content` truncated. Every object is a capture-owned copy, never a caller alias: arrays and plain objects are cloned structurally and deep-frozen, while non-plain values are cloned via `structuredClone` (class instances flatten to plain data objects; uncloneable values normalize to own-enumerable snapshots) and captured `Map`/`Set`/`Date` copies are frozen with their mutators neutralized. The array itself is frozen, so mutating the returned reference cannot alter internal telemetry state.
 - **`lastUpdated`** — Unix epoch timestamp (ms) of the most recent metric mutation.
 - **`outputTokens`** — Cumulative completion/output tokens generated across all turns ($n ≥ 0$).
 - **`precallCount`** — Number of precall tool executions performed prior to model inference.
 - **`terminalStops`** — Number of times the agent completed execution via a terminal stop condition.
 - **`toolExecutionCount`** — Cumulative number of tool executions performed by this agent.
-- **`totalTokens`** — Cumulative total tokens (`inputTokens + outputTokens`).
+- **`totalTokens`** — Cumulative total tokens (`inputTokens + cachedInputTokens + outputTokens`).
 - **`turnCount`** — Cumulative execution turns completed by the agent ($n ≥ 0$).
 
 ### `AuthorityDescriptor` — interface
@@ -2026,8 +2030,8 @@ Narrow on `success` to obtain the fully-populated delivery projection; the failu
 ## Doc coverage
 
 - Top-level exports: 54
-- Declarations (exports + members): 417
-- Documented declarations: 417 / 417 (100%)
+- Declarations (exports + members): 419
+- Documented declarations: 419 / 419 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): `Agent`, `AGENT_STATES`, `AgentModelConfig`, `AgentSecurityContext`, `AgentTelemetry_2`, `CancelScheduleSuccessReceipt`, `CredentialResolverPort`, `EngineModel`, `EngineStreamChunk`, `ExecutionErrorCode`, `ExecutionStatus`, `HistoryToolCall`, `InterruptedTurn`, `InvocationEngine`, `InvocationReceipt`, `InvocationSingleResult`, `LaunchAgentOptions`, `MessagingBus`, `ModelPresetSourcePort`, `OrchestratorActionMode`, `RealmPublishingPort`, `ScheduledTaskProjection`, `ScheduleErrorReceipt`, `SchedulerStatus`, `ScheduleSuccessReceipt`, `TimerCondition`, `ToolCallRecord`, `TriggerPolicy`, `TriggerQueue`, `TurnInputObject`, `UndoTurnSelectionFailure`, `VirtualFS`, `WaitForMailFailureResult`, `WaitForMailSuccessResult`, `WorldClock`

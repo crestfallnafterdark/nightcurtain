@@ -901,20 +901,27 @@ export interface SerializedAgent {
  * Token and execution telemetry counters for a single agent.
  *
  * Metrics are produced by the runtime telemetry subsystem and applied to
- * `Agent.telemetry` through `Agent.applyTelemetrySnapshot()`; token counters are
- * cumulative, while `last*` fields describe the most recent turn.
+ * `Agent.telemetry` through `Agent.applyTelemetrySnapshot()`; token counters
+ * are cumulative, while `last*` fields describe the most recent turn. Prompt
+ * tokens split into an uncached tier (`inputTokens`/`lastPromptTokens`) and a
+ * cached tier (`cachedInputTokens`/`lastCachedPromptTokens`); `totalTokens` is
+ * the sum of the uncached, cached, and output counters.
  */
 export interface AgentTelemetry {
-  /** Cumulative prompt tokens processed */
+  /** Cumulative uncached prompt tokens processed */
   inputTokens: number;
+  /** Cumulative cached prompt tokens processed */
+  cachedInputTokens: number;
   /** Cumulative completion tokens generated */
   outputTokens: number;
-  /** Total tokens consumed (input + output) */
+  /** Total tokens consumed (uncached input + cached input + output) */
   totalTokens: number;
   /** Total completed conversational turns */
   turnCount: number;
-  /** Prompt tokens in the most recent turn */
+  /** Uncached prompt tokens in the most recent turn */
   lastPromptTokens: number;
+  /** Cached prompt tokens in the most recent turn */
+  lastCachedPromptTokens: number;
   /** Completion tokens in the most recent turn */
   lastCompletionTokens: number;
   /** Number of turns terminated via stop conditions */
@@ -1487,10 +1494,12 @@ function normalizeAgentTelemetry(snapshot: Partial<AgentTelemetry> | null | unde
   const source = snapshot && typeof snapshot === 'object' ? snapshot : {};
   return {
     inputTokens: asNumber(source.inputTokens),
+    cachedInputTokens: asNumber(source.cachedInputTokens),
     outputTokens: asNumber(source.outputTokens),
     totalTokens: asNumber(source.totalTokens),
     turnCount: asNumber(source.turnCount),
     lastPromptTokens: asNumber(source.lastPromptTokens),
+    lastCachedPromptTokens: asNumber(source.lastCachedPromptTokens),
     lastCompletionTokens: asNumber(source.lastCompletionTokens),
     terminalStops: asNumber(source.terminalStops),
     injectedDeliveries: asNumber(source.injectedDeliveries),
@@ -2394,10 +2403,12 @@ export class Agent {
       turnCount: this.turnCount || 0,
       telemetry: this.telemetry ? JSON.parse(JSON.stringify(this.telemetry)) : {
         inputTokens: 0,
+        cachedInputTokens: 0,
         outputTokens: 0,
         totalTokens: 0,
         turnCount: 0,
         lastPromptTokens: 0,
+        lastCachedPromptTokens: 0,
         lastCompletionTokens: 0,
         precallCount: 0,
         terminalStops: 0,

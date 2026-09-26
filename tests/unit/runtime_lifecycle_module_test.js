@@ -173,10 +173,12 @@ test('2. Agent Construction: Validates config, inherits ModelConfig, and initial
   // Telemetry initialized
   assert.deepStrictEqual(agent.telemetry, {
     inputTokens: 0,
+    cachedInputTokens: 0,
     outputTokens: 0,
     totalTokens: 0,
     turnCount: 0,
     lastPromptTokens: 0,
+    lastCachedPromptTokens: 0,
     lastCompletionTokens: 0,
     terminalStops: 0,
     injectedDeliveries: 0,

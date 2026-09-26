@@ -11,6 +11,7 @@
  * 6. Store Integration: sandboxStore.clearAgentTelemetry resets agent telemetry and updates reactive store.
  * 7. Persistence & Restore: serializeRuntimeEnvironment and restoreRuntimeEnvironment preserve telemetry across snapshots.
  * 8. Two-Tier Accounting: turns without provider usage record zero tokens (INV-4).
+ * 9. Cached Prompt Telemetry: provider cache fields split prompt tokens into cached/uncached tiers through runtime, entity, and persistence (5224a4a).
  */
 
 import '../test_env.js';
@@ -434,4 +435,91 @@ test('8. Two-Tier Token Accounting: turns without provider usage record zero tok
   assert.equal(telemetry.outputTokens, 0, 'Completion tokens must be 0 when provider usage is absent');
   assert.equal(telemetry.totalTokens, 0);
   assert.equal(telemetry.turnCount, 1);
+});
+
+test('9. Cached Prompt Telemetry: provider cache fields split across runtime, entity, and persistence (5224a4a)', async () => {
+  const vfs = new VirtualFS();
+  const bus = new MessagingBus();
+
+  const mockCompletion = async () => ({
+    content: 'Cache-aware response',
+    usage: {
+      prompt_tokens: 500,
+      completion_tokens: 100,
+      total_tokens: 600,
+      prompt_tokens_details: { cached_tokens: 320 }
+    }
+  });
+
+  const runtime = new AgentRuntime({
+    virtualFs: vfs,
+    messagingBus: bus,
+    autoBootstrapDirector: false
+  });
+
+  await runtime.launchAgent({
+    id: 'agent_cache',
+    name: 'Cache Agent'
+  }, createMockModel(mockCompletion));
+
+  const emittedEvents = [];
+  runtime.on((event) => {
+    if (event.type === 'telemetry_update') {
+      emittedEvents.push(event);
+    }
+  });
+
+  await runtime.executeAgentTurn('agent_cache', 'Warm the cache');
+
+  const telemetry = runtime.getAgentTelemetry('agent_cache');
+  assert.ok(telemetry, 'Telemetry must exist');
+  assert.equal(telemetry.inputTokens, 180, 'inputTokens is the uncached share');
+  assert.equal(telemetry.cachedInputTokens, 320, 'cachedInputTokens carries the cached share');
+  assert.equal(telemetry.outputTokens, 100);
+  assert.equal(telemetry.totalTokens, 600, 'totalTokens identity holds across the split');
+  assert.equal(telemetry.lastPromptTokens, 180);
+  assert.equal(telemetry.lastCachedPromptTokens, 320);
+  assert.equal(telemetry.lastCompletionTokens, 100);
+
+  // The entity mirror receives the cached tier through the accessor sync.
+  const entity = runtime.getAgent('agent_cache');
+  assert.equal(entity.telemetry.inputTokens, 180);
+  assert.equal(entity.telemetry.cachedInputTokens, 320);
+  assert.equal(entity.telemetry.lastCachedPromptTokens, 320);
+  assert.equal(entity.telemetry.totalTokens, 600);
+
+  assert.equal(emittedEvents.length, 1);
+  assert.equal(emittedEvents[0].payload.turnPromptTokens, 180);
+  assert.equal(emittedEvents[0].payload.turnCachedPromptTokens, 320);
+  assert.equal(emittedEvents[0].payload.telemetry.cachedInputTokens, 320);
+
+  // Persistence round-trip preserves the cached tier for entity and tracker.
+  const snapshot = serializeRuntimeEnvironment(runtime, vfs, bus);
+  const serializedAgent = snapshot.agents.find(a => a.id === 'agent_cache');
+  assert.ok(serializedAgent, 'Serialized agent must exist');
+  assert.equal(serializedAgent.telemetry.inputTokens, 180);
+  assert.equal(serializedAgent.telemetry.cachedInputTokens, 320);
+  assert.equal(serializedAgent.telemetry.lastCachedPromptTokens, 320);
+  assert.equal(serializedAgent.telemetry.totalTokens, 600);
+
+  const newRuntime = new AgentRuntime({
+    virtualFs: new VirtualFS(),
+    messagingBus: new MessagingBus(),
+    autoBootstrapDirector: false
+  });
+  const restored = restoreRuntimeEnvironment(snapshot, newRuntime, newRuntime.virtualFs, newRuntime.messagingBus);
+  assert.equal(restored.success, true, 'restoreRuntimeEnvironment must succeed');
+
+  const restoredAgent = newRuntime.getAgent('agent_cache');
+  assert.ok(restoredAgent, 'Restored agent must exist');
+  assert.equal(restoredAgent.telemetry.inputTokens, 180);
+  assert.equal(restoredAgent.telemetry.cachedInputTokens, 320);
+  assert.equal(restoredAgent.telemetry.lastPromptTokens, 180);
+  assert.equal(restoredAgent.telemetry.lastCachedPromptTokens, 320);
+  assert.equal(restoredAgent.telemetry.totalTokens, 600);
+
+  const restoredTelemetry = newRuntime.getAgentTelemetry('agent_cache');
+  assert.equal(restoredTelemetry.cachedInputTokens, 320);
+  assert.equal(restoredTelemetry.inputTokens, 180);
+  assert.equal(restoredTelemetry.totalTokens, 600);
 });

@@ -28,6 +28,8 @@
  *  23. ICD-A3 (dbeb5d4): non-plain entries (class instances, Map/Set/Date) are copied
  *      and mutation-isolated; caller objects survive truncation; captured containers
  *      are hardened against snapshot-side mutation
+ *  24. Cached prompt-token accounting (5224a4a): provider cache-field resolution,
+ *      explicit override, clamps, accumulation/reset/seeding, and INV-6 untouched
  */
 
 import test from 'node:test';
@@ -1335,4 +1337,301 @@ test('23.3 Uncloneable non-plain entries normalize instead of aliasing (dbeb5d4-
   assert.strictEqual(typeof captured.onEvent, 'string', 'uncloneable function leaves become descriptor strings');
   assert.ok(captured.onEvent.startsWith('[Function'));
   assert.ok(Object.isFrozen(captured));
+});
+
+// ============================================================================
+// 24. Cached prompt-token accounting (5224a4a)
+// ============================================================================
+
+test('24.1 OpenAI prompt_tokens_details.cached_tokens splits prompt tokens (5224a4a-a)', () => {
+  const telemetry = new RuntimeTelemetry();
+  const events = [];
+  telemetry.subscribe((e) => events.push(e));
+
+  const result = telemetry.recordTurnUsage('agent_cache_openai', {
+    turnUsage: {
+      prompt_tokens: 1000,
+      completion_tokens: 250,
+      total_tokens: 1250,
+      prompt_tokens_details: { cached_tokens: 640 }
+    }
+  });
+
+  assert.strictEqual(result.turnPromptTokens, 360, 'turnPromptTokens is the uncached share');
+  assert.strictEqual(result.turnCachedPromptTokens, 640);
+  assert.strictEqual(result.turnCompletionTokens, 250);
+  assert.strictEqual(result.telemetry.inputTokens, 360);
+  assert.strictEqual(result.telemetry.cachedInputTokens, 640);
+  assert.strictEqual(result.telemetry.outputTokens, 250);
+  assert.strictEqual(result.telemetry.totalTokens, 1250, 'totalTokens identity holds');
+  assert.strictEqual(result.telemetry.lastPromptTokens, 360);
+  assert.strictEqual(result.telemetry.lastCachedPromptTokens, 640);
+  assert.strictEqual(result.telemetry.lastCompletionTokens, 250);
+
+  assert.strictEqual(events.length, 3);
+  assert.strictEqual(events[0].type, TELEMETRY_EVENT_TYPES.TOKEN_USAGE);
+  assert.strictEqual(events[0].payload.turnPromptTokens, 360);
+  assert.strictEqual(events[0].payload.turnCachedPromptTokens, 640);
+  assert.strictEqual(events[0].payload.turnCompletionTokens, 250);
+  assert.strictEqual(events[0].payload.cumulativeTotalTokens, 1250);
+
+  assert.strictEqual(events[1].type, TELEMETRY_EVENT_TYPES.TURN_COMPLETE);
+  assert.strictEqual(events[1].payload.turnPromptTokens, 360);
+  assert.strictEqual(events[1].payload.turnCachedPromptTokens, 640);
+
+  assert.strictEqual(events[2].type, TELEMETRY_EVENT_TYPES.TELEMETRY_UPDATE);
+  assert.strictEqual(events[2].payload.turnPromptTokens, 360);
+  assert.strictEqual(events[2].payload.turnCachedPromptTokens, 640);
+  assert.strictEqual(events[2].payload.telemetry.cachedInputTokens, 640);
+
+  const aggregate = telemetry.getRuntimeMetrics();
+  assert.strictEqual(aggregate.cumulativeInputTokens, 360);
+  assert.strictEqual(aggregate.cumulativeCachedInputTokens, 640);
+  assert.strictEqual(aggregate.cumulativeOutputTokens, 250);
+  assert.strictEqual(aggregate.cumulativeTotalTokens, 1250);
+});
+
+test('24.2 DeepSeek cache-hit and miss-derived cache splits (5224a4a-b)', () => {
+  const telemetry = new RuntimeTelemetry();
+
+  telemetry.recordTurnUsage('agent_cache_deepseek', {
+    turnUsage: { prompt_tokens: 800, completion_tokens: 100, prompt_cache_hit_tokens: 500 }
+  });
+  let metrics = telemetry.getAgentMetrics('agent_cache_deepseek');
+  assert.strictEqual(metrics.inputTokens, 300);
+  assert.strictEqual(metrics.cachedInputTokens, 500);
+  assert.strictEqual(metrics.totalTokens, 900);
+
+  // Miss-derivation is used only when no direct cache field is present.
+  telemetry.recordTurnUsage('agent_cache_deepseek', {
+    turnUsage: { prompt_tokens: 400, completion_tokens: 50, prompt_cache_miss_tokens: 120 }
+  });
+  metrics = telemetry.getAgentMetrics('agent_cache_deepseek');
+  assert.strictEqual(metrics.lastPromptTokens, 120);
+  assert.strictEqual(metrics.lastCachedPromptTokens, 280);
+  assert.strictEqual(metrics.inputTokens, 420);
+  assert.strictEqual(metrics.cachedInputTokens, 780);
+  assert.strictEqual(metrics.outputTokens, 150);
+  assert.strictEqual(metrics.totalTokens, 1350);
+
+  // A direct cache field wins over a coexisting miss count.
+  telemetry.recordTurnUsage('agent_cache_deepseek', {
+    turnUsage: { prompt_tokens: 100, prompt_cache_hit_tokens: 30, prompt_cache_miss_tokens: 70 }
+  });
+  metrics = telemetry.getAgentMetrics('agent_cache_deepseek');
+  assert.strictEqual(metrics.lastCachedPromptTokens, 30);
+  assert.strictEqual(metrics.lastPromptTokens, 70);
+});
+
+test('24.3 Anthropic cache_read_input_tokens splits prompt tokens (5224a4a-c)', () => {
+  const telemetry = new RuntimeTelemetry();
+
+  const result = telemetry.recordTurnUsage('agent_cache_anthropic', {
+    turnUsage: { prompt_tokens: 500, completion_tokens: 60, cache_read_input_tokens: 320 }
+  });
+
+  assert.strictEqual(result.turnPromptTokens, 180);
+  assert.strictEqual(result.turnCachedPromptTokens, 320);
+  assert.strictEqual(result.telemetry.inputTokens, 180);
+  assert.strictEqual(result.telemetry.cachedInputTokens, 320);
+  assert.strictEqual(result.telemetry.outputTokens, 60);
+  assert.strictEqual(result.telemetry.totalTokens, 560);
+});
+
+test('24.4 Explicit turnCachedPromptTokens overrides every provider cache field (5224a4a-d)', () => {
+  const telemetry = new RuntimeTelemetry();
+
+  const result = telemetry.recordTurnUsage('agent_cache_explicit', {
+    turnCachedPromptTokens: 250,
+    turnUsage: {
+      prompt_tokens: 1000,
+      completion_tokens: 10,
+      prompt_tokens_details: { cached_tokens: 640 },
+      prompt_cache_hit_tokens: 700,
+      cache_read_input_tokens: 800,
+      prompt_cache_miss_tokens: 100
+    }
+  });
+  assert.strictEqual(result.turnCachedPromptTokens, 250);
+  assert.strictEqual(result.turnPromptTokens, 750);
+  assert.strictEqual(result.telemetry.cachedInputTokens, 250);
+  assert.strictEqual(result.telemetry.inputTokens, 750);
+  assert.strictEqual(result.telemetry.totalTokens, 1010);
+
+  // Explicit zero is honored too.
+  const zero = telemetry.recordTurnUsage('agent_cache_explicit', {
+    turnCachedPromptTokens: 0,
+    turnUsage: { prompt_tokens: 100, completion_tokens: 5, prompt_cache_hit_tokens: 80 }
+  });
+  assert.strictEqual(zero.turnCachedPromptTokens, 0);
+  assert.strictEqual(zero.turnPromptTokens, 100);
+});
+
+test('24.5 Cache counts are floored and clamped (5224a4a-e)', () => {
+  const telemetry = new RuntimeTelemetry();
+
+  // cached > prompt clamps to the prompt total; uncached becomes 0.
+  let result = telemetry.recordTurnUsage('agent_cache_clamp', {
+    turnUsage: { prompt_tokens: 10, completion_tokens: 4, prompt_tokens_details: { cached_tokens: 40 } }
+  });
+  assert.strictEqual(result.turnCachedPromptTokens, 10);
+  assert.strictEqual(result.turnPromptTokens, 0);
+  assert.strictEqual(result.telemetry.totalTokens, 14);
+
+  // Fractional values floor; the prompt floors before the clamp.
+  result = telemetry.recordTurnUsage('agent_cache_clamp', {
+    turnUsage: { prompt_tokens: 100.9, completion_tokens: 0.9, prompt_tokens_details: { cached_tokens: 7.9 } }
+  });
+  assert.strictEqual(result.turnCachedPromptTokens, 7);
+  assert.strictEqual(result.turnPromptTokens, 93);
+
+  // Negative explicit caches resolve to zero.
+  result = telemetry.recordTurnUsage('agent_cache_clamp', { turnCachedPromptTokens: -5, turnPromptTokens: 50 });
+  assert.strictEqual(result.turnCachedPromptTokens, 0);
+  assert.strictEqual(result.turnPromptTokens, 50);
+
+  // NaN and string caches resolve to zero.
+  result = telemetry.recordTurnUsage('agent_cache_clamp', { turnCachedPromptTokens: NaN, turnPromptTokens: 50 });
+  assert.strictEqual(result.turnCachedPromptTokens, 0);
+  result = telemetry.recordTurnUsage('agent_cache_clamp', { turnCachedPromptTokens: '12', turnPromptTokens: 50 });
+  assert.strictEqual(result.turnCachedPromptTokens, 0);
+
+  // Non-finite higher-tier provider cache fields fall through to lower tiers.
+  result = telemetry.recordTurnUsage('agent_cache_clamp', {
+    turnUsage: { prompt_tokens: 100, prompt_tokens_details: { cached_tokens: NaN }, prompt_cache_hit_tokens: 30 }
+  });
+  assert.strictEqual(result.turnCachedPromptTokens, 30);
+
+  // A non-finite miss count never derives a cache share.
+  result = telemetry.recordTurnUsage('agent_cache_clamp', {
+    turnUsage: { prompt_tokens: 50, prompt_cache_miss_tokens: NaN }
+  });
+  assert.strictEqual(result.turnCachedPromptTokens, 0);
+  assert.strictEqual(result.turnPromptTokens, 50);
+
+  // miss > prompt clamps the derived cache to zero.
+  result = telemetry.recordTurnUsage('agent_cache_clamp', {
+    turnUsage: { prompt_tokens: 40, prompt_cache_miss_tokens: 90 }
+  });
+  assert.strictEqual(result.turnCachedPromptTokens, 0);
+  assert.strictEqual(result.turnPromptTokens, 40);
+});
+
+test('24.6 Absent cache fields keep the legacy split byte-identical (5224a4a-f)', () => {
+  const telemetry = new RuntimeTelemetry();
+  const events = [];
+  telemetry.subscribe((e) => events.push(e));
+
+  const result = telemetry.recordTurnUsage('agent_cache_absent', {
+    turnUsage: { prompt_tokens: 180, completion_tokens: 65, total_tokens: 245 }
+  });
+
+  assert.strictEqual(result.turnPromptTokens, 180);
+  assert.strictEqual(result.turnCachedPromptTokens, 0);
+  assert.strictEqual(result.telemetry.inputTokens, 180);
+  assert.strictEqual(result.telemetry.cachedInputTokens, 0);
+  assert.strictEqual(result.telemetry.totalTokens, 245);
+  assert.strictEqual(result.telemetry.lastPromptTokens, 180);
+  assert.strictEqual(result.telemetry.lastCachedPromptTokens, 0);
+
+  const aggregate = telemetry.getRuntimeMetrics();
+  assert.strictEqual(aggregate.cumulativeInputTokens, 180);
+  assert.strictEqual(aggregate.cumulativeCachedInputTokens, 0);
+  assert.strictEqual(aggregate.cumulativeTotalTokens, 245);
+
+  for (const event of events) {
+    assert.strictEqual(event.payload.turnCachedPromptTokens, 0, 'every turn event carries the zero cached count');
+  }
+
+  // Explicit-only payloads without cache fields behave identically too.
+  const explicit = telemetry.recordTurnUsage('agent_cache_absent', { turnPromptTokens: 20, turnCompletionTokens: 5 });
+  assert.strictEqual(explicit.turnCachedPromptTokens, 0);
+  assert.strictEqual(explicit.telemetry.inputTokens, 200);
+  assert.strictEqual(explicit.telemetry.cachedInputTokens, 0);
+  assert.strictEqual(explicit.telemetry.totalTokens, 270);
+});
+
+test('24.7 Accumulation, reset, seeding, and snapshot carry the cached tier (5224a4a-g)', () => {
+  const telemetry = new RuntimeTelemetry();
+  const events = [];
+  telemetry.subscribe((e) => events.push(e));
+
+  telemetry.recordTurnUsage('agent_cache_lifecycle', {
+    turnUsage: { prompt_tokens: 300, completion_tokens: 50, prompt_tokens_details: { cached_tokens: 100 } }
+  });
+  telemetry.recordTurnUsage('agent_cache_lifecycle', {
+    turnUsage: { prompt_tokens: 200, completion_tokens: 40, prompt_cache_hit_tokens: 60 }
+  });
+
+  let metrics = telemetry.getAgentMetrics('agent_cache_lifecycle');
+  assert.strictEqual(metrics.inputTokens, 340);
+  assert.strictEqual(metrics.cachedInputTokens, 160);
+  assert.strictEqual(metrics.outputTokens, 90);
+  assert.strictEqual(metrics.totalTokens, 590, 'totalTokens stays uncached + cached + output');
+  assert.strictEqual(metrics.lastPromptTokens, 140);
+  assert.strictEqual(metrics.lastCachedPromptTokens, 60);
+  assert.strictEqual(metrics.lastCompletionTokens, 40);
+
+  // Reset zeroes the cached tier and its last-turn mirror.
+  assert.strictEqual(telemetry.resetAgentMetrics('agent_cache_lifecycle'), true);
+  metrics = telemetry.getAgentMetrics('agent_cache_lifecycle');
+  assert.strictEqual(metrics.inputTokens, 0);
+  assert.strictEqual(metrics.cachedInputTokens, 0);
+  assert.strictEqual(metrics.totalTokens, 0);
+  assert.strictEqual(metrics.lastCachedPromptTokens, 0);
+  const resetEvent = events.find((e) => e.type === TELEMETRY_EVENT_TYPES.TELEMETRY_RESET);
+  assert.strictEqual(resetEvent.payload.telemetry.cachedInputTokens, 0);
+  assert.strictEqual(resetEvent.payload.telemetry.lastCachedPromptTokens, 0);
+
+  // clearAllMetrics zeroes the aggregate cached counter.
+  telemetry.clearAllMetrics();
+  assert.strictEqual(telemetry.getRuntimeMetrics().cumulativeCachedInputTokens, 0);
+
+  // Seeding floors cached counters and never lowers a recorded value.
+  const seeded = telemetry.initializeTelemetry('agent_cache_seed', {
+    inputTokens: 3.7,
+    cachedInputTokens: 4.9,
+    outputTokens: 1.2,
+    totalTokens: 100.9,
+    lastPromptTokens: 9.99,
+    lastCachedPromptTokens: 2.2,
+    lastCompletionTokens: 0.5
+  });
+  assert.strictEqual(seeded.inputTokens, 3);
+  assert.strictEqual(seeded.cachedInputTokens, 4);
+  assert.strictEqual(seeded.outputTokens, 1);
+  assert.strictEqual(seeded.totalTokens, 100);
+  assert.strictEqual(seeded.lastPromptTokens, 9);
+  assert.strictEqual(seeded.lastCachedPromptTokens, 2);
+  assert.strictEqual(seeded.lastCompletionTokens, 0);
+
+  telemetry.recordTurnUsage('agent_cache_seed', {
+    turnUsage: { prompt_tokens: 10, completion_tokens: 0, prompt_tokens_details: { cached_tokens: 6 } }
+  });
+  const reseeded = telemetry.initializeTelemetry('agent_cache_seed', {
+    inputTokens: 0.5,
+    cachedInputTokens: 1.9
+  });
+  assert.strictEqual(reseeded.inputTokens, 7, 'seeding never lowers a recorded uncached counter');
+  assert.strictEqual(reseeded.cachedInputTokens, 10, 'seeding never lowers a recorded cached counter');
+  assert.strictEqual(reseeded.lastCachedPromptTokens, 6);
+});
+
+test('24.8 Cached accounting leaves lastSentContext capture untouched (5224a4a-h)', () => {
+  const telemetry = new RuntimeTelemetry();
+  const messages = [
+    { role: 'system', content: 'system directive' },
+    { role: 'user', content: 'question' }
+  ];
+
+  const result = telemetry.recordTurnUsage('agent_cache_context', {
+    turnUsage: { prompt_tokens: 120, completion_tokens: 10, prompt_tokens_details: { cached_tokens: 80 } },
+    formattedMessages: messages
+  });
+
+  assert.strictEqual(result.telemetry.lastCachedPromptTokens, 80);
+  assert.strictEqual(result.telemetry.lastPromptTokens, 40);
+  assert.strictEqual(result.telemetry.lastSentContext.length, 2);
+  assert.deepStrictEqual(result.telemetry.lastSentContext, messages);
+  assert.ok(Object.isFrozen(result.telemetry.lastSentContext));
 });
