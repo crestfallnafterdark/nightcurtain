@@ -71,7 +71,7 @@ import {
   getAuthorityToolSchemas,
   getPublishingToolSchemas
 } from '../../src/lib/sandbox/tools/descriptors/index.ts';
-import { PUBLISHING_TOOLS, REALM_ADMIN_TOOLS, EXTENSIONS_ADMIN_TOOLS } from '../../src/lib/sandbox/tools/constants/index.ts';
+import { PUBLISHING_TOOLS, REALM_ADMIN_TOOLS, EXTENSIONS_ADMIN_TOOLS, REALM_KNOWLEDGE_TOOLS } from '../../src/lib/sandbox/tools/constants/index.ts';
 import {
   createSandboxToolDispatcher,
   getSandboxToolsSchema
@@ -412,16 +412,22 @@ test('5. publishing tools stay outside the canonical taxonomy and never wildcard
   );
   assert.deepEqual(getPublishingToolSchemas(['*']), [], 'the wildcard is not an authority');
   assert.deepEqual(
-    getPublishingToolSchemas([AGENT_AUTHORITIES.TEMPLATE]).map((def) => def.function.name),
-    [PUBLISHING_TOOLS.IMPORT_REALM_TEMPLATE]
+    getPublishingToolSchemas([AGENT_AUTHORITIES.TEMPLATE]).map((def) => def.function.name).sort(),
+    [PUBLISHING_TOOLS.IMPORT_REALM_TEMPLATE, REALM_KNOWLEDGE_TOOLS.LIST_TEMPLATES, REALM_KNOWLEDGE_TOOLS.GET_TEMPLATE].sort()
   );
   assert.deepEqual(
-    getPublishingToolSchemas([AGENT_AUTHORITIES.HYDRATION]).map((def) => def.function.name),
-    [PUBLISHING_TOOLS.SUBMIT_HYDRATION_PACKAGE]
+    getPublishingToolSchemas([AGENT_AUTHORITIES.HYDRATION]).map((def) => def.function.name).sort(),
+    [PUBLISHING_TOOLS.SUBMIT_HYDRATION_PACKAGE, REALM_KNOWLEDGE_TOOLS.LIST_HYDRATION_PACKAGES].sort()
   );
   assert.deepEqual(
     getPublishingToolSchemas(KNOWN_AGENT_AUTHORITIES).map((def) => def.function.name).sort(),
-    [PUBLISHING_TOOLS.IMPORT_REALM_TEMPLATE, PUBLISHING_TOOLS.SUBMIT_HYDRATION_PACKAGE]
+    [
+      PUBLISHING_TOOLS.IMPORT_REALM_TEMPLATE,
+      PUBLISHING_TOOLS.SUBMIT_HYDRATION_PACKAGE,
+      REALM_KNOWLEDGE_TOOLS.LIST_TEMPLATES,
+      REALM_KNOWLEDGE_TOOLS.GET_TEMPLATE,
+      REALM_KNOWLEDGE_TOOLS.LIST_HYDRATION_PACKAGES
+    ].sort()
   );
 });
 
@@ -1820,8 +1826,8 @@ test('26. [M1] AUTHORITY_IDS is the runtime vocabulary; KNOWN_AGENT_AUTHORITIES 
   }
   // The registry maps every known id with a registered descriptor to exactly
   // one authority tool (M1: the publishing pair; M3 appends the realm-admin
-  // pair; M4 the extension-admin pair; the remaining ids stay descriptor-less
-  // until their phase lands).
+  // pair; M4 the extension-admin pair; M5b the template/hydration knowledge
+  // reads).
   assert.deepEqual(
     Object.keys(AUTHORITY_TOOL_REGISTRY).sort(),
     [
@@ -1830,7 +1836,10 @@ test('26. [M1] AUTHORITY_IDS is the runtime vocabulary; KNOWN_AGENT_AUTHORITIES 
       REALM_ADMIN_TOOLS.INSPECT_REALM,
       REALM_ADMIN_TOOLS.UPDATE_REALM,
       EXTENSIONS_ADMIN_TOOLS.LIST_EXTENSIONS,
-      EXTENSIONS_ADMIN_TOOLS.ATTACH_EXTENSION
+      EXTENSIONS_ADMIN_TOOLS.ATTACH_EXTENSION,
+      REALM_KNOWLEDGE_TOOLS.LIST_TEMPLATES,
+      REALM_KNOWLEDGE_TOOLS.GET_TEMPLATE,
+      REALM_KNOWLEDGE_TOOLS.LIST_HYDRATION_PACKAGES
     ].sort()
   );
 });
@@ -1844,8 +1853,25 @@ test('27. [M1] generic tool-schema exposure filters by exact id membership only'
     REALM_ADMIN_TOOLS.INSPECT_REALM,
     REALM_ADMIN_TOOLS.UPDATE_REALM,
     EXTENSIONS_ADMIN_TOOLS.LIST_EXTENSIONS,
-    EXTENSIONS_ADMIN_TOOLS.ATTACH_EXTENSION
+    EXTENSIONS_ADMIN_TOOLS.ATTACH_EXTENSION,
+    REALM_KNOWLEDGE_TOOLS.LIST_TEMPLATES,
+    REALM_KNOWLEDGE_TOOLS.GET_TEMPLATE,
+    REALM_KNOWLEDGE_TOOLS.LIST_HYDRATION_PACKAGES
   ].sort(), 'only ids with a registered descriptor expose a schema');
+  assert.deepEqual(
+    getAuthorityToolSchemas([AGENT_AUTHORITIES.TEMPLATE]).map((def) => def.function.name).sort(),
+    [
+      PUBLISHING_TOOLS.IMPORT_REALM_TEMPLATE,
+      REALM_KNOWLEDGE_TOOLS.LIST_TEMPLATES,
+      REALM_KNOWLEDGE_TOOLS.GET_TEMPLATE
+    ].sort(),
+    'the template authority exposes import plus the template knowledge reads'
+  );
+  assert.deepEqual(
+    getAuthorityToolSchemas([AGENT_AUTHORITIES.HYDRATION]).map((def) => def.function.name).sort(),
+    [PUBLISHING_TOOLS.SUBMIT_HYDRATION_PACKAGE, REALM_KNOWLEDGE_TOOLS.LIST_HYDRATION_PACKAGES].sort(),
+    'the hydration authority exposes submit plus the hydration listing'
+  );
   assert.deepEqual(
     getAuthorityToolSchemas([AGENT_AUTHORITIES.REALM_INSPECT]).map((def) => def.function.name),
     [REALM_ADMIN_TOOLS.INSPECT_REALM],
@@ -1858,8 +1884,13 @@ test('27. [M1] generic tool-schema exposure filters by exact id membership only'
   );
   assert.deepEqual(
     getAuthorityToolSchemas([AGENT_AUTHORITIES.TEMPLATE, AGENT_AUTHORITIES.REALM_INSPECT]).map((def) => def.function.name).sort(),
-    [PUBLISHING_TOOLS.IMPORT_REALM_TEMPLATE, REALM_ADMIN_TOOLS.INSPECT_REALM].sort(),
-    'the generic filter is exact-id membership (each id adds exactly its tool)'
+    [
+      PUBLISHING_TOOLS.IMPORT_REALM_TEMPLATE,
+      REALM_KNOWLEDGE_TOOLS.LIST_TEMPLATES,
+      REALM_KNOWLEDGE_TOOLS.GET_TEMPLATE,
+      REALM_ADMIN_TOOLS.INSPECT_REALM
+    ].sort(),
+    'the generic filter is exact-id membership (each id adds exactly its tools)'
   );
   assert.deepEqual(
     getPublishingToolSchemas(KNOWN_AGENT_AUTHORITIES),
@@ -1868,7 +1899,7 @@ test('27. [M1] generic tool-schema exposure filters by exact id membership only'
   );
   assert.equal(
     getAuthorityToolDescriptors([AGENT_AUTHORITIES.TEMPLATE, AGENT_AUTHORITIES.REALM_INSPECT]).length,
-    2,
+    4,
     'the descriptor filter mirrors the schema filter'
   );
   assert.equal(getAuthorityToolDescriptors([AGENT_AUTHORITIES.AGENT_INSPECT]).length, 0, 'an M2 id carries no authority descriptor');

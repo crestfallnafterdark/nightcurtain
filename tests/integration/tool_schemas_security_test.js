@@ -21,7 +21,7 @@ import {
   getAuthorityToolSchemas,
   getPublishingToolSchemas
 } from '../../src/lib/sandbox/tools/descriptors/index.ts';
-import { PUBLISHING_TOOLS, REALM_ADMIN_TOOLS, EXTENSIONS_ADMIN_TOOLS, TOOL_PRESETS, INNATE_TOOLS } from '../../src/lib/sandbox/tools/constants/index.ts';
+import { PUBLISHING_TOOLS, REALM_ADMIN_TOOLS, EXTENSIONS_ADMIN_TOOLS, REALM_KNOWLEDGE_TOOLS, TOOL_PRESETS, INNATE_TOOLS } from '../../src/lib/sandbox/tools/constants/index.ts';
 import { AGENT_AUTHORITIES, AUTHORITY_IDS, KNOWN_AGENT_AUTHORITIES } from '../../src/lib/sandbox/realmCatalog/index.ts';
 import { VirtualFS, PermissionDeniedError, FileNotFoundError } from '../../src/lib/sandbox/virtualFs/index.ts';
 import { MessagingBus } from '../../src/lib/sandbox/messagingBus/index.ts';
@@ -633,14 +633,18 @@ async function runEpic6UnitTests() {
     'wildcard is not an authority and exposes no publishing schema'
   );
   assert(
-    getPublishingToolSchemas([AGENT_AUTHORITIES.TEMPLATE]).length === 1
-      && getPublishingToolSchemas([AGENT_AUTHORITIES.TEMPLATE])[0].function.name === PUBLISHING_TOOLS.IMPORT_REALM_TEMPLATE,
-    'the template authority exposes only import_realm_template'
+    getPublishingToolSchemas([AGENT_AUTHORITIES.TEMPLATE]).map((def) => def.function.name).sort().join(',')
+      === [
+        PUBLISHING_TOOLS.IMPORT_REALM_TEMPLATE,
+        REALM_KNOWLEDGE_TOOLS.LIST_TEMPLATES,
+        REALM_KNOWLEDGE_TOOLS.GET_TEMPLATE
+      ].sort().join(','),
+    'the template authority exposes import plus the template knowledge reads'
   );
   assert(
-    getPublishingToolSchemas([AGENT_AUTHORITIES.HYDRATION]).length === 1
-      && getPublishingToolSchemas([AGENT_AUTHORITIES.HYDRATION])[0].function.name === PUBLISHING_TOOLS.SUBMIT_HYDRATION_PACKAGE,
-    'the hydration authority exposes only submit_hydration_package'
+    getPublishingToolSchemas([AGENT_AUTHORITIES.HYDRATION]).map((def) => def.function.name).sort().join(',')
+      === [PUBLISHING_TOOLS.SUBMIT_HYDRATION_PACKAGE, REALM_KNOWLEDGE_TOOLS.LIST_HYDRATION_PACKAGES].sort().join(','),
+    'the hydration authority exposes submit plus the hydration listing'
   );
   for (const descriptor of Object.values(PUBLISHING_TOOL_REGISTRY)) {
     assert(descriptor.schema.type === 'object', `${descriptor.name} schema is an object`);
@@ -796,9 +800,12 @@ async function runEpic6UnitTests() {
           REALM_ADMIN_TOOLS.INSPECT_REALM,
           REALM_ADMIN_TOOLS.UPDATE_REALM,
           EXTENSIONS_ADMIN_TOOLS.LIST_EXTENSIONS,
-          EXTENSIONS_ADMIN_TOOLS.ATTACH_EXTENSION
+          EXTENSIONS_ADMIN_TOOLS.ATTACH_EXTENSION,
+          REALM_KNOWLEDGE_TOOLS.LIST_TEMPLATES,
+          REALM_KNOWLEDGE_TOOLS.GET_TEMPLATE,
+          REALM_KNOWLEDGE_TOOLS.LIST_HYDRATION_PACKAGES
         ].sort().join(','),
-      'AUTHORITY_TOOL_REGISTRY carries the publishing pair plus the M3 realm-admin and M4 extension-admin pairs'
+      'AUTHORITY_TOOL_REGISTRY carries the publishing pair plus the M3 realm-admin, M4 extension-admin, and M5b knowledge tools'
     );
     assert(
       getAuthorityToolSchemas(KNOWN_AGENT_AUTHORITIES).length === getPublishingToolSchemas(KNOWN_AGENT_AUTHORITIES).length,
@@ -807,9 +814,9 @@ async function runEpic6UnitTests() {
     assert(getAuthorityToolSchemas(['*']).length === 0, 'the wildcard is never an authority id in the generic filter');
     assert(getAuthorityToolSchemas([]).length === 0, 'no ids expose no schemas');
     assert(
-      getAuthorityToolSchemas(AUTHORITY_IDS).length === 6
+      getAuthorityToolSchemas(AUTHORITY_IDS).length === 9
         && getAuthorityToolSchemas(AUTHORITY_IDS).every((def) => def.function.name !== undefined),
-      'only ids with a registered descriptor expose a schema (publishing + realm-admin + extension-admin)'
+      'only ids with a registered descriptor expose a schema (publishing + realm-admin + extension-admin + M5b knowledge)'
     );
     assert(
       getAuthorityToolSchemas([AGENT_AUTHORITIES.EXTENSIONS]).map((def) => def.function.name).sort().join(',')

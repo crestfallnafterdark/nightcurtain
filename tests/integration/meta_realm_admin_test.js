@@ -52,7 +52,7 @@ import {
   getAuthorityToolDescriptors,
   getAuthorityToolSchemas
 } from '../../src/lib/sandbox/tools/descriptors/index.ts';
-import { SANDBOX_TOOLS } from '../../src/lib/sandbox/tools/constants/index.ts';
+import { REALM_KNOWLEDGE_TOOLS, SANDBOX_TOOLS } from '../../src/lib/sandbox/tools/constants/index.ts';
 import { getCanonToolName } from '../../src/lib/sandbox/tools/normalizers/index.ts';
 import { AGENT_AUTHORITIES, AUTHORITY_IDS } from '../../src/lib/sandbox/realmCatalog/index.ts';
 import { SandboxStore } from '../../src/lib/sandbox/sandboxStore/index.svelte.ts';
@@ -281,7 +281,10 @@ test('1. [AC-M3-01] inspect_realm/update_realm are exact-authority tools outside
   assert.deepEqual(getAuthorityToolSchemas([]), [], 'no ids expose no schemas');
   assert.deepEqual(
     getAuthorityToolSchemas(AUTHORITY_IDS).map((definition) => definition.function.name).sort(),
-    ['import_realm_template', INSPECT_REALM, 'submit_hydration_package', UPDATE_REALM, 'list_extensions', 'attach_extension'].sort(),
+    [
+      'import_realm_template', INSPECT_REALM, 'submit_hydration_package', UPDATE_REALM, 'list_extensions', 'attach_extension',
+      REALM_KNOWLEDGE_TOOLS.LIST_TEMPLATES, REALM_KNOWLEDGE_TOOLS.GET_TEMPLATE, REALM_KNOWLEDGE_TOOLS.LIST_HYDRATION_PACKAGES
+    ].sort(),
     'every id with a registered descriptor exposes exactly its schema'
   );
   assert.deepEqual(
