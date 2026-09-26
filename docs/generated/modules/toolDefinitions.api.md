@@ -97,6 +97,40 @@ export interface ExecutionContext {
 }
 
 // @public
+export interface ExtensionAttachReceipt {
+    readonly alreadyAttached: boolean;
+    readonly applied: boolean;
+    readonly extensionId: string;
+    readonly realm: string;
+    readonly success: true;
+    readonly toolSelection: RealmAdminToolSelection;
+}
+
+// @public
+export interface ExtensionsAdminAttachmentView extends RealmAdminAttachmentView {
+    readonly tools?: readonly string[];
+}
+
+// @public
+export interface ExtensionsAdminInstalledView {
+    readonly attached: boolean;
+    readonly connected: boolean;
+    readonly displayName?: string;
+    readonly id: string;
+    readonly kind: string;
+    readonly status: string;
+    readonly tools?: readonly string[];
+}
+
+// @public
+export interface ExtensionsInspectReceipt {
+    readonly attachments: readonly ExtensionsAdminAttachmentView[];
+    readonly installed: readonly ExtensionsAdminInstalledView[];
+    readonly realm: string;
+    readonly success: true;
+}
+
+// @public
 export interface ExtensionToolBinding {
     readonly callName: string;
     readonly extensionId: string;
@@ -201,10 +235,18 @@ export interface RealmAdminPatch {
 
 // @public
 export interface RealmAdminPort {
+    attachExtension(input: {
+        actorRef: string | null;
+        extensionId: string;
+        toolSelection?: RealmAdminToolSelection;
+    }): ExtensionAttachReceipt;
     inspectRealm(input: {
         actorRef: string | null;
         realmLabel: string | null;
     }): RealmInspectReceipt;
+    listExtensions(input: {
+        actorRef: string | null;
+    }): ExtensionsInspectReceipt;
     updateRealm(input: {
         actorRef: string | null;
         realmLabel: string | null;
@@ -535,6 +577,52 @@ const context: ExecutionContext = {
 - **`workspaceId`** — Active workspace isolation boundary (defaults to `agentId` or 'global'). Trust boundary: pinned from bound construction. A per-call `workspaceId`/`workspace_id` (or the reserved Realm/tenant scope keys) is stripped before dispatch and can never select the workspace a handler or substrate operation resolves (ticket c7a3049).
 - **`worldClock`** — Injected Layer 0 World Clock & Timeline Events instance. Opaque to this contract: descriptor handlers narrow the capability they are configured to consume.
 
+### `ExtensionAttachReceipt` — interface
+
+Bounded realm-wide extension attach receipt.
+
+#### Members
+
+- **`alreadyAttached`** — `true` when the realm already attached the extension (no mutation, no audit).
+- **`applied`** — `true` when this call added the attachment; `false` on the idempotent path.
+- **`extensionId`** — Host-level id of the targeted extension.
+- **`realm`** — Realm display label (never the realm id).
+- **`success`** — Always `true`; failures throw instead of returning a receipt.
+- **`toolSelection`** — Effective realm-level tool ceiling of the attachment.
+
+### `ExtensionsAdminAttachmentView` — interface
+
+One realm attachment view in the M4 extension listing (the M3 projection plus live call names).
+
+#### Members
+
+- **`tools`** — Live, conflict-free catalog call names; absent when no live catalog exists.
+
+### `ExtensionsAdminInstalledView` — interface
+
+One installed-extension view in the M4 extension listing (no transport/credential material).
+
+#### Members
+
+- **`attached`** — Whether the caller's realm currently attaches the extension.
+- **`connected`** — Live connection state: `true` when a connected, conflict-free catalog is active.
+- **`displayName`** — Operator-facing display name, when declared.
+- **`id`** — Host-level extension id.
+- **`kind`** — Extension kind (`mcp`/`pack`).
+- **`status`** — Installation lifecycle status.
+- **`tools`** — Live, conflict-free catalog call names; absent when no live catalog exists.
+
+### `ExtensionsInspectReceipt` — interface
+
+Bounded extension listing receipt. Label-only realm addressing.
+
+#### Members
+
+- **`attachments`** — The caller realm's attachments with ceiling and live connection state.
+- **`installed`** — Every host-level install record with live connection and attachment state.
+- **`realm`** — Realm display label (never the realm id).
+- **`success`** — Always `true`; failures throw instead of returning a receipt.
+
 ### `ExtensionToolBinding` — interface
 
 One resolved provider-tool binding returned by ExtensionToolProviderPort.resolveTool.
@@ -731,7 +819,7 @@ One realm-admin edit patch (M3 closed shape): display metadata (`name`/`descript
 
 ### `RealmAdminPort` — interface
 
-Narrow host port consumed by the M3 realm-admin meta tools.
+Narrow host port consumed by the M3 realm-admin and M4 extension-admin meta tools.
 
 The composition root (the sandbox store) implements this port over its real `realmRegistry` + `extensionRegistry` live state, runtime rosters, and the existing attach/ceiling + safe-state sweep internals. The port is trusted bound construction: per-call context cannot substitute it (`realmAdminPort` is a pinned context key), and the *authority verdict stays dispatcher-side* from the caller's frozen descriptor — the port only re-reads the registry-side grant scope (never a caller claim) and fails closed when the `actorRef` carries no matching active grant record, so a direct store call can never execute under the operator principal without an actor record (R6).
 
@@ -739,7 +827,9 @@ Every target-resolution failure (missing/unknown actor record, missing grant, un
 
 #### Members
 
+- **`attachExtension`** — Attaches one installed+connected extension to the caller's realm under the caller's exact scoped `@extensions:authority` grant: the realm-wide uniform set gains the attachment through the shared store path, the member safe-state sweep follows, and a repeated attach is an idempotent no-op (no mutation, no duplicate audit). Never installs, dials, disconnects, detaches, or touches credentials.
 - **`inspectRealm`** — Inspects one realm under the caller's exact scoped `@realm:inspect` grant.
+- **`listExtensions`** — Lists the installed extensions and the caller realm's attachments under the caller's exact scoped `@extensions:authority` grant: install metadata (id/display name/kind/status), live connection state, and the available call names of connected conflict-free catalogs. Never transport URLs, credential ids, or realm ids.
 - **`updateRealm`** — Updates one realm under the caller's exact scoped `@realm:edit` grant.
 
 ### `RealmAdminProvenanceView` — interface
@@ -1154,9 +1244,9 @@ function handleToolError(code: ToolSystemErrorCode, message: string) {
 
 ## Doc coverage
 
-- Top-level exports: 41
-- Declarations (exports + members): 171
-- Documented declarations: 171 / 171 (100%)
+- Top-level exports: 45
+- Declarations (exports + members): 195
+- Documented declarations: 195 / 195 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): `AgentIdentityPort`, `AgentIdentityProjection`, `AgentIdentityScope`, `AgentRuntime`, `BundleFiles`, `ExtensionExecutionPort`, `ExtensionToolDescriptor`, `LifecyclePort`, `PendingInstancePayload`, `RealmTemplate`
