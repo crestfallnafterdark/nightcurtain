@@ -102,6 +102,12 @@ export interface AuthorityGrantRecord {
 }
 
 // @public
+export type AuthorityGrantSnapshotEntry = string | {
+    readonly ref: string;
+    readonly scope?: AuthorityScopeRecord;
+};
+
+// @public
 export interface AuthorityScopeRecord {
     readonly fields?: readonly string[];
     readonly ownSpawns?: boolean;
@@ -566,6 +572,10 @@ One frozen authority grant recorded in the registry authority inputs (M1): the e
 
 - **`id`** — Exact member of `AUTHORITY_IDS`.
 - **`scope`** — Optional narrowed bounds; absent = the id's default scope.
+
+### `AuthorityGrantSnapshotEntry` — type alias
+
+One exportable authority-grant entry (M2 scope persistence): either a bare canonical `(realmId, agentId)` identity key — the legacy keys-only form, restored unscoped — or a scoped `{ ref, scope? }` record carrying the registry-side narrowing. The entry is the persistence currency of the additive `authorityGrants` snapshot field, so a narrowed grant survives a save/hydrate restart instead of silently widening to the id's default scope. Scopes remain registry-side: they never reach a descriptor, the identity projection, or any model-facing surface.
 
 ### `AuthorityScopeRecord` — interface
 
@@ -1543,9 +1553,9 @@ The validated template reference
 
 ## Doc coverage
 
-- Top-level exports: 70
-- Declarations (exports + members): 223
-- Documented declarations: 223 / 223 (100%)
+- Top-level exports: 71
+- Declarations (exports + members): 224
+- Documented declarations: 224 / 224 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): `ToolPresetName`, `TriggerPolicy`

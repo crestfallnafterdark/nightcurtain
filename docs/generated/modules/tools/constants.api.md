@@ -21,14 +21,14 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 ## Invariants
 
 - Leaf: zero imports (including type-only); all exports are deterministic with no import-time side effects, and `TOOL_SYSTEM_ERROR_CODES`, `SANDBOX_TOOLS`, `INNATE_TOOLS`, `TOOL_PRESETS`, and every nested preset array are frozen.
-- Canonical taxonomy: `SANDBOX_TOOLS` enumerates exactly 36 unique `snake_case` tool names grouped across 7 substrate domains — VFS (12), messaging/mailbox (8), agent lifecycle (5), synchronous invocation (3), runtime scheduler (3), world clock & events (3), precall & reflection (2).
+- Canonical taxonomy: `SANDBOX_TOOLS` enumerates exactly 38 unique `snake_case` tool names grouped across 7 substrate domains — VFS (12), messaging/mailbox (8), agent lifecycle (7), synchronous invocation (3), runtime scheduler (3), world clock & events (3), precall & reflection (2).
 - Innate baseline primitives: `INNATE_TOOLS` is the frozen four-name list — `whoami`, `get_current_time`, `describe_tool`, `batch_precall` — augmented with a non-enumerable `has()` lookup.
 - Frozen error-code dictionary: `TOOL_SYSTEM_ERROR_CODES` freezes the canonical machine-readable codes (`TOOL_NOT_FOUND`, `PERMISSION_DENIED`, `INVALID_ARGUMENTS`, `SERVICE_UNAVAILABLE`, `PRECALL_FORBIDDEN`, `EXECUTION_FAILED`, `AGENT_ALREADY_EXISTS`); the dispatcher's universal error shield constrains every emitted failure receipt to this vocabulary, normalizing downstream subsystem codes outside it to `EXECUTION_FAILED`.
 - Tool-family taxonomy: `TOOL_FAMILIES` declares exactly one primary family — from the frozen 11-family vocabulary (`vfs.read`, `vfs.write`, `messaging.send`, `mailbox.read`, `mailbox.consume`, `lifecycle`, `invocation`, `scheduler`, `clock`, `world`, `precall`) — for every canonical `SANDBOX_TOOLS` entry; `FAMILY_TIER_PLAN` maps each family to its named tiers, and `TOOL_TIER_EXPOSURE` carries the explicit never/override decisions (an absent tool defaults to `'family'`).
 - Retired-selector window: `RETIRED_TOOL_SELECTORS` freezes the canonical `subagent_management` selector expansion (`spawn_agent`, `kill_agent`, `invoke_agent`, `undo_turn`, fixed legacy order), and `expandRetiredToolSelector` is a pure fail-closed lookup keyed by the canonical selector id only — spellings resolve through the alias normalizer.
 - Capability tiers: exactly five presets (`all`, `manager`, `collaborator`, `readonly_collaborator`, `readonly`), each a frozen string array; `all` is exactly `['*']`. The named tiers are generated once from the family taxonomy (innate baseline + `FAMILY_TIER_PLAN`/`TOOL_TIER_EXPOSURE`, canonical declaration order, duplicate-free) — no hand-enumerated member list exists, no tier carries the retired `subagent_management` selector, and every `INNATE_TOOLS` primitive (including `describe_tool`) is a member of every named tier. `includeReflection: false` still removes `describe_tool` from emitted schemas without changing tier membership.
 - Preset values are allowlist strings only: no execution-context or infrastructure configuration (model, provider, temperature, privilege/whitelist flags) is represented in the preset definitions.
-- Mutation-capability vocabulary: `MUTATING_TOOLS` and `READ_ONLY_TOOLS` partition every canonical `SANDBOX_TOOLS` entry exactly once (disjoint, union = the 36-name canonical set) as frozen arrays in canonical declaration order, and `isMutatingTool` is a pure membership probe over that vocabulary. The clock/event tools (`world_clock`, `event_list`) classify as mutating because they step simulation time and mutate VFS-backed event registries.
+- Mutation-capability vocabulary: `MUTATING_TOOLS` and `READ_ONLY_TOOLS` partition every canonical `SANDBOX_TOOLS` entry exactly once (disjoint, union = the 38-name canonical set) as frozen arrays in canonical declaration order, and `isMutatingTool` is a pure membership probe over that vocabulary. The clock/event tools (`world_clock`, `event_list`) classify as mutating because they step simulation time and mutate VFS-backed event registries.
 - Publishing-tool vocabulary: `PUBLISHING_TOOLS` freezes the two publishing tool names (`import_realm_template`, `submit_hydration_package`) outside the canonical taxonomy — they are explicit-grant-only meta tools, never wildcard-implied capabilities.
 - `resolveToolPreset` is a pure resolver: `null`/`undefined`/empty input returns `[]`, the wildcard string returns exactly `['*']`, named presets resolve case-insensitively to fresh copies (never the frozen stored arrays), comma-separated strings are split and trimmed, Sets/arrays are copied without mutation, and every entry whose canonical form is a retired selector expands in place to that selector's frozen tool list (fixed legacy order, no de-duplication).
 
@@ -101,6 +101,8 @@ export const SANDBOX_TOOLS: {
     readonly LIST_AGENTS: 'list_agents';
     readonly WHOAMI: 'whoami';
     readonly UNDO_TURN: 'undo_turn';
+    readonly INSPECT_AGENT: 'inspect_agent';
+    readonly UPDATE_AGENT: 'update_agent';
     readonly INVOKE_AGENT: 'invoke_agent';
     readonly WAIT_FOR_INVOCATION: 'wait_for_invocation';
     readonly WAIT_FOR_AGENT: 'wait_for_agent';
@@ -338,9 +340,9 @@ RETIRED_TOOL_SELECTORS.subagent_management; // ['spawn_agent', 'kill_agent', 'in
 
 ### `SANDBOX_TOOLS` — variable
 
-Master Sandbox Tools Enum (Canonical `snake_case` names for all 36 tools). Eliminates magic strings across turn execution engines, lifecycle managers, UI components, and test suites.
+Master Sandbox Tools Enum (Canonical `snake_case` names for all 38 tools). Eliminates magic strings across turn execution engines, lifecycle managers, UI components, and test suites.
 
-Grouped across 7 substrate domains: - **Virtual Filesystem (VFS)** (12 tools): `read_file`, `write_file`, `replace_file_content`, `copy_file`, `delete_file`, `list_files`, `write_json`, `query_json`, `json_patch`, `grep`, `set_permissions`, `concat_files` - **Messaging & Mailbox** (8 tools): `send_message`, `wait_for_mail`, `list_inbox`, `read_message`, `get_archive`, `inline_file_in_message`, `get_inbox`, `drain_inbox` - **Agent Lifecycle Management** (5 tools): `spawn_agent`, `kill_agent`, `list_agents`, `whoami`, `undo_turn` - **Synchronous Invocation** (3 tools): `invoke_agent`, `wait_for_invocation`, `wait_for_agent` - **Runtime Scheduler** (3 tools): `schedule`, `list_schedules`, `cancel_schedule` - **World Clock & Events** (3 tools): `world_clock`, `event_list`, `get_current_time` - **Precall & Reflection** (2 tools): `batch_precall`, `describe_tool`
+Grouped across 7 substrate domains: - **Virtual Filesystem (VFS)** (12 tools): `read_file`, `write_file`, `replace_file_content`, `copy_file`, `delete_file`, `list_files`, `write_json`, `query_json`, `json_patch`, `grep`, `set_permissions`, `concat_files` - **Messaging & Mailbox** (8 tools): `send_message`, `wait_for_mail`, `list_inbox`, `read_message`, `get_archive`, `inline_file_in_message`, `get_inbox`, `drain_inbox` - **Agent Lifecycle Management** (7 tools): `spawn_agent`, `kill_agent`, `list_agents`, `whoami`, `undo_turn`, `inspect_agent`, `update_agent` - **Synchronous Invocation** (3 tools): `invoke_agent`, `wait_for_invocation`, `wait_for_agent` - **Runtime Scheduler** (3 tools): `schedule`, `list_schedules`, `cancel_schedule` - **World Clock & Events** (3 tools): `world_clock`, `event_list`, `get_current_time` - **Precall & Reflection** (2 tools): `batch_precall`, `describe_tool`
 
 Enum of `string` values:
 
@@ -357,7 +359,7 @@ if (toolName === SANDBOX_TOOLS.SEND_MESSAGE) {
 
 ### `SandboxToolName` — type alias
 
-Union type representing all 36 canonical sandbox tool names.
+Union type representing all 38 canonical sandbox tool names.
 
 #### Examples
 
@@ -373,7 +375,7 @@ Tool-family assignment for every canonical `SANDBOX_TOOLS` entry (frozen).
 
 This is the **only** place a baked tool's family is written: the named capability tiers are derived from it through FAMILY_TIER_PLAN and TOOL_TIER_EXPOSURE, so adding or re-familying a tool updates the right tiers automatically. Mutation class is not duplicated here — it stays the existing `MUTATING_TOOLS`/`READ_ONLY_TOOLS` partition.
 
-Type: `Readonly<Record<SandboxToolName, ToolFamily>>` (exactly 36 keys).
+Type: `Readonly<Record<SandboxToolName, ToolFamily>>` (exactly 38 keys).
 
 #### Examples
 
@@ -389,7 +391,7 @@ Standard capability presets defining tool permission tiers for agents.
 
 Generated once (frozen) from the tool-family taxonomy: every named tier is the innate baseline plus its family members under FAMILY_TIER_PLAN/TOOL_TIER_EXPOSURE, filtered into canonical `SANDBOX_TOOLS` declaration order and duplicate-free — no hand-enumerated member list exists. The retired `subagent_management` selector is never a member; it is accepted only through the deprecated selector window (RETIRED_TOOL_SELECTORS) and expands to its four legacy tools.
 
-- `all`: Full access to all 36 sandbox tools (`['*']`). - `manager`: VFS manipulation, messaging, scheduling, subagent lifecycle, invocation, clock, and precall. - `collaborator`: Full VFS, messaging, scheduling, clock, and precall (no lifecycle/invocation). - `readonly_collaborator`: Read-only VFS, mailbox tools plus `send_message` (mail can be consumed by `read_message`/`get_inbox`), clock, and precall. - `readonly`: Read-only VFS, mailbox tools (mail can be consumed by `read_message`/`get_inbox`; no `send_message`), whoami, clock, and precall.
+- `all`: Full access to all 38 sandbox tools (`['*']`). - `manager`: VFS manipulation, messaging, scheduling, subagent lifecycle, invocation, clock, and precall. - `collaborator`: Full VFS, messaging, scheduling, clock, and precall (no lifecycle/invocation). - `readonly_collaborator`: Read-only VFS, mailbox tools plus `send_message` (mail can be consumed by `read_message`/`get_inbox`), clock, and precall. - `readonly`: Read-only VFS, mailbox tools (mail can be consumed by `read_message`/`get_inbox`; no `send_message`), whoami, clock, and precall.
 
 #### Examples
 

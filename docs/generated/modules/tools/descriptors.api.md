@@ -21,7 +21,7 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 ## Invariants
 
 - Frozen catalog: every descriptor, schema, alias map, and descriptor array is `Object.freeze`d; `TOOL_REGISTRY` is built once from `ALL_TOOL_DESCRIPTORS` as a null-prototype lookup table and frozen, with no registration or mutation path.
-- Authority meta tools: `AUTHORITY_TOOL_REGISTRY` carries every explicit-grant-only authority tool (the Wave U publishing pair today; the meta-plane phases append theirs), each declaring the exact authority id (`@template:authority`/`@hydration:authority`/…) its invocation requires; they are not members of `ALL_TOOL_DESCRIPTORS`/`TOOL_REGISTRY`, their schemas are exposed only through `getAuthorityToolSchemas()` for callers holding the matching exact id (with `getAuthorityToolDescriptors()` as the describe-merge source), and the wildcard `'*'`/`privileged` never satisfy them.
+- Authority meta tools: `AUTHORITY_TOOL_REGISTRY` carries every explicit-grant-only authority tool (the Wave U publishing pair today; the meta-plane phases append theirs), each declaring the exact authority id (`@template:authority`/`@hydration:authority`/…) its invocation requires; they are not members of `ALL_TOOL_DESCRIPTORS`/`TOOL_REGISTRY`, their schemas are exposed only through `getAuthorityToolSchemas()` for callers holding the matching exact id (with `getAuthorityToolDescriptors()` as the describe-merge source), and the wildcard `'*'`/`privileged` never satisfy them. The M2 `inspect_agent`/`update_agent` surfaces are the deliberate exception: they are **canonical** ordinary tools (manager preset) whose parental tier is inherent and whose meta tier is enforced registry-side by the lifecycle manager, so no `requiredAuthority` gate applies.
 - Fail-closed precalls: `batch_precall` denies any call whose name does not canonically resolve to a `PRECALL_ALLOWLIST` member, so unresolved or non-allowlisted names never reach the executor.
 
 ## Decisions
@@ -29,7 +29,7 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 - Identity-only caller scope: invocation, lifecycle, and scheduler handlers forward only the dispatcher-bound subject id plus the identity-port principal; per-call caller identity, privilege flags, and role aliases are never read
 - `invoke_agent` pins recursion depth from the trusted bound `currentDepth`, never from a per-call `depth` key
 - VFS and messaging sanitizers strip caller-supplied identity and mailbox-routing keys from the fresh sanitized parameter copy
-- Realm/authority meta tools stay outside the canonical taxonomy (36 names) so no wildcard, preset, or `toolProfile` selector can expose or authorize them; descriptors resolve exclusively through `AUTHORITY_TOOL_REGISTRY`, and the dispatcher consults the caller's frozen authority descriptor for the exact explicit authority
+- Realm/authority meta tools stay outside the canonical taxonomy (38 names) so no wildcard, preset, or `toolProfile` selector can expose or authorize them; descriptors resolve exclusively through `AUTHORITY_TOOL_REGISTRY`, and the dispatcher consults the caller's frozen authority descriptor for the exact explicit authority. `inspect_agent`/`update_agent` are ordinary canonical tools by design (M2): their schemas are preset-authorized, and the parental/meta verdict is enforced registry-side per target.
 
 ## Surface
 
@@ -46,9 +46,9 @@ export const AUTHORITY_TOOL_REGISTRY: Readonly<Record<string, AuthorityToolDescr
 export interface AuthorityToolDescriptor {
     readonly authority: string;
     readonly description: string;
-    // Warning: (ae-forgotten-export) The symbol "ToolParams_8" needs to be exported by the entry point index.d.ts
+    // Warning: (ae-forgotten-export) The symbol "ToolParams_9" needs to be exported by the entry point index.d.ts
     // Warning: (ae-forgotten-export) The symbol "ExecutionContext" needs to be exported by the entry point index.d.ts
-    readonly handler: (params: ToolParams_8, context: ExecutionContext) => unknown;
+    readonly handler: (params: ToolParams_9, context: ExecutionContext) => unknown;
     readonly name: string;
     readonly paramAliasMap: Readonly<Record<string, string>>;
     readonly sanitize: (rawArgs?: unknown) => Record<string, unknown>;
@@ -95,7 +95,7 @@ export const batch_precall: Readonly<{
         batch: "calls";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_7, context: ExecutionContext) => Promise<{
+    handler: (params: ToolParams_8, context: ExecutionContext) => Promise<{
         success: boolean;
         error: string;
         code: "INVALID_ARGUMENTS";
@@ -161,7 +161,7 @@ export const batchPrecall: Readonly<{
         batch: "calls";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_7, context: ExecutionContext) => Promise<{
+    handler: (params: ToolParams_8, context: ExecutionContext) => Promise<{
         success: boolean;
         error: string;
         code: "INVALID_ARGUMENTS";
@@ -227,7 +227,7 @@ export const batchPrecallDescriptor: Readonly<{
         batch: "calls";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_7, context: ExecutionContext) => Promise<{
+    handler: (params: ToolParams_8, context: ExecutionContext) => Promise<{
         success: boolean;
         error: string;
         code: "INVALID_ARGUMENTS";
@@ -280,7 +280,7 @@ export const cancel_schedule: Readonly<{
         id: "task_id";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_5 | string, context: ExecutionContext) => Promise<unknown>;
+    handler: (params: ToolParams_6 | string, context: ExecutionContext) => Promise<unknown>;
 }>;
 
 // @public
@@ -306,7 +306,7 @@ export const cancelSchedule: Readonly<{
         id: "task_id";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_5 | string, context: ExecutionContext) => Promise<unknown>;
+    handler: (params: ToolParams_6 | string, context: ExecutionContext) => Promise<unknown>;
 }>;
 
 // @public
@@ -332,7 +332,7 @@ export const cancelScheduleDescriptor: Readonly<{
         id: "task_id";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_5 | string, context: ExecutionContext) => Promise<unknown>;
+    handler: (params: ToolParams_6 | string, context: ExecutionContext) => Promise<unknown>;
 }>;
 
 // @public
@@ -385,7 +385,7 @@ export const clockToolDescriptors: readonly (Readonly<{
         time_string: "time";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_6, context: ExecutionContext) => Promise<unknown>;
+    handler: (params: ToolParams_7, context: ExecutionContext) => Promise<unknown>;
 }> | Readonly<{
     name: "event_list";
     description: "Query, register, resolve, or cancel world simulation events.";
@@ -436,7 +436,7 @@ export const clockToolDescriptors: readonly (Readonly<{
         description: "description";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_6, context: ExecutionContext) => Promise<unknown>;
+    handler: (params: ToolParams_7, context: ExecutionContext) => Promise<unknown>;
 }> | Readonly<{
     name: "get_current_time";
     description: "Retrieve current world clock time and formatted timestamp string.";
@@ -448,7 +448,7 @@ export const clockToolDescriptors: readonly (Readonly<{
     }>;
     paramAliasMap: Readonly<{}>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_6, context: ExecutionContext) => Promise<unknown>;
+    handler: (params: ToolParams_7, context: ExecutionContext) => Promise<unknown>;
 }>)[];
 
 // @public
@@ -710,7 +710,7 @@ export const describe_tool: Readonly<{
         tool: "tool_name";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_7, context: ExecutionContext) => Promise<{
+    handler: (params: ToolParams_8, context: ExecutionContext) => Promise<{
         success: boolean;
         tool_name: unknown;
         description: {};
@@ -753,7 +753,7 @@ export const describeTool: Readonly<{
         tool: "tool_name";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_7, context: ExecutionContext) => Promise<{
+    handler: (params: ToolParams_8, context: ExecutionContext) => Promise<{
         success: boolean;
         tool_name: unknown;
         description: {};
@@ -796,7 +796,7 @@ export const describeToolDescriptor: Readonly<{
         tool: "tool_name";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_7, context: ExecutionContext) => Promise<{
+    handler: (params: ToolParams_8, context: ExecutionContext) => Promise<{
         success: boolean;
         tool_name: unknown;
         description: {};
@@ -928,7 +928,7 @@ export const event_list: Readonly<{
         description: "description";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_6, context: ExecutionContext) => Promise<unknown>;
+    handler: (params: ToolParams_7, context: ExecutionContext) => Promise<unknown>;
 }>;
 
 // @public
@@ -982,7 +982,7 @@ export const eventList: Readonly<{
         description: "description";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_6, context: ExecutionContext) => Promise<unknown>;
+    handler: (params: ToolParams_7, context: ExecutionContext) => Promise<unknown>;
 }>;
 
 // @public
@@ -1036,7 +1036,7 @@ export const eventListDescriptor: Readonly<{
         description: "description";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_6, context: ExecutionContext) => Promise<unknown>;
+    handler: (params: ToolParams_7, context: ExecutionContext) => Promise<unknown>;
 }>;
 
 // @public
@@ -1081,7 +1081,7 @@ export const get_current_time: Readonly<{
     }>;
     paramAliasMap: Readonly<{}>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_6, context: ExecutionContext) => Promise<unknown>;
+    handler: (params: ToolParams_7, context: ExecutionContext) => Promise<unknown>;
 }>;
 
 // @public
@@ -1194,7 +1194,7 @@ export const getCurrentTime: Readonly<{
     }>;
     paramAliasMap: Readonly<{}>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_6, context: ExecutionContext) => Promise<unknown>;
+    handler: (params: ToolParams_7, context: ExecutionContext) => Promise<unknown>;
 }>;
 
 // @public
@@ -1209,7 +1209,7 @@ export const getCurrentTimeDescriptor: Readonly<{
     }>;
     paramAliasMap: Readonly<{}>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_6, context: ExecutionContext) => Promise<unknown>;
+    handler: (params: ToolParams_7, context: ExecutionContext) => Promise<unknown>;
 }>;
 
 // @public
@@ -1406,7 +1406,7 @@ export const import_realm_template: Readonly<{
         dryrun: "dry_run";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_8, context: ExecutionContext) => Partial<PublishingFailure> | {
+    handler: (params: ToolParams_9, context: ExecutionContext) => Partial<PublishingFailure> | {
         success: boolean;
         tool: "import_realm_template";
         templateId: string;
@@ -1471,7 +1471,7 @@ export const importRealmTemplate: Readonly<{
         dryrun: "dry_run";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_8, context: ExecutionContext) => Partial<PublishingFailure> | {
+    handler: (params: ToolParams_9, context: ExecutionContext) => Partial<PublishingFailure> | {
         success: boolean;
         tool: "import_realm_template";
         templateId: string;
@@ -1536,7 +1536,7 @@ export const importRealmTemplateDescriptor: Readonly<{
         dryrun: "dry_run";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_8, context: ExecutionContext) => Partial<PublishingFailure> | {
+    handler: (params: ToolParams_9, context: ExecutionContext) => Partial<PublishingFailure> | {
         success: boolean;
         tool: "import_realm_template";
         templateId: string;
@@ -1682,6 +1682,66 @@ export const inlineFileInMessageDescriptor: Readonly<{
 }>;
 
 // @public
+export const inspect_agent: Readonly<{
+    name: "inspect_agent";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {
+            target: {
+                type: string;
+                description: string;
+            };
+        };
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: (rawArgs?: unknown) => ToolParams_4;
+    handler: (params: ToolParams_4, context: ExecutionContext) => Promise<unknown>;
+}>;
+
+// @public
+export const inspectAgent: Readonly<{
+    name: "inspect_agent";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {
+            target: {
+                type: string;
+                description: string;
+            };
+        };
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: (rawArgs?: unknown) => ToolParams_4;
+    handler: (params: ToolParams_4, context: ExecutionContext) => Promise<unknown>;
+}>;
+
+// @public
+export const inspectAgentDescriptor: Readonly<{
+    name: "inspect_agent";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {
+            target: {
+                type: string;
+                description: string;
+            };
+        };
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: (rawArgs?: unknown) => ToolParams_4;
+    handler: (params: ToolParams_4, context: ExecutionContext) => Promise<unknown>;
+}>;
+
+// @public
 export const invocationToolDescriptors: readonly (Readonly<{
     name: "invoke_agent";
     description: "Dispatch a turn to another agent. Returns an invocation id immediately (fire-and-forget); call wait_for_invocation with that id to await the result, or wait_for_agent to await the target agent directly.";
@@ -1719,7 +1779,7 @@ export const invocationToolDescriptors: readonly (Readonly<{
         timeout: "timeout_ms";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_4 | string, context: ExecutionContext) => Promise<unknown>;
+    handler: (params: ToolParams_5 | string, context: ExecutionContext) => Promise<unknown>;
 }> | Readonly<{
     name: "wait_for_invocation";
     description: "Wait asynchronously for in-flight agent invocations to complete.";
@@ -1757,7 +1817,7 @@ export const invocationToolDescriptors: readonly (Readonly<{
         requireAll: "require_all";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_4, context: ExecutionContext) => Promise<unknown>;
+    handler: (params: ToolParams_5, context: ExecutionContext) => Promise<unknown>;
 }> | Readonly<{
     name: "wait_for_agent";
     description: "Wait for another agent's pending work to finish (blocks this turn), or register a one-shot completion wake (notify) that starts a new turn on this agent when the target finishes. Use wait_for_invocation when you already hold an invocation id.";
@@ -1792,7 +1852,7 @@ export const invocationToolDescriptors: readonly (Readonly<{
         timeout: "timeout_ms";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_4 | string, context: ExecutionContext) => Promise<unknown>;
+    handler: (params: ToolParams_5 | string, context: ExecutionContext) => Promise<unknown>;
 }>)[];
 
 // @public
@@ -1833,7 +1893,7 @@ export const invoke_agent: Readonly<{
         timeout: "timeout_ms";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_4 | string, context: ExecutionContext) => Promise<unknown>;
+    handler: (params: ToolParams_5 | string, context: ExecutionContext) => Promise<unknown>;
 }>;
 
 // @public
@@ -1874,7 +1934,7 @@ export const invokeAgent: Readonly<{
         timeout: "timeout_ms";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_4 | string, context: ExecutionContext) => Promise<unknown>;
+    handler: (params: ToolParams_5 | string, context: ExecutionContext) => Promise<unknown>;
 }>;
 
 // @public
@@ -1915,7 +1975,7 @@ export const invokeAgentDescriptor: Readonly<{
         timeout: "timeout_ms";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_4 | string, context: ExecutionContext) => Promise<unknown>;
+    handler: (params: ToolParams_5 | string, context: ExecutionContext) => Promise<unknown>;
 }>;
 
 // @public
@@ -2536,7 +2596,7 @@ export const list_schedules: Readonly<{
     }>;
     paramAliasMap: Readonly<{}>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_5, context: ExecutionContext) => Promise<unknown>;
+    handler: (params: ToolParams_6, context: ExecutionContext) => Promise<unknown>;
 }>;
 
 // @public
@@ -2745,7 +2805,7 @@ export const listSchedules: Readonly<{
     }>;
     paramAliasMap: Readonly<{}>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_5, context: ExecutionContext) => Promise<unknown>;
+    handler: (params: ToolParams_6, context: ExecutionContext) => Promise<unknown>;
 }>;
 
 // @public
@@ -2760,7 +2820,7 @@ export const listSchedulesDescriptor: Readonly<{
     }>;
     paramAliasMap: Readonly<{}>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_5, context: ExecutionContext) => Promise<unknown>;
+    handler: (params: ToolParams_6, context: ExecutionContext) => Promise<unknown>;
 }>;
 
 // @public
@@ -3006,6 +3066,102 @@ export const messagingToolDescriptors: readonly (Readonly<{
 }>)[];
 
 // @public
+export const metaToolDescriptors: readonly (Readonly<{
+    name: "inspect_agent";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {
+            target: {
+                type: string;
+                description: string;
+            };
+        };
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: (rawArgs?: unknown) => ToolParams_4;
+    handler: (params: ToolParams_4, context: ExecutionContext) => Promise<unknown>;
+}> | Readonly<{
+    name: "update_agent";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {
+            target: {
+                type: string;
+                description: string;
+            };
+            tools: {
+                type: string;
+                items: {
+                    type: string;
+                };
+                description: string;
+            };
+            allowedTools: {
+                type: string;
+                items: {
+                    type: string;
+                };
+                description: string;
+            };
+            toolPreset: {
+                type: string;
+                description: string;
+            };
+            privileged: {
+                type: string;
+                description: string;
+            };
+            triggerPolicy: {
+                type: string;
+                description: string;
+            };
+            systemPrompt: {
+                type: string;
+                description: string;
+            };
+            maxTurns: {
+                type: string;
+                minimum: number;
+                description: string;
+            };
+            name: {
+                type: string;
+                description: string;
+            };
+        };
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: typeof sanitizeMetaUpdateParams;
+    handler: (params: ToolParams_4, context: ExecutionContext) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | {
+        success: boolean;
+        error: string;
+        code: "PERMISSION_DENIED";
+        result?: undefined;
+    } | {
+        [x: string]: unknown;
+        success?: undefined;
+        error?: undefined;
+        code?: undefined;
+        result?: undefined;
+    } | {
+        success: boolean;
+        result: AgentUpdateReceipt & any[];
+        error?: undefined;
+        code?: undefined;
+    }>;
+}>)[];
+
+// @public
 export const precallToolDescriptors: readonly (Readonly<{
     name: "batch_precall";
     description: "Execute an ordered batch of allowlisted pre-computation tool calls prior to conversational actions; the allowlist admits mail consumption and clock/event stepping, while VFS writes, agent lifecycle mutations, scheduler mutations, outbound messaging, and direct invocation are forbidden.";
@@ -3041,7 +3197,7 @@ export const precallToolDescriptors: readonly (Readonly<{
         batch: "calls";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_7, context: ExecutionContext) => Promise<{
+    handler: (params: ToolParams_8, context: ExecutionContext) => Promise<{
         success: boolean;
         error: string;
         code: "INVALID_ARGUMENTS";
@@ -3090,7 +3246,7 @@ export const precallToolDescriptors: readonly (Readonly<{
         tool: "tool_name";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_7, context: ExecutionContext) => Promise<{
+    handler: (params: ToolParams_8, context: ExecutionContext) => Promise<{
         success: boolean;
         tool_name: unknown;
         description: {};
@@ -3772,7 +3928,7 @@ export const schedule: Readonly<{
         timerCondition: "condition";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_5, context: ExecutionContext) => Promise<unknown>;
+    handler: (params: ToolParams_6, context: ExecutionContext) => Promise<unknown>;
 }>;
 
 // @public
@@ -3809,7 +3965,7 @@ export const scheduleDescriptor: Readonly<{
         timerCondition: "condition";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_5, context: ExecutionContext) => Promise<unknown>;
+    handler: (params: ToolParams_6, context: ExecutionContext) => Promise<unknown>;
 }>;
 
 // @public
@@ -3846,7 +4002,7 @@ export const schedulerToolDescriptors: readonly (Readonly<{
         timerCondition: "condition";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_5, context: ExecutionContext) => Promise<unknown>;
+    handler: (params: ToolParams_6, context: ExecutionContext) => Promise<unknown>;
 }> | Readonly<{
     name: "list_schedules";
     description: "List all active, pending, or triggered schedules and timers.";
@@ -3858,7 +4014,7 @@ export const schedulerToolDescriptors: readonly (Readonly<{
     }>;
     paramAliasMap: Readonly<{}>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_5, context: ExecutionContext) => Promise<unknown>;
+    handler: (params: ToolParams_6, context: ExecutionContext) => Promise<unknown>;
 }> | Readonly<{
     name: "cancel_schedule";
     description: "Cancel an active or pending scheduled task by its task ID.";
@@ -3881,7 +4037,7 @@ export const schedulerToolDescriptors: readonly (Readonly<{
         id: "task_id";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_5 | string, context: ExecutionContext) => Promise<unknown>;
+    handler: (params: ToolParams_6 | string, context: ExecutionContext) => Promise<unknown>;
 }>)[];
 
 // @public
@@ -4428,7 +4584,7 @@ export const submit_hydration_package: Readonly<{
         dryrun: "dry_run";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_8, context: ExecutionContext) => Partial<PublishingFailure> | {
+    handler: (params: ToolParams_9, context: ExecutionContext) => Partial<PublishingFailure> | {
         success: boolean;
         tool: "submit_hydration_package";
         templateId: string;
@@ -4490,7 +4646,7 @@ export const submitHydrationPackage: Readonly<{
         dryrun: "dry_run";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_8, context: ExecutionContext) => Partial<PublishingFailure> | {
+    handler: (params: ToolParams_9, context: ExecutionContext) => Partial<PublishingFailure> | {
         success: boolean;
         tool: "submit_hydration_package";
         templateId: string;
@@ -4552,7 +4708,7 @@ export const submitHydrationPackageDescriptor: Readonly<{
         dryrun: "dry_run";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_8, context: ExecutionContext) => Partial<PublishingFailure> | {
+    handler: (params: ToolParams_9, context: ExecutionContext) => Partial<PublishingFailure> | {
         success: boolean;
         tool: "submit_hydration_package";
         templateId: string;
@@ -4668,6 +4824,243 @@ export const undoTurnDescriptor: Readonly<{
         reason: unknown;
         targetTurnId: unknown;
     } | null | undefined>;
+}>;
+
+// @public
+export const update_agent: Readonly<{
+    name: "update_agent";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {
+            target: {
+                type: string;
+                description: string;
+            };
+            tools: {
+                type: string;
+                items: {
+                    type: string;
+                };
+                description: string;
+            };
+            allowedTools: {
+                type: string;
+                items: {
+                    type: string;
+                };
+                description: string;
+            };
+            toolPreset: {
+                type: string;
+                description: string;
+            };
+            privileged: {
+                type: string;
+                description: string;
+            };
+            triggerPolicy: {
+                type: string;
+                description: string;
+            };
+            systemPrompt: {
+                type: string;
+                description: string;
+            };
+            maxTurns: {
+                type: string;
+                minimum: number;
+                description: string;
+            };
+            name: {
+                type: string;
+                description: string;
+            };
+        };
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: typeof sanitizeMetaUpdateParams;
+    handler: (params: ToolParams_4, context: ExecutionContext) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | {
+        success: boolean;
+        error: string;
+        code: "PERMISSION_DENIED";
+        result?: undefined;
+    } | {
+        [x: string]: unknown;
+        success?: undefined;
+        error?: undefined;
+        code?: undefined;
+        result?: undefined;
+    } | {
+        success: boolean;
+        result: AgentUpdateReceipt & any[];
+        error?: undefined;
+        code?: undefined;
+    }>;
+}>;
+
+// @public
+export const updateAgent: Readonly<{
+    name: "update_agent";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {
+            target: {
+                type: string;
+                description: string;
+            };
+            tools: {
+                type: string;
+                items: {
+                    type: string;
+                };
+                description: string;
+            };
+            allowedTools: {
+                type: string;
+                items: {
+                    type: string;
+                };
+                description: string;
+            };
+            toolPreset: {
+                type: string;
+                description: string;
+            };
+            privileged: {
+                type: string;
+                description: string;
+            };
+            triggerPolicy: {
+                type: string;
+                description: string;
+            };
+            systemPrompt: {
+                type: string;
+                description: string;
+            };
+            maxTurns: {
+                type: string;
+                minimum: number;
+                description: string;
+            };
+            name: {
+                type: string;
+                description: string;
+            };
+        };
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: typeof sanitizeMetaUpdateParams;
+    handler: (params: ToolParams_4, context: ExecutionContext) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | {
+        success: boolean;
+        error: string;
+        code: "PERMISSION_DENIED";
+        result?: undefined;
+    } | {
+        [x: string]: unknown;
+        success?: undefined;
+        error?: undefined;
+        code?: undefined;
+        result?: undefined;
+    } | {
+        success: boolean;
+        result: AgentUpdateReceipt & any[];
+        error?: undefined;
+        code?: undefined;
+    }>;
+}>;
+
+// @public
+export const updateAgentDescriptor: Readonly<{
+    name: "update_agent";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {
+            target: {
+                type: string;
+                description: string;
+            };
+            tools: {
+                type: string;
+                items: {
+                    type: string;
+                };
+                description: string;
+            };
+            allowedTools: {
+                type: string;
+                items: {
+                    type: string;
+                };
+                description: string;
+            };
+            toolPreset: {
+                type: string;
+                description: string;
+            };
+            privileged: {
+                type: string;
+                description: string;
+            };
+            triggerPolicy: {
+                type: string;
+                description: string;
+            };
+            systemPrompt: {
+                type: string;
+                description: string;
+            };
+            maxTurns: {
+                type: string;
+                minimum: number;
+                description: string;
+            };
+            name: {
+                type: string;
+                description: string;
+            };
+        };
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: typeof sanitizeMetaUpdateParams;
+    handler: (params: ToolParams_4, context: ExecutionContext) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | {
+        success: boolean;
+        error: string;
+        code: "PERMISSION_DENIED";
+        result?: undefined;
+    } | {
+        [x: string]: unknown;
+        success?: undefined;
+        error?: undefined;
+        code?: undefined;
+        result?: undefined;
+    } | {
+        success: boolean;
+        result: AgentUpdateReceipt & any[];
+        error?: undefined;
+        code?: undefined;
+    }>;
 }>;
 
 // @public
@@ -5286,7 +5679,7 @@ export const wait_for_agent: Readonly<{
         timeout: "timeout_ms";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_4 | string, context: ExecutionContext) => Promise<unknown>;
+    handler: (params: ToolParams_5 | string, context: ExecutionContext) => Promise<unknown>;
 }>;
 
 // @public
@@ -5327,7 +5720,7 @@ export const wait_for_invocation: Readonly<{
         requireAll: "require_all";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_4, context: ExecutionContext) => Promise<unknown>;
+    handler: (params: ToolParams_5, context: ExecutionContext) => Promise<unknown>;
 }>;
 
 // @public
@@ -5399,7 +5792,7 @@ export const waitForAgent: Readonly<{
         timeout: "timeout_ms";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_4 | string, context: ExecutionContext) => Promise<unknown>;
+    handler: (params: ToolParams_5 | string, context: ExecutionContext) => Promise<unknown>;
 }>;
 
 // @public
@@ -5437,7 +5830,7 @@ export const waitForAgentDescriptor: Readonly<{
         timeout: "timeout_ms";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_4 | string, context: ExecutionContext) => Promise<unknown>;
+    handler: (params: ToolParams_5 | string, context: ExecutionContext) => Promise<unknown>;
 }>;
 
 // @public
@@ -5478,7 +5871,7 @@ export const waitForInvocation: Readonly<{
         requireAll: "require_all";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_4, context: ExecutionContext) => Promise<unknown>;
+    handler: (params: ToolParams_5, context: ExecutionContext) => Promise<unknown>;
 }>;
 
 // @public
@@ -5519,7 +5912,7 @@ export const waitForInvocationDescriptor: Readonly<{
         requireAll: "require_all";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_4, context: ExecutionContext) => Promise<unknown>;
+    handler: (params: ToolParams_5, context: ExecutionContext) => Promise<unknown>;
 }>;
 
 // @public
@@ -5670,7 +6063,7 @@ export const world_clock: Readonly<{
         time_string: "time";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_6, context: ExecutionContext) => Promise<unknown>;
+    handler: (params: ToolParams_7, context: ExecutionContext) => Promise<unknown>;
 }>;
 
 // @public
@@ -5723,7 +6116,7 @@ export const worldClock: Readonly<{
         time_string: "time";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_6, context: ExecutionContext) => Promise<unknown>;
+    handler: (params: ToolParams_7, context: ExecutionContext) => Promise<unknown>;
 }>;
 
 // @public
@@ -5776,7 +6169,7 @@ export const worldClockDescriptor: Readonly<{
         time_string: "time";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_6, context: ExecutionContext) => Promise<unknown>;
+    handler: (params: ToolParams_7, context: ExecutionContext) => Promise<unknown>;
 }>;
 
 // @public
@@ -6144,15 +6537,18 @@ export const writeJsonDescriptor: Readonly<{
 
 // Warnings were encountered during analysis:
 //
-// <declarations>/tools/descriptors/clockTools.d.ts:439:5 - (ae-forgotten-export) The symbol "ToolParams_6" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/invocationTools.d.ts:465:5 - (ae-forgotten-export) The symbol "ToolParams_4" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/lifecycleTools.d.ts:451:5 - (ae-forgotten-export) The symbol "ToolParams_3" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/lifecycleTools.d.ts:891:5 - (ae-forgotten-export) The symbol "PublicAgentDescriptor" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/lifecycleTools.d.ts:925:5 - (ae-forgotten-export) The symbol "UndoTurnPortResult" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/clockTools.d.ts:439:5 - (ae-forgotten-export) The symbol "ToolParams_7" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/invocationTools.d.ts:465:5 - (ae-forgotten-export) The symbol "ToolParams_5" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/lifecycleTools.d.ts:481:5 - (ae-forgotten-export) The symbol "ToolParams_3" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/lifecycleTools.d.ts:921:5 - (ae-forgotten-export) The symbol "PublicAgentDescriptor" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/lifecycleTools.d.ts:955:5 - (ae-forgotten-export) The symbol "UndoTurnPortResult" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/messagingTools.d.ts:823:5 - (ae-forgotten-export) The symbol "ToolParams_2" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/precallTools.d.ts:187:5 - (ae-forgotten-export) The symbol "ToolParams_7" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/metaTools.d.ts:95:5 - (ae-forgotten-export) The symbol "ToolParams_4" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/metaTools.d.ts:415:5 - (ae-forgotten-export) The symbol "sanitizeMetaUpdateParams" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/metaTools.d.ts:433:9 - (ae-forgotten-export) The symbol "AgentUpdateReceipt" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/precallTools.d.ts:187:5 - (ae-forgotten-export) The symbol "ToolParams_8" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/realmTools.d.ts:290:5 - (ae-forgotten-export) The symbol "PublishingFailure" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/schedulerTools.d.ts:220:5 - (ae-forgotten-export) The symbol "ToolParams_5" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/schedulerTools.d.ts:220:5 - (ae-forgotten-export) The symbol "ToolParams_6" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/vfsTools.d.ts:713:5 - (ae-forgotten-export) The symbol "ToolParams" needs to be exported by the entry point index.d.ts
 ```
 
@@ -6160,7 +6556,7 @@ export const writeJsonDescriptor: Readonly<{
 
 ### `ALL_TOOL_DESCRIPTORS` — variable
 
-Array of all 36 Canonical Tool Descriptors
+Array of all 38 Canonical Tool Descriptors
 
 ### `AUTHORITY_TOOL_REGISTRY` — variable
 
@@ -6412,6 +6808,18 @@ Args: `file_path`, `recipient` (both required), optional `message`. Delegates to
 
 The path is resolved through the caller's workspace view by the VirtualFS: private by default, `/global/...` for the shared workspace, and `/agents/<agentId>/...` for an authorized peer mount. The delegated bus read carries the pinned caller identity and private-workspace binding, never a tool-argument workspace claim (tickets a50f109, cf5e707).
 
+### `inspect_agent` — variable
+
+snake_case alias of `inspectAgentDescriptor`.
+
+### `inspectAgent` — variable
+
+camelCase alias of `inspectAgentDescriptor`.
+
+### `inspectAgentDescriptor` — variable
+
+`inspect_agent` descriptor — inspect one target agent under the parental (inherent; registered direct spawns in the caller's own realm) or meta (exact scoped `@agent:inspect`) tier. Self-inspection is allowed. Every unauthorized target shares one uniform, realm-opaque `PERMISSION_DENIED`.
+
 ### `invocationToolDescriptors` — variable
 
 Array of all Invocation Tool Descriptors
@@ -6531,6 +6939,10 @@ Declares no parameters; delegates to `context.lifecyclePort.listSchedules({}, sc
 ### `messagingToolDescriptors` — variable
 
 Array of all 8 Messaging Tool Descriptors
+
+### `metaToolDescriptors` — variable
+
+Array of the M2 meta-plane agent descriptors, appended to the canonical `ALL_TOOL_DESCRIPTORS` catalog by `tools/descriptors/index.ts` (M3-M5b extend this file with their own authority-gated descriptors).
 
 ### `precallToolDescriptors` — variable
 
@@ -6728,6 +7140,18 @@ camelCase alias of `undoTurnDescriptor`.
 
 Args: optional `target_turn_id` selector. Delegates to `context.lifecyclePort.undoAgentTurn()` and maps port failures to `{success:false, error, code, reason, targetTurnId}`; throws when the port is missing. The target reference is the dispatcher-pinned canonical `callerKey` when the caller resolved realm-exactly, else the bound bare subject (Wave I, ticket d57cbc1; I2-V F1), so a same-literal-id caller undoes its own turn instead of failing not-found on the ambiguous bare id.
 
+### `update_agent` — variable
+
+snake_case alias of `updateAgentDescriptor`.
+
+### `updateAgent` — variable
+
+camelCase alias of `updateAgentDescriptor`.
+
+### `updateAgentDescriptor` — variable
+
+`update_agent` descriptor — update one target agent's editable settings under the parental (inherent; registered direct spawns in the caller's own realm) or meta (exact scoped `@agent:edit`) tier. Editable: tool selector, privilege, trigger policy, system prompt, maxTurns, and name. The edit applies at the target's next safe state; the resulting state can never out-rank the caller. Operator-only keys fail the whole call.
+
 ### `vfsToolDescriptors` — variable
 
 Array of all 12 Virtual Filesystem (VFS) Tool Descriptors
@@ -6836,10 +7260,10 @@ Args: `file_path` (required), exactly one of inline `data` or file-sourced `data
 
 ## Doc coverage
 
-- Top-level exports: 129
-- Declarations (exports + members): 136
-- Documented declarations: 136 / 136 (100%)
+- Top-level exports: 136
+- Declarations (exports + members): 143
+- Documented declarations: 143 / 143 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
-- Referenced but not exported (`ae-forgotten-export`): `ExecutionContext`, `JsonSchemaDraft07`, `PublicAgentDescriptor`, `PublishingFailure`, `ToolDescriptor`, `ToolParams`, `ToolParams_2`, `ToolParams_3`, `ToolParams_4`, `ToolParams_5`, `ToolParams_6`, `ToolParams_7`, `ToolParams_8`, `UndoTurnPortResult`
+- Referenced but not exported (`ae-forgotten-export`): `AgentUpdateReceipt`, `ExecutionContext`, `JsonSchemaDraft07`, `PublicAgentDescriptor`, `PublishingFailure`, `sanitizeMetaUpdateParams`, `ToolDescriptor`, `ToolParams`, `ToolParams_2`, `ToolParams_3`, `ToolParams_4`, `ToolParams_5`, `ToolParams_6`, `ToolParams_7`, `ToolParams_8`, `ToolParams_9`, `UndoTurnPortResult`
 - Unresolved `{@link}` targets (`ae-unresolved-link`): 8 (policy `none`; see `scripts/api_reports.mjs`)

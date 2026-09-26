@@ -35,7 +35,7 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 
 - `SubsystemEmitPort` is the frozen emit-only DI port handed to MOD-9/10/11/12 subsystem constructors; emit failures are swallowed and never propagate into subsystem execution
 - `PersistencePort` is the frozen snapshot/import-only handoff from MOD-13 to MOD-6 via MOD-14; no mutation path beyond the declared import/restore calls
-- `LifecyclePort` is the frozen facade-delegation port consumed by MOD-8 descriptors, including the `whoami`/`undoAgentTurn` additions
+- `LifecyclePort` is the frozen facade-delegation port consumed by MOD-8 descriptors, including the `whoami`/`undoAgentTurn` additions and the M2 parental/meta `inspectAgent`/`updateAgent` members (identity-only caller scope; the lifecycle manager owns the tier verdict)
 - `AgentIdentityPort` is the frozen identity-resolution surface injected as `ToolExecutionPort.getAgentIdentity` for MOD-8/MOD-10; it carries the agent's frozen registry `AuthorityDescriptor`, built once at launch from trusted config, never caller claims, plus the canonical `(realmId, agentId)` identity `key` and the realm-exact/bypass resolution scopes
 - Realm scope rides the same frozen projection: every projection carries `realmId` (owner-controlled `config.realmId`, `null` = the bootstrap-only system scope) and `realmBypass`. `realmBypass` is `true` iff the registry authority inputs carry the `realmBypass` grant — the engine bootstrap's hardcoded composition or an operator grant through the lifecycle grant API — and is never derived from an agent id; the operator/engine branch of the locked bypass rule is the opaque `InternalPrincipal`, which substrates check by exact reference (it has no agent id and never appears here), and agent authority — including the wildcard `'*'` — never bypasses without a grant
 - Authority is the frozen `AuthorityDescriptor` (`subject`/`kind`/`allow`/`extensions`/`visibility`/`realmBypass`) built once at construction from trusted config; there is no `privileged` boolean, admission is default-deny, reserved ids (`admin`/`director`/`system`) are ordinary identifiers, and every denial is uniform `PERMISSION_DENIED`
@@ -53,6 +53,14 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 ## Surface
 
 ```ts
+// @public
+export interface AgentAuthoritySummary {
+    readonly authorities: readonly string[];
+    readonly baked: readonly string[];
+    readonly extensions: readonly string[];
+    readonly privileged: boolean;
+}
+
 // @public
 export interface AgentConfig {
     allowedTools?: string[] | '*';
@@ -125,6 +133,7 @@ export interface AgentFilterOptions {
 // @public
 export interface AgentIdentityDescriptor {
     allowedTools: string[];
+    authorities: readonly string[];
     createdAt: number;
     id: string;
     name: string;
@@ -157,6 +166,31 @@ export interface AgentIdentityProjection {
 export interface AgentIdentityScope {
     readonly realmBypass?: boolean;
     readonly realmId?: string | null;
+}
+
+// @public
+export interface AgentInspectProjection {
+    readonly authorities?: readonly string[];
+    readonly createdAt: number | null;
+    readonly id: string;
+    readonly model: {
+        readonly presetId?: string;
+        readonly modelId?: string;
+        readonly providerId?: string;
+    };
+    readonly name: string;
+    readonly privileged: boolean;
+    readonly role: string;
+    readonly spawnedBy?: string | null;
+    readonly state: string;
+    readonly stateDetail?: string | null;
+    readonly tools: {
+        readonly baked: readonly string[];
+        readonly extensions: readonly string[];
+    };
+    readonly turns: number;
+    readonly unreadCount: number;
+    readonly workspace: string | null;
 }
 
 // @public
@@ -214,6 +248,7 @@ export class AgentRuntime {
     hasRecycledAgent(agentId: string): boolean;
     importSchedules(schedulesList: ScheduledTaskSnapshot[]): void;
     importSnapshot(snapshot: RuntimeSnapshot): void;
+    inspectAgent(targetRef: string, callerContext?: object | null): AgentInspectProjection;
     // Warning: (ae-forgotten-export) The symbol "InvocationEngine" needs to be exported by the entry point index.d.ts
     get invocationEngine(): InvocationEngine;
     // Warning: (ae-forgotten-export) The symbol "InvocationReceipt" needs to be exported by the entry point index.d.ts
@@ -229,6 +264,8 @@ export class AgentRuntime {
         principal?: InternalPrincipal | AuthorityDescriptor;
     }) | AgentConfig, arg2?: unknown, arg3?: unknown, arg4?: unknown): Promise<Agent>;
     listAgents(options?: AgentFilterOptions): Agent[];
+    // Warning: (ae-forgotten-export) The symbol "AuthorityGrantSnapshotEntry" needs to be exported by the entry point index.d.ts
+    listAuthorityGrantRecords(): Record<string, readonly AuthorityGrantSnapshotEntry[]>;
     listAuthorityGrants(): Record<string, string[]>;
     listMetaAuthorityGrants(): {
         template: string[];
@@ -256,7 +293,7 @@ export class AgentRuntime {
     restoreAgent(agentId: string, callerContext?: (CallerContext & {
         principal?: InternalPrincipal | AuthorityDescriptor;
     }) | null): Agent;
-    restoreAuthorityGrants(grants: Record<string, readonly string[]> | null | undefined, callerContext?: {
+    restoreAuthorityGrants(grants: Record<string, readonly AuthorityGrantSnapshotEntry[]> | null | undefined, callerContext?: {
         principal?: InternalPrincipal | AuthorityDescriptor;
     } | null): Record<string, string[]>;
     restoreMetaAuthorityGrants(grants: {
@@ -297,6 +334,7 @@ export class AgentRuntime {
     unstickAgent(agentId: string, reason?: string, callerContext?: (CallerContext & {
         principal?: InternalPrincipal | AuthorityDescriptor;
     }) | null): UnstickResult;
+    updateAgent(targetRef: string, patch: object, callerContext?: object | null): AgentUpdateReceipt;
     updateAgentConfig(agentId: string, updatedConfig: Partial<AgentLaunchConfig>, callerContext?: (CallerContext & {
         principal?: InternalPrincipal | AuthorityDescriptor;
     }) | null): Agent;
@@ -381,6 +419,18 @@ export interface AgentTelemetry {
     readonly toolExecutionCount: number;
     readonly totalTokens: number;
     readonly turnCount: number;
+}
+
+// @public
+export interface AgentUpdateReceipt {
+    readonly after: AgentAuthoritySummary | null;
+    readonly applied: boolean;
+    readonly before: AgentAuthoritySummary;
+    readonly deferred: boolean;
+    readonly fields: readonly string[];
+    readonly success: true;
+    readonly target: string;
+    readonly tier: 'parental' | 'meta';
 }
 
 // @public
@@ -484,6 +534,7 @@ export interface LaunchHistoryEntry {
 // @public
 export interface LifecyclePort {
     cancelSchedule(timerIdOrParams: object | string, reason?: string | null, context?: object): object;
+    inspectAgent(targetRef: string, callerContext?: object | null): AgentInspectProjection;
     invokeAgent(invokerId: string, targetAgentId: string, prompt: string, options?: object): object;
     killAgent(agentId: string, reason?: string, callerContext?: object | null): boolean;
     launchAgent(config: object, ...rest: unknown[]): Promise<Agent>;
@@ -496,6 +547,7 @@ export interface LifecyclePort {
     restoreAgent(agentId: string, callerContext?: object | null): Agent;
     schedule(params: object, context?: object): object;
     undoAgentTurn(agentId: string, targetTurnId?: string | null): UndoResult | UndoTurnSelectionFailure;
+    updateAgent(targetRef: string, patch: object, callerContext?: object | null): AgentUpdateReceipt;
     waitForAgent(targetAgentId: string, options?: object, context?: object): Promise<WaitForAgentResult>;
     waitForInvocation(optionsOrIds: object | string[] | string, options?: object, context?: object): Promise<WaitForInvocationResult>;
     whoami(agentId: string): AgentIdentityDescriptor;
@@ -824,6 +876,17 @@ export type WaitForMailResult = WaitForMailSuccessResult | WaitForMailFailureRes
 
 ## API docs
 
+### `AgentAuthoritySummary` — interface
+
+Host-side authority summary of one agent (M2 audit/receipt payload): the canonical baked tool list (`['*']` under wildcard capability), the privilege flag, the extension call names, and the held authority ids. Never carries scopes, realm ids, workspaces, or credentials.
+
+#### Members
+
+- **`authorities`** — Held explicit authority ids (never scopes).
+- **`baked`** — Effective baked tool names (canonical); `['*']` under wildcard capability.
+- **`extensions`** — Effective extension call names (exact sanitized names).
+- **`privileged`** — Whether the agent's trusted effective state is privileged/wildcard.
+
 ### `AgentConfig` — interface
 
 Agent Entity Configuration Declaration.
@@ -950,6 +1013,7 @@ console.log(`Agent ${identity.name} has role ${identity.role}, privileged: ${ide
 #### Members
 
 - **`allowedTools`** — List of permitted tool names
+- **`authorities`** — Explicit authority ids granted to this registration (M2): own ids only, never scopes, never realm vocabulary.
 - **`createdAt`** — Epoch millisecond creation timestamp
 - **`id`** — Unique agent identifier
 - **`name`** — Human-readable display name
@@ -997,6 +1061,27 @@ Trusted resolution scope accepted by the frozen identity port (Wave I, ticket d5
 
 - **`realmBypass`** — Resolve the unique match across every Realm (`realmId` then only narrows nothing).
 - **`realmId`** — Realm membership to resolve exactly; `null` selects the system scope.
+
+### `AgentInspectProjection` — interface
+
+Bounded host-side inspection projection of one target agent (M2 `inspect_agent`). The descriptor handler masks the raw workspace label to its realm-opaque form before it reaches a model-facing receipt.
+
+#### Members
+
+- **`authorities`** — Own authority ids; present for self-inspection only.
+- **`createdAt`** — Epoch creation timestamp, or `null` when absent.
+- **`id`** — Bare realm-local agent id.
+- **`model`** — Bounded model-config summary (catalog identifiers only; never URLs or credentials).
+- **`name`** — Display name.
+- **`privileged`** — Trusted effective privilege flag.
+- **`role`** — Role label.
+- **`spawnedBy`** — Bare parent id; present only for the parent or a meta-scoped caller.
+- **`state`** — Lifecycle state.
+- **`stateDetail`** — State detail when recorded.
+- **`tools`** — Effective tool policy: canonical baked list plus extension call names.
+- **`turns`** — Cumulative completed turn count.
+- **`unreadCount`** — Pending unread mailbox count.
+- **`workspace`** — Raw configured workspace label (the tool handler masks it realm-opaquely).
 
 ### `AgentLaunchConfig` — type alias
 
@@ -1088,6 +1173,7 @@ const snapshot = runtime.exportSnapshot();
 - **`hasRecycledAgent`** — Returns true if exactly one recycled agent carries the given identifier (an id recycled in two Realms resolves `false` — fail closed); a canonical identity key resolves its exact registration (Wave I, ticket d57cbc1).
 - **`importSchedules`** — Hydrates scheduled timers from a persisted snapshot.
 - **`importSnapshot`** — Atomically restores runtime state from a serialized snapshot (fail-closed). Validates and hydrates every entity before mutating the current registry, so a malformed snapshot leaves prior runtime state intact and surfaces `ERR_SNAPSHOT_INVALID`. Hydrated authority is default-deny for every record (a snapshot contributes no grant, the director included): the persisted body hydrates through the entity snapshot contract, and the composition root re-applies persisted `realmBypass` grants explicitly through `restoreRealmBypassGrants` (Wave I, ticket c02d0b9). Active lifecycle claims are normalized before hydration: active entries hydrate IDLE and terminal/recycled claims route to the recycle bin (d5b583d).
+- **`inspectAgent`** — Inspects one target agent under the M2 parental/meta tiers (facade pass-through to the lifecycle manager). The caller context carries the identity-only caller scope; the manager resolves the caller descriptor, the target, and the tier verdict registry-side and never reads authority claims. Every unauthorized target shares one uniform, realm-opaque `PERMISSION_DENIED`.
 - **`invocationEngine`** — Access to underlying invocation engine substrate.
 - **`invokeAgent`** — Dispatches a direct subagent RPC invocation. Returns an InvocationReceipt.
 - **`isAgentBusy`** — Checks if an agent has an in-flight turn promise or is in running, waiting_for_message, waiting_for_input, waiting_for_dependents, or canceling.
@@ -1096,6 +1182,7 @@ const snapshot = runtime.exportSnapshot();
 - **`killAgent`** — Soft-kills an active agent, moving it to the recycle bin and cancelling in-flight work. Authorization runs first: the lifecycle manager validates the caller before any state mutation, so a denied kill leaves the victim's timers, messages, and mailbox untouched. Scheduled-timer teardown runs only after the kill succeeds.
 - **`launchAgent`** — Launches and registers a new agent instance in the runtime. Enforces universal AgentModelConfig resolution and security gating. The unified options object may declare a trusted baked prologue (`history`): the lifecycle composes `[system message, ...declared entries]` with launch-generated ids (INV-7) and no model call — only `initialPrompt` triggers a turn. Legacy positional launches carry no declared history.
 - **`listAgents`** — Returns a defensive list of currently active registered agents. Optionally filtered by criteria. Realm wave A, ticket 3487c56: the additive `realmId` filter is applied verbatim (`null`/empty selects ungrouped agents); the operator/store path passes no scope and stays unscoped.
+- **`listAuthorityGrantRecords`** — Lists the exportable authority-grant entries of active agents (M2) with their registry-side scopes: an unscoped grant stays a bare canonical identity-key string (the legacy keys-only form), a scoped grant becomes a frozen `{ ref, scope }` record. The composition root persists this listing into the additive `authorityGrants` snapshot field, so a narrowed grant survives save/hydrate restart instead of silently restoring unscoped (M1 finding F3). Host-only: scopes never reach a descriptor, an identity projection, a model-facing schema, a receipt, or an audit payload.
 - **`listAuthorityGrants`** — Lists the canonical `(realmId, agentId)` identity keys of the active agents currently holding explicit authority grants (M1), grouped per authority id. The listing is registry state, not authority: it lets the composition root persist and restore grants across a snapshot cycle. Canonical keys make the persisted lists realm-exact; they are internal-only and never appear on an agent-facing surface. Ids with no holder are omitted.
 - **`listMetaAuthorityGrants`** — Lists the canonical `(realmId, agentId)` identity keys of the active agents currently holding the Wave U publishing-authority grants (ticket 2518510). The listing is registry state, not authority: it lets the composition root persist and restore grants across a snapshot cycle. Canonical keys make the persisted lists realm-exact; they are internal-only and never appear on an agent-facing surface.
 - **`listRealmBypassGrants`** — Lists the canonical `(realmId, agentId)` identity keys of the active agents currently holding the `realmBypass` grant (Wave I, ticket d57cbc1; fix lane G2). The listing is registry state, not authority: it lets the composition root persist and restore grants across a snapshot cycle. Canonical keys make the persisted list realm-exact, so a scoped grant on a same-id pair survives the round-trip; the key is internal-only and never appears on an agent-facing surface. Unknown and recycled ids never appear (a recycled record carries no grant).
@@ -1108,7 +1195,7 @@ const snapshot = runtime.exportSnapshot();
 - **`redoAgentTurn`** — Redoes the most recently undone turn bundle for an agent from the redo stack.
 - **`reset`** — Flushes active runtime state: cancels in-flight turns, clears agent registries, unbinds bus subscriptions, and resets underlying primitives.
 - **`restoreAgent`** — Restores an agent from the recycle bin back to active idle status. Authority gate (MOD-21 W8, default-deny): a principal is mandatory; a record whose live-construction descriptor would regain authority (`privileged` or wildcard tools) requires lifecycle authority.
-- **`restoreAuthorityGrants`** — Restores persisted authority grants after snapshot hydration (M1). Engine-only path: the caller must present the exact injected `InternalPrincipal` reference. Each ref is granted through the generic grant core under the operator principal; unknown authority ids are skipped, and ids that are unknown, recycled, or ambiguous resolve no registration and are skipped (fail-closed), so a tampered snapshot id can never mint a grant. Entries are canonical `(realmId, agentId)` identity keys as emitted by listAuthorityGrants, resolving each key to its exact registration. Legacy snapshots that persisted bare ids still hydrate through the unique-match rule; an ambiguous bare id resolves no registration and is skipped, so a legacy grant is never duplicated across two Realms.
+- **`restoreAuthorityGrants`** — Restores persisted authority grants after snapshot hydration (M1; scoped entries M2). Engine-only path: the caller must present the exact injected `InternalPrincipal` reference. Each entry is granted through the generic grant core under the operator principal; unknown authority ids are skipped, ids that are unknown, recycled, or ambiguous resolve no registration and are skipped (fail-closed), and a malformed scope drops only its own entry, so a tampered snapshot can never mint or widen a grant. Entries are either canonical `(realmId, agentId)` identity-key strings (the legacy keys-only form, restored unscoped) or `{ ref, scope? }` records carrying the registry-side narrowing, as emitted by listAuthorityGrantRecords. Legacy snapshots that persisted bare ids still hydrate through the unique-match rule; an ambiguous bare id resolves no registration and is skipped, so a legacy grant is never duplicated across two Realms.
 - **`restoreMetaAuthorityGrants`** — Restores persisted Wave U publishing-authority grants after snapshot hydration (ticket 2518510). Engine-only path: the caller must present the exact injected `InternalPrincipal` reference. Each entry is granted through the lifecycle gate; ids that are unknown or not active are skipped (fail-closed), so a tampered snapshot id can never mint a grant. Entries are canonical `(realmId, agentId)` identity keys as emitted by listMetaAuthorityGrants; legacy bare ids still hydrate through the unique-match rule, and an ambiguous bare id is skipped rather than duplicated across Realms.
 - **`restoreRealmBypassGrants`** — Restores persisted `realmBypass` grants after snapshot hydration. Engine-only path: the caller must present the exact injected `InternalPrincipal` reference. Each entry is granted through the lifecycle gate; ids that are unknown or not active are skipped (fail-closed), so a tampered snapshot id can never mint a grant. Entries are canonical `(realmId, agentId)` identity keys as emitted by listRealmBypassGrants, resolving their exact registration. Legacy snapshots that persisted bare ids still hydrate through the unique-match rule; an ambiguous bare id resolves no registration and is skipped, so a legacy grant is never duplicated across two Realms.
 - **`retryAgentTurn`** — Retries the most recent user turn for an agent, re-running execution.
@@ -1123,6 +1210,7 @@ const snapshot = runtime.exportSnapshot();
 - **`triggerQueue`** — Access to underlying trigger queue substrate.
 - **`undoAgentTurn`** — Undoes the most recent turn bundle for an agent, pushing to the redo stack. An explicit `targetTurnId` (message `id` or `metadata.turnId`) selects an earlier turn in place; blank values behave as "no target" and an unmatched target returns a structured `{ success: false, reason, targetTurnId }` failure without mutating history.
 - **`unstickAgent`** — Emergency unstick engine: cancels stuck promises and resets agent state to 'idle'. Authority gate (MOD-21 W8, default-deny): a principal is mandatory; sudoer, parent creator, or the agent itself may unstick.
+- **`updateAgent`** — Updates one target agent's editable settings under the M2 parental/meta tiers (facade pass-through to the lifecycle manager). A busy target is deferred to its next safe state; a sanctioned flush applies the edit exactly once through the same intrinsic channel as `updateAgentConfig`.
 - **`updateAgentConfig`** — Dynamically updates an agent's configuration, prompt directives, and model bindings. Authority-bearing fields (`privileged`, privilege flags, `admin`/`system` role claims) require `callerContext` to resolve to a principal whose frozen registry `AuthorityDescriptor` allows `@lifecycle:authority`. Anonymous and unprivileged callers are denied before mutation.
 - **`updateHistoryMessage`** — Updates an existing message in an agent's history in-place.
 - **`virtualFs`** — Access to underlying virtual filesystem substrate.
@@ -1227,6 +1315,21 @@ console.log(`Total tokens used: ${metrics.totalTokens} across ${metrics.turnCoun
 - **`toolExecutionCount`** — Cumulative number of tool executions performed by this agent.
 - **`totalTokens`** — Cumulative total tokens (`inputTokens + cachedInputTokens + outputTokens`).
 - **`turnCount`** — Cumulative execution turns completed by the agent ($n ≥ 0$).
+
+### `AgentUpdateReceipt` — interface
+
+Receipt returned by the M2 `update_agent` surface: which tier authorized the edit, whether it applied immediately or was deferred to the target's next safe state, and the before/after authority summaries.
+
+#### Members
+
+- **`after`** — Authority summary after an applied edit; `null` when deferred.
+- **`applied`** — Whether the edit applied during the call (false when deferred).
+- **`before`** — Authority summary before the edit.
+- **`deferred`** — Whether the edit is queued for the target's next safe state.
+- **`fields`** — Ratified field tokens the patch touched.
+- **`success`** — Always `true`; a denied or malformed edit throws (the tool boundary maps it to a failure receipt).
+- **`target`** — Bare realm-local target id.
+- **`tier`** — Authorizing tier.
 
 ### `AuthorityDescriptor` — interface
 
@@ -1485,6 +1588,7 @@ Canonical frozen lifecycle port consumed by tool descriptors.
 #### Members
 
 - **`cancelSchedule`** — Cancels a scheduled task via `AgentRuntime.cancelSchedule`, forwarding the diagnostic `reason` and the trusted `context` unchanged. Privilege and caller identity are read only from `context`.
+- **`inspectAgent`** — Inspects one target agent under the M2 parental/meta tiers: the caller must be the target's registered direct parent (same realm) or hold the exact scoped `@agent:inspect` grant, or be the target itself. Denials are uniform and realm-opaque.
 - **`invokeAgent`** — Dispatches a subagent invocation via `AgentRuntime.invokeAgent`.
 - **`killAgent`** — Kills an agent via `AgentRuntime.killAgent`, coercing a successful kill to `true`. Unknown agents throw `NOT_FOUND`, invalid ids throw `INVALID_CONFIG`, and unauthorized callers throw `PERMISSION_DENIED`; this member never returns `false`.
 - **`launchAgent`** — Launches an agent via `AgentRuntime.launchAgent`, forwarding any extra positional arguments after `config`.
@@ -1494,6 +1598,7 @@ Canonical frozen lifecycle port consumed by tool descriptors.
 - **`restoreAgent`** — Restores a recycled agent via `AgentRuntime.restoreAgent`, forwarding the caller context unchanged.
 - **`schedule`** — Schedules a deferred task via `AgentRuntime.schedule`, forwarding `params` and the trusted `context` unchanged. Privilege, caller identity, and Realm scope are read only from `context`.
 - **`undoAgentTurn`** — Undoes the most recent turn bundle for an agent, optionally targeting a specific turn, and pushes it onto the redo stack.
+- **`updateAgent`** — Updates one target agent's editable settings under the M2 parental/meta tiers: the caller must be the target's registered direct parent (same realm) or hold the exact scoped `@agent:edit` grant, the resulting state must not out-rank the caller, and operator-only keys are rejected. A busy target defers the edit to its next `turn_complete`.
 - **`waitForAgent`** — Waits for another agent's next settled turn (bounded output), or registers a one-shot completion wake, via `AgentRuntime.waitForAgent` (ticket 17b5c47). Agent-facing port path: the trusted `context` carries the identity-only caller scope. A call with no caller context is caller-scoped but unresolved and therefore fails closed with `PERMISSION_DENIED`; a resolved caller must be the target itself, the target's registered parent creator, an `'*'`/`'@lifecycle:authority'` holder, or a Realm-bypass principal, and a non-bypass caller stays confined to its own Realm scope.
 - **`waitForInvocation`** — Waits for invocation completion via `AgentRuntime.waitForInvocation`. Agent-facing port path (Realm wave A, ticket 3487c56): the trusted `context` carries the identity-only caller scope. A call with no caller context is caller-scoped but unresolved and therefore fails closed with `PERMISSION_DENIED`; a resolved caller must be the invocation's invoker, its target, or a Realm-bypass principal.
 - **`whoami`** — Identity and permission descriptor for the given agent (mirrors `AgentRuntime.whoami`).
@@ -2127,10 +2232,10 @@ Narrow on `success` to obtain the fully-populated delivery projection; the failu
 
 ## Doc coverage
 
-- Top-level exports: 56
-- Declarations (exports + members): 448
-- Documented declarations: 448 / 448 (100%)
+- Top-level exports: 59
+- Declarations (exports + members): 483
+- Documented declarations: 483 / 483 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
-- Referenced but not exported (`ae-forgotten-export`): `Agent`, `AGENT_STATES`, `AgentModelConfig`, `AgentSecurityContext`, `AgentTelemetry_2`, `AuthorityGrantRecord`, `AuthorityScopeRecord`, `CancelScheduleSuccessReceipt`, `CredentialResolverPort`, `EngineModel`, `EngineStreamChunk`, `ExecutionErrorCode`, `ExecutionStatus`, `ExtensionExecutionPort`, `ExtensionToolProviderPort`, `HistoryToolCall`, `InterruptedTurn`, `InvocationEngine`, `InvocationReceipt`, `InvocationSingleResult`, `LaunchAgentOptions`, `MessagingBus`, `ModelPresetSourcePort`, `OrchestratorActionMode`, `RealmPublishingPort`, `ScheduledTaskProjection`, `ScheduleErrorReceipt`, `SchedulerStatus`, `ScheduleSuccessReceipt`, `TimerCondition`, `ToolCallRecord`, `TriggerPolicy`, `TriggerQueue`, `TurnInputObject`, `UndoTurnSelectionFailure`, `VirtualFS`, `WaitForMailFailureResult`, `WaitForMailSuccessResult`, `WorldClock`
+- Referenced but not exported (`ae-forgotten-export`): `Agent`, `AGENT_STATES`, `AgentModelConfig`, `AgentSecurityContext`, `AgentTelemetry_2`, `AuthorityGrantRecord`, `AuthorityGrantSnapshotEntry`, `AuthorityScopeRecord`, `CancelScheduleSuccessReceipt`, `CredentialResolverPort`, `EngineModel`, `EngineStreamChunk`, `ExecutionErrorCode`, `ExecutionStatus`, `ExtensionExecutionPort`, `ExtensionToolProviderPort`, `HistoryToolCall`, `InterruptedTurn`, `InvocationEngine`, `InvocationReceipt`, `InvocationSingleResult`, `LaunchAgentOptions`, `MessagingBus`, `ModelPresetSourcePort`, `OrchestratorActionMode`, `RealmPublishingPort`, `ScheduledTaskProjection`, `ScheduleErrorReceipt`, `SchedulerStatus`, `ScheduleSuccessReceipt`, `TimerCondition`, `ToolCallRecord`, `TriggerPolicy`, `TriggerQueue`, `TurnInputObject`, `UndoTurnSelectionFailure`, `VirtualFS`, `WaitForMailFailureResult`, `WaitForMailSuccessResult`, `WorldClock`
 - Unresolved `{@link}` targets (`ae-unresolved-link`): 20 (policy `none`; see `scripts/api_reports.mjs`)

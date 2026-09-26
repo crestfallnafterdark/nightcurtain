@@ -215,6 +215,8 @@ export const SANDBOX_TOOLS: {
     readonly LIST_AGENTS: 'list_agents';
     readonly WHOAMI: 'whoami';
     readonly UNDO_TURN: 'undo_turn';
+    readonly INSPECT_AGENT: 'inspect_agent';
+    readonly UPDATE_AGENT: 'update_agent';
     readonly INVOKE_AGENT: 'invoke_agent';
     readonly WAIT_FOR_INVOCATION: 'wait_for_invocation';
     readonly WAIT_FOR_AGENT: 'wait_for_agent';
@@ -651,9 +653,9 @@ const setTools = resolveToolPreset(new Set(['read_file', 'get_current_time']));
 
 ### `SANDBOX_TOOLS` — variable
 
-Master Sandbox Tools Enum (Canonical `snake_case` names for all 36 tools). Eliminates magic strings across turn execution engines, lifecycle managers, UI components, and test suites.
+Master Sandbox Tools Enum (Canonical `snake_case` names for all 38 tools). Eliminates magic strings across turn execution engines, lifecycle managers, UI components, and test suites.
 
-Grouped across 7 substrate domains: - **Virtual Filesystem (VFS)** (12 tools): `read_file`, `write_file`, `replace_file_content`, `copy_file`, `delete_file`, `list_files`, `write_json`, `query_json`, `json_patch`, `grep`, `set_permissions`, `concat_files` - **Messaging & Mailbox** (8 tools): `send_message`, `wait_for_mail`, `list_inbox`, `read_message`, `get_archive`, `inline_file_in_message`, `get_inbox`, `drain_inbox` - **Agent Lifecycle Management** (5 tools): `spawn_agent`, `kill_agent`, `list_agents`, `whoami`, `undo_turn` - **Synchronous Invocation** (3 tools): `invoke_agent`, `wait_for_invocation`, `wait_for_agent` - **Runtime Scheduler** (3 tools): `schedule`, `list_schedules`, `cancel_schedule` - **World Clock & Events** (3 tools): `world_clock`, `event_list`, `get_current_time` - **Precall & Reflection** (2 tools): `batch_precall`, `describe_tool`
+Grouped across 7 substrate domains: - **Virtual Filesystem (VFS)** (12 tools): `read_file`, `write_file`, `replace_file_content`, `copy_file`, `delete_file`, `list_files`, `write_json`, `query_json`, `json_patch`, `grep`, `set_permissions`, `concat_files` - **Messaging & Mailbox** (8 tools): `send_message`, `wait_for_mail`, `list_inbox`, `read_message`, `get_archive`, `inline_file_in_message`, `get_inbox`, `drain_inbox` - **Agent Lifecycle Management** (7 tools): `spawn_agent`, `kill_agent`, `list_agents`, `whoami`, `undo_turn`, `inspect_agent`, `update_agent` - **Synchronous Invocation** (3 tools): `invoke_agent`, `wait_for_invocation`, `wait_for_agent` - **Runtime Scheduler** (3 tools): `schedule`, `list_schedules`, `cancel_schedule` - **World Clock & Events** (3 tools): `world_clock`, `event_list`, `get_current_time` - **Precall & Reflection** (2 tools): `batch_precall`, `describe_tool`
 
 Enum of `string` values:
 
@@ -722,7 +724,7 @@ const out = await dispatcher.executeTool('get_current_time', {});
 
 ### `SandboxToolName` — type alias
 
-Union type representing all 36 canonical sandbox tool names.
+Union type representing all 38 canonical sandbox tool names.
 
 #### Examples
 
@@ -752,7 +754,7 @@ Standard capability presets defining tool permission tiers for agents.
 
 Generated once (frozen) from the tool-family taxonomy: every named tier is the innate baseline plus its family members under FAMILY_TIER_PLAN/TOOL_TIER_EXPOSURE, filtered into canonical `SANDBOX_TOOLS` declaration order and duplicate-free — no hand-enumerated member list exists. The retired `subagent_management` selector is never a member; it is accepted only through the deprecated selector window (RETIRED_TOOL_SELECTORS) and expands to its four legacy tools.
 
-- `all`: Full access to all 36 sandbox tools (`['*']`). - `manager`: VFS manipulation, messaging, scheduling, subagent lifecycle, invocation, clock, and precall. - `collaborator`: Full VFS, messaging, scheduling, clock, and precall (no lifecycle/invocation). - `readonly_collaborator`: Read-only VFS, mailbox tools plus `send_message` (mail can be consumed by `read_message`/`get_inbox`), clock, and precall. - `readonly`: Read-only VFS, mailbox tools (mail can be consumed by `read_message`/`get_inbox`; no `send_message`), whoami, clock, and precall.
+- `all`: Full access to all 38 sandbox tools (`['*']`). - `manager`: VFS manipulation, messaging, scheduling, subagent lifecycle, invocation, clock, and precall. - `collaborator`: Full VFS, messaging, scheduling, clock, and precall (no lifecycle/invocation). - `readonly_collaborator`: Read-only VFS, mailbox tools plus `send_message` (mail can be consumed by `read_message`/`get_inbox`), clock, and precall. - `readonly`: Read-only VFS, mailbox tools (mail can be consumed by `read_message`/`get_inbox`; no `send_message`), whoami, clock, and precall.
 
 #### Examples
 

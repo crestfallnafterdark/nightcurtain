@@ -40,7 +40,7 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 - Legacy snapshots that omit `recycleBin` are accepted and normalized to `[]` during hydration
 - Additive MOD-20 topology fields `activePresetId`/`customPresets` round-trip as plain data: serialization emits them from session metadata, validation drops structurally invalid values instead of failing the snapshot, and legacy snapshots without the fields load byte-compatibly
 - Additive realm-registry field `realms` round-trips as plain data: serialization emits only the canonical record fields from session metadata, validation drops structurally invalid entries instead of failing the snapshot, and legacy snapshots without the field load byte-compatibly with an empty registry
-- Additive authority fields `metaAuthorityGrants`/`authorityGrants`/`templateAuthorityTrust` round-trip as plain data emitted from session metadata only when non-empty (legacy snapshots stay byte-identical) and are strictly validated fail-closed: malformed shapes reject the snapshot, proto-pollution keys are rejected by the recursive scan, and hydration never derives authority from any field — grants are re-applied through the composition root's lifecycle-gated restore (unknown authority ids and unknown/recycled refs skipped) and trust only auto-approves exact declared matches at a later launch
+- Additive authority fields `metaAuthorityGrants`/`authorityGrants`/`templateAuthorityTrust` round-trip as plain data emitted from session metadata only when non-empty (legacy snapshots stay byte-identical) and are strictly validated fail-closed: malformed shapes reject the snapshot, proto-pollution keys are rejected by the recursive scan, and hydration never derives authority from any field — grants are re-applied through the composition root's lifecycle-gated restore (unknown authority ids, unknown/recycled refs, and malformed scopes skipped fail-closed; a scoped `{ ref, scope }` entry keeps its narrowing across the restart — M1 finding F3) and trust only auto-approves exact declared matches at a later launch
 - Additive saved hydration-payload library field `savedInstancePayloads` round-trips as plain data emitted from session metadata only when non-empty (legacy snapshots stay byte-identical): malformed, duplicate-id, and oversize entries are dropped individually, the entry list is capped, payloads are never validated as launch contracts at load (only at attach), and hydration replaces the in-memory library with the persisted set (absent field → empty)
 - Persistence does not re-wire runtime timer listeners on restore; the `MessagingBus` timer-listener lifecycle is owned by `AgentRuntime`
 
@@ -106,8 +106,10 @@ export interface HistoryMessageSnapshot {
 // @public
 export function loadSandboxState(options?: StorageOptions): SandboxPersistedState | null;
 
+// Warning: (ae-forgotten-export) The symbol "AuthorityGrantSnapshotEntry" needs to be exported by the entry point index.d.ts
+//
 // @public
-export type PersistedAuthorityGrants = Readonly<Record<string, readonly string[]>>;
+export type PersistedAuthorityGrants = Readonly<Record<string, readonly AuthorityGrantSnapshotEntry[]>>;
 
 // @public
 export interface PersistedExtensionInstallRecord {
@@ -700,7 +702,7 @@ if (state) {
 
 ### `PersistedAuthorityGrants` — type alias
 
-Structural shape of the additive generic authority-grant field (M1): authority id → canonical `(realmId, agentId)` identity keys. Persistence never imports the runtime vocabulary — ids are validated as non-empty strings and unknown ids are skipped fail-closed by the composition-root restore. The field carries only non-publishing ids (the Wave U pair keeps the legacy `metaAuthorityGrants` field byte-identically) and is emitted only when at least one generic grant is active, so grant-free and legacy sessions keep their persisted bytes unchanged. Hydration re-applies grants exclusively through the composition-root restore; the lists are never derived from template/config content.
+Structural shape of the additive generic authority-grant field (M1; scoped entries M2): authority id → export entries. An entry is either a canonical `(realmId, agentId)` identity-key string (the legacy keys-only form, restored unscoped) or a `{ ref, scope? }` record carrying the registry-side narrowing, so a narrowed grant survives save/hydrate restart instead of silently widening (M1 finding F3). Persistence never imports the runtime vocabulary — ids are validated as non-empty strings, scopes as plain records, and unknown ids/malformed scopes are skipped fail-closed by the composition-root restore. The field carries only non-publishing ids (the Wave U pair keeps the legacy `metaAuthorityGrants` field byte-identically) and is emitted only when at least one generic grant is active, so grant-free and legacy sessions keep their persisted bytes unchanged. Hydration re-applies grants exclusively through the composition-root restore; the lists are never derived from template/config content.
 
 ### `PersistedExtensionInstallRecord` — interface
 
@@ -1383,5 +1385,5 @@ Serialized file record within a virtual filesystem workspace partition. Mirrors 
 - Documented declarations: 262 / 262 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
-- Referenced but not exported (`ae-forgotten-export`): `AgentRuntime`, `AgentState`, `InterruptedTurn`, `MessageEnvelope`, `MessagingBus`, `PartitionClockSnapshot`, `SchedulerStatus`, `TimerCondition`, `VirtualFS`, `WorldClock`, `WorldEvent`
+- Referenced but not exported (`ae-forgotten-export`): `AgentRuntime`, `AgentState`, `AuthorityGrantSnapshotEntry`, `InterruptedTurn`, `MessageEnvelope`, `MessagingBus`, `PartitionClockSnapshot`, `SchedulerStatus`, `TimerCondition`, `VirtualFS`, `WorldClock`, `WorldEvent`
 - Unresolved `{@link}` targets (`ae-unresolved-link`): 0 (policy `none`; see `scripts/api_reports.mjs`)

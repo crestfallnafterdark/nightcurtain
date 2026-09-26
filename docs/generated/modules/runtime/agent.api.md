@@ -15,6 +15,7 @@
   - `../../inference/index.ts`
   - `type-only ../../inference/ProviderInterface/index.ts`
   - `../../modelConfig/index.ts`
+  - `../../realmCatalog/index.ts`
   - `type-only ../../credentialVault/index.ts`
   - `type-only ../../presetCatalog/index.ts`
   - `type-only ../index.ts`
@@ -219,6 +220,7 @@ export interface AgentDescriptor {
 export interface AgentIdentityDescriptor {
     readonly agentId: string;
     readonly allowedTools: string[];
+    readonly authorities: readonly string[];
     readonly name: string;
     readonly privileged: boolean;
     readonly role: string;
@@ -636,6 +638,7 @@ const identity: AgentIdentityDescriptor = {
 
 - **`agentId`** — Unique agent identifier
 - **`allowedTools`** — Allowed tool names
+- **`authorities`** — Explicit authority ids granted to this agent (own ids only, M2). Scopes are registry-side and deliberately never surface here.
 - **`name`** — Display name
 - **`privileged`** — Whether agent has sudo/privileged status. Legacy boolean projection of `config.privileged` retained for wire compatibility; authority decisions read the runtime registry `AuthorityDescriptor`, and this boolean remains the fallback only for hosts whose identity projection lacks `authority`.
 - **`role`** — Role string
@@ -1125,8 +1128,8 @@ const result: UndoTurnResult = {
 ## Doc coverage
 
 - Top-level exports: 28
-- Declarations (exports + members): 228
-- Documented declarations: 228 / 228 (100%)
+- Declarations (exports + members): 229
+- Documented declarations: 229 / 229 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): `AuthorityDescriptor`, `CredentialResolverPort`, `ModelInterface`, `ModelPresetSourcePort`, `ProviderInterface`
