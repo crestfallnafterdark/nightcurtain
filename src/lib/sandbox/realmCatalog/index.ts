@@ -68,6 +68,7 @@
  * @invariant INV-RESOLVED-GRANTS: Plans and capability summaries carry tool grants resolved through the canonical tool-constants resolver; classification uses the canonical mutation vocabulary, the aggregate subagent-management selector expands to its canonical tools, and declared legacy requirement ids and extension tool references (`providerId::serverToolName`) resolve to their derived model-facing call names (`deriveToolCallName`: every character outside `[A-Za-z0-9_]` becomes `_`, per character, with no collapsing, case folding, or trimming) in `grants` without a mutation classification, while the declared requirement id or reference remains the authoring identity (and the future `resolvedTools` key); derived call names are unique per template and never collide with a reserved baked/publishing name, and provider resolution and connection belong to the extension wave.
  * @invariant INV-PRIVILEGE-HONEST: A privileged spec reports effective wildcard capability in its summary, matching the runtime authority derivation, so previews never understate what a launched agent can do.
  * @invariant INV-DECLARED-AUTHORITIES: `AgentSpec.authorities` declares publishing-grant requests as non-empty unique strings and is inert data — validation accepts identifiers unknown to the host (`KNOWN_AGENT_AUTHORITIES` lists the known set), `templateUnsupportedAuthorities()` reports declared-but-unknown ids for the launch gate to fail closed on, and materialization copies the declarations verbatim onto `RealmLaunchAgentPlan.authorities` (empty when none declared) without ever granting anything: approval and grant application belong exclusively to the launch seam.
+ * @invariant INV-AUTHORITY-VOCABULARY: the runtime vocabulary is the frozen `AUTHORITY_IDS` array (publishing pair + meta-plane ids, declaration order) and the template-declarable set stays exactly the publishing pair `KNOWN_AGENT_AUTHORITIES` (decision A15) — meta ids are operator-minted runtime capabilities, never template-declarable; `AUTHORITY_SCOPE_FIELDS` is the frozen per-id editable field-token vocabulary of a grant scope, and neither scopes nor meta ids ever reach a model-facing surface.
  * @invariant INV-NO-MODEL-LITERALS: The catalog contains no model identifiers, endpoints, credentials, or provider implementations; model-preset ids pass through verbatim, tool selectors resolve through the canonical preset resolver, and `providers` entries are concrete extension requests with the legacy `toolContract` accepted on the compatibility path — both shape-validated but never resolved or connected.
  * @decision Agent ids materialize as trimmed literal strings with no realm-derived prefix; the retired `{realm}` placeholder is rejected at validation with a clear message, per-key overrides win over patterns, and every resolved id is ordinary — the historically reserved `director` identity included, because ids confer no authority under the principal model
  * @decision A tool profile declares exactly one of a canonical preset name or an explicit tools list; presets resolve through the tool constants, explicit lists pass through in declared order, and the capability summary canonicalizes alias spellings before classification so the preview matches dispatcher authorization
@@ -108,12 +109,14 @@ export {
   validateTemplate
 } from './validation.ts';
 export { deriveToolCallName } from '../tools/normalizers/index.ts';
-export { AGENT_AUTHORITIES, KNOWN_AGENT_AUTHORITIES } from './types.ts';
+export { AGENT_AUTHORITIES, AUTHORITY_IDS, AUTHORITY_SCOPE_FIELDS, KNOWN_AGENT_AUTHORITIES } from './types.ts';
 export { REALM_CATALOG_ERROR_CODES, RealmCatalogError } from './errors.ts';
 export type { RealmCatalogErrorCode } from './errors.ts';
 
 export type {
   AgentCapabilitySummary,
+  AuthorityGrantRecord,
+  AuthorityScopeRecord,
   BakedTemplateBundle,
   BundleFiles,
   CapabilityWildcardSource,

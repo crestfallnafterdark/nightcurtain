@@ -9,6 +9,7 @@
  * @module runtime/agentLifecycle
  * @mayImport ../agent/index.ts
  * @mayImport ../../tools/constants/index.ts
+ * @mayImport ../../realmCatalog/index.ts
  * @mayImport ../../virtualFs/index.ts
  * @mayImport type-only ../../messagingBus/index.ts
  * @mayImport type-only ../../invocationEngine/index.ts
@@ -42,7 +43,7 @@
  * @decision Launch, kill, update, and descriptor-visibility authority is the frozen registry `AuthorityDescriptor` resolved from a trusted principal (rejected as anonymous when absent); caller-asserted `AgentSecurityContext` flags and authority-bearing roles are ignored, and only the `callerAgentId` identity claim is honored through registry resolution
  * @decision `updateAgentConfig` rejects authority-bearing fields (`privileged`, `isAdmin`/`isPrivileged`, `admin`/`system` roles, the parentage fields `spawnedBy`/`creatorId`, the Realm membership field `realmId`, and capability selectors whose resolved allow set carries the wildcard `'*'` or `@lifecycle:authority` — `allowedTools`/`tools`/`toolPreset`/`role` aliases included) with `PERMISSION_DENIED` unless the caller principal holds `@lifecycle:authority`; authority edits are operator-API-only. Realm membership is strictly immutable: any `realmId` key is denied for every caller before the authority verdict — the injected `InternalPrincipal` included — so membership changes only by terminate + relaunch into the target realm. The `realmBypass` key is likewise denied for every caller before the authority verdict; grants are applied only through the engine bootstrap or the operator grant/revoke API
  * @decision `realmBypass` is a revocable operator/engine grant recorded in the frozen registry authority inputs (`AuthorityInputRecord.realmBypass`) and rebuilt into the `AuthorityDescriptor`; `grantRealmBypass`/`revokeRealmBypass` accept only the exact injected `InternalPrincipal` reference and only active agents, emit an audit event, and never move Realm membership or touch the capability axis. Killing/purging drops the grant with the authority inputs, so a recycled record carries no grant; hydration restores grants only through the composition root's `restoreRealmBypassGrants`
- * @invariant INV-META-AUTHORITY: the explicit publishing authorities `@template:authority`/`@hydration:authority` are revocable operator/engine grants recorded in the frozen registry authority inputs (`AuthorityInputRecord.templateAuthority`/`hydrationAuthority`) and rebuilt into the `AuthorityDescriptor` allow set as the exact ids; `grantTemplateAuthority`/`revokeTemplateAuthority`/`grantHydrationAuthority`/`revokeHydrationAuthority` accept only the exact injected `InternalPrincipal` reference and only active agents, emit audit events (`template_authority_granted`/`revoked`, `hydration_authority_granted`/`revoked`), and never touch the scope axis or the capability selector axis. The root system director is engine-composed with both grants on the bootstrap path. Killing/purging drops the grants with the authority inputs, so a recycled record carries none; hydration restores them only through the composition-root `restoreMetaAuthorityGrants`. The wildcard `'*'` and `privileged` never imply either authority, and no selector path (launch, spawn, `reauthorizeAgent`, `updateAgentConfig`) can place the ids
+ * @invariant INV-META-AUTHORITY: the explicit authorities (the publishing pair `@template:authority`/`@hydration:authority` and the meta-plane ids of `AUTHORITY_IDS`) are revocable operator/engine grants recorded in the frozen registry authority inputs (`AuthorityInputRecord.authorities`, one frozen `{id, scope?}` record per grant) and rebuilt into the `AuthorityDescriptor` allow set as the exact ids. One grant core (`#setAuthority`) serves every id: it accepts only the exact injected `InternalPrincipal` reference and only active agents, validates the id against `AUTHORITY_IDS` and the registry-side scope against the id-class vocabulary, rebuilds descriptor + inputs atomically, and never touches the capability selector axis or Realm membership. Audit keeps the legacy event names for the publishing pair (`template_authority_granted`/`revoked`, `hydration_authority_granted`/`revoked`) and emits `authority_granted`/`authority_revoked` `{authorityId, enabled, by, scopePresent}` for every other id. The root system director is engine-composed with its bootstrap grants. Killing/purging drops the grants with the authority inputs, so a recycled record carries none; hydration restores them only through the composition-root `restoreAuthorityGrants`. The wildcard `'*'` and `privileged` never imply any id, no selector path (launch, spawn, `reauthorizeAgent`, `updateAgentConfig`) can place the ids, and scopes are registry-side only (read through `getAuthorityGrants`) — the frozen descriptor shape never changes and the identity projection never carries scope data.
  * @decision Registry-owned authority inputs (`privileged` + capability selector) are the identity projection source of truth; the live entity config is a getter-only projection for the uneditable legacy consumers only
  * @decision The injected `SubsystemEmitPort` replaces `runtime._emit` reach-backs and their `typeof` guards; the manager emits only through the port (or the `runtime.createSubsystemEmitPort()` fallback)
  * @decision `killAgent` throws an Error coded `NOT_FOUND` for an unknown agent instead of returning a null sentinel; an already-recycled id returns that agent idempotently
@@ -74,7 +75,12 @@ import type {
   LaunchHistoryEntry
 } from '../agent/index.ts';
 import { resolveToolPreset, TOOL_PRESETS } from '../../tools/constants/index.ts';
-import { AGENT_AUTHORITIES } from '../../realmCatalog/index.ts';
+import {
+  AGENT_AUTHORITIES,
+  AUTHORITY_IDS,
+  AUTHORITY_SCOPE_FIELDS
+} from '../../realmCatalog/index.ts';
+import type { AuthorityGrantRecord, AuthorityScopeRecord } from '../../realmCatalog/index.ts';
 import { isReservedWorkspaceKey } from '../../virtualFs/index.ts';
 import type { VirtualFS } from '../../virtualFs/index.ts';
 import type { MessagingBus } from '../../messagingBus/index.ts';
@@ -197,6 +203,15 @@ interface LaunchConfigInput extends Omit<Partial<AgentConfig>, 'extensionTools'>
   initialTurnMode?: 'await' | 'detach';
   callerContext?: AgentSecurityContext | null;
   principal?: LifecyclePrincipal | null;
+  /**
+   * Engine-path authority grant composition (M1): honored only when the
+   * resolved principal is the exact injected `InternalPrincipal` (the engine
+   * bootstrap); every other caller's value is ignored like the legacy alias
+   * keys. Entries are authority ids or `{ id, scope? }` records; ids outside
+   * `AUTHORITY_IDS` are skipped fail-closed and malformed scopes drop the
+   * record, so engine composition never widens the vocabulary.
+   */
+  authorities?: unknown;
   /**
    * Trusted baked-history entries read from the unified options object only
    * (Wave T, ticket 7e6edae). Validated fail-closed by
@@ -452,20 +467,16 @@ export interface AuthorityInputRecord {
    */
   readonly realmBypass: boolean;
   /**
-   * Whether the explicit `@template:authority` publishing grant is active
-   * (Wave U, ticket 2518510). Recorded only through the operator grant/revoke
-   * API (or the engine bootstrap for the root system director) and rebuilt
-   * into the descriptor's allow set; a capability selector can never place
-   * the authority string.
+   * Explicit authority grants active for this registration (M1 authority-set
+   * generalization): one frozen `{id, scope?}` record per grant, in grant
+   * order. Recorded only through the operator grant/revoke API (or the engine
+   * bootstrap) and rebuilt into the descriptor's allow set as the exact ids; a
+   * capability selector can never place an authority string, and the optional
+   * registry-side scope never leaves this record (host-only accessor
+   * `AgentRuntime.getAuthorityGrants`). Replaced by the legacy per-authority
+   * booleans of the publishing pair; a grant-free record is an empty array.
    */
-  readonly templateAuthority: boolean;
-  /**
-   * Whether the explicit `@hydration:authority` publishing grant is active
-   * (Wave U, ticket 2518510). Recorded only through the operator grant/revoke
-   * API (or the engine bootstrap for the root system director) and rebuilt
-   * into the descriptor's allow set.
-   */
-  readonly hydrationAuthority: boolean;
+  readonly authorities: readonly AuthorityGrantRecord[];
 }
 
 /**
@@ -537,7 +548,9 @@ const AUTHORITY_UPDATE_FIELDS: ReadonlyArray<string> = Object.freeze([
   'realmId',
   'realmBypass',
   'templateAuthority',
-  'hydrationAuthority'
+  'hydrationAuthority',
+  'authorities',
+  ...AUTHORITY_IDS
 ]);
 
 /**
@@ -572,22 +585,287 @@ function freezeAuthorityMemberNames(names: unknown): ReadonlyArray<string> {
 }
 
 /**
- * Explicit publishing-authority ids (Wave U, ticket 2518510) that are never
- * selectable capability data: a launch/spawn/update selector can never place
- * them into the composed allowlist or the frozen descriptor. Grants are
- * recorded only through the dedicated operator API or the engine bootstrap.
+ * Runtime authority vocabulary set (M1). Every known id — the publishing pair
+ * and the meta-plane ids — is never selectable capability data: a
+ * launch/spawn/update selector can never place one into the composed allowlist
+ * or the frozen descriptor. Grants are recorded only through the dedicated
+ * operator API (`#setAuthority`) or the engine bootstrap. Derived
+ * table-driven from `AUTHORITY_IDS` so a future id cannot be forgotten.
  * @internal
  */
-const META_AUTHORITY_IDS: ReadonlySet<string> = new Set<string>([
+const AUTHORITY_ID_SET: ReadonlySet<string> = new Set<string>(AUTHORITY_IDS);
+
+/**
+ * Agent-class authority ids (`@template:`/`@hydration:`/`@agent:*`) whose
+ * scopes accept the agent-target keys: `targets` (bare realm-local agent ids)
+ * and the `realms` bound.
+ * @internal
+ */
+const AGENT_CLASS_AUTHORITY_IDS: ReadonlySet<string> = new Set<string>([
   AGENT_AUTHORITIES.TEMPLATE,
-  AGENT_AUTHORITIES.HYDRATION
+  AGENT_AUTHORITIES.HYDRATION,
+  AGENT_AUTHORITIES.AGENT_INSPECT,
+  AGENT_AUTHORITIES.AGENT_EDIT
 ]);
+
+/**
+ * `@agent:*` authority ids whose scopes additionally accept the `ownSpawns`
+ * and `realmMembers` selectors.
+ * @internal
+ */
+const AGENT_SELECTOR_AUTHORITY_IDS: ReadonlySet<string> = new Set<string>([
+  AGENT_AUTHORITIES.AGENT_INSPECT,
+  AGENT_AUTHORITIES.AGENT_EDIT
+]);
+
+/**
+ * Realm-class authority ids (`@realm:*`/`@extensions:*`) whose scopes accept
+ * `targets` as realm ids only.
+ * @internal
+ */
+const REALM_CLASS_AUTHORITY_IDS: ReadonlySet<string> = new Set<string>([
+  AGENT_AUTHORITIES.REALM_INSPECT,
+  AGENT_AUTHORITIES.REALM_EDIT,
+  AGENT_AUTHORITIES.EXTENSIONS
+]);
+
+/**
+ * Identifier names that may never appear as scope list entries or keys: they
+ * are prototype vocabulary and would route through the object prototype chain
+ * rather than plain data.
+ * @internal
+ */
+const AUTHORITY_SCOPE_FORBIDDEN_NAMES: ReadonlySet<string> = new Set<string>([
+  '__proto__',
+  'constructor',
+  'prototype'
+]);
+
+/**
+ * Validates and deep-freezes one authority scope record for its id (M1; spec
+ * §1.2). Unknown keys, non-array/non-boolean shapes, empty/duplicate/
+ * prototype-vocabulary entries, class-invalid keys (`ownSpawns`/`realmMembers`
+ * outside `@agent:*`, `realms` outside agent scopes, `fields` outside the
+ * id's declared token vocabulary) all reject with `INVALID_CONFIG` before any
+ * mutation.
+ *
+ * @param authorityId - Exact `AUTHORITY_IDS` member the scope narrows.
+ * @param scope - Candidate scope object.
+ * @returns The deeply frozen scope record.
+ * @throws `Error` - With code `'INVALID_CONFIG'` for any malformed scope.
+ * @internal
+ */
+function validateAuthorityScope(authorityId: string, scope: unknown): AuthorityScopeRecord {
+  function invalid(message: string): never {
+    const err: CodedError = new Error(`Invalid authority scope for '${authorityId}': ${message}`);
+    err.code = 'INVALID_CONFIG';
+    throw err;
+  }
+  if (!scope || typeof scope !== 'object' || Array.isArray(scope)) {
+    invalid('the scope must be a plain object');
+  }
+  const record = scope as Record<string, unknown>;
+  const agentClass = AGENT_CLASS_AUTHORITY_IDS.has(authorityId);
+  const realmClass = REALM_CLASS_AUTHORITY_IDS.has(authorityId);
+  const allowedKeys: Record<string, boolean> = Object.create(null);
+  if (agentClass) {
+    allowedKeys.targets = true;
+    allowedKeys.realms = true;
+  } else if (realmClass) {
+    allowedKeys.targets = true;
+  }
+  if (AGENT_SELECTOR_AUTHORITY_IDS.has(authorityId)) {
+    allowedKeys.ownSpawns = true;
+    allowedKeys.realmMembers = true;
+  }
+  const fieldTokens = AUTHORITY_SCOPE_FIELDS[authorityId];
+  if (fieldTokens) allowedKeys.fields = true;
+
+  const keys = Object.keys(record);
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    if (!allowedKeys[key]) invalid(`unknown or class-invalid scope key '${key}'`);
+  }
+
+  const normalizeList = (key: string): readonly string[] | undefined => {
+    const value = record[key];
+    if (value === undefined) return undefined;
+    if (!Array.isArray(value)) invalid(`'${key}' must be an array`);
+    const members: string[] = [];
+    for (let i = 0; i < value.length; i++) {
+      const entry = value[i];
+      if (typeof entry !== 'string' || !entry.trim()) invalid(`'${key}' entries must be non-empty strings`);
+      const member = entry.trim();
+      if (AUTHORITY_SCOPE_FORBIDDEN_NAMES.has(member)) invalid(`'${key}' entries must not carry prototype vocabulary`);
+      for (let j = 0; j < members.length; j++) {
+        if (members[j] === member) invalid(`'${key}' entries must be unique`);
+      }
+      members[members.length] = member;
+    }
+    return Object.freeze(members);
+  };
+  const normalizeFlag = (key: string): boolean | undefined => {
+    const value = record[key];
+    if (value === undefined) return undefined;
+    if (typeof value !== 'boolean') invalid(`'${key}' must be a boolean`);
+    return value;
+  };
+
+  const targets = normalizeList('targets');
+  const ownSpawns = normalizeFlag('ownSpawns');
+  const realmMembers = normalizeFlag('realmMembers');
+  const realms = normalizeList('realms');
+  let fields: readonly string[] | undefined;
+  if (Object.prototype.hasOwnProperty.call(record, 'fields')) {
+    if (!fieldTokens) invalid('\'fields\' is not declared for this authority id');
+    const normalizedFields = normalizeList('fields') ?? [];
+    for (let i = 0; i < normalizedFields.length; i++) {
+      const token = normalizedFields[i];
+      let known = false;
+      for (let j = 0; j < fieldTokens.length; j++) {
+        if (fieldTokens[j] === token) {
+          known = true;
+          break;
+        }
+      }
+      if (!known) invalid(`'fields' entry '${token}' is outside the id vocabulary`);
+    }
+    fields = normalizedFields;
+  }
+
+  const normalized: {
+    targets?: readonly string[];
+    ownSpawns?: boolean;
+    realmMembers?: boolean;
+    realms?: readonly string[];
+    fields?: readonly string[];
+  } = {};
+  if (targets) normalized.targets = targets;
+  if (ownSpawns !== undefined) normalized.ownSpawns = ownSpawns;
+  if (realmMembers !== undefined) normalized.realmMembers = realmMembers;
+  if (realms) normalized.realms = realms;
+  if (fields) normalized.fields = fields;
+  return Object.freeze(normalized) as AuthorityScopeRecord;
+}
+
+/**
+ * Builds one frozen authority grant record, validating the id against
+ * `AUTHORITY_IDS` and the optional scope against the id-class vocabulary.
+ *
+ * @param id - Candidate authority id.
+ * @param scope - Optional candidate scope (absent = the id's default scope).
+ * @returns The frozen grant record.
+ * @throws `Error` - With code `'INVALID_CONFIG'` for unknown ids or malformed scopes.
+ * @internal
+ */
+function createAuthorityGrantRecord(id: unknown, scope: unknown = undefined): AuthorityGrantRecord {
+  if (typeof id !== 'string' || !AUTHORITY_ID_SET.has(id)) {
+    const err: CodedError = new Error(`Unknown authority id '${String(id)}'`);
+    err.code = 'INVALID_CONFIG';
+    throw err;
+  }
+  if (scope === undefined || scope === null) return Object.freeze({ id });
+  return Object.freeze({ id, scope: validateAuthorityScope(id, scope) });
+}
+
+/**
+ * Fail-closed normalizes trusted authority grant input (engine composition and
+ * descriptor rebuilds): non-array input yields an empty list, unknown ids and
+ * malformed scopes drop the single record, duplicates keep the first
+ * occurrence. Unlike the grant core this never throws — it is the
+ * registry-record normalizer, not caller-facing validation.
+ *
+ * @param authorities - Candidate grant list.
+ * @returns Frozen grant records.
+ * @internal
+ */
+function normalizeAuthorityGrantRecords(authorities: unknown): ReadonlyArray<AuthorityGrantRecord> {
+  if (!Array.isArray(authorities)) return Object.freeze([]);
+  const records: AuthorityGrantRecord[] = [];
+  for (let i = 0; i < authorities.length; i++) {
+    const candidate = authorities[i];
+    let id: unknown = candidate;
+    let scope: unknown;
+    if (candidate && typeof candidate === 'object' && !Array.isArray(candidate)) {
+      const record = candidate as { id?: unknown; scope?: unknown };
+      id = record.id;
+      scope = record.scope;
+    }
+    if (typeof id !== 'string' || !AUTHORITY_ID_SET.has(id)) continue;
+    let seen = false;
+    for (let j = 0; j < records.length; j++) {
+      if (records[j].id === id) {
+        seen = true;
+        break;
+      }
+    }
+    if (seen) continue;
+    let grant: AuthorityGrantRecord;
+    try {
+      grant = createAuthorityGrantRecord(id, scope === undefined ? null : scope);
+    } catch {
+      // Fail closed: a malformed scope never grants the id unscoped.
+      continue;
+    }
+    records[records.length] = grant;
+  }
+  return Object.freeze(records);
+}
+
+/**
+ * Tests whether a config-update / reauthorize input claims an authority grant
+ * key: the generic `authorities` key, a legacy publishing alias, or any exact
+ * `AUTHORITY_IDS` key (M1). Such keys are operator-API-only on every
+ * capability-update path.
+ *
+ * @param input - Candidate caller-supplied object.
+ * @returns True when an authority grant key is present (any value, `false`/`null` included).
+ * @internal
+ */
+function hasAuthorityGrantInputKey(input: Record<string, unknown>): boolean {
+  if (input.authorities !== undefined) return true;
+  if (input.templateAuthority !== undefined || input.hydrationAuthority !== undefined) return true;
+  for (let i = 0; i < AUTHORITY_IDS.length; i++) {
+    if (input[AUTHORITY_IDS[i]] !== undefined) return true;
+  }
+  return false;
+}
+
+/**
+ * Composes the engine-path authority grants of a launch config (M1): the
+ * `authorities` list (ids or `{id, scope?}` records) plus the migration-window
+ * legacy aliases `templateAuthority`/`hydrationAuthority`, deduplicated by id.
+ * Only called for the exact injected `InternalPrincipal`; every other caller's
+ * values are ignored before this point.
+ *
+ * @param config - Trusted engine launch config.
+ * @returns Frozen grant records (unknown ids and malformed scopes skipped).
+ * @internal
+ */
+function composeEngineAuthorityGrants(config: {
+  authorities?: unknown;
+  templateAuthority?: boolean;
+  hydrationAuthority?: boolean;
+}): ReadonlyArray<AuthorityGrantRecord> {
+  const records: AuthorityGrantRecord[] = [];
+  const push = (grant: AuthorityGrantRecord): void => {
+    for (let i = 0; i < records.length; i++) {
+      if (records[i].id === grant.id) return;
+    }
+    records[records.length] = grant;
+  };
+  const declared = normalizeAuthorityGrantRecords(config.authorities);
+  for (let i = 0; i < declared.length; i++) push(declared[i]);
+  if (config.templateAuthority === true) push(Object.freeze({ id: AGENT_AUTHORITIES.TEMPLATE }));
+  if (config.hydrationAuthority === true) push(Object.freeze({ id: AGENT_AUTHORITIES.HYDRATION }));
+  return Object.freeze(records);
+}
 
 /**
  * Normalizes trusted authority-input selector data for the registry record
  * (MOD-21 W10). Uses indexed reads only; `null` means "no selector supplied".
- * Publishing-authority strings are stripped: they are grants, never selector
- * capability data (Wave U, ticket 2518510).
+ * Every authority id is stripped table-driven from `AUTHORITY_IDS`: they are
+ * grants, never selector capability data.
  *
  * @param allowedTools - Trusted capability selector.
  * @returns Normalized member names, or `null` when no selector was supplied.
@@ -599,7 +877,7 @@ function normalizeAuthorityInputAllowedTools(allowedTools: unknown): ReadonlyArr
   const members = freezeAuthorityMemberNames(allowedTools);
   const filtered: string[] = [];
   for (let i = 0; i < members.length; i++) {
-    if (!META_AUTHORITY_IDS.has(members[i])) filtered[filtered.length] = members[i];
+    if (!AUTHORITY_ID_SET.has(members[i])) filtered[filtered.length] = members[i];
   }
   return Object.freeze(filtered);
 }
@@ -752,15 +1030,16 @@ function createReadonlyAllowSet(names: unknown): ReadonlySet<string> {
  * a granted agent keeps its capability set while spanning every Realm (Wave I,
  * ticket c02d0b9).
  *
- * Wave U publishing authorities (ticket 2518510) are explicit-only capability
- * data: `templateAuthority`/`hydrationAuthority` flags append the exact
- * `@template:authority`/`@hydration:authority` ids to the allow set, while the
- * selector-derived members are stripped of those ids, so only the dedicated
- * grant API (or the engine bootstrap) can ever place them. The wildcard `'*'`
- * never implies a publishing authority — the tool gate checks the exact id.
+ * Explicit authority grants (M1) are explicit-only capability data: each
+ * frozen `{id, scope?}` record appends its exact id to the allow set, while the
+ * selector-derived members are stripped of every `AUTHORITY_IDS` id, so only
+ * the dedicated grant core (or the engine bootstrap) can ever place them. The
+ * scope is stored registry-side only and never appears on the descriptor; the
+ * wildcard `'*'` never implies an authority id — the tool gate checks the
+ * exact id.
  *
  * @param subject - Principal subject (agent id).
- * @param options - Trusted privilege flag, capability selector, extension grant set, bypass grant, and publishing-authority flags.
+ * @param options - Trusted privilege flag, capability selector, extension grant set, bypass grant, and authority grant records.
  * @returns The frozen authority descriptor.
  * @internal
  */
@@ -771,15 +1050,13 @@ function createAgentAuthorityDescriptor(
     allowedTools = null,
     extensionTools = null,
     realmBypass = false,
-    templateAuthority = false,
-    hydrationAuthority = false
+    authorities = []
   }: {
     privileged?: boolean;
     allowedTools?: string[] | '*' | null;
     extensionTools?: readonly string[] | null;
     realmBypass?: boolean;
-    templateAuthority?: boolean;
-    hydrationAuthority?: boolean;
+    authorities?: readonly AuthorityGrantRecord[];
   } = {}
 ): AuthorityDescriptor {
   let names: string[];
@@ -791,13 +1068,15 @@ function createAgentAuthorityDescriptor(
     names = allowedTools === '*' ? ['*'] : [];
   }
   const authoritativeNames: string[] = [...names];
-  if (templateAuthority === true) authoritativeNames[authoritativeNames.length] = AGENT_AUTHORITIES.TEMPLATE;
-  if (hydrationAuthority === true) authoritativeNames[authoritativeNames.length] = AGENT_AUTHORITIES.HYDRATION;
+  const grants = normalizeAuthorityGrantRecords(authorities);
+  for (let i = 0; i < grants.length; i++) {
+    authoritativeNames[authoritativeNames.length] = grants[i].id;
+  }
   // Extension grants are their own exact-membership axis (extension wave):
   // the trusted store-computed call names are frozen onto `extensions` and are
   // deliberately NOT derived from `privileged`, the wildcard `'*'`, the
-  // selector members, or the publishing authorities — no legacy channel can
-  // widen this axis, and an empty/absent list denies every extension call.
+  // selector members, or the authority grants — no legacy channel can widen
+  // this axis, and an empty/absent list denies every extension call.
   const authoritativeExtensions = normalizeAuthorityInputExtensions(extensionTools) ?? [];
   return Object.freeze({
     subject,
@@ -1623,7 +1902,7 @@ export class AgentLifecycleManager {
    * trusted construction input.
    * @param identityKey - Canonical `(realmId, agentId)` identity key owning the entry.
    * @param subject - Bare registered agent id carried on the descriptor.
-   * @param input - Trusted privilege flag, capability selector, bypass grant, and publishing-authority grants.
+   * @param input - Trusted privilege flag, capability selector, bypass grant, and authority grant records.
    * @returns The frozen registered descriptor.
    */
   #registerAgentAuthority(
@@ -1634,24 +1913,22 @@ export class AgentLifecycleManager {
       allowedTools = null,
       extensionTools = null,
       realmBypass = false,
-      templateAuthority = false,
-      hydrationAuthority = false
+      authorities = []
     }: {
       privileged?: boolean;
       allowedTools?: string[] | '*' | null;
       extensionTools?: readonly string[] | null;
       realmBypass?: boolean;
-      templateAuthority?: boolean;
-      hydrationAuthority?: boolean;
+      authorities?: readonly AuthorityGrantRecord[];
     } = {}
   ): AuthorityDescriptor {
+    const grants = normalizeAuthorityGrantRecords(authorities);
     const descriptor = createAgentAuthorityDescriptor(subject, {
       privileged,
       allowedTools,
       extensionTools,
       realmBypass,
-      templateAuthority,
-      hydrationAuthority
+      authorities: grants
     });
     this.#authorityRegistry.set(identityKey, descriptor);
     this.#authorityInputs.set(identityKey, Object.freeze({
@@ -1659,8 +1936,7 @@ export class AgentLifecycleManager {
       allowedTools: normalizeAuthorityInputAllowedTools(allowedTools),
       extensionTools: normalizeAuthorityInputExtensions(extensionTools),
       realmBypass: realmBypass === true,
-      templateAuthority: templateAuthority === true,
-      hydrationAuthority: hydrationAuthority === true
+      authorities: grants
     }));
     return descriptor;
   }
@@ -1669,7 +1945,7 @@ export class AgentLifecycleManager {
    * Copies the registry-owned capability inputs of an active agent into the
    * shape `#registerAgentAuthority` accepts, preserving the current grant
    * state. Used by descriptor rebuilds that must not touch the scope or
-   * publishing-authority axes.
+   * authority-grant axes.
    *
    * @param identityKey - Canonical identity key owning the entry.
    * @returns Trusted capability inputs with the current grants.
@@ -1679,8 +1955,7 @@ export class AgentLifecycleManager {
     allowedTools: string[] | null;
     extensionTools: string[] | null;
     realmBypass: boolean;
-    templateAuthority: boolean;
-    hydrationAuthority: boolean;
+    authorities: readonly AuthorityGrantRecord[];
   } {
     const inputs = this.#authorityInputs.get(identityKey);
     return {
@@ -1688,8 +1963,7 @@ export class AgentLifecycleManager {
       allowedTools: inputs && inputs.allowedTools ? [...inputs.allowedTools] : null,
       extensionTools: inputs && inputs.extensionTools ? [...inputs.extensionTools] : null,
       realmBypass: Boolean(inputs && inputs.realmBypass === true),
-      templateAuthority: Boolean(inputs && inputs.templateAuthority === true),
-      hydrationAuthority: Boolean(inputs && inputs.hydrationAuthority === true)
+      authorities: inputs ? [...inputs.authorities] : Object.freeze([])
     };
   }
 
@@ -1816,42 +2090,48 @@ export class AgentLifecycleManager {
   }
 
   /**
-   * Sets one explicit Wave U publishing-authority grant state for an active
-   * agent (ticket 2518510).
+   * Sets one explicit authority grant state for an active agent (M1; the one
+   * grant core behind every authority id).
    *
    * Authority-bearing operator action: only the exact injected
    * `InternalPrincipal` reference resolves; every other caller — agent
    * principals, caller-asserted flags, plain lookalike objects — is denied
-   * with `PERMISSION_DENIED` before any mutation. The grant is recorded in the
-   * frozen authority inputs and rebuilt into the descriptor's allow set as the
-   * exact `@template:authority`/`@hydration:authority` id; the capability
-   * selector axis, the scope axis, and Realm membership are untouched. An audit
-   * event is emitted for both directions.
+   * with `PERMISSION_DENIED` before any mutation. The id is validated against
+   * `AUTHORITY_IDS` and the optional registry-side scope against the id-class
+   * vocabulary (`INVALID_CONFIG` on any unknown id or malformed scope); the
+   * grant is recorded in the frozen authority inputs as one frozen
+   * `{id, scope?}` record and rebuilt into the descriptor's allow set as the
+   * exact id, atomically with the inputs record. The capability selector axis,
+   * the extension axis, and Realm membership are untouched.
+   *
+   * Audit keeps the legacy event names for the publishing pair
+   * (`template_authority_granted`/`revoked`,
+   * `hydration_authority_granted`/`revoked`, payload retained verbatim) and
+   * emits `authority_granted`/`authority_revoked` with
+   * `{authorityId, enabled, by, scopePresent}` for every other id. The payload
+   * carries bare ids only — never scope values or realm vocabulary.
    *
    * @param agentId - Active agent identifier (bare realm-local id or canonical identity key).
-   * @param authority - Exact publishing-authority id to set.
+   * @param authority - Exact `AUTHORITY_IDS` member to set.
+   * @param scope - Optional narrowed scope (absent = the id's default scope).
    * @param enabled - Desired grant state.
    * @param callerContext - Caller context carrying the exact `principal`.
    * @returns The rebuilt descriptor, or `null` for an unknown/recycled id.
-   * @throws `Error` - With code `'PERMISSION_DENIED'` for non-operator callers.
+   * @throws `Error` - With code `'INVALID_CONFIG'` for unknown ids or malformed scopes, `'PERMISSION_DENIED'` for non-operator callers.
    */
-  #setMetaAuthority(
+  #setAuthority(
     agentId: string,
     authority: string,
+    scope: AuthorityScopeRecord | null,
     enabled: boolean,
     callerContext: unknown
   ): AuthorityDescriptor | null {
     if (!agentId || typeof agentId !== 'string') {
-      const err: CodedError = new Error('meta-authority operation requires a valid string \'agentId\'');
+      const err: CodedError = new Error('authority operation requires a valid string \'agentId\'');
       err.code = 'INVALID_CONFIG';
       throw err;
     }
-    const isTemplateAuthority = authority === AGENT_AUTHORITIES.TEMPLATE;
-    if (!isTemplateAuthority && authority !== AGENT_AUTHORITIES.HYDRATION) {
-      const err: CodedError = new Error(`Unknown publishing authority '${String(authority)}'`);
-      err.code = 'INVALID_CONFIG';
-      throw err;
-    }
+    const grant = createAuthorityGrantRecord(authority, scope);
     const principal = this.#resolveCallerPrincipal({ callerContext });
     if (!principal || principal.kind !== 'internal') {
       throw new PermissionDeniedError(
@@ -1868,28 +2148,87 @@ export class AgentLifecycleManager {
     if (!agent) return null;
     const identityKey = this.#agentIdentityKeyOf(agent);
 
+    const current = this.#currentAuthorityInputs(identityKey);
+    const next: AuthorityGrantRecord[] = [];
+    for (let i = 0; i < current.authorities.length; i++) {
+      if (current.authorities[i].id !== authority) next[next.length] = current.authorities[i];
+    }
+    if (enabled) next[next.length] = grant;
     const descriptor = this.#registerAgentAuthority(identityKey, agent.id, {
-      ...this.#currentAuthorityInputs(identityKey),
-      ...(isTemplateAuthority
-        ? { templateAuthority: enabled === true }
-        : { hydrationAuthority: enabled === true })
+      ...current,
+      authorities: next
     });
 
-    // The audit event carries the bare realm-local id only (Realm opacity).
-    this.#emit({
-      type: isTemplateAuthority
-        ? (enabled ? 'template_authority_granted' : 'template_authority_revoked')
-        : (enabled ? 'hydration_authority_granted' : 'hydration_authority_revoked'),
-      agentId: agent.id,
-      payload: {
+    // The audit event carries the bare realm-local id only (Realm opacity);
+    // the publishing pair keeps its legacy event names and payload verbatim.
+    const isPublishing = authority === AGENT_AUTHORITIES.TEMPLATE || authority === AGENT_AUTHORITIES.HYDRATION;
+    if (isPublishing) {
+      const isTemplateAuthority = authority === AGENT_AUTHORITIES.TEMPLATE;
+      this.#emit({
+        type: isTemplateAuthority
+          ? (enabled ? 'template_authority_granted' : 'template_authority_revoked')
+          : (enabled ? 'hydration_authority_granted' : 'hydration_authority_revoked'),
         agentId: agent.id,
-        authority,
-        enabled: enabled === true,
-        by: principal.subject
-      }
-    });
+        payload: {
+          agentId: agent.id,
+          authority,
+          enabled: enabled === true,
+          by: principal.subject
+        }
+      });
+    } else {
+      this.#emit({
+        type: enabled ? 'authority_granted' : 'authority_revoked',
+        agentId: agent.id,
+        payload: {
+          authorityId: authority,
+          enabled: enabled === true,
+          by: principal.subject,
+          scopePresent: grant.scope !== undefined
+        }
+      });
+    }
 
     return descriptor;
+  }
+
+  /**
+   * Grants one explicit authority id (with an optional registry-side scope) to
+   * an active agent (M1 generic grant API).
+   *
+   * @param agentId - Active agent identifier.
+   * @param authority - Exact `AUTHORITY_IDS` member.
+   * @param scope - Optional narrowed scope; absent/null = the id's default scope.
+   * @param callerContext - Caller context carrying the exact `principal`.
+   * @returns The rebuilt descriptor, or `null` for an unknown/recycled id.
+   * @throws `Error` - With code `'INVALID_CONFIG'` for unknown ids or malformed scopes, `'PERMISSION_DENIED'` for non-operator callers.
+   */
+  grantAuthority(
+    agentId: string,
+    authority: string,
+    scope: AuthorityScopeRecord | null = null,
+    callerContext: unknown = null
+  ): AuthorityDescriptor | null {
+    return this.#setAuthority(agentId, authority, scope, true, callerContext);
+  }
+
+  /**
+   * Revokes one explicit authority id from an active agent (M1 generic grant
+   * API). Revocation ignores any stored scope: the whole grant record is
+   * removed.
+   *
+   * @param agentId - Active agent identifier.
+   * @param authority - Exact `AUTHORITY_IDS` member.
+   * @param callerContext - Caller context carrying the exact `principal`.
+   * @returns The rebuilt descriptor, or `null` for an unknown/recycled id.
+   * @throws `Error` - With code `'INVALID_CONFIG'` for unknown ids, `'PERMISSION_DENIED'` for non-operator callers.
+   */
+  revokeAuthority(
+    agentId: string,
+    authority: string,
+    callerContext: unknown = null
+  ): AuthorityDescriptor | null {
+    return this.#setAuthority(agentId, authority, null, false, callerContext);
   }
 
   /**
@@ -1901,7 +2240,7 @@ export class AgentLifecycleManager {
    * @throws `Error` - With code `'PERMISSION_DENIED'` for non-operator callers.
    */
   grantTemplateAuthority(agentId: string, callerContext: unknown = null): AuthorityDescriptor | null {
-    return this.#setMetaAuthority(agentId, AGENT_AUTHORITIES.TEMPLATE, true, callerContext);
+    return this.#setAuthority(agentId, AGENT_AUTHORITIES.TEMPLATE, null, true, callerContext);
   }
 
   /**
@@ -1913,7 +2252,7 @@ export class AgentLifecycleManager {
    * @throws `Error` - With code `'PERMISSION_DENIED'` for non-operator callers.
    */
   revokeTemplateAuthority(agentId: string, callerContext: unknown = null): AuthorityDescriptor | null {
-    return this.#setMetaAuthority(agentId, AGENT_AUTHORITIES.TEMPLATE, false, callerContext);
+    return this.#setAuthority(agentId, AGENT_AUTHORITIES.TEMPLATE, null, false, callerContext);
   }
 
   /**
@@ -1925,7 +2264,7 @@ export class AgentLifecycleManager {
    * @throws `Error` - With code `'PERMISSION_DENIED'` for non-operator callers.
    */
   grantHydrationAuthority(agentId: string, callerContext: unknown = null): AuthorityDescriptor | null {
-    return this.#setMetaAuthority(agentId, AGENT_AUTHORITIES.HYDRATION, true, callerContext);
+    return this.#setAuthority(agentId, AGENT_AUTHORITIES.HYDRATION, null, true, callerContext);
   }
 
   /**
@@ -1937,12 +2276,13 @@ export class AgentLifecycleManager {
    * @throws `Error` - With code `'PERMISSION_DENIED'` for non-operator callers.
    */
   revokeHydrationAuthority(agentId: string, callerContext: unknown = null): AuthorityDescriptor | null {
-    return this.#setMetaAuthority(agentId, AGENT_AUTHORITIES.HYDRATION, false, callerContext);
+    return this.#setAuthority(agentId, AGENT_AUTHORITIES.HYDRATION, null, false, callerContext);
   }
 
   /**
    * Lists the canonical `(realmId, agentId)` identity keys of the active agents
-   * currently holding the Wave U publishing-authority grants (ticket 2518510).
+   * currently holding explicit authority grants (M1), grouped per authority
+   * id. Ids with no holder are omitted.
    *
    * Canonical keys are the persistence currency: a grant list carrying the
    * same literal id from two Realms round-trips exactly, because the
@@ -1950,18 +2290,63 @@ export class AgentLifecycleManager {
    * listing itself is registry state, not authority, and the keys are
    * internal-only — they never reach an agent-facing surface.
    *
-   * @returns Canonical identity keys per publishing authority.
+   * @returns Canonical identity keys per authority id (declaration order).
    */
-  listMetaAuthorityGrants(): { template: string[]; hydration: string[] } {
-    const template: string[] = [];
-    const hydration: string[] = [];
+  listAuthorityGrants(): Record<string, string[]> {
+    const perId: Record<string, string[]> = Object.create(null);
+    for (let i = 0; i < AUTHORITY_IDS.length; i++) perId[AUTHORITY_IDS[i]] = [];
     for (const identityKey of this.#agents.keys()) {
       const inputs = this.#authorityInputs.get(identityKey);
       if (!inputs) continue;
-      if (inputs.templateAuthority === true) template.push(identityKey);
-      if (inputs.hydrationAuthority === true) hydration.push(identityKey);
+      for (let i = 0; i < inputs.authorities.length; i++) {
+        const id = inputs.authorities[i].id;
+        if (perId[id]) perId[id][perId[id].length] = identityKey;
+      }
     }
-    return { template, hydration };
+    const listing: Record<string, string[]> = {};
+    for (let i = 0; i < AUTHORITY_IDS.length; i++) {
+      const id = AUTHORITY_IDS[i];
+      if (perId[id].length > 0) listing[id] = perId[id];
+    }
+    return listing;
+  }
+
+  /**
+   * Lists the canonical `(realmId, agentId)` identity keys of the active agents
+   * currently holding the publishing-authority grants (`@template:authority` /
+   * `@hydration:authority`), as a source-compatible projection of
+   * {@link listAuthorityGrants}.
+   *
+   * @returns Canonical identity keys per publishing authority.
+   */
+  listMetaAuthorityGrants(): { template: string[]; hydration: string[] } {
+    const listing = this.listAuthorityGrants();
+    return {
+      template: listing[AGENT_AUTHORITIES.TEMPLATE] ? [...listing[AGENT_AUTHORITIES.TEMPLATE]] : [],
+      hydration: listing[AGENT_AUTHORITIES.HYDRATION] ? [...listing[AGENT_AUTHORITIES.HYDRATION]] : []
+    };
+  }
+
+  /**
+   * Returns the frozen authority grant records registered for an active agent
+   * (M1) — the registry-side source for *how far* each held capability reaches.
+   *
+   * Host-only surface: scopes never reach the identity projection, a
+   * model-facing schema, a receipt, or an audit payload. Resolution is
+   * canonical-key-capable with the unique-match bare-id fallback; unknown,
+   * recycled, purged, or ambiguous refs resolve the empty list.
+   *
+   * @param agentId - Active agent identifier (bare realm-local id or canonical identity key).
+   * @returns Frozen grant records (empty when none).
+   */
+  getAuthorityGrants(agentId: string): readonly AuthorityGrantRecord[] {
+    if (!agentId || typeof agentId !== 'string') return Object.freeze([]);
+    const byKey = this.#authorityInputs.get(agentId);
+    if (byKey) return byKey.authorities;
+    const agent = this.#uniqueByBareId(this.#agents, agentId);
+    if (!agent) return Object.freeze([]);
+    const inputs = this.#authorityInputs.get(this.#agentIdentityKeyOf(agent));
+    return inputs ? inputs.authorities : Object.freeze([]);
   }
 
   /**
@@ -2112,10 +2497,10 @@ export class AgentLifecycleManager {
    * `PERMISSION_DENIED` before any mutation. The agent config is not touched.
    *
    * @param agentId - Registered active agent identifier
-   * @param input - Trusted capability inputs (`privileged`/`allowedTools`/`extensionTools`); any `realmBypass` key is rejected
+   * @param input - Trusted capability inputs (`privileged`/`allowedTools`/`extensionTools`); any `realmBypass` or authority-grant key is rejected
    * @param callerContext - Caller context carrying `principal` or a registry `callerAgentId` identity
    * @returns The registered descriptor, or `null` for an unknown id
-   * @throws `Error` - With code `'PERMISSION_DENIED'` when the caller lacks lifecycle authority or supplied a `realmBypass` key
+   * @throws `Error` - With code `'PERMISSION_DENIED'` when the caller lacks lifecycle authority or supplied a `realmBypass`/authority-grant key
    */
 
   reauthorizeAgent(
@@ -2125,8 +2510,14 @@ export class AgentLifecycleManager {
       allowedTools?: string[] | '*' | null;
       extensionTools?: readonly string[] | null;
       realmBypass?: boolean;
+      /** @deprecated Operator-API-only; rejected when present. */
       templateAuthority?: boolean;
+      /** @deprecated Operator-API-only; rejected when present. */
       hydrationAuthority?: boolean;
+      /** Operator-API-only grant records; rejected when present. */
+      authorities?: unknown;
+      /** Exact authority-id keys are operator-API-only; rejected when present. */
+      [authorityIdKey: string]: unknown;
     } = {},
     callerContext: object | null = null
   ): AuthorityDescriptor | null {
@@ -2153,16 +2544,16 @@ export class AgentLifecycleManager {
         { callerAgentId: principal && principal.kind === 'agent' ? principal.subject : null, code: 'PERMISSION_DENIED' }
       );
     }
-    // Wave U publishing authorities are likewise operator-API-only (ticket
-    // 2518510): any claim through this capability path is denied for every
-    // caller — the exact injected principal included — so authority can only
-    // flow through grantTemplateAuthority/grantHydrationAuthority (or the
-    // engine bootstrap).
-    if (input && typeof input === 'object'
-      && (input.templateAuthority !== undefined || input.hydrationAuthority !== undefined)) {
+    // Every authority id is likewise operator-API-only (M1; the publishing
+    // pair included): any `authorities` key, legacy alias key, or exact-id key
+    // through this capability path is denied for every caller — the exact
+    // injected principal included — so authority can only flow through
+    // grantAuthority/revokeAuthority (or the engine bootstrap). The denial
+    // names the vocabulary, never a realm or scope value.
+    if (input && typeof input === 'object' && hasAuthorityGrantInputKey(input)) {
       throw new PermissionDeniedError(
-        `Permission denied: agent '${agentId}' publishing authorities are operator grants, never a reauthorize input `
-        + '(use grantTemplateAuthority/revokeTemplateAuthority/grantHydrationAuthority/revokeHydrationAuthority)',
+        `Permission denied: agent '${agentId}' authorities (${AUTHORITY_IDS.join(', ')}) are operator grants, `
+        + 'never a reauthorize input (use grantAuthority/revokeAuthority)',
         { callerAgentId: principal && principal.kind === 'agent' ? principal.subject : null, code: 'PERMISSION_DENIED' }
       );
     }
@@ -2591,13 +2982,17 @@ export class AgentLifecycleManager {
     // API. The grant never moves membership.
     const realmBypass = isEnginePrincipal && config.realmBypass === true;
 
-    // Wave U publishing-authority composition (ticket 2518510): same engine
-    // rule as `realmBypass`. The root system director bootstrap composes both
-    // authorities; every other caller's config value is ignored and operator
-    // grant/revoke flows exclusively through the dedicated API. Neither grant
-    // touches the capability selector or the scope axis.
-    const templateAuthority = isEnginePrincipal && config.templateAuthority === true;
-    const hydrationAuthority = isEnginePrincipal && config.hydrationAuthority === true;
+    // Explicit authority-grant composition (M1): same engine rule as
+    // `realmBypass`. Only the exact injected `InternalPrincipal` (the engine
+    // bootstrap) may compose grants; every other caller's `authorities` list
+    // and legacy `templateAuthority`/`hydrationAuthority` aliases are ignored
+    // (never denied — ignored, like `realmBypass`). Operator grants/revokes
+    // flow exclusively through the generic grant API. Composition maps through
+    // `AUTHORITY_IDS` fail-closed (unknown ids skipped, malformed scopes drop
+    // the record), so engine input never widens the vocabulary.
+    const composedAuthorities: readonly AuthorityGrantRecord[] = isEnginePrincipal
+      ? composeEngineAuthorityGrants(config)
+      : Object.freeze([]);
 
     // Canonical identity key (Wave I, ticket d57cbc1): the single registry key
     // for this registration. Registry/lookup surfaces stay bare-id (the
@@ -2832,15 +3227,14 @@ export class AgentLifecycleManager {
       );
     }
 
-    // Publishing authorities are grants, never selector data (Wave U, ticket
-    // 2518510): the explicit `@template:authority`/`@hydration:authority` ids
-    // are stripped from every composed selector for every caller, so no
-    // launch/spawn config can smuggle them into the frozen descriptor. The
-    // dedicated operator grant API and the engine bootstrap are their only
-    // writers (and the descriptor rebuild strips them again as defense in
-    // depth).
+    // Authority ids are grants, never selector data (M1; the publishing pair
+    // included): every `AUTHORITY_IDS` member is stripped from each composed
+    // selector for every caller, so no launch/spawn config can smuggle one
+    // into the frozen descriptor. The dedicated operator grant API and the
+    // engine bootstrap are their only writers (and the descriptor rebuild
+    // strips them again as defense in depth).
     if (Array.isArray(allowedTools)) {
-      allowedTools = allowedTools.filter((tool) => !META_AUTHORITY_IDS.has(tool));
+      allowedTools = allowedTools.filter((tool) => !AUTHORITY_ID_SET.has(tool));
     }
 
     const composedConfig = {
@@ -2927,7 +3321,7 @@ export class AgentLifecycleManager {
 
       // Build the frozen authority descriptor once at construction from the
       // trusted composed config (never from caller data). `realmBypass` and
-      // the Wave U publishing grants are the engine-composed values only; a
+      // the explicit authority grants are the engine-composed values only; a
       // caller-supplied value was ignored above for every non-engine
       // principal. The extension grant set (extension wave) comes only from
       // the trusted unified-options channel — the config selector is state,
@@ -2937,8 +3331,7 @@ export class AgentLifecycleManager {
         allowedTools: composedConfig.allowedTools,
         extensionTools: Array.isArray(extensionToolsInput) ? extensionToolsInput : null,
         realmBypass,
-        templateAuthority,
-        hydrationAuthority
+        authorities: composedAuthorities
       });
 
       // Register on MessagingBus under the canonical registration key (Wave
@@ -4489,10 +4882,11 @@ export class AgentLifecycleManager {
     // caller before the generic authority verdict. Grants and revocations flow
     // exclusively through `grantRealmBypass`/`revokeRealmBypass`.
     const realmBypassClaim = update.realmBypass !== undefined;
-    // Wave U publishing authorities are operator-API-only too (ticket
-    // 2518510): any `templateAuthority`/`hydrationAuthority` key is denied for
-    // EVERY caller before the generic authority verdict.
-    const metaAuthorityClaim = update.templateAuthority !== undefined || update.hydrationAuthority !== undefined;
+    // Every authority id is operator-API-only too (M1): the generic
+    // `authorities` key, a legacy `templateAuthority`/`hydrationAuthority`
+    // alias, or any exact `AUTHORITY_IDS` key is denied for EVERY caller
+    // before the generic authority verdict.
+    const authorityGrantClaim = hasAuthorityGrantInputKey(update);
     // Capability selectors feed the frozen registry `AuthorityDescriptor`, so a
     // selector resolving to the wildcard `'*'`, the `@lifecycle:authority`
     // capability, or a Wave U publishing authority is an authority-bearing edit
@@ -4513,7 +4907,7 @@ export class AgentLifecycleManager {
       && resolvedTools.some((tool) => (
         tool === '*'
         || tool === LIFECYCLE_AUTHORITY_CAPABILITY
-        || META_AUTHORITY_IDS.has(tool)
+        || AUTHORITY_ID_SET.has(tool)
       ));
     // The per-agent extension tool selector is authority-bearing too
     // (extension wave): it decides which third-party tools the agent may be
@@ -4527,7 +4921,7 @@ export class AgentLifecycleManager {
       || parentageClaim
       || realmClaim
       || realmBypassClaim
-      || metaAuthorityClaim
+      || authorityGrantClaim
       || capabilityClaim
       || extensionSelectorClaim;
 
@@ -4559,13 +4953,13 @@ export class AgentLifecycleManager {
           { callerAgentId: principal && principal.kind === 'agent' ? principal.subject : null, code: 'PERMISSION_DENIED' }
         );
       }
-      // Wave U publishing authorities follow the same operator-API-only rule
-      // (ticket 2518510): the keys are denied for every caller, so a
+      // Every authority id follows the same operator-API-only rule (M1; the
+      // publishing pair included): the keys are denied for every caller, so a
       // config-update path can never grant or smuggle them.
-      if (metaAuthorityClaim) {
+      if (authorityGrantClaim) {
         throw new PermissionDeniedError(
-          `Permission denied: agent '${targetLabel}' publishing authorities are operator grants, never a config-update field `
-          + '(use grantTemplateAuthority/revokeTemplateAuthority/grantHydrationAuthority/revokeHydrationAuthority)',
+          `Permission denied: agent '${targetLabel}' authority grants (${AUTHORITY_IDS.join(', ')}) are operator grants, `
+          + 'never a config-update field (use grantAuthority/revokeAuthority)',
           { callerAgentId: principal && principal.kind === 'agent' ? principal.subject : null, code: 'PERMISSION_DENIED' }
         );
       }

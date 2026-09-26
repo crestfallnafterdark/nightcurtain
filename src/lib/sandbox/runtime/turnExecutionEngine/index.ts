@@ -20,7 +20,7 @@
  * @invariant Cancellation is cooperative: an external `AbortSignal` aborts the agent's internal controller, stream/tool/loop boundaries re-check abort state, the turn settles `cancelled` with `TURN_ABORTED`, and abort listeners are removed in `finally`.
  * @invariant Precalls are fail-closed: a raw or canonical name absent from the frozen `PRECALL_ALLOWLIST` yields an `isError` tool receipt coded `FORBIDDEN_PRECALL` and is never executed; terminal-batch queued calls are re-validated through the same gate.
  * @invariant Host-registered custom tool handlers execute only for callers whose frozen `AuthorityDescriptor` grants the wildcard `'*'` or `'@lifecycle:authority'` (or an engine-internal principal projection); a matching `allowedTools` entry never authorizes custom execution, anonymous callers are denied, and custom schemas are hidden from ungranted callers.
- * @invariant Publishing meta-tool schemas (`import_realm_template`/`submit_hydration_package`) are appended to the model-facing schema list only when the agent's frozen `AuthorityDescriptor` explicitly holds the matching `@template:authority`/`@hydration:authority` id; the wildcard `'*'` and `privileged` never expose them, and a descriptor-less or anonymous caller sees no publishing surface. The same explicit-holder rule governs the merged `describe_tool` registry: an exact holder gains the authority descriptors, every other caller never learns they exist (ticket ec397bf; d872723 F10).
+ * @invariant Authority meta-tool schemas (`import_realm_template`/`submit_hydration_package` today) are appended to the model-facing schema list only when the agent's frozen `AuthorityDescriptor` explicitly holds the descriptor's exact authority id (each `AUTHORITY_IDS` member is probed table-driven); the wildcard `'*'` and `privileged` never expose them, and a descriptor-less or anonymous caller sees no authority surface. The same explicit-holder rule governs the merged `describe_tool` registry: an exact holder gains the authority descriptors, every other caller never learns they exist (ticket ec397bf; d872723 F10).
  * @invariant Extension-tool exposure mirrors descriptor-exact authorization: the model-facing schema list and the merged `describe_tool` registry gain exactly the extension tools the agent's frozen `AuthorityDescriptor.extensions` axis grants and the bound provider registry currently resolves — never the whole catalog, never an ungranted name, and a missing provider exposes nothing; a granted name whose descriptor has gone (disconnected/conflicted/refused projection) carries no schema and resolves `TOOL_NOT_FOUND` at call time.
  * @invariant Precall execution exceptions are converted to `isError` tool receipts (`PRECALL_EXECUTION_ERROR`) and never halt the turn.
  * @invariant The multi-turn tool loop is bounded by a positive numeric `agent.config.maxTurns`; absent or non-positive values leave it open-ended by design (accepted QUIRK-001, no hard cap). When the budget is exhausted while the model is still dispatching tool calls, the turn throws an `Error` coded `MAX_TURNS_EXCEEDED` instead of resolving `completed`.
@@ -60,8 +60,12 @@ import {
   getSandboxToolsSchema,
   createSandboxToolDispatcher
 } from '../../toolDefinitions/index.ts';
-import { getPublishingToolSchemas, PUBLISHING_TOOL_REGISTRY, TOOL_REGISTRY } from '../../tools/descriptors/index.ts';
-import { AGENT_AUTHORITIES } from '../../realmCatalog/index.ts';
+import {
+  getAuthorityToolDescriptors,
+  getAuthorityToolSchemas,
+  TOOL_REGISTRY
+} from '../../tools/descriptors/index.ts';
+import { AUTHORITY_IDS } from '../../realmCatalog/index.ts';
 import { AGENT_WORKSPACE_VIEW_TOKEN, resolveAgentPrivateWorkspaceKey } from '../../virtualFs/index.ts';
 import type {
   ExecutionContext,
@@ -1583,37 +1587,40 @@ export class TurnExecutionEngine {
   }
 
   /**
-   * Resolves the Wave U publishing authorities the agent's frozen
-   * `AuthorityDescriptor` explicitly holds (ticket 2518510).
+   * Resolves the authority ids the agent's frozen `AuthorityDescriptor`
+   * explicitly holds (M1 generalization of the Wave U publishing probe).
    *
    * Exposure discipline mirrors {@link TurnExecutionEngine#isCustomToolCallerAuthorized}:
-   * the descriptor is the sole source, the wildcard `'*'` and `privileged`
-   * never satisfy a publishing authority, and any throw from the descriptor
-   * read or capability probe denies (empty list). Realm-exact resolution when
-   * the agent carries membership; Realm-less structural agents keep the
-   * unique-match path.
+   * the descriptor is the sole source, every id is iterated table-driven from
+   * `AUTHORITY_IDS` (so a new id cannot be forgotten), the wildcard `'*'` and
+   * `privileged` never satisfy an authority id, and any throw from the
+   * descriptor read or capability probe denies (empty list). Realm-exact
+   * resolution when the agent carries membership; Realm-less structural agents
+   * keep the unique-match path. An engine-internal principal projection holds
+   * the whole vocabulary.
    *
-   * @param agent - Agent whose publishing surface is being prepared.
-   * @returns Explicitly held publishing-authority ids (empty when none).
+   * @param agent - Agent whose authority surface is being prepared.
+   * @returns Explicitly held authority ids (empty when none).
    */
-  #publishingAuthoritiesFor(agent: EngineAgent): string[] {
+  #heldAuthorityIdsFor(agent: EngineAgent): string[] {
     const identity = this.#resolveAgentIdentity(agent);
     if (!identity || typeof identity !== 'object') return [];
     try {
       const authority = readProperty(identity, 'authority');
       if (!authority || typeof authority !== 'object') return [];
       if (readProperty(authority, 'kind') === 'internal') {
-        return [AGENT_AUTHORITIES.TEMPLATE, AGENT_AUTHORITIES.HYDRATION];
+        return [...AUTHORITY_IDS];
       }
       const allow = readProperty(authority, 'allow') as { has?: (name: string) => unknown } | null;
       if (!allow || typeof allow.has !== 'function') return [];
       const held: string[] = [];
-      if (allow.has(AGENT_AUTHORITIES.TEMPLATE) === true) held.push(AGENT_AUTHORITIES.TEMPLATE);
-      if (allow.has(AGENT_AUTHORITIES.HYDRATION) === true) held.push(AGENT_AUTHORITIES.HYDRATION);
+      for (let i = 0; i < AUTHORITY_IDS.length; i++) {
+        if (allow.has(AUTHORITY_IDS[i]) === true) held[held.length] = AUTHORITY_IDS[i];
+      }
       return held;
     } catch {
       // Fail closed: a throwing descriptor accessor or capability probe hides
-      // the publishing surface.
+      // the whole authority surface.
       return [];
     }
   }
@@ -1676,17 +1683,18 @@ export class TurnExecutionEngine {
 
   /**
    * Builds the turn's merged tool registry: the frozen baked `TOOL_REGISTRY`
-   * plus the publishing descriptors the caller's frozen `AuthorityDescriptor`
+   * plus the authority descriptors the caller's frozen `AuthorityDescriptor`
    * explicitly holds (ticket ec397bf; d872723 F10 — an exact authority holder
    * can `describe_tool` its authority tool) plus the granted extension
    * descriptors under their sanitized call names, so `describe_tool` documents
-   * exactly the tools this caller may invoke. The wildcard `'*'`, `privileged`,
-   * and descriptor-less callers hold no authority ids and gain no authority
-   * entry. The merged view is a fresh null-prototype frozen record; an
-   * ungranted call name has no entry and stays `TOOL_NOT_FOUND`.
+   * exactly the tools this caller may invoke. The filter is the generic
+   * `getAuthorityToolDescriptors` exact-id membership; the wildcard `'*'`,
+   * `privileged`, and descriptor-less callers hold no authority ids and gain
+   * no authority entry. The merged view is a fresh null-prototype frozen
+   * record; an ungranted call name has no entry and stays `TOOL_NOT_FOUND`.
    *
    * @param extensionDescriptors - Granted, resolvable extension descriptors.
-   * @param authorityIds - Explicit publishing-authority ids the caller holds.
+   * @param authorityIds - Explicit authority ids the caller holds.
    * @returns The frozen merged registry.
    * @internal
    */
@@ -1696,10 +1704,8 @@ export class TurnExecutionEngine {
   ): Readonly<Record<string, unknown>> {
     const merged: Record<string, unknown> = Object.assign(Object.create(null), TOOL_REGISTRY);
     if (authorityIds.length > 0) {
-      for (const descriptor of Object.values(PUBLISHING_TOOL_REGISTRY)) {
-        if (authorityIds.includes(descriptor.authority)) {
-          merged[descriptor.name] = descriptor;
-        }
+      for (const descriptor of getAuthorityToolDescriptors(authorityIds)) {
+        merged[descriptor.name] = descriptor;
       }
     }
     for (const descriptor of extensionDescriptors) {
@@ -2356,15 +2362,14 @@ export class TurnExecutionEngine {
         }
       }
 
-      // Wave U publishing meta tools (ticket 2518510): schemas are exposed only
-      // for the exact explicit authority the caller's frozen descriptor holds
-      // (`@template:authority`/`@hydration:authority`); the wildcard `'*'` and
-      // `privileged` never satisfy them, so an ungranted caller never sees the
-      // publishing surface. Mirrors the host-only custom-tool exposure
-      // discipline.
-      const publishingAuthorities = this.#publishingAuthoritiesFor(agent);
-      if (publishingAuthorities.length > 0) {
-        toolsSchema.push(...getPublishingToolSchemas(publishingAuthorities));
+      // Authority meta tools (M1): schemas are exposed only for the exact
+      // explicit authority ids the caller's frozen descriptor holds (`*` and
+      // `privileged` never satisfy them), so an ungranted caller never sees an
+      // authority surface. Mirrors the host-only custom-tool exposure
+      // discipline; ids with no registered descriptor append nothing.
+      const heldAuthorityIds = this.#heldAuthorityIdsFor(agent);
+      if (heldAuthorityIds.length > 0) {
+        toolsSchema.push(...getAuthorityToolSchemas(heldAuthorityIds));
       }
 
       const currentDepth = typeof normalizedOptions?.depth === 'number'
@@ -2412,7 +2417,7 @@ export class TurnExecutionEngine {
         // caller's granted extension descriptors) feeds `describe_tool`; the
         // provider/execution ports are trusted bound construction (pinned keys)
         // and route an authorized extension call to the live server.
-        toolRegistry: this.#mergedToolRegistryFor(grantedExtensionDescriptors, publishingAuthorities),
+        toolRegistry: this.#mergedToolRegistryFor(grantedExtensionDescriptors, heldAuthorityIds),
         ...(this.#extensionToolProvider ? { extensionToolProvider: this.#extensionToolProvider } : {}),
         ...(this.#extensionExecutionPort ? { extensionExecutionPort: this.#extensionExecutionPort } : {}),
         worldClock: this.#worldClock,

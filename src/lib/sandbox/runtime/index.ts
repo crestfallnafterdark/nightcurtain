@@ -68,6 +68,8 @@ import { RuntimeScheduler } from './runtimeScheduler/index.ts';
 import { TriggerDispatcher, TRIGGER_TYPES } from './triggerDispatcher/index.ts';
 import { RuntimeTelemetryTracker } from './runtimeTelemetry/index.ts';
 import { ensureDirectorAgent } from '../domain/directorAgent/index.ts';
+import { AGENT_AUTHORITIES, AUTHORITY_IDS } from '../realmCatalog/index.ts';
+import type { AuthorityGrantRecord, AuthorityScopeRecord } from '../realmCatalog/index.ts';
 
 import type { CredentialResolverPort } from '../credentialVault/index.ts';
 import type { ModelPresetSourcePort, PresetChangeEvent } from '../presetCatalog/index.ts';
@@ -112,6 +114,14 @@ import type {
   TurnInput
 } from './turnExecutionEngine/index.ts';
 import type { DirectorRuntimeHost } from '../domain/directorAgent/index.ts';
+
+/**
+ * Runtime authority vocabulary set (M1): the restore path skips any persisted
+ * key outside `AUTHORITY_IDS` fail-closed, so a tampered snapshot can never
+ * mint a grant for an id this runtime does not know.
+ * @internal
+ */
+const AUTHORITY_ID_SET: ReadonlySet<string> = new Set<string>(AUTHORITY_IDS);
 
 // ============================================================================
 // Public Type Re-exports (contract aliases)
@@ -1630,9 +1640,9 @@ export class AgentRuntime {
     // bootstrap. The root system director is an ordinary agent with the
     // hardcoded `realmBypass` grant composed on the engine path and the
     // bootstrap-only system scope (`realmId: null`); the id itself carries no
-    // meaning (Wave I, ticket c02d0b9). Wave U (ticket 2518510): the bootstrap
-    // also engine-composes both explicit publishing authorities
-    // (`@template:authority`/`@hydration:authority`), so the root director can
+    // meaning (Wave I, ticket c02d0b9). M1: the bootstrap composes the
+    // publishing pair as ordinary authority grant records (the legacy alias
+    // keys stay alongside for one migration window), so the root director can
     // import templates and submit hydration packages without an operator
     // grant; no other agent is composed this way.
     this.#directorHost = Object.freeze({
@@ -1649,12 +1659,17 @@ export class AgentRuntime {
       ) => {
         const bootstrapConfig: AgentConfig & {
           realmBypass?: boolean;
+          authorities?: unknown;
           templateAuthority?: boolean;
           hydrationAuthority?: boolean;
         } = {
           ...config,
           realmId: null,
           realmBypass: true,
+          authorities: [
+            { id: AGENT_AUTHORITIES.TEMPLATE },
+            { id: AGENT_AUTHORITIES.HYDRATION }
+          ],
           templateAuthority: true,
           hydrationAuthority: true
         };
@@ -2374,8 +2389,145 @@ export class AgentRuntime {
   }
 
   /**
+   * Grants one explicit authority id (with an optional registry-side scope) to
+   * an active agent (M1 generic grant API).
+   *
+   * Authority-bearing: only the exact injected `InternalPrincipal` reference
+   * (the composition-root operator, also returned by
+   * {@link getOperatorPrincipal}) may grant; agent principals, caller-asserted
+   * flags, and plain lookalike objects are denied with `PERMISSION_DENIED`
+   * before any mutation. The id is validated against `AUTHORITY_IDS` and the
+   * scope against the id-class vocabulary (`INVALID_CONFIG` otherwise); the
+   * grant is recorded in the frozen registry authority inputs as one frozen
+   * `{id, scope?}` record and rebuilt into the descriptor's allow set as the
+   * exact id. The wildcard `'*'` and `privileged` never imply it, and the
+   * scope/selector/extension axes are untouched.
+   *
+   * @param agentId - Active agent identifier.
+   * @param authorityId - Exact `AUTHORITY_IDS` member.
+   * @param scope - Optional narrowed scope; absent/null = the id's default scope.
+   * @param callerContext - Trusted caller context carrying `{ principal }`.
+   * @returns The rebuilt frozen descriptor, or `null` for an unknown/recycled id.
+   * @throws `Error` - With code `'INVALID_CONFIG'` for unknown ids/malformed scopes, `'PERMISSION_DENIED'` for non-operator callers.
+   */
+  grantAuthority(
+    agentId: string,
+    authorityId: string,
+    scope: AuthorityScopeRecord | null = null,
+    callerContext: { principal?: InternalPrincipal | AuthorityDescriptor } | null = null
+  ): AuthorityDescriptor | null {
+    this.#assertNotDestroyed();
+    return this.#lifecycleManager.grantAuthority(agentId, authorityId, scope, callerContext);
+  }
+
+  /**
+   * Revokes one explicit authority id from an active agent (M1 generic grant
+   * API). Revocation removes the whole grant record; the scope is ignored.
+   *
+   * @param agentId - Active agent identifier.
+   * @param authorityId - Exact `AUTHORITY_IDS` member.
+   * @param callerContext - Trusted caller context carrying `{ principal }`.
+   * @returns The rebuilt frozen descriptor, or `null` for an unknown/recycled id.
+   * @throws `Error` - With code `'INVALID_CONFIG'` for unknown ids, `'PERMISSION_DENIED'` for non-operator callers.
+   */
+  revokeAuthority(
+    agentId: string,
+    authorityId: string,
+    callerContext: { principal?: InternalPrincipal | AuthorityDescriptor } | null = null
+  ): AuthorityDescriptor | null {
+    this.#assertNotDestroyed();
+    return this.#lifecycleManager.revokeAuthority(agentId, authorityId, callerContext);
+  }
+
+  /**
+   * Returns the frozen authority grant records registered for an active agent
+   * (M1 pass-through to the lifecycle registry).
+   *
+   * Host-only surface: registry-side scopes never reach an identity projection,
+   * a model-facing schema, a receipt, or an audit payload. Unknown, recycled,
+   * purged, or ambiguous refs resolve the empty list.
+   *
+   * @param ref - Active agent identifier (bare realm-local id or canonical identity key).
+   * @returns Frozen grant records (empty when none).
+   */
+  getAuthorityGrants(ref: string): readonly AuthorityGrantRecord[] {
+    return this.#lifecycleManager.getAuthorityGrants(ref);
+  }
+
+  /**
+   * Lists the canonical `(realmId, agentId)` identity keys of the active agents
+   * currently holding explicit authority grants (M1), grouped per authority id.
+   *
+   * The listing is registry state, not authority: it lets the composition root
+   * persist and restore grants across a snapshot cycle. Canonical keys make the
+   * persisted lists realm-exact; they are internal-only and never appear on an
+   * agent-facing surface. Ids with no holder are omitted.
+   *
+   * @returns Canonical identity keys per authority id.
+   */
+  listAuthorityGrants(): Record<string, string[]> {
+    return this.#lifecycleManager.listAuthorityGrants();
+  }
+
+  /**
+   * Restores persisted authority grants after snapshot hydration (M1).
+   *
+   * Engine-only path: the caller must present the exact injected
+   * `InternalPrincipal` reference. Each ref is granted through the generic
+   * grant core under the operator principal; unknown authority ids are
+   * skipped, and ids that are unknown, recycled, or ambiguous resolve no
+   * registration and are skipped (fail-closed), so a tampered snapshot id can
+   * never mint a grant.
+   *
+   * Entries are canonical `(realmId, agentId)` identity keys as emitted by
+   * {@link listAuthorityGrants}, resolving each key to its exact registration.
+   * Legacy snapshots that persisted bare ids still hydrate through the
+   * unique-match rule; an ambiguous bare id resolves no registration and is
+   * skipped, so a legacy grant is never duplicated across two Realms.
+   *
+   * @param grants - Persisted granted refs per authority id.
+   * @param callerContext - Trusted caller context carrying `{ principal }`.
+   * @returns The refs that were granted per authority id (active agents only; ids with no restored ref omitted).
+   * @throws `Error` - With code `'PERMISSION_DENIED'` for non-operator callers.
+   */
+  restoreAuthorityGrants(
+    grants: Record<string, readonly string[]> | null | undefined,
+    callerContext: { principal?: InternalPrincipal | AuthorityDescriptor } | null = null
+  ): Record<string, string[]> {
+    this.#assertNotDestroyed();
+    const principal = callerContext && typeof callerContext === 'object' ? callerContext.principal : null;
+    if (principal !== this.#internalPrincipal) {
+      throw createRuntimeError(
+        'Permission denied: only the composition-root operator principal may restore authority grants',
+        'PERMISSION_DENIED'
+      );
+    }
+    const restored: Record<string, string[]> = {};
+    if (!grants || typeof grants !== 'object' || Array.isArray(grants)) return restored;
+    const authorityIds = Object.keys(grants);
+    for (const authorityId of authorityIds) {
+      if (!AUTHORITY_ID_SET.has(authorityId)) continue;
+      const refs = grants[authorityId];
+      if (!Array.isArray(refs)) continue;
+      const granted: string[] = [];
+      for (const ref of refs) {
+        if (typeof ref !== 'string' || !ref) continue;
+        const descriptor = this.#lifecycleManager.grantAuthority(
+          ref,
+          authorityId,
+          null,
+          { principal: this.#internalPrincipal }
+        );
+        if (descriptor) granted.push(ref);
+      }
+      if (granted.length > 0) restored[authorityId] = granted;
+    }
+    return restored;
+  }
+
+  /**
    * Grants the explicit `@template:authority` publishing capability to an
-   * active agent (Wave U, ticket 2518510).
+   * active agent (Wave U, ticket 2518510; delegates to {@link grantAuthority}).
    *
    * Authority-bearing: only the exact injected `InternalPrincipal` reference
    * (the composition-root operator, also returned by
@@ -2396,7 +2548,7 @@ export class AgentRuntime {
     callerContext: { principal?: InternalPrincipal | AuthorityDescriptor } | null = null
   ): AuthorityDescriptor | null {
     this.#assertNotDestroyed();
-    return this.#lifecycleManager.grantTemplateAuthority(agentId, callerContext);
+    return this.#lifecycleManager.grantAuthority(agentId, AGENT_AUTHORITIES.TEMPLATE, null, callerContext);
   }
 
   /**
@@ -2416,7 +2568,7 @@ export class AgentRuntime {
     callerContext: { principal?: InternalPrincipal | AuthorityDescriptor } | null = null
   ): AuthorityDescriptor | null {
     this.#assertNotDestroyed();
-    return this.#lifecycleManager.revokeTemplateAuthority(agentId, callerContext);
+    return this.#lifecycleManager.revokeAuthority(agentId, AGENT_AUTHORITIES.TEMPLATE, callerContext);
   }
 
   /**
@@ -2435,7 +2587,7 @@ export class AgentRuntime {
     callerContext: { principal?: InternalPrincipal | AuthorityDescriptor } | null = null
   ): AuthorityDescriptor | null {
     this.#assertNotDestroyed();
-    return this.#lifecycleManager.grantHydrationAuthority(agentId, callerContext);
+    return this.#lifecycleManager.grantAuthority(agentId, AGENT_AUTHORITIES.HYDRATION, null, callerContext);
   }
 
   /**
@@ -2455,7 +2607,7 @@ export class AgentRuntime {
     callerContext: { principal?: InternalPrincipal | AuthorityDescriptor } | null = null
   ): AuthorityDescriptor | null {
     this.#assertNotDestroyed();
-    return this.#lifecycleManager.revokeHydrationAuthority(agentId, callerContext);
+    return this.#lifecycleManager.revokeAuthority(agentId, AGENT_AUTHORITIES.HYDRATION, callerContext);
   }
 
   /**
@@ -2489,6 +2641,8 @@ export class AgentRuntime {
       privileged?: boolean;
       allowedTools?: string[] | '*' | null;
       extensionTools?: readonly string[] | null;
+      /** Operator-API-only grant key; rejected when present. */
+      authorities?: unknown;
     } = {},
     callerContext: (CallerContext & { principal?: InternalPrincipal | AuthorityDescriptor }) | null = null
   ): AuthorityDescriptor | null {
@@ -2509,7 +2663,11 @@ export class AgentRuntime {
    * @returns Canonical identity keys per publishing authority.
    */
   listMetaAuthorityGrants(): { template: string[]; hydration: string[] } {
-    return this.#lifecycleManager.listMetaAuthorityGrants();
+    const listing = this.listAuthorityGrants();
+    return {
+      template: listing[AGENT_AUTHORITIES.TEMPLATE] ? [...listing[AGENT_AUTHORITIES.TEMPLATE]] : [],
+      hydration: listing[AGENT_AUTHORITIES.HYDRATION] ? [...listing[AGENT_AUTHORITIES.HYDRATION]] : []
+    };
   }
 
   /**
@@ -2534,29 +2692,16 @@ export class AgentRuntime {
     grants: { template?: readonly string[]; hydration?: readonly string[] } | null | undefined,
     callerContext: { principal?: InternalPrincipal | AuthorityDescriptor } | null = null
   ): { template: string[]; hydration: string[] } {
-    this.#assertNotDestroyed();
-    const principal = callerContext && typeof callerContext === 'object' ? callerContext.principal : null;
-    if (principal !== this.#internalPrincipal) {
-      throw createRuntimeError(
-        'Permission denied: only the composition-root operator principal may restore publishing-authority grants',
-        'PERMISSION_DENIED'
-      );
+    const generic: Record<string, readonly string[]> = {};
+    if (grants && typeof grants === 'object') {
+      if (Array.isArray(grants.template)) generic[AGENT_AUTHORITIES.TEMPLATE] = grants.template;
+      if (Array.isArray(grants.hydration)) generic[AGENT_AUTHORITIES.HYDRATION] = grants.hydration;
     }
-    const restored: { template: string[]; hydration: string[] } = { template: [], hydration: [] };
-    if (!grants || typeof grants !== 'object') return restored;
-    const templateIds = Array.isArray(grants.template) ? grants.template : [];
-    for (const agentId of templateIds) {
-      if (typeof agentId !== 'string' || !agentId) continue;
-      const descriptor = this.#lifecycleManager.grantTemplateAuthority(agentId, { principal: this.#internalPrincipal });
-      if (descriptor) restored.template.push(agentId);
-    }
-    const hydrationIds = Array.isArray(grants.hydration) ? grants.hydration : [];
-    for (const agentId of hydrationIds) {
-      if (typeof agentId !== 'string' || !agentId) continue;
-      const descriptor = this.#lifecycleManager.grantHydrationAuthority(agentId, { principal: this.#internalPrincipal });
-      if (descriptor) restored.hydration.push(agentId);
-    }
-    return restored;
+    const restored = this.restoreAuthorityGrants(generic, callerContext);
+    return {
+      template: restored[AGENT_AUTHORITIES.TEMPLATE] ? [...restored[AGENT_AUTHORITIES.TEMPLATE]] : [],
+      hydration: restored[AGENT_AUTHORITIES.HYDRATION] ? [...restored[AGENT_AUTHORITIES.HYDRATION]] : []
+    };
   }
 
   /**

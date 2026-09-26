@@ -25,7 +25,7 @@
  * @decision `canonicalizeToolName` is exposed on the dispatcher as the shared alias-normalization authority so engine consumers (precall revalidation) do not duplicate alias maps
  * @decision Per-call `callerContext` is caller data, never authority: the dispatcher strips its `isAdmin`/`isPrivileged`/`privileged` flags, authority-bearing `callerRole`/`role` aliases, `principal`/`authority` objects, and `allowedTools`, deriving privilege and capability only from trusted bound construction options and the injected identity port
  * @decision Descriptor-authoritative capability: when the projection's frozen `AuthorityDescriptor` is present, capability derives from the descriptor alone — a wildcard/explicit grant authorizes, and a retired-selector entry authorizes exactly its expansion — any other outcome denies, and the deprecated legacy channels above apply only to descriptor-less callers
- * @decision Publishing meta tools (`import_realm_template`/`submit_hydration_package`) are explicit-grant-only: they resolve through the separate `PUBLISHING_TOOL_REGISTRY` (never members of `TOOL_REGISTRY` or `ALL_TOOL_DESCRIPTORS`, never emitted by `getSandboxToolsSchema`), and authorization is the exact `@template:authority`/`@hydration:authority` entry on the caller's frozen descriptor — the wildcard `'*'`, `privileged`, and every legacy channel are deliberately insufficient, an engine-internal descriptor stays authorized, and descriptor-less callers deny (INV-9 refinement)
+ * @decision Authority meta tools (`import_realm_template`/`submit_hydration_package` today, the meta-plane tools as they land) are explicit-grant-only: they resolve through the separate `AUTHORITY_TOOL_REGISTRY` (never members of `TOOL_REGISTRY` or `ALL_TOOL_DESCRIPTORS`, never emitted by `getSandboxToolsSchema`), and authorization is the exact authority-id entry on the caller's frozen descriptor — the wildcard `'*'`, `privileged`, and every legacy channel are deliberately insufficient, an engine-internal descriptor stays authorized, and descriptor-less callers deny (INV-9 refinement)
  * @decision Extension tools are exact-membership-only on the separate frozen `AuthorityDescriptor.extensions` axis: the dispatcher's extension branch is gated on an optional provider-registry port (bound at composition), authorize iff `authority.extensions.has(callName)`, with no wildcard/`privileged`/selector/alias/legacy fallback, engine-internal and anonymous/descriptor-less callers denying, and descriptor-probe throws failing closed; the axis is never populated from `allow` and an extension call never falls through to a baked handler or schema. After authorization, the branch resolves the frozen synthesized descriptor through the provider port's optional `resolveDescriptor` and executes it against the pinned `extensionExecutionPort` context key: a missing descriptor or execution port fails closed with `EXECUTION_FAILED`, an unresolved/catalog-less name stays `TOOL_NOT_FOUND`, and a port rejection propagates to the universal error shield as a redacted `EXECUTION_FAILED` receipt
  * @decision Realm/workspace/tenant scope is never caller-supplied: the scope vocabulary (`workspaceId`/`workspace_id`, `realmId`/`realm_id`, `tenantId`/`tenant_id`, `scope`) is pinned at dispatcher construction and stripped from per-call `callerContext`; a scope claim may only ride trusted bound construction (and, once Realm lands, the trusted identity projection), never a tool call
  * @decision Realm-exact caller resolution and canonical key binding: a construction-bound `realmId` resolves the caller projection for exactly that `(realmId, agentId)` registration and binds its canonical identity `key` as the execution context's `callerKey` (a pinned key — per-call `callerKey`/`caller_key` claims are stripped), so substrate contexts disambiguate the same literal id across Realms; an omitted Realm keeps the unique-match resolution and the bare-id channel
@@ -47,8 +47,8 @@ import {
 } from '../tools/constants/index.ts';
 import type { SandboxToolName, ToolSystemErrorCode } from '../tools/constants/index.ts';
 import { getCanonToolName } from '../tools/normalizers/index.ts';
-import { ALL_TOOL_DESCRIPTORS, PUBLISHING_TOOL_REGISTRY, TOOL_REGISTRY } from '../tools/descriptors/index.ts';
-import type { PublishingToolDescriptor } from '../tools/descriptors/index.ts';
+import { ALL_TOOL_DESCRIPTORS, AUTHORITY_TOOL_REGISTRY, TOOL_REGISTRY } from '../tools/descriptors/index.ts';
+import type { AuthorityToolDescriptor } from '../tools/descriptors/index.ts';
 import type { ExtensionExecutionPort, ExtensionToolDescriptor } from '../tools/extensionTools/index.ts';
 import type {
   BundleFiles,
@@ -947,12 +947,13 @@ const TOOL_RESULT_ERROR_CODES: ReadonlySet<string> = new Set<string>(Object.valu
 const TOOL_REGISTRY_VIEW: Readonly<Record<string, ToolDescriptor>> = TOOL_REGISTRY;
 
 /**
- * Typed view of the frozen Wave U publishing meta-tool registry. These tools
- * are deliberately outside `TOOL_REGISTRY`; they route through the same
- * dispatcher pipeline but authorize only against the caller's explicit
- * authority descriptor (never the wildcard/legacy channels).
+ * Typed view of the frozen authority meta-tool registry (M1 generalization of
+ * the Wave U publishing registry). These tools are deliberately outside
+ * `TOOL_REGISTRY`; they route through the same dispatcher pipeline but
+ * authorize only against the caller's exact authority descriptor (never the
+ * wildcard/legacy channels).
  */
-const PUBLISHING_TOOL_REGISTRY_VIEW: Readonly<Record<string, PublishingToolDescriptor>> = PUBLISHING_TOOL_REGISTRY;
+const AUTHORITY_TOOL_REGISTRY_VIEW: Readonly<Record<string, AuthorityToolDescriptor>> = AUTHORITY_TOOL_REGISTRY;
 
 /**
  * Realm/workspace/tenant scope vocabulary pinned at dispatcher construction
@@ -1200,13 +1201,13 @@ export function createSandboxToolDispatcher(options: SandboxDispatcherOptions = 
     const rawName = toolCall?.function?.name || toolCall?.name;
     const canonName = getCanonToolName(rawName);
 
-    // 1. Tool Identification. The canonical taxonomy resolves first; the Wave
-    // U publishing meta tools are a separate explicit-grant-only registry
+    // 1. Tool Identification. The canonical taxonomy resolves first; the
+    // authority meta tools are a separate explicit-grant-only registry
     // (never members of `TOOL_REGISTRY`, never wildcard-exposed) routed
     // through this same pipeline.
     const canonicalDescriptor = canonName ? TOOL_REGISTRY_VIEW[canonName] ?? null : null;
-    const publishingDescriptor = canonName ? PUBLISHING_TOOL_REGISTRY_VIEW[canonName] ?? null : null;
-    const descriptor: ToolDescriptor | PublishingToolDescriptor | null = canonicalDescriptor ?? publishingDescriptor;
+    const authorityDescriptor = canonName ? AUTHORITY_TOOL_REGISTRY_VIEW[canonName] ?? null : null;
+    const descriptor: ToolDescriptor | AuthorityToolDescriptor | null = canonicalDescriptor ?? authorityDescriptor;
 
     // Extension identification (extension wave; P2 lands the branch inert
     // because no production composition binds the provider-registry port): a
@@ -1361,7 +1362,7 @@ export function createSandboxToolDispatcher(options: SandboxDispatcherOptions = 
               && !Array.isArray(mergedContext.toolRegistry)
               ? mergedContext.toolRegistry as Record<string, unknown>
               : TOOL_REGISTRY),
-            ...PUBLISHING_TOOL_REGISTRY
+            ...AUTHORITY_TOOL_REGISTRY
           },
           { isAdmin: isPrivileged, isPrivileged, allowedTools },
           agentIdentity,
@@ -1450,7 +1451,7 @@ export function createSandboxToolDispatcher(options: SandboxDispatcherOptions = 
       };
     }
 
-    if (!isAuthorized(authorizationName, executionContext, agentIdentity, publishingDescriptor ? publishingDescriptor.authority : null)) {
+    if (!isAuthorized(authorizationName, executionContext, agentIdentity, authorityDescriptor ? authorityDescriptor.authority : null)) {
       // A descriptor may publish a remedy restating its description (e.g. the
       // capability requirement); it never reads registry state, so the denial
       // gives no existence/authority oracle.

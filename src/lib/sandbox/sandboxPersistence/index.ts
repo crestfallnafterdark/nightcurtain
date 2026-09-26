@@ -29,7 +29,7 @@
  * @decision Legacy snapshots that omit `recycleBin` are accepted and normalized to `[]` during hydration
  * @decision Additive MOD-20 topology fields `activePresetId`/`customPresets` round-trip as plain data: serialization emits them from session metadata, validation drops structurally invalid values instead of failing the snapshot, and legacy snapshots without the fields load byte-compatibly
  * @decision Additive realm-registry field `realms` round-trips as plain data: serialization emits only the canonical record fields from session metadata, validation drops structurally invalid entries instead of failing the snapshot, and legacy snapshots without the field load byte-compatibly with an empty registry
- * @decision Additive authority fields `metaAuthorityGrants`/`templateAuthorityTrust` round-trip as plain data emitted from session metadata only when non-empty (legacy snapshots stay byte-identical) and are strictly validated fail-closed: malformed shapes reject the snapshot, proto-pollution keys are rejected by the recursive scan, and hydration never derives authority from either field — grants are re-applied through the composition root's lifecycle-gated restore (unknown/recycled refs skipped) and trust only auto-approves exact declared matches at a later launch
+ * @decision Additive authority fields `metaAuthorityGrants`/`authorityGrants`/`templateAuthorityTrust` round-trip as plain data emitted from session metadata only when non-empty (legacy snapshots stay byte-identical) and are strictly validated fail-closed: malformed shapes reject the snapshot, proto-pollution keys are rejected by the recursive scan, and hydration never derives authority from any field — grants are re-applied through the composition root's lifecycle-gated restore (unknown authority ids and unknown/recycled refs skipped) and trust only auto-approves exact declared matches at a later launch
  * @decision Additive saved hydration-payload library field `savedInstancePayloads` round-trips as plain data emitted from session metadata only when non-empty (legacy snapshots stay byte-identical): malformed, duplicate-id, and oversize entries are dropped individually, the entry list is capped, payloads are never validated as launch contracts at load (only at attach), and hydration replaces the in-memory library with the persisted set (absent field → empty)
  * @decision Persistence does not re-wire runtime timer listeners on restore; the `MessagingBus` timer-listener lifecycle is owned by `AgentRuntime`
  */
@@ -370,6 +370,20 @@ export interface PersistedMetaAuthorityGrants {
   /** Canonical identity keys holding `@hydration:authority`. */
   readonly hydration?: readonly string[];
 }
+
+/**
+ * Structural shape of the additive generic authority-grant field (M1):
+ * authority id → canonical `(realmId, agentId)` identity keys. Persistence
+ * never imports the runtime vocabulary — ids are validated as non-empty
+ * strings and unknown ids are skipped fail-closed by the composition-root
+ * restore. The field carries only non-publishing ids (the Wave U pair keeps
+ * the legacy `metaAuthorityGrants` field byte-identically) and is emitted only
+ * when at least one generic grant is active, so grant-free and legacy sessions
+ * keep their persisted bytes unchanged. Hydration re-applies grants exclusively
+ * through the composition-root restore; the lists are never derived from
+ * template/config content.
+ */
+export type PersistedAuthorityGrants = Readonly<Record<string, readonly string[]>>;
 
 /**
  * Structural shape of the additive Wave U per-template authority-trust record
@@ -952,6 +966,16 @@ export interface SandboxPersistedState {
    * composition-root restore only (unknown/recycled refs skipped).
    */
   readonly metaAuthorityGrants?: PersistedMetaAuthorityGrants;
+  /**
+   * Persisted generic authority grant lists (additive optional field, M1):
+   * authority id → canonical identity keys, for every non-publishing id.
+   * Absent while no generic grant exists (legacy and publishing-only sessions
+   * stay byte-identical); malformed values fail validation closed, and
+   * hydration never derives authority from this field — it re-applies grants
+   * through the composition-root restore only (unknown/recycled refs skipped,
+   * unknown ids skipped fail-closed).
+   */
+  readonly authorityGrants?: PersistedAuthorityGrants;
   /**
    * Persisted Wave U per-template authority trust (additive optional field,
    * ticket 2518510): template id → agent key → previously approved authority
@@ -2082,7 +2106,7 @@ function normalizeAgentDiagnostics(entry: unknown): unknown {
  * Validation checks:
  * 1. Root shape is a non-null, non-array object.
  * 2. Deep prototype pollution scan of every own key (`__proto__`, `constructor`, `prototype`);
- *    the optional Wave U authority fields (`metaAuthorityGrants`,
+ *    the optional authority fields (`metaAuthorityGrants`, `authorityGrants`,
  *    `templateAuthorityTrust`) must additionally arrive as own properties, so a
  *    prototype-carried record rejects as pollution (defect cc2b4e8).
  * 3. Required fields: non-empty string `version` whose major component matches
@@ -2095,9 +2119,9 @@ function normalizeAgentDiagnostics(entry: unknown): unknown {
  * 5. Additive optional fields when present: MOD-20 presets, realm records,
  *    extension install records, imported templates, and the saved
  *    hydration-payload library are normalized — invalid entries are dropped
- *    individually and the saved-payload list is capped — while the Wave U
- *    authority fields (`metaAuthorityGrants`/`templateAuthorityTrust`) fail
- *    closed on any malformed shape.
+ *    individually and the saved-payload list is capped — while the authority
+ *    fields (`metaAuthorityGrants`/`authorityGrants`/`templateAuthorityTrust`)
+ *    fail closed on any malformed shape.
  *
  * Purity: Pure inspection function. Never throws; returns `{ valid: false, error, code }` on invalid input.
  *
@@ -2160,7 +2184,7 @@ function inspectSandboxState(state: unknown): ValidationResult {
   // cc2b4e8). The persisted state is JSON, so a value reachable only through
   // the prototype chain is hostile: fail the snapshot closed instead of
   // reading it as operator intent during a composition-root restore.
-  for (const authorityField of ['metaAuthorityGrants', 'templateAuthorityTrust'] as const) {
+  for (const authorityField of ['metaAuthorityGrants', 'authorityGrants', 'templateAuthorityTrust'] as const) {
     if (!Object.prototype.hasOwnProperty.call(candidate, authorityField)
       && authorityField in candidate) {
       return {
@@ -2328,6 +2352,49 @@ function inspectSandboxState(state: unknown): ValidationResult {
           return {
             valid: false,
             error: `'metaAuthorityGrants.${authority}[${i}]' must be a non-empty string`,
+            code: PERSISTENCE_ERROR_CODES.INVALID_STATE
+          };
+        }
+      }
+    }
+  }
+
+  // Generic authority grants (M1 authority-set generalization): the same
+  // fail-closed discipline as the legacy field — an object whose every value
+  // is an array of non-empty identity keys. Unknown authority ids stay valid
+  // (the runtime restore skips them fail-closed); prototype-pollution keys are
+  // rejected by the recursive scan. Grants are never derived from this field.
+  if (Object.prototype.hasOwnProperty.call(candidate, 'authorityGrants')
+    && candidate.authorityGrants !== undefined
+    && candidate.authorityGrants !== null) {
+    const grants = candidate.authorityGrants;
+    if (typeof grants !== 'object' || Array.isArray(grants)) {
+      return { valid: false, error: "'authorityGrants' must be an object", code: PERSISTENCE_ERROR_CODES.INVALID_STATE };
+    }
+    const authorityIds = Object.keys(grants);
+    for (let i = 0; i < authorityIds.length; i++) {
+      const authorityId = authorityIds[i];
+      if (typeof authorityId !== 'string' || !authorityId.trim()) {
+        return {
+          valid: false,
+          error: "'authorityGrants' carries an empty authority id",
+          code: PERSISTENCE_ERROR_CODES.INVALID_STATE
+        };
+      }
+      const refs = (grants as Record<string, unknown>)[authorityId];
+      if (!Array.isArray(refs)) {
+        return {
+          valid: false,
+          error: `'authorityGrants.${authorityId}' must be an array of identity keys`,
+          code: PERSISTENCE_ERROR_CODES.INVALID_STATE
+        };
+      }
+      for (let j = 0; j < refs.length; j++) {
+        const ref = refs[j];
+        if (typeof ref !== 'string' || !ref.trim()) {
+          return {
+            valid: false,
+            error: `'authorityGrants.${authorityId}[${j}]' must be a non-empty string`,
             code: PERSISTENCE_ERROR_CODES.INVALID_STATE
           };
         }

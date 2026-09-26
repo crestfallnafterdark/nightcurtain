@@ -521,21 +521,111 @@ export interface RealmLaunchAgentPlan {
 }
 
 /**
- * Publishing-authority ids a template agent spec may declare (Wave U, lane
- * U-P). `authorities` declares grant *requests*; the mandatory launch review is
- * the approval act, and approval applies ordinary revocable operator grants.
- * The ids are explicit-grant-only capabilities: the wildcard `'*'` and
- * `privileged` never imply them.
+ * Authority ids the runtime understands (M1 authority-set generalization).
+ *
+ * The publishing pair (`@template:authority`/`@hydration:authority`) keeps its
+ * original semantics: explicit-grant-only capabilities that the wildcard `'*'`
+ * and `privileged` never imply, declarable by templates and approved at launch.
+ * The meta-plane ids (`@agent:inspect`, `@agent:edit`, `@realm:inspect`,
+ * `@realm:edit`, `@extensions:authority`) join the same runtime vocabulary but
+ * are **not** template-declarable in v1 (decision A15): `KNOWN_AGENT_AUTHORITIES`
+ * stays exactly the publishing pair, and a template declaring any other id
+ * still fails launch closed (`ERR_TEMPLATE_AUTHORITY_UNSUPPORTED`).
+ *
+ * `AUTHORITY_IDS` is the single data-driven source for every strip/deny/
+ * validation table, so a future id cannot be forgotten by a hand-maintained
+ * list.
  */
 export const AGENT_AUTHORITIES: Readonly<{
   /** Import realm template bundles. */
   readonly TEMPLATE: '@template:authority';
   /** Submit hydration packages. */
   readonly HYDRATION: '@hydration:authority';
+  /** Inspect target agents (meta tier, M2). */
+  readonly AGENT_INSPECT: '@agent:inspect';
+  /** Edit target agents (meta tier, M2). */
+  readonly AGENT_EDIT: '@agent:edit';
+  /** Inspect realms (meta tier, M3). */
+  readonly REALM_INSPECT: '@realm:inspect';
+  /** Edit realms (meta tier, M3). */
+  readonly REALM_EDIT: '@realm:edit';
+  /** List and attach installed extensions realm-wide (meta tier, M4). */
+  readonly EXTENSIONS: '@extensions:authority';
 }> = Object.freeze({
   TEMPLATE: '@template:authority',
-  HYDRATION: '@hydration:authority'
+  HYDRATION: '@hydration:authority',
+  AGENT_INSPECT: '@agent:inspect',
+  AGENT_EDIT: '@agent:edit',
+  REALM_INSPECT: '@realm:inspect',
+  REALM_EDIT: '@realm:edit',
+  EXTENSIONS: '@extensions:authority'
 } as const);
+
+/**
+ * Frozen runtime vocabulary of every known authority id, in declaration order
+ * (M1). The publishing pair keeps its `KNOWN_AGENT_AUTHORITIES` template
+ * declarability; the meta-plane ids are operator-minted runtime capabilities
+ * only (A15). Every strip/deny/validation path iterates this array.
+ */
+export const AUTHORITY_IDS: readonly string[] = Object.freeze([
+  AGENT_AUTHORITIES.TEMPLATE,
+  AGENT_AUTHORITIES.HYDRATION,
+  AGENT_AUTHORITIES.AGENT_INSPECT,
+  AGENT_AUTHORITIES.AGENT_EDIT,
+  AGENT_AUTHORITIES.REALM_INSPECT,
+  AGENT_AUTHORITIES.REALM_EDIT,
+  AGENT_AUTHORITIES.EXTENSIONS
+]);
+
+/**
+ * Per-id editable field-token vocabulary of a grant scope (M1; spec §1.1).
+ *
+ * Only ids whose declared default scope carries a field subset appear here:
+ * `@agent:edit` uses the A18 parental set and `@realm:edit` the realm metadata
+ * and attachment set. An id absent from this table declares no field tokens, so
+ * a `fields` array on its scope rejects fail-closed. The table is registry-side
+ * vocabulary; it never reaches a model-facing schema, receipt, or descriptor.
+ */
+export const AUTHORITY_SCOPE_FIELDS: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  [AGENT_AUTHORITIES.AGENT_EDIT]: Object.freeze(['tools', 'privilege', 'policy', 'prompt']),
+  [AGENT_AUTHORITIES.REALM_EDIT]: Object.freeze(['attachments', 'ceiling', 'name', 'description', 'color'])
+});
+
+/**
+ * Optional bounds narrowing one authority grant (M1; spec §1.2).
+ *
+ * A scope is registry-side data: it never appears on the frozen
+ * `AuthorityDescriptor`, the identity projection, or any model-facing surface.
+ * Semantics are a narrowing of the grant — the exact id is still required
+ * (dispatcher), then the scope must match the concrete target. Absent fields
+ * mean "the id's default scope" (unscoped for the publishing pair, own-spawns
+ * for `@agent:*`, own realm for `@realm:*`/`@extensions:authority`).
+ */
+export interface AuthorityScopeRecord {
+  /** Target bounds: `@agent:*` ids take bare realm-local agent ids, `@realm:*`/`@extensions:*` take realm ids. */
+  readonly targets?: readonly string[];
+  /** `@agent:*` only: all agents the grant holder spawned (direct spawns). */
+  readonly ownSpawns?: boolean;
+  /** `@agent:*` only: every active member of the `realms` bound (or the holder's own realm). */
+  readonly realmMembers?: boolean;
+  /** Agent-scope realm bound; absent = the caller's own realm. */
+  readonly realms?: readonly string[];
+  /** Editable field tokens, restricted to the id's declared vocabulary (`AUTHORITY_SCOPE_FIELDS`). */
+  readonly fields?: readonly string[];
+}
+
+/**
+ * One frozen authority grant recorded in the registry authority inputs (M1):
+ * the exact id plus its optional registry-side scope. The grant record is the
+ * trusted source for *how far* a capability reaches; the frozen descriptor
+ * remains the only source for *whether* it is held (INV-9).
+ */
+export interface AuthorityGrantRecord {
+  /** Exact member of `AUTHORITY_IDS`. */
+  readonly id: string;
+  /** Optional narrowed bounds; absent = the id's default scope. */
+  readonly scope?: AuthorityScopeRecord;
+}
 
 /**
  * Frozen vocabulary of the known publishing-authority ids (`@template:authority`
@@ -544,7 +634,9 @@ export const AGENT_AUTHORITIES: Readonly<{
  * Validation accepts any non-empty unique identifier in
  * `AgentSpec.authorities`; identifiers outside this set are declared-but-unknown
  * and fail launch closed (`ERR_TEMPLATE_AUTHORITY_UNSUPPORTED`) while import,
- * parse, and review stay valid — the providers precedent.
+ * parse, and review stay valid — the providers precedent. This set stays the
+ * publishing pair only: the remaining `AUTHORITY_IDS` members are
+ * operator-minted runtime capabilities and are never template-declarable (A15).
  */
 export const KNOWN_AGENT_AUTHORITIES: readonly string[] = Object.freeze([
   AGENT_AUTHORITIES.TEMPLATE,

@@ -1,12 +1,15 @@
 /**
- * Realm publishing meta-tool descriptors for the Wave U `AgentSpec` publishing
- * surface: `import_realm_template` and `submit_hydration_package`.
+ * Realm authority meta-tool descriptors: the Wave U publishing surface
+ * (`import_realm_template` and `submit_hydration_package`) plus the generic
+ * authority registry that the meta-plane phases (M2–M5b) extend.
  *
- * These two tools are explicit-grant-only meta tools. They are deliberately
+ * Every descriptor is an explicit-grant-only meta tool. They are deliberately
  * **outside** the canonical 35-tool taxonomy (`SANDBOX_TOOLS`), are never
  * implied by the wildcard capability or `privileged`, and their schemas are
  * only ever exposed to callers whose frozen `AuthorityDescriptor` carries the
- * matching authority id (`@template:authority` / `@hydration:authority`).
+ * matching authority id (`getAuthorityToolSchemas` is the exact-membership
+ * filter over `authorityToolDescriptors`; `PUBLISHING_TOOL_REGISTRY` is the
+ * publishing-pair projection of `AUTHORITY_TOOL_REGISTRY`).
  *
  * Both tools speak the format-v2 publishing contract (decision `2ba3008`) while
  * keeping the format-v1 transport/package conveniences working for one
@@ -81,14 +84,18 @@ export const REALM_PUBLISHING_MAX_BUNDLE_BYTES: number = 3 * 1024 * 1024;
 export const REALM_PUBLISHING_MAX_PACKAGE_BYTES: number = 8 * 1024 * 1024;
 
 /**
- * One publishing meta-tool descriptor: the canonical tool name, the explicit
- * authority id required to invoke it, and the standard descriptor contract.
+ * One authority meta-tool descriptor (M1 generalization of the Wave U
+ * publishing descriptor): the canonical tool name, the explicit authority id
+ * required to invoke it, and the standard descriptor contract.
  *
  * The `authority` member is the single capability declaration the dispatcher
- * consults; it is never derived from caller data.
+ * consults; it is never derived from caller data. Every descriptor in
+ * `authorityToolDescriptors` is explicit-grant-only: schemas are exposed only
+ * to callers whose frozen descriptor holds the exact id (`*`/`privileged`
+ * never satisfy it), and the ids stay outside the canonical taxonomy.
  */
-export interface PublishingToolDescriptor {
-  /** Canonical publishing tool name (`PUBLISHING_TOOLS`). */
+export interface AuthorityToolDescriptor {
+  /** Canonical tool name (`PUBLISHING_TOOLS` / future authority tool names). */
   readonly name: string;
   /** Explicit authority id required to invoke this tool (never wildcard-implied). */
   readonly authority: string;
@@ -103,6 +110,12 @@ export interface PublishingToolDescriptor {
   /** Delegation handler bound to the injected host publishing port. */
   readonly handler: (params: ToolParams, context: ExecutionContext) => unknown;
 }
+
+/**
+ * Backward-compatible alias of {@link AuthorityToolDescriptor} (Wave U name).
+ * The publishing descriptors are ordinary members of the authority registry.
+ */
+export type PublishingToolDescriptor = AuthorityToolDescriptor;
 
 /** Minimal structural view of the caller-scoped VirtualFS read surface. */
 interface VirtualFsReadView {
@@ -1239,21 +1252,57 @@ export const submitHydrationPackage = submitHydrationPackageDescriptor;
 /** snake_case alias of `submitHydrationPackageDescriptor`. */
 export const submit_hydration_package = submitHydrationPackageDescriptor;
 
+/** Explicit authority ids owned by the Wave U publishing descriptors. */
+const PUBLISHING_AUTHORITY_ID_SET: ReadonlySet<string> = new Set<string>([
+  AGENT_AUTHORITIES.TEMPLATE,
+  AGENT_AUTHORITIES.HYDRATION
+]);
+
 /**
- * Array of the two Wave U publishing meta-tool descriptors.
+ * Every authority meta-tool descriptor (M1): the Wave U publishing pair is the
+ * complete set today; the meta-plane phases (M2–M5b) append their descriptors
+ * here (`metaTools.ts` or the same file), and every filter below derives its
+ * membership from this one array plus each descriptor's `authority` id.
  */
-export const publishingToolDescriptors: readonly PublishingToolDescriptor[] = Object.freeze([
+export const authorityToolDescriptors: readonly AuthorityToolDescriptor[] = Object.freeze([
   importRealmTemplateDescriptor,
   submitHydrationPackageDescriptor
 ]);
 
 /**
- * Frozen registry of the publishing meta tools keyed by canonical name.
+ * Array of the two Wave U publishing meta-tool descriptors: the publishing
+ * slice of {@link authorityToolDescriptors} (derived, never hand-maintained).
+ */
+export const publishingToolDescriptors: readonly PublishingToolDescriptor[] = Object.freeze(
+  authorityToolDescriptors.filter((descriptor) => PUBLISHING_AUTHORITY_ID_SET.has(descriptor.authority))
+);
+
+/**
+ * Frozen registry of every authority meta tool keyed by canonical name (M1).
  *
- * The publishing registry is deliberately separate from the canonical
+ * The authority registry is deliberately separate from the canonical
  * `TOOL_REGISTRY`: `getSandboxToolsSchema()` never exposes these schemas by
  * wildcard, and the dispatcher resolves them only for a caller whose frozen
  * authority descriptor carries the matching explicit authority id.
+ */
+export const AUTHORITY_TOOL_REGISTRY: Readonly<Record<string, AuthorityToolDescriptor>> = Object.freeze(
+  authorityToolDescriptors.reduce<Record<string, AuthorityToolDescriptor>>((registry, descriptor) => {
+    Object.defineProperty(registry, descriptor.name, {
+      value: descriptor,
+      writable: false,
+      enumerable: true,
+      configurable: false
+    });
+    return registry;
+  }, Object.create(null))
+);
+
+/**
+ * Frozen registry of the publishing meta tools keyed by canonical name,
+ * retained as the publishing-pair projection of {@link AUTHORITY_TOOL_REGISTRY}
+ * for source compatibility (Wave U). These tools are deliberately outside
+ * `TOOL_REGISTRY`; they route through the same dispatcher pipeline but
+ * authorize only against the caller's explicit authority descriptor.
  */
 export const PUBLISHING_TOOL_REGISTRY: Readonly<Record<string, PublishingToolDescriptor>> = Object.freeze(
   publishingToolDescriptors.reduce<Record<string, PublishingToolDescriptor>>((registry, descriptor) => {
@@ -1268,8 +1317,8 @@ export const PUBLISHING_TOOL_REGISTRY: Readonly<Record<string, PublishingToolDes
 );
 
 /**
- * Builds OpenAI function schemas for the publishing tools whose explicit
- * authority id is present in `authorities`.
+ * Builds OpenAI function schemas for every authority tool whose exact
+ * authority id is present in `authorities` (M1 generic exposure filter).
  *
  * The exposure discipline mirrors the host-only custom-tool surface: schemas
  * are only ever appended for a caller whose frozen authority descriptor holds
@@ -1278,7 +1327,7 @@ export const PUBLISHING_TOOL_REGISTRY: Readonly<Record<string, PublishingToolDes
  * @param authorities - Explicit authority ids the caller holds.
  * @returns Fresh OpenAI tool definitions (empty when no authority matches).
  */
-export function getPublishingToolSchemas(authorities: readonly string[]): Array<{
+export function getAuthorityToolSchemas(authorities: readonly string[]): Array<{
   type: 'function';
   function: { name: string; description: string; parameters: JsonSchemaDraft07 };
 }> {
@@ -1287,7 +1336,7 @@ export function getPublishingToolSchemas(authorities: readonly string[]): Array<
     type: 'function';
     function: { name: string; description: string; parameters: JsonSchemaDraft07 };
   }> = [];
-  for (const descriptor of publishingToolDescriptors) {
+  for (const descriptor of authorityToolDescriptors) {
     if (!granted.has(descriptor.authority)) continue;
     definitions.push({
       type: 'function',
@@ -1311,4 +1360,35 @@ export function getPublishingToolSchemas(authorities: readonly string[]): Array<
     });
   }
   return definitions;
+}
+
+/**
+ * Returns the authority tool descriptors whose exact authority id is present
+ * in `authorities` (M1): the `describe_tool` merge source, so an exact
+ * authority holder can describe exactly the authority tools it may invoke and
+ * every other caller never learns they exist.
+ *
+ * @param authorities - Explicit authority ids the caller holds.
+ * @returns Granted descriptors (empty when none match).
+ */
+export function getAuthorityToolDescriptors(authorities: readonly string[]): readonly AuthorityToolDescriptor[] {
+  const granted: ReadonlySet<string> = new Set(Array.isArray(authorities) ? authorities : []);
+  const descriptors: AuthorityToolDescriptor[] = [];
+  for (const descriptor of authorityToolDescriptors) {
+    if (granted.has(descriptor.authority)) descriptors.push(descriptor);
+  }
+  return Object.freeze(descriptors);
+}
+
+/**
+ * Source-compatible Wave U alias of {@link getAuthorityToolSchemas}.
+ *
+ * @param authorities - Explicit authority ids the caller holds.
+ * @returns Fresh OpenAI tool definitions (empty when no authority matches).
+ */
+export function getPublishingToolSchemas(authorities: readonly string[]): Array<{
+  type: 'function';
+  function: { name: string; description: string; parameters: JsonSchemaDraft07 };
+}> {
+  return getAuthorityToolSchemas(authorities);
 }
