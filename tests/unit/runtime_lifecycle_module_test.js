@@ -2890,6 +2890,19 @@ test('21. [M1] every known authority id is stripped from selectors on launch, sp
     () => lifecycle.reauthorizeAgent('strip_launch', { authorities: [] }, operator),
     (err) => err?.code === 'PERMISSION_DENIED'
   );
+  // The legacy publishing alias keys stay rejected through the migration window.
+  for (const legacyKey of ['templateAuthority', 'hydrationAuthority']) {
+    assert.throws(
+      () => lifecycle.updateAgentConfig('strip_launch', { [legacyKey]: true }, operator),
+      (err) => err?.code === 'PERMISSION_DENIED',
+      `updateAgentConfig denies the legacy '${legacyKey}' key`
+    );
+    assert.throws(
+      () => lifecycle.reauthorizeAgent('strip_launch', { [legacyKey]: true }, operator),
+      (err) => err?.code === 'PERMISSION_DENIED',
+      `reauthorizeAgent denies the legacy '${legacyKey}' key`
+    );
+  }
 });
 
 test('22. [M1] the wildcard and privilege never imply an authority id and scopes never reach the descriptor', async () => {
