@@ -4,7 +4,7 @@
  * authority registry that the meta-plane phases (M2–M5b) extend.
  *
  * Every descriptor is an explicit-grant-only meta tool. They are deliberately
- * **outside** the canonical 35-tool taxonomy (`SANDBOX_TOOLS`), are never
+ * **outside** the canonical 41-tool taxonomy (`SANDBOX_TOOLS`), are never
  * implied by the wildcard capability or `privileged`, and their schemas are
  * only ever exposed to callers whose frozen `AuthorityDescriptor` carries the
  * matching authority id (`getAuthorityToolSchemas` is the exact-membership

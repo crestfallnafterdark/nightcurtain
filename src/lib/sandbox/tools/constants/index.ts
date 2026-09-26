@@ -6,14 +6,15 @@
  *
  * @module tools/constants
  * @invariant Leaf: zero imports (including type-only); all exports are deterministic with no import-time side effects, and `TOOL_SYSTEM_ERROR_CODES`, `SANDBOX_TOOLS`, `INNATE_TOOLS`, `TOOL_PRESETS`, and every nested preset array are frozen.
- * @invariant Canonical taxonomy: `SANDBOX_TOOLS` enumerates exactly 38 unique `snake_case` tool names grouped across 7 substrate domains — VFS (12), messaging/mailbox (8), agent lifecycle (7), synchronous invocation (3), runtime scheduler (3), world clock & events (3), precall & reflection (2).
- * @invariant Innate baseline primitives: `INNATE_TOOLS` is the frozen four-name list — `whoami`, `get_current_time`, `describe_tool`, `batch_precall` — augmented with a non-enumerable `has()` lookup.
+ * @invariant Canonical taxonomy: `SANDBOX_TOOLS` enumerates exactly 41 unique `snake_case` tool names grouped across 7 substrate domains — VFS (12), messaging/mailbox (8), agent lifecycle (7), synchronous invocation (3), runtime scheduler (3), world clock & events (3), precall & reflection (5).
+ * @invariant Innate baseline primitives: `INNATE_TOOLS` is the frozen seven-name list — `whoami`, `get_current_time`, `describe_tool`, `batch_precall`, `list_tools`, `list_tool_presets`, `describe_preset` — augmented with a non-enumerable `has()` lookup.
  * @invariant Frozen error-code dictionary: `TOOL_SYSTEM_ERROR_CODES` freezes the canonical machine-readable codes (`TOOL_NOT_FOUND`, `PERMISSION_DENIED`, `INVALID_ARGUMENTS`, `SERVICE_UNAVAILABLE`, `PRECALL_FORBIDDEN`, `EXECUTION_FAILED`, `AGENT_ALREADY_EXISTS`); the dispatcher's universal error shield constrains every emitted failure receipt to this vocabulary, normalizing downstream subsystem codes outside it to `EXECUTION_FAILED`.
  * @invariant Tool-family taxonomy: `TOOL_FAMILIES` declares exactly one primary family — from the frozen 11-family vocabulary (`vfs.read`, `vfs.write`, `messaging.send`, `mailbox.read`, `mailbox.consume`, `lifecycle`, `invocation`, `scheduler`, `clock`, `world`, `precall`) — for every canonical `SANDBOX_TOOLS` entry; `FAMILY_TIER_PLAN` maps each family to its named tiers, and `TOOL_TIER_EXPOSURE` carries the explicit never/override decisions (an absent tool defaults to `'family'`).
  * @invariant Retired-selector window: `RETIRED_TOOL_SELECTORS` freezes the canonical `subagent_management` selector expansion (`spawn_agent`, `kill_agent`, `invoke_agent`, `undo_turn`, fixed legacy order), and `expandRetiredToolSelector` is a pure fail-closed lookup keyed by the canonical selector id only — spellings resolve through the alias normalizer.
- * @invariant Capability tiers: exactly five presets (`all`, `manager`, `collaborator`, `readonly_collaborator`, `readonly`), each a frozen string array; `all` is exactly `['*']`. The named tiers are generated once from the family taxonomy (innate baseline + `FAMILY_TIER_PLAN`/`TOOL_TIER_EXPOSURE`, canonical declaration order, duplicate-free) — no hand-enumerated member list exists, no tier carries the retired `subagent_management` selector, and every `INNATE_TOOLS` primitive (including `describe_tool`) is a member of every named tier. `includeReflection: false` still removes `describe_tool` from emitted schemas without changing tier membership.
+ * @invariant Capability tiers: exactly five presets (`all`, `manager`, `collaborator`, `readonly_collaborator`, `readonly`), each a frozen string array; `all` is exactly `['*']`. The named tiers are generated once from the family taxonomy (innate baseline + `FAMILY_TIER_PLAN`/`TOOL_TIER_EXPOSURE`, canonical declaration order, duplicate-free) — no hand-enumerated member list exists, no tier carries the retired `subagent_management` selector, and every `INNATE_TOOLS` primitive (including `describe_tool` and the M5a catalog reflection tools) is a member of every named tier. `includeReflection: false` still removes `describe_tool` from emitted schemas without changing tier membership.
  * @invariant Preset values are allowlist strings only: no execution-context or infrastructure configuration (model, provider, temperature, privilege/whitelist flags) is represented in the preset definitions.
- * @invariant Mutation-capability vocabulary: `MUTATING_TOOLS` and `READ_ONLY_TOOLS` partition every canonical `SANDBOX_TOOLS` entry exactly once (disjoint, union = the 38-name canonical set) as frozen arrays in canonical declaration order, and `isMutatingTool` is a pure membership probe over that vocabulary. The clock/event tools (`world_clock`, `event_list`) classify as mutating because they step simulation time and mutate VFS-backed event registries.
+ * @invariant Mutation-capability vocabulary: `MUTATING_TOOLS` and `READ_ONLY_TOOLS` partition every canonical `SANDBOX_TOOLS` entry exactly once (disjoint, union = the 41-name canonical set) as frozen arrays in canonical declaration order, and `isMutatingTool` is a pure membership probe over that vocabulary. The clock/event tools (`world_clock`, `event_list`) classify as mutating because they step simulation time and mutate VFS-backed event registries.
+ * @invariant Catalog reflection vocabulary (M5a): `SANDBOX_TOOLS` carries the three canonical read-only reflection tools — `list_tools`, `list_tool_presets`, `describe_preset` — in the `precall` family and the innate baseline (ordinary-facing, no authority gate); they are members of `ALL_TOOL_DESCRIPTORS`/`TOOL_REGISTRY` and never of any authority registry.
  * @invariant Publishing-tool vocabulary: `PUBLISHING_TOOLS` freezes the two publishing tool names (`import_realm_template`, `submit_hydration_package`) outside the canonical taxonomy — they are explicit-grant-only meta tools, never wildcard-implied capabilities.
  * @invariant Realm-admin tool vocabulary (M3): `REALM_ADMIN_TOOLS` freezes the two realm meta-tool names (`inspect_realm`, `update_realm`) outside the canonical taxonomy — explicit-grant-only (`@realm:inspect`/`@realm:edit`), never wildcard-, privileged-, or preset-implied, and exposed only through the exact-authority schema filter.
  * @invariant Extension-admin tool vocabulary (M4): `EXTENSIONS_ADMIN_TOOLS` freezes the two extension meta-tool names (`list_extensions`, `attach_extension`) outside the canonical taxonomy — explicit-grant-only (`@extensions:authority`), never wildcard-, privileged-, or preset-implied, and exposed only through the exact-authority schema filter.
@@ -142,7 +143,7 @@ export type ToolSystemErrorCode = typeof TOOL_SYSTEM_ERROR_CODES[keyof typeof TO
 // ============================================================================
 
 /**
- * Master Sandbox Tools Enum (Canonical `snake_case` names for all 38 tools).
+ * Master Sandbox Tools Enum (Canonical `snake_case` names for all 41 tools).
  * Eliminates magic strings across turn execution engines, lifecycle managers, UI components, and test suites.
  *
  * Grouped across 7 substrate domains:
@@ -156,7 +157,8 @@ export type ToolSystemErrorCode = typeof TOOL_SYSTEM_ERROR_CODES[keyof typeof TO
  * - **Synchronous Invocation** (3 tools): `invoke_agent`, `wait_for_invocation`, `wait_for_agent`
  * - **Runtime Scheduler** (3 tools): `schedule`, `list_schedules`, `cancel_schedule`
  * - **World Clock & Events** (3 tools): `world_clock`, `event_list`, `get_current_time`
- * - **Precall & Reflection** (2 tools): `batch_precall`, `describe_tool`
+ * - **Precall & Reflection** (5 tools): `batch_precall`, `describe_tool`, `list_tools`,
+ *   `list_tool_presets`, `describe_preset`
  *
  * @readonly
  * Enum of `string` values:
@@ -255,11 +257,17 @@ export const SANDBOX_TOOLS: {
   /** Returns the current world clock state: elapsed seconds, day/hour/minute/second fields, and formatted time strings. */
   readonly GET_CURRENT_TIME: 'get_current_time';
 
-  // Precall & Reflection Primitives (2 Tools)
+  // Precall & Reflection Primitives (5 Tools)
   /** Executes an ordered batch of allowlisted pre-computation tool calls prior to conversational actions; not restricted to read-only — the allowlist admits mail consumption and clock/event stepping, while VFS writes, agent lifecycle mutations, scheduler mutations, outbound messaging, and direct invocation stay forbidden. */
   readonly BATCH_PRECALL: 'batch_precall';
   /** Returns OpenAI JSON schema and semantic documentation for a tool by name. */
   readonly DESCRIBE_TOOL: 'describe_tool';
+  /** Enumerates the canonical baked tool catalog with family, mutation class, and a bounded one-line description. */
+  readonly LIST_TOOLS: 'list_tools';
+  /** Lists the generated capability presets with their member counts. */
+  readonly LIST_TOOL_PRESETS: 'list_tool_presets';
+  /** Describes one generated capability preset: canonical members and count. */
+  readonly DESCRIBE_PRESET: 'describe_preset';
 } = Object.freeze({
   READ_FILE: 'read_file',
   WRITE_FILE: 'write_file',
@@ -304,11 +312,14 @@ export const SANDBOX_TOOLS: {
   GET_CURRENT_TIME: 'get_current_time',
 
   BATCH_PRECALL: 'batch_precall',
-  DESCRIBE_TOOL: 'describe_tool'
+  DESCRIBE_TOOL: 'describe_tool',
+  LIST_TOOLS: 'list_tools',
+  LIST_TOOL_PRESETS: 'list_tool_presets',
+  DESCRIBE_PRESET: 'describe_preset'
 });
 
 /**
- * Union type representing all 38 canonical sandbox tool names.
+ * Union type representing all 41 canonical sandbox tool names.
  *
  * @example
  * ```typescript
@@ -375,7 +386,7 @@ export const MUTATING_TOOLS: readonly SandboxToolName[] = Object.freeze([
   // World Clock & Events (2 of 3)
   SANDBOX_TOOLS.WORLD_CLOCK,
   SANDBOX_TOOLS.EVENT_LIST,
-  // Precall & Reflection (1 of 2; nested calls may mutate)
+  // Precall & Reflection (1 of 5; nested calls may mutate)
   SANDBOX_TOOLS.BATCH_PRECALL
 ] as const);
 
@@ -416,8 +427,11 @@ export const READ_ONLY_TOOLS: readonly SandboxToolName[] = Object.freeze([
   SANDBOX_TOOLS.LIST_SCHEDULES,
   // World Clock & Events (1 of 3)
   SANDBOX_TOOLS.GET_CURRENT_TIME,
-  // Precall & Reflection (1 of 2)
-  SANDBOX_TOOLS.DESCRIBE_TOOL
+  // Precall & Reflection (4 of 5)
+  SANDBOX_TOOLS.DESCRIBE_TOOL,
+  SANDBOX_TOOLS.LIST_TOOLS,
+  SANDBOX_TOOLS.LIST_TOOL_PRESETS,
+  SANDBOX_TOOLS.DESCRIBE_PRESET
 ] as const);
 
 /**
@@ -559,7 +573,10 @@ const innateToolsList: SandboxToolName[] = [
   SANDBOX_TOOLS.WHOAMI,
   SANDBOX_TOOLS.GET_CURRENT_TIME,
   SANDBOX_TOOLS.DESCRIBE_TOOL,
-  SANDBOX_TOOLS.BATCH_PRECALL
+  SANDBOX_TOOLS.BATCH_PRECALL,
+  SANDBOX_TOOLS.LIST_TOOLS,
+  SANDBOX_TOOLS.LIST_TOOL_PRESETS,
+  SANDBOX_TOOLS.DESCRIBE_PRESET
 ];
 Object.defineProperty(innateToolsList, 'has', {
   value: function(this: readonly string[], tool: string): boolean {
@@ -572,8 +589,10 @@ Object.defineProperty(innateToolsList, 'has', {
 
 /**
  * Immutable list of baseline primitives permitted for all agents by default.
- * Contains: `whoami`, `get_current_time`, `describe_tool`, and `batch_precall`
- * (which may perform the limited mutations its own allowlist admits).
+ * Contains: `whoami`, `get_current_time`, `describe_tool`, `batch_precall`
+ * (which may perform the limited mutations its own allowlist admits), and the
+ * three M5a catalog reflection tools (`list_tools`, `list_tool_presets`,
+ * `describe_preset`).
  *
  * @readonly
  * Type: `InnateToolsList`.
@@ -619,7 +638,7 @@ export type ToolFamily =
  * the existing `MUTATING_TOOLS`/`READ_ONLY_TOOLS` partition.
  *
  * @readonly
- * Type: `Readonly<Record<SandboxToolName, ToolFamily>>` (exactly 38 keys).
+ * Type: `Readonly<Record<SandboxToolName, ToolFamily>>` (exactly 41 keys).
  * @example
  * ```typescript
  * import { TOOL_FAMILIES } from './constants/index.ts';
@@ -665,7 +684,10 @@ export const TOOL_FAMILIES: Readonly<Record<SandboxToolName, ToolFamily>> = Obje
   [SANDBOX_TOOLS.EVENT_LIST]: 'world',
   [SANDBOX_TOOLS.GET_CURRENT_TIME]: 'clock',
   [SANDBOX_TOOLS.BATCH_PRECALL]: 'precall',
-  [SANDBOX_TOOLS.DESCRIBE_TOOL]: 'precall'
+  [SANDBOX_TOOLS.DESCRIBE_TOOL]: 'precall',
+  [SANDBOX_TOOLS.LIST_TOOLS]: 'precall',
+  [SANDBOX_TOOLS.LIST_TOOL_PRESETS]: 'precall',
+  [SANDBOX_TOOLS.DESCRIBE_PRESET]: 'precall'
 });
 
 /**
@@ -866,7 +888,7 @@ export function expandRetiredToolSelector(canonical: string): readonly SandboxTo
  * member; it is accepted only through the deprecated selector window
  * ({@link RETIRED_TOOL_SELECTORS}) and expands to its four legacy tools.
  *
- * - `all`: Full access to all 38 sandbox tools (`['*']`).
+ * - `all`: Full access to all 41 sandbox tools (`['*']`).
  * - `manager`: VFS manipulation, messaging, scheduling, subagent lifecycle, invocation, clock, and precall.
  * - `collaborator`: Full VFS, messaging, scheduling, clock, and precall (no lifecycle/invocation).
  * - `readonly_collaborator`: Read-only VFS, mailbox tools plus `send_message` (mail can be consumed by `read_message`/`get_inbox`), clock, and precall.
@@ -882,7 +904,7 @@ export function expandRetiredToolSelector(canonical: string): readonly SandboxTo
  * ```
  */
 export const TOOL_PRESETS: {
-  /** Full access to all 38 sandbox tools wildcard */
+  /** Full access to all 41 sandbox tools wildcard */
   readonly all: readonly ['*'];
   /** Manager tier: Full VFS, messaging, scheduler, subagent lifecycle, invocation, clock, and precall */
   readonly manager: readonly string[];

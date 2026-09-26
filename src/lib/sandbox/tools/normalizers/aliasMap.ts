@@ -652,6 +652,18 @@ export const TOOL_ALIAS_MAP: Readonly<Record<string, string>> = Object.freeze({
   'inspect_tool': SANDBOX_TOOLS.DESCRIBE_TOOL,
   'inspectTool': SANDBOX_TOOLS.DESCRIBE_TOOL,
 
+  // list_tools (M5a canonical catalog reflection)
+  'list_tools': SANDBOX_TOOLS.LIST_TOOLS,
+  'listTools': SANDBOX_TOOLS.LIST_TOOLS,
+
+  // list_tool_presets (M5a canonical catalog reflection)
+  'list_tool_presets': SANDBOX_TOOLS.LIST_TOOL_PRESETS,
+  'listToolPresets': SANDBOX_TOOLS.LIST_TOOL_PRESETS,
+
+  // describe_preset (M5a canonical catalog reflection)
+  'describe_preset': SANDBOX_TOOLS.DESCRIBE_PRESET,
+  'describePreset': SANDBOX_TOOLS.DESCRIBE_PRESET,
+
   // Deprecated retired-selector window (ticket 5efc129): the canonical id and
   // its spellings stay reserved for derived call names; authorization
   // compatibility expands the canonical id through `expandRetiredToolSelector`.
