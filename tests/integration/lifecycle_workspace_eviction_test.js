@@ -225,11 +225,11 @@ test('emptyRecycleBin evicts each recycled member resolved workspace', async () 
   );
 });
 
-test('spawn_agent workspace pinning is confined for non-authority creators (f44da3e)', async () => {
+test('spawn workspace pinning is confined for non-authority creators (f44da3e); the tool boundary strips pins', async () => {
   const { runtime, virtualFs } = await createRealRuntime();
 
   await runtime.launchAgent({
-    config: { id: 'manager-lane', role: 'manager' },
+    config: { id: 'manager-lane', role: 'manager', allowedTools: ['spawn_agent', 'read_file'] },
     callerContext: { callerAgentId: 'director' }
   });
   seedWorkspace(virtualFs, 'peer-lane', 'peer private data');
@@ -240,23 +240,43 @@ test('spawn_agent workspace pinning is confined for non-authority creators (f44d
 
   const managerDispatcher = createSandboxToolDispatcher({ runtime, agentId: 'manager-lane' });
 
-  const deniedPeer = await managerDispatcher.executeTool('spawn_agent', {
-    id: 'pinned-peer',
+  // Ratified parameter surface (f41f838 follow-up): `workspace` is not a
+  // model-facing input. The tool boundary strips it (with a warning) and the
+  // child lands on its own resolved private key — a peer pin cannot even
+  // reach the lifecycle through this channel.
+  const stripped = await managerDispatcher.executeTool('spawn_agent', {
+    id: 'tool-stripped-pin',
     role: 'manager',
     workspace: 'peer-lane'
   });
-  assert.equal(deniedPeer.success, false, 'a non-authority creator cannot pin a peer private workspace');
-  assert.equal(deniedPeer.code, 'PERMISSION_DENIED', 'the refused pin reports the denial code');
+  assert.equal(stripped.success, true, `the spawn succeeds without the pin: ${stripped.error}`);
+  assert.equal(stripped.workspace, 'tool-stripped-pin', 'the child keeps its own private workspace key');
+  assert.deepStrictEqual(stripped.warnings, ["ignored unknown parameter 'workspace'"]);
+  assert.equal(runtime.getAgent('tool-stripped-pin')?.config?.workspaceId, 'tool-stripped-pin');
+
+  // The lifecycle gate itself (defense in depth, host/operator + legacy API
+  // path) still refuses a non-authority pin to a peer private workspace and to
+  // a reserved realm-global key; a denied pin leaves no registration and no
+  // recycle-bin capture.
+  await assert.rejects(
+    () => runtime.launchAgent({
+      config: { id: 'pinned-peer', workspace: 'peer-lane', allowedTools: ['read_file'] },
+      callerContext: { callerAgentId: 'manager-lane' }
+    }),
+    (err) => err?.code === 'PERMISSION_DENIED',
+    'a non-authority creator cannot pin a peer private workspace'
+  );
   assert.equal(runtime.getAgent('pinned-peer'), null, 'no partially-launched child stays registered');
   assert.equal(runtime.getRecycledAgent('pinned-peer'), null, 'no zombie child lands in the recycle bin');
 
-  const deniedRealm = await managerDispatcher.executeTool('spawn_agent', {
-    id: 'pinned-realm',
-    role: 'manager',
-    workspace: 'realm:alpha:global'
-  });
-  assert.equal(deniedRealm.success, false, 'a reserved realm-global pin is refused');
-  assert.equal(deniedRealm.code, 'PERMISSION_DENIED', 'the refused realm pin reports the denial code');
+  await assert.rejects(
+    () => runtime.launchAgent({
+      config: { id: 'pinned-realm', workspace: 'realm:alpha:global', allowedTools: ['read_file'] },
+      callerContext: { callerAgentId: 'manager-lane' }
+    }),
+    (err) => err?.code === 'PERMISSION_DENIED',
+    'a reserved realm-global pin is refused'
+  );
   assert.equal(runtime.getAgent('pinned-realm'), null, 'the denied realm spawn leaves no child');
 
   assert.equal(readSentinel(virtualFs, 'peer-lane'), 'peer private data', 'the peer workspace bytes survive');
@@ -266,14 +286,12 @@ test('spawn_agent workspace pinning is confined for non-authority creators (f44d
     'the realm-global workspace bytes survive'
   );
 
-  // Explicit pins that ARE legitimate keep working.
-  const shared = await managerDispatcher.executeTool('spawn_agent', {
-    id: 'pinned-shared',
-    role: 'manager',
-    workspace: 'manager-lane'
+  // Explicit pins that ARE legitimate keep working at the lifecycle.
+  const shared = await runtime.launchAgent({
+    config: { id: 'pinned-shared', workspace: 'manager-lane', allowedTools: ['read_file'] },
+    callerContext: { callerAgentId: 'manager-lane' }
   });
-  assert.equal(shared.success, true, 'a creator may pin a child to its own resolved workspace');
-  assert.equal(runtime.getAgent('pinned-shared')?.config?.workspaceId, 'manager-lane');
+  assert.equal(shared.config.workspaceId, 'manager-lane', 'a creator may pin a child to its own resolved workspace');
 
   const hosted = await runtime.launchAgent({
     config: { id: 'host-pinned', workspace: 'host-shared-ws', allowedTools: ['read_file'] },
@@ -329,7 +347,7 @@ test('spawn_agent denies resolved workspace-key shadowing for non-authority crea
     callerContext: { callerAgentId: 'director' }
   });
   await runtime.launchAgent({
-    config: { id: 'claim-manager', role: 'manager' },
+    config: { id: 'claim-manager', role: 'manager', allowedTools: ['spawn_agent', 'read_file'] },
     callerContext: { callerAgentId: 'director' }
   });
   seedWorkspace(virtualFs, 'orphan-key', 'orphan bytes');
@@ -363,7 +381,7 @@ test('kill_agent preserves a child workspace shared with its creator (26c3913)',
   const { runtime, virtualFs } = await createRealRuntime();
 
   await runtime.launchAgent({
-    config: { id: 'share-manager', role: 'manager' },
+    config: { id: 'share-manager', role: 'manager', allowedTools: ['spawn_agent', 'kill_agent', 'read_file'] },
     callerContext: { callerAgentId: 'director' }
   });
 
@@ -372,18 +390,16 @@ test('kill_agent preserves a child workspace shared with its creator (26c3913)',
   // addresses that key literally (this fixture VFS has no identity port, so the
   // caller claim must equal the storage key); a bare-id pin stays verbatim and
   // names its own partition, so the canonical key is the shared-workspace
-  // composition.
+  // composition. The pin is an explicit lifecycle call (the model-facing tool
+  // boundary strips `workspace`).
   const sharedKey = genericKey('share-manager');
   virtualFs.writeFile('/sentinel.txt', 'creator shared bytes', { workspaceId: sharedKey, callerAgentId: sharedKey });
 
-  const managerDispatcher = createSandboxToolDispatcher({ runtime, agentId: 'share-manager' });
-  const spawn = await managerDispatcher.executeTool('spawn_agent', {
-    id: 'share-child',
-    role: 'manager',
-    workspace: sharedKey
+  const spawn = await runtime.launchAgent({
+    config: { id: 'share-child', workspace: sharedKey, allowedTools: ['kill_agent', 'read_file'] },
+    callerContext: { callerAgentId: 'share-manager' }
   });
-  assert.equal(spawn.success, true, 'sharing the creator workspace remains an allowed composition');
-  assert.equal(runtime.getAgent('share-child')?.config?.workspaceId, sharedKey);
+  assert.equal(spawn.config.workspaceId, sharedKey, 'sharing the creator workspace remains an allowed composition');
 
   const childDispatcher = createSandboxToolDispatcher({ runtime, agentId: 'share-child' });
   const kill = await childDispatcher.executeTool('kill_agent', {
@@ -442,7 +458,7 @@ test('spawn_agent denies reserved-shape own-id launches for non-authority creato
   const { runtime, virtualFs } = await createRealRuntime();
 
   await runtime.launchAgent({
-    config: { id: 'manager-res-shape', role: 'manager' },
+    config: { id: 'manager-res-shape', role: 'manager', allowedTools: ['spawn_agent', 'read_file'] },
     callerContext: { callerAgentId: 'director' }
   });
   seedWorkspace(virtualFs, 'realm:alpha:global', 'realm global data');

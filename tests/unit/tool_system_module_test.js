@@ -200,6 +200,10 @@ test('4. Draft-07 JSON Schema Generation & Invariant 4 Zero Schema Pollution', (
   assert.ok(!noReflectionSchemas.some(s => s.function.name === 'describe_tool'));
 
   // 4. Structural validation of Draft-07 schemas
+  // `spawn_agent` is the one ratified open-schema descriptor (accept-and-warn
+  // boundary: `additionalProperties: true` and the documented capability
+  // parameters ARE model-facing, decision ticket f41f838). Every other tool
+  // keeps the closed schema.
   for (const toolDef of allSchemas) {
     assert.strictEqual(toolDef.type, 'function');
     assert.ok(typeof toolDef.function.name === 'string' && toolDef.function.name.length > 0);
@@ -208,18 +212,32 @@ test('4. Draft-07 JSON Schema Generation & Invariant 4 Zero Schema Pollution', (
     assert.strictEqual(toolDef.function.parameters.type, 'object');
     assert.ok(typeof toolDef.function.parameters.properties === 'object');
     assert.ok(Array.isArray(toolDef.function.parameters.required));
-    assert.strictEqual(toolDef.function.parameters.additionalProperties, false);
+    assert.strictEqual(typeof toolDef.function.parameters.additionalProperties, 'boolean');
+    const isSpawn = toolDef.function.name === SANDBOX_TOOLS.SPAWN_AGENT;
+    assert.strictEqual(
+      toolDef.function.parameters.additionalProperties,
+      isSpawn,
+      `'${toolDef.function.name}' additionalProperties must match its boundary policy`
+    );
 
     // INVARIANT 4: Zero LLM Schema Pollution
     const propertyKeys = Object.keys(toolDef.function.parameters.properties);
     assert.ok(!propertyKeys.includes('model'), 'Schema must not expose model parameter');
-    assert.ok(!propertyKeys.includes('temperature'), 'Schema must not expose temperature parameter');
     assert.ok(!propertyKeys.includes('maxTurns'), 'Schema must not expose maxTurns parameter');
     assert.ok(!propertyKeys.includes('depth'), 'Schema must not expose internal depth parameter');
     assert.ok(!propertyKeys.includes('privileged'), 'Schema must not expose privileged parameter');
-    assert.ok(!propertyKeys.includes('allowedTools'), 'Schema must not expose allowedTools parameter');
-    assert.ok(!propertyKeys.includes('toolPreset'), 'Schema must not expose toolPreset parameter');
+    if (!isSpawn) {
+      assert.ok(!propertyKeys.includes('temperature'), 'Schema must not expose temperature parameter');
+      assert.ok(!propertyKeys.includes('allowedTools'), 'Schema must not expose allowedTools parameter');
+      assert.ok(!propertyKeys.includes('toolPreset'), 'Schema must not expose toolPreset parameter');
+    }
   }
+
+  // Ratified capability surface: spawn_agent documents its real inputs.
+  const spawnSchema = allSchemas.find((toolDef) => toolDef.function.name === SANDBOX_TOOLS.SPAWN_AGENT);
+  assert.ok(spawnSchema.function.parameters.properties.toolPreset, 'spawn_agent exposes toolPreset');
+  assert.ok(spawnSchema.function.parameters.properties.allowedTools, 'spawn_agent exposes allowedTools');
+  assert.ok(spawnSchema.function.parameters.properties.await_completion, 'spawn_agent exposes await_completion');
 });
 
 // ============================================================================

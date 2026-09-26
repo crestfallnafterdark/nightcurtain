@@ -45,7 +45,7 @@ const REALM_VOCABULARY_PATTERN = /realm:/;
 const REALM_FIELD_PATTERN = /realmId|realm_id|realm_scope|realmScope|realmBypass|realm_bypass/;
 
 /** Exact public key set of the projected successful spawn receipt. */
-const PUBLIC_SPAWN_RECEIPT_KEYS = Object.freeze(['id', 'name', 'role', 'state', 'success', 'workspace']);
+const PUBLIC_SPAWN_RECEIPT_KEYS = Object.freeze(['allowedTools', 'id', 'name', 'role', 'state', 'success', 'workspace']);
 
 /** Entity-internal keys the projected receipt must never carry. */
 const FORBIDDEN_RECEIPT_KEYS = Object.freeze(['config', 'history', 'provider', 'model', 'modelConfig', 'authority']);
@@ -150,6 +150,7 @@ test('550486c: a successful realm-bound spawn_agent receipt is projected and rea
     assert.equal(receipt.role, 'worker', 'the child role is reported');
     assert.equal(receipt.state, 'idle', 'the child lifecycle state is reported');
     assert.equal(receipt.workspace, 'worker', 'the child workspace stays the plain private key');
+    assert.ok(Array.isArray(receipt.allowedTools), 'the effective tool policy is reported');
     assert.deepStrictEqual(
       Object.keys(receipt).sort(),
       [...PUBLIC_SPAWN_RECEIPT_KEYS].sort(),
@@ -163,7 +164,7 @@ test('550486c: a successful realm-bound spawn_agent receipt is projected and rea
   }
 });
 
-test('550486c: an authority spawn pinned to a realm-global key reports the opaque global label', async () => {
+test('550486c: workspace pins are not model-facing; the realm-global label stays masked in listings', async () => {
   const runtime = new AgentRuntime({ autoBootstrapDirector: false });
   try {
     await runtime.ensureDirector();
@@ -174,19 +175,26 @@ test('550486c: an authority spawn pinned to a realm-global key reports the opaqu
     });
 
     const dispatcher = createSandboxToolDispatcher({ runtime, agentId: 'root_manager' });
+    // Ratified parameter surface (f41f838 follow-up): `workspace` is
+    // authority-adjacent and stripped at the tool boundary, never forwarded to
+    // the lifecycle, and reported in the model-visible warnings.
     const receipt = await dispatcher.executeTool('spawn_agent', {
       id: 'pinned_child',
       workspace: FOREIGN_REALM_KEY
     });
-    assert.equal(receipt.success, true, 'an authority creator keeps full workspace pinning');
+    assert.equal(receipt.success, true, `the spawn itself succeeds: ${receipt.error}`);
+    assert.equal(receipt.workspace, 'pinned_child', 'the stripped pin leaves the child on its own private key');
+    assert.deepStrictEqual(receipt.warnings, ["ignored unknown parameter 'workspace'"]);
+    assertRealmOpaque(JSON.stringify(receipt), 'the spawn_agent receipt with a stripped pin');
 
-    const serialized = JSON.stringify(receipt);
-    assertRealmOpaque(serialized, 'the authority-pinned spawn_agent receipt');
-    assert.equal(receipt.workspace, 'global', 'the internal realm-global partition key is labeled global');
-
-    // The same pinned child must stay realm-opaque in the visibility listing.
+    // The operator/host surface keeps explicit pinning; its projection stays
+    // realm-opaque and masks the internal realm-global partition label.
+    await runtime.launchAgent({
+      config: { id: 'global_pinned_child', realmId: REALM_ID, workspace: FOREIGN_REALM_KEY, allowedTools: ['read_file'] },
+      principal: operator
+    });
     const listed = await dispatcher.executeTool('list_agents', {});
-    const child = listed.result.find((entry) => entry.id === 'pinned_child');
+    const child = listed.result.find((entry) => entry.id === 'global_pinned_child');
     assert.ok(child, 'the pinned child is listed for its authority creator');
     assert.equal(child.workspace, 'global', 'the listing labels the realm-global workspace as global');
     assertRealmOpaque(JSON.stringify(listed.result), 'the list_agents result');
@@ -195,7 +203,7 @@ test('550486c: an authority spawn pinned to a realm-global key reports the opaqu
   }
 });
 
-test('550486c: a denied realm-bound spawn_agent receipt stays opaque', async () => {
+test('550486c/eab4e51: authority-adjacent claims are stripped at the tool boundary without escalation', async () => {
   const runtime = new AgentRuntime({ autoBootstrapDirector: false });
   try {
     await runtime.ensureDirector();
@@ -203,9 +211,25 @@ test('550486c: a denied realm-bound spawn_agent receipt stays opaque', async () 
 
     const dispatcher = createSandboxToolDispatcher({ runtime, agentId: 'manager' });
     const receipt = await dispatcher.executeTool('spawn_agent', { id: 'priv_child', privileged: true });
-    assert.equal(receipt.success, false, 'a non-authority caller cannot spawn a privileged child');
-    assert.equal(receipt.code, 'PERMISSION_DENIED', 'the denial uses the fail-closed code');
-    assertRealmOpaque(JSON.stringify(receipt), 'the spawn_agent denial receipt');
+    assert.equal(receipt.success, true, 'the privileged claim is not a model input; the spawn itself succeeds');
+    assert.deepStrictEqual(receipt.warnings, ["ignored unknown parameter 'privileged'"]);
+    assert.equal(runtime.getAgent('priv_child').config.privileged, false, 'the stripped claim never elevates the child');
+    assertRealmOpaque(JSON.stringify(receipt), 'the stripped-claim spawn_agent receipt');
+
+    // Defense in depth: the lifecycle's lifecycle-authority gate still denies a
+    // direct (non-tool) escalation claim, and the denial stays realm-opaque.
+    await assert.rejects(
+      () => runtime.launchAgent({
+        config: { id: 'direct_priv_child', privileged: true },
+        callerContext: { callerAgentId: 'manager' }
+      }),
+      (err) => {
+        assert.equal(err?.code, 'PERMISSION_DENIED');
+        assertRealmOpaque(String(err?.message || ''), 'the direct privileged-spawn denial');
+        return true;
+      }
+    );
+    assert.equal(runtime.getAgent('direct_priv_child'), null);
   } finally {
     runtime.destroy();
   }
@@ -269,7 +293,7 @@ test('eab4e51/d57cbc1: a realm-vocabulary spawn claim is refused uniformly and n
   }
 });
 
-test('eab4e51/d57cbc1: a withheld workspace label is omitted from spawn receipts and listings', async () => {
+test('eab4e51/d57cbc1: a withheld workspace label is omitted from listings, never the raw key', async () => {
   const runtime = new AgentRuntime({ autoBootstrapDirector: false });
   try {
     await runtime.ensureDirector();
@@ -280,24 +304,25 @@ test('eab4e51/d57cbc1: a withheld workspace label is omitted from spawn receipts
     });
     const dispatcher = createSandboxToolDispatcher({ runtime, agentId: 'root_manager' });
 
-    // An authority pin to a realm-scoped private key (not the realm-global
-    // shape) must not fall back to the raw key as a workspace label.
-    const pinned = await dispatcher.executeTool('spawn_agent', {
+    // Tool-boundary: a realm-private pin is stripped, never forwarded.
+    const stripped = await dispatcher.executeTool('spawn_agent', {
       id: 'pinned_private',
       workspace: 'realm:beta:private'
     });
-    assert.equal(pinned.success, true, `an authority realm-private pin still launches: ${pinned.error}`);
-    assert.equal(
-      Object.prototype.hasOwnProperty.call(pinned, 'workspace'),
-      false,
-      'the withheld workspace label is omitted, never the raw key'
-    );
-    assertRealmOpaque(JSON.stringify(pinned), 'the realm-private pinned spawn receipt');
+    assert.equal(stripped.success, true, `the spawn itself succeeds: ${stripped.error}`);
+    assert.equal(stripped.workspace, 'pinned_private', 'the child keeps its own plain private key');
+    assert.deepStrictEqual(stripped.warnings, ["ignored unknown parameter 'workspace'"]);
+    assertRealmOpaque(JSON.stringify(stripped), 'the stripped-pin spawn receipt');
 
-    // The same child stays realm-opaque in the visibility listing: the
-    // withheld workspace field is absent rather than echoed.
+    // The projection itself: an operator/host pin to a realm-scoped private
+    // key (not the realm-global shape) must not fall back to the raw key as a
+    // workspace label.
+    await runtime.launchAgent({
+      config: { id: 'direct_private', realmId: REALM_ID, workspace: 'realm:beta:private', allowedTools: ['read_file'] },
+      principal: operator
+    });
     const listed = await dispatcher.executeTool('list_agents', {});
-    const child = listed.result.find((entry) => entry.id === 'pinned_private');
+    const child = listed.result.find((entry) => entry.id === 'direct_private');
     assert.ok(child, 'the pinned child is listed for its authority creator');
     assert.equal(
       Object.prototype.hasOwnProperty.call(child, 'workspace'),

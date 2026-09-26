@@ -3,7 +3,7 @@
  * Exports individual canonical tool descriptors and the consolidated lifecycleToolDescriptors array.
  */
 
-import { SANDBOX_TOOLS, TOOL_SYSTEM_ERROR_CODES } from '../constants/index.ts';
+import { SANDBOX_TOOLS, TOOL_PRESETS, TOOL_SYSTEM_ERROR_CODES } from '../constants/index.ts';
 import { createParamSanitizer } from '../normalizers/index.ts';
 import type { ExecutionContext } from '../../toolDefinitions/index.ts';
 
@@ -38,6 +38,14 @@ interface UndoTurnPortResult {
 interface LaunchAgentOptionsView {
   config: Record<string, unknown>;
   callerContext?: CallerScope;
+  /**
+   * Trusted initial-turn policy for `initial_prompt` (ratified prompt
+   * contract, ticket 4692014): `'detach'` queues the child turn and returns
+   * immediately (the tool's default), `'await'` waits for the completed child
+   * turn (the `await_completion` opt-in). A failed child turn never unwinds
+   * the registered child in either mode.
+   */
+  initialTurnMode?: 'await' | 'detach';
 }
 
 /** Call-site view of the lifecycle port members consumed by this descriptor. */
@@ -347,6 +355,17 @@ function toRealmOpaqueFailureReceipt(receipt: Record<string, unknown>): Record<s
 }
 
 // --- 1. spawn_agent ---
+
+/**
+ * Canonical `spawn_agent` parameter alias map (ratified capability contract,
+ * ticket 1eca963).
+ *
+ * Documented spellings canonicalize onto the exact keys the lifecycle launch
+ * reads: `allowedTools`/`allowed_tools`/`tools` all reach
+ * `agentLifecycle`'s camelCase capability reader, `toolPreset`/`tool_preset`
+ * both reach the preset reader, and `await_completion`/`awaitCompletion`
+ * both reach the prompt-policy reader. `role` stays a pure label.
+ */
 const spawnAgentParamAliasMap = Object.freeze({
   id: 'id',
   agent_id: 'id',
@@ -359,12 +378,106 @@ const spawnAgentParamAliasMap = Object.freeze({
   systemPrompt: 'system_prompt',
   prompt: 'initial_prompt',
   initial_prompt: 'initial_prompt',
-  initialPrompt: 'initial_prompt'
+  initialPrompt: 'initial_prompt',
+  toolPreset: 'toolPreset',
+  tool_preset: 'toolPreset',
+  allowedTools: 'allowedTools',
+  allowed_tools: 'allowedTools',
+  tools: 'allowedTools',
+  await_completion: 'await_completion',
+  awaitCompletion: 'await_completion'
 });
+
+/**
+ * Model-facing `spawn_agent` keys accepted at the tool boundary (post-alias
+ * canonical spellings). Every other key is dropped before the lifecycle port
+ * is reached (unknown-parameter policy, ticket 2adf38a / f41f838 follow-up).
+ */
+const SPAWN_ACCEPTED_PARAM_KEYS: ReadonlySet<string> = new Set([
+  'id',
+  'name',
+  'role',
+  'system_prompt',
+  'initial_prompt',
+  'toolPreset',
+  'allowedTools',
+  'await_completion'
+]);
+
+/**
+ * Identity/authority vocabulary silently stripped at the `spawn_agent` tool
+ * boundary: realm membership, trusted caller-key/caller-context/principal
+ * claims, and the engine-composed authority grants are never model inputs.
+ * They are dropped without a mention — echoing these names (even in a
+ * warning) must never reach an agent-visible receipt, preserving the
+ * realm-opacity contract (tickets eab4e51/d57cbc1).
+ */
+const SPAWN_SILENT_STRIP_KEYS: ReadonlySet<string> = new Set([
+  'realmId',
+  'realm_id',
+  'realmScope',
+  'realm_scope',
+  'realmBypass',
+  'realm_bypass',
+  'callerKey',
+  'caller_key',
+  'callerContext',
+  'caller_context',
+  'principal',
+  'authority',
+  'templateAuthority',
+  'template_authority',
+  'hydrationAuthority',
+  'hydration_authority'
+]);
+
+/**
+ * Partitions sanitized `spawn_agent` args at the tool boundary: accepted keys
+ * are forwarded, identity/authority vocabulary is silently dropped, and every
+ * other key is dropped with a model-visible warning naming the caller's exact
+ * spelling (never forwarded — the lifecycle's `composedConfig` whitelist is
+ * defense in depth, never the only filter).
+ *
+ * A warned key carrying realm vocabulary in its own name is reported with its
+ * name withheld, so a hostile key can never smuggle `realm:`/`realm_`
+ * vocabulary into a receipt.
+ *
+ * @param params - Sanitized handler params.
+ * @returns The forwarded config plus the warning list.
+ */
+function partitionSpawnParams(params: ToolParams): { forwarded: ToolParams; warnings: string[] } {
+  const forwarded: ToolParams = {};
+  const warnings: string[] = [];
+  const source = params && typeof params === 'object' ? params : {};
+  for (const [key, value] of Object.entries(source)) {
+    if (SPAWN_ACCEPTED_PARAM_KEYS.has(key)) {
+      forwarded[key] = value;
+      continue;
+    }
+    if (SPAWN_SILENT_STRIP_KEYS.has(key)) continue;
+    const label = REALM_TEXT_VOCABULARY_PATTERN.test(key) ? '(name withheld)' : `'${key}'`;
+    warnings.push(`ignored unknown parameter ${label}`);
+  }
+  return { forwarded, warnings };
+}
+
+/**
+ * Attaches the boundary warning list to a `spawn_agent` receipt when any key
+ * was ignored. The same receipt flows into agent history and tool telemetry —
+ * the existing operator-visible audit surface — so repeated model mistakes
+ * are observable without a dedicated audit port.
+ *
+ * @param receipt - Spawn receipt.
+ * @param warnings - Ignored-key warnings (empty when nothing was dropped).
+ * @returns The receipt, carrying `warnings` only when non-empty.
+ */
+function withSpawnWarnings(receipt: ToolParams, warnings: readonly string[]): ToolParams {
+  return warnings.length > 0 ? { ...receipt, warnings: [...warnings] } : receipt;
+}
 
 /** Reduced public fields exposed by a successful `spawn_agent` receipt. */
 interface PublicSpawnReceipt {
-  /** Child identifier. */
+  /** Child identifier — the handle a parent addresses with `send_message`/`invoke_agent`. */
   id: string;
   /** Child display name. */
   name: string;
@@ -372,35 +485,79 @@ interface PublicSpawnReceipt {
   state: string;
   /** Child role label. */
   role: string;
+  /**
+   * Effective child tool policy (post-clamp): the names the child can actually
+   * invoke. Absent only when a malformed port record carries no policy at all;
+   * the live lifecycle port always composes one.
+   */
+  allowedTools?: readonly string[];
   /** Realm-opaque workspace label; absent when the raw key is withheld. */
   workspace?: string;
 }
 
 /**
+ * Reads an effective tool policy from a port record or its composed config.
+ *
+ * @param source - Port record (an `Agent` entity or descriptor record).
+ * @param config - Composed config view of the record, or `null`.
+ * @returns A frozen string array, or `null` when no policy is available.
+ */
+function readPublicToolPolicy(
+  source: Record<string, unknown> | null,
+  config: Record<string, unknown> | null
+): readonly string[] | null {
+  const candidates = [
+    source ? source.allowedTools : null,
+    config ? config.allowedTools : null,
+    config ? config.tools : null
+  ];
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) {
+      return Object.freeze(candidate.filter((tool): tool is string => typeof tool === 'string'));
+    }
+  }
+  return null;
+}
+
+/**
  * Projects the lifecycle port's launched-agent record onto the bounded public
- * `spawn_agent` receipt shape (`id`, `name`, `state`, `role`, workspace label).
+ * `spawn_agent` receipt shape (`id`, `name`, `state`, `role`, effective
+ * `allowedTools`, workspace label).
  *
  * The live `Agent` entity is never spread: entity internals (`config` and its
- * `realmId`/`allowedTools`, `history`, `modelConfig`, `provider`, `model`,
- * `authority`, telemetry, …) are dropped here, mirroring the ticket `9133495`
- * `list_agents` safe projection. The workspace label is realm-opaque: an
- * internal `realm:<realmId>:global` partition key is presented as `global`,
- * and any other key carrying the internal `realm:` vocabulary is omitted, so
- * no realm identifier or realm field reaches agent-visible tool history/UI
- * (ticket 550486c; WAVE_R §0.2). A record id carrying internal realm
- * vocabulary is withheld entirely (`null`): the receipt must never echo it
- * (ticket eab4e51, folded into d57cbc1).
+ * `realmId`, `history`, `modelConfig`, `provider`, `model`, `authority`,
+ * telemetry, …) are dropped here, mirroring the ticket `9133495` `list_agents`
+ * safe projection. The child handle (`id`) is mandatory: a malformed success
+ * record without a non-empty string id fails the receipt (a coded
+ * `EXECUTION_FAILED` error) instead of fabricating `'unknown'` identity
+ * (ticket f541390). The workspace label is realm-opaque: an internal
+ * `realm:<realmId>:global` partition key is presented as `global`, and any
+ * other key carrying the internal `realm:` vocabulary is omitted, so no realm
+ * identifier or realm field reaches agent-visible tool history/UI (ticket
+ * 550486c; WAVE_R §0.2). A record id carrying internal realm vocabulary is
+ * withheld entirely (`null`): the receipt must never echo it (ticket eab4e51,
+ * folded into d57cbc1).
  *
  * @param record - Launched record returned by the lifecycle port.
  * @returns The frozen, wire-safe public receipt (without the `success` flag),
  *   or `null` when the record id must be withheld.
+ * @throws `Error` - Coded `EXECUTION_FAILED` when the port record carries no
+ *   valid string id (never a fabricated identity).
  */
 function toPublicSpawnReceipt(record: unknown): PublicSpawnReceipt | null {
   const source = record && typeof record === 'object' ? record as Record<string, unknown> : {};
   const config = source.config && typeof source.config === 'object'
     ? source.config as Record<string, unknown>
     : null;
-  const id = readPublicString(source, 'id') || readPublicString(config, 'id') || 'unknown';
+  const rawId = readPublicString(source, 'id') || readPublicString(config, 'id');
+  const id = rawId ? rawId.trim() : '';
+  if (!id) {
+    const err: Error & { code?: unknown } = new Error(
+      'spawn_agent: the lifecycle port returned an agent record without a valid id'
+    );
+    err.code = TOOL_SYSTEM_ERROR_CODES.EXECUTION_FAILED;
+    throw err;
+  }
   if (carriesInternalRealmVocabulary(id)) return null;
   const workspace = toAgentVisibleWorkspaceKey(
     readPublicString(source, 'workspace')
@@ -408,25 +565,80 @@ function toPublicSpawnReceipt(record: unknown): PublicSpawnReceipt | null {
       || readPublicString(config, 'workspace')
       || id
   );
+  const allowedTools = readPublicToolPolicy(source, config);
   return Object.freeze({
     id,
     name: readPublicString(source, 'name') || readPublicString(config, 'name') || id,
     state: readPublicString(source, 'state') || 'unknown',
     role: readPublicString(source, 'role') || readPublicString(config, 'role') || '',
+    ...(allowedTools ? { allowedTools } : {}),
     ...(workspace ? { workspace } : {})
   });
 }
 
 /**
- * `spawn_agent` descriptor — launch a new agent instance in the sandbox runtime.
+ * `spawn_agent` descriptor — launch a new agent instance in the sandbox runtime
+ * (ratified contract: decision ticket `f41f838` comments #2-#3).
  *
- * Args: `id` (required), optional `name`, `role`, `system_prompt`,
- * `initial_prompt`. Forwards the identity-only caller scope to
- * `context.lifecyclePort.launchAgent()` and throws when that service is missing.
- * The successful receipt is projected to the bounded public shape (`success`,
- * `id`, `name`, `state`, `role`, realm-opaque `workspace`); the live `Agent`
- * entity returned by the port is never spread, and explicit failure receipts
- * keep their shape so denial semantics are preserved (ticket 550486c).
+ * ## Capability contract
+ *
+ * The child's tools come only from `toolPreset` (a preset id) or `allowedTools`
+ * (an explicit tool-name list) — both documented, both honored end-to-end.
+ * `role` is a pure display label and never selects capability. A spawning agent
+ * can never produce a child with more tool access than itself: the lifecycle
+ * clamps the requested set to the spawner's own effective set (the SEC-2 clamp
+ * as documented contract; `'*'` spawner → `'*'` child is equivalent access).
+ * With neither capability parameter the child defaults to
+ * `readonly_collaborator ∩ spawner tools`, or the spawner's own effective set
+ * when that intersection is empty — never a zero-tool child when the spawner
+ * has tools. Host/operator/engine launches (no resolved agent principal) keep
+ * their existing full-pinning semantics.
+ *
+ * ## Parameter surface (accept-and-warn)
+ *
+ * Every accepted key is listed by {@link SPAWN_ACCEPTED_PARAM_KEYS}; unknown
+ * keys are dropped at this boundary, never forwarded to the lifecycle, and
+ * reported in the model-visible `warnings` list on the receipt (naming the
+ * caller's exact spelling). Identity/authority vocabulary (realm membership,
+ * `callerKey`/`callerContext`/`principal`, engine-composed authority grants) is
+ * silently stripped so realm opacity holds. Authority-adjacent acting keys are
+ * deliberately not model inputs and are stripped with a warning: `privileged`
+ * (lifecycle-authority gated), `workspace`/`workspaceId` (workspace
+ * confinement belongs to explicit host/operator launches), and the model/turn
+ * tuning keys (`temperature`, `settings`, `maxTurns`, `modelConfig`,
+ * `presetId`, …). `additionalProperties` is emitted as `true` because the
+ * provider adapters do not run strict tool-schema validation, so the keyword
+ * tells the truth: extra keys are accepted by the wire format and ignored with
+ * a warning.
+ *
+ * ## Prompt policy
+ *
+ * `initial_prompt` is queued and the spawn returns immediately by default
+ * (non-blocking). `await_completion: true` opts into blocking: the tool awaits
+ * the child's completed first turn and surfaces a bounded outcome (the turn
+ * error as a failure receipt). A failed child turn — default or blocking —
+ * never unwinds the registered child; the failure stays observable on the
+ * child (`lastError`/state detail). Destructive rollback covers registration-
+ * time failures only.
+ *
+ * ## Receipts
+ *
+ * The successful receipt is the bounded public projection (`success`, `id`,
+ * `name`, `state`, `role`, effective `allowedTools`, realm-opaque `workspace`,
+ * plus `warnings` when keys were ignored); `id` is the handle a parent uses
+ * with `send_message`/`invoke_agent`. The live `Agent` entity returned by the
+ * port is never spread, a malformed port record without a valid string id
+ * fails the receipt instead of fabricating `'unknown'` identity, and explicit
+ * failure receipts keep their shape so denial semantics are preserved (ticket
+ * 550486c, f541390).
+ *
+ * ## Errors
+ *
+ * Tool-boundary validation is tool-scoped: a missing/non-string `id` fails with
+ * `INVALID_ARGUMENTS` and text naming `spawn_agent` (never the internal
+ * `launchAgent`), and a duplicate id keeps its dedicated
+ * `AGENT_ALREADY_EXISTS` code. Denials name the requirement without inventing
+ * an oracle.
  *
  * Realm-exact caller resolution (Wave I, ticket d57cbc1; I2-V F1): the scope is
  * resolved from the trusted bound execution context only — the
@@ -437,28 +649,33 @@ function toPublicSpawnReceipt(record: unknown): PublicSpawnReceipt | null {
  * workspace-confinement gate, and the SEC-2 tool clamp all apply. A bound
  * caller that is a realm-ambiguous bare id with no trusted identity channel
  * fails closed with the uniform `PERMISSION_DENIED` shape rather than reaching
- * that host path. A per-call `callerKey`/`caller_key` argument is stripped from
- * the launch config — the trusted execution context is the only caller-key
- * channel.
+ * that host path.
  *
  * Realm opacity (ticket eab4e51, folded into d57cbc1): an `id` claim carrying
  * internal realm vocabulary (`realm:`/`system:` shapes, the seeded Generic
  * realm id) is refused before delegation with the uniform
  * `PERMISSION_DENIED` shape and is never echoed; a downstream failure message
  * that repeats a caller-supplied realm-vocabulary claim is sanitized to the
- * same uniform phrase with its failure code preserved; and a per-call
- * `callerKey`/`caller_key` argument is stripped from the launch config — the
- * trusted execution context is the only caller-key channel.
+ * same uniform phrase with its failure code preserved.
  */
 export const spawnAgentDescriptor = Object.freeze({
   name: SANDBOX_TOOLS.SPAWN_AGENT,
-  description: 'Spawn a new agent instance in the sandbox runtime.',
+  description:
+    'Spawn a new child agent in the sandbox runtime (requires the spawn_agent capability; the manager preset grants it). '
+    + 'Capability: choose the child tools with toolPreset (a preset id) or allowedTools (an explicit tool-name list); '
+    + 'the child can never exceed your own effective tool access, and with neither parameter it defaults to '
+    + 'readonly_collaborator intersected with your tools (your own set when that intersection is empty). '
+    + 'role is a display label only and never selects tools. '
+    + 'initial_prompt queues the child first turn and returns immediately by default; pass await_completion:true to wait '
+    + 'for the completed turn (a failed first turn never removes the child). '
+    + 'The receipt carries the child id (use it as the send_message/invoke_agent target), name, role, state, workspace, '
+    + 'and the effective allowedTools. Unknown parameters are ignored and reported in warnings.',
   schema: Object.freeze({
     type: 'object',
     properties: {
       id: {
         type: 'string',
-        description: 'Unique identifier for the new agent.'
+        description: 'Unique identifier for the new agent (required).'
       },
       name: {
         type: 'string',
@@ -466,44 +683,75 @@ export const spawnAgentDescriptor = Object.freeze({
       },
       role: {
         type: 'string',
-        description: 'Domain role or purpose of the agent.'
+        description: 'Role label for the child. Display/identity only — it never selects tools.'
       },
       system_prompt: {
         type: 'string',
-        description: 'Custom system prompt instructions for the agent.'
+        description: 'Custom system prompt seeded as the child first history message.'
       },
       initial_prompt: {
         type: 'string',
-        description: 'Initial prompt or task to trigger the agent with upon launch.'
+        description: 'First user turn text for the child. Queued asynchronously (fire-and-forget) by default; set await_completion:true to wait for the completed turn.'
+      },
+      toolPreset: {
+        type: 'string',
+        enum: Object.keys(TOOL_PRESETS),
+        description: 'Capability preset for the child tools (one of the declared preset ids); clamped to your own effective tool access.'
+      },
+      allowedTools: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Explicit tool-name allowlist for the child; clamped to your own effective tool access.'
+      },
+      await_completion: {
+        type: 'boolean',
+        description: 'Wait for the child first turn to complete before returning (default false: the prompt is queued and the receipt returns immediately).'
       }
     },
     required: ['id'],
-    additionalProperties: false
+    // Honest accept-and-warn keyword: the provider adapters do not run strict
+    // tool-schema validation, so the runtime accepts extra keys by design and
+    // reports each ignored key in `warnings` (never a silent drop).
+    additionalProperties: true
   }),
   paramAliasMap: spawnAgentParamAliasMap,
-  sanitize: createParamSanitizer(spawnAgentParamAliasMap),
+  sanitize: createParamSanitizer(spawnAgentParamAliasMap, {}, { preserveUnknownKeys: true }),
   handler: async (params: ToolParams, context: ExecutionContext) => {
     const lifecyclePort: LifecyclePortView | undefined = context?.lifecyclePort;
     if (!lifecyclePort || typeof lifecyclePort.launchAgent !== 'function') {
       throw new Error('lifecyclePort service is not available in execution context');
     }
+    // Boundary partition (ticket 2adf38a / f41f838 follow-up): accepted keys
+    // forward, identity/authority vocabulary is silently dropped, everything
+    // else is dropped with a model-visible warning and never reaches the port.
+    const { forwarded, warnings } = partitionSpawnParams(params);
     // Identity travels through the explicit LaunchAgentOptions channel, never
     // through config: a per-call `callerContext` is caller data, and the
     // runtime derives spawn authority from the registry descriptor for the
     // supplied subject.
     const scope = resolveCallerScope(context);
-    const config = params && typeof params === 'object' ? { ...params } : {};
+    // Tool-boundary validation (ticket ec397bf): a missing/non-string/blank id
+    // is refused with the tool-scoped argument code and text — never the
+    // lifecycle's internal `launchAgent` vocabulary.
+    const requestedId = forwarded.id;
+    if (typeof requestedId !== 'string' || !requestedId.trim()) {
+      return withSpawnWarnings({
+        success: false,
+        error: "spawn_agent: 'id' is required and must be a non-empty string.",
+        code: TOOL_SYSTEM_ERROR_CODES.INVALID_ARGUMENTS
+      }, warnings);
+    }
     // Fail closed on a realm-ambiguous keyless bound caller (Wave I, ticket
     // d57cbc1; I2-V F1): without a trusted canonical key or a resolving realm
     // scope the caller cannot be attributed, and an unattributed launch would
     // fall through to the anonymous host path (wrong realm, no confinement, no
     // SEC-2 clamp). The refusal carries the uniform permission-denied shape.
     if (isBoundCallerAmbiguous(context)) {
-      return {
+      return withSpawnWarnings({
         success: false,
         error: AMBIGUOUS_CALLER_LAUNCH_REFUSED_MESSAGE,
         code: TOOL_SYSTEM_ERROR_CODES.PERMISSION_DENIED
-      };
+      }, warnings);
     }
     // Realm opacity at the tool boundary (ticket eab4e51, folded into
     // d57cbc1): a claimed id carrying internal realm vocabulary is refused
@@ -511,22 +759,22 @@ export const spawnAgentDescriptor = Object.freeze({
     // echoed by a receipt, or exposed by a listing. The launch-side
     // registry-id check is the runtime lane's; this static-shape gate needs no
     // registry lookup and therefore creates no existence oracle.
-    if (carriesInternalRealmVocabulary(config.id)) {
-      return {
+    if (carriesInternalRealmVocabulary(requestedId)) {
+      return withSpawnWarnings({
         success: false,
         error: LIFECYCLE_CLAIM_REFUSED_MESSAGE,
         code: TOOL_SYSTEM_ERROR_CODES.PERMISSION_DENIED
-      };
+      }, warnings);
     }
-    // A per-call `callerKey` claim is never a launch input: the trusted
-    // execution context is the only caller-key channel (Wave I, d57cbc1).
-    delete config.callerKey;
-    delete config.caller_key;
+    const awaitCompletion = forwarded.await_completion === true;
+    const config: ToolParams = { ...forwarded };
+    delete config.await_completion;
     let launched: unknown;
     try {
       launched = await lifecyclePort.launchAgent({
         config,
-        ...(scope ? { callerContext: scope } : {})
+        ...(scope ? { callerContext: scope } : {}),
+        initialTurnMode: awaitCompletion ? 'await' : 'detach'
       });
     } catch (err) {
       // A launch-gate denial must not echo a caller-supplied realm-vocabulary
@@ -538,19 +786,19 @@ export const spawnAgentDescriptor = Object.freeze({
     // never returned. A failure that repeats a realm-vocabulary claim is
     // reduced to the uniform refusal.
     if (launched && typeof launched === 'object' && (launched as { success?: unknown }).success === false) {
-      return toRealmOpaqueFailureReceipt(launched as Record<string, unknown>);
+      return withSpawnWarnings(toRealmOpaqueFailureReceipt(launched as Record<string, unknown>), warnings);
     }
     const receipt = toPublicSpawnReceipt(launched);
     if (!receipt) {
       // Defense in depth: a port-returned record whose id carries internal
       // realm vocabulary is withheld rather than echoed.
-      return {
+      return withSpawnWarnings({
         success: false,
         error: LIFECYCLE_CLAIM_REFUSED_MESSAGE,
         code: TOOL_SYSTEM_ERROR_CODES.PERMISSION_DENIED
-      };
+      }, warnings);
     }
-    return { success: true, ...receipt };
+    return withSpawnWarnings({ success: true, ...receipt }, warnings);
   }
 });
 /** camelCase alias of `spawnAgentDescriptor`. */
@@ -674,6 +922,12 @@ interface PublicAgentDescriptor {
   triggerPolicy: string;
   /** Unread mailbox message count. */
   unreadCount: number;
+  /**
+   * Effective tool policy the agent can invoke (ticket f541390). Absent only
+   * when a malformed port record carries no policy at all; the live lifecycle
+   * port always composes one.
+   */
+  allowedTools?: readonly string[];
   /** Realm-opaque workspace label; absent when the raw key is withheld. */
   workspace?: string;
 }
@@ -707,6 +961,7 @@ function toPublicAgentDescriptor(record: unknown): PublicAgentDescriptor | null 
   const workspace = toAgentVisibleWorkspaceKey(
     readPublicString(source, 'workspace') || readPublicString(config, 'workspaceId')
   );
+  const allowedTools = readPublicToolPolicy(source, config);
   return Object.freeze({
     id,
     name: readPublicString(source, 'name') || readPublicString(config, 'name') || id,
@@ -714,6 +969,7 @@ function toPublicAgentDescriptor(record: unknown): PublicAgentDescriptor | null 
     role: readPublicString(source, 'role') || readPublicString(config, 'role') || '',
     triggerPolicy: readPublicString(source, 'triggerPolicy') || readPublicString(config, 'triggerPolicy') || 'auto',
     unreadCount: typeof rawUnread === 'number' && Number.isFinite(rawUnread) ? rawUnread : 0,
+    ...(allowedTools ? { allowedTools } : {}),
     ...(workspace ? { workspace } : {})
   });
 }
@@ -729,11 +985,13 @@ function toPublicAgentDescriptor(record: unknown): PublicAgentDescriptor | null 
  * ordinary callers receive same-scope self and registry children (the
  * director's reserved system scope stays outside every realm scope). Results
  * are reduced to the public descriptor shape (`id`, `name`, `state`, `role`,
- * `triggerPolicy`, `unreadCount`, realm-opaque `workspace`, which is omitted
- * when the raw key must be withheld); live `Agent` entities and their
- * internals are never returned, and an entry whose id carries internal realm
- * vocabulary is withheld from the listing (ticket eab4e51, folded into
- * d57cbc1).
+ * `triggerPolicy`, `unreadCount`, effective `allowedTools`, realm-opaque
+ * `workspace`, which is omitted when the raw key must be withheld); live
+ * `Agent` entities and their internals are never returned, and an entry whose
+ * id carries internal realm vocabulary is withheld from the listing (ticket
+ * eab4e51, folded into d57cbc1). The effective tool policy is exposed per
+ * agent so a parent can verify what a spawned child can actually do (ticket
+ * f541390).
  *
  * Fail closed: a host-supplied legacy port without the scoped
  * `listAgentDescriptors` projector raises a clear error instead of falling
@@ -748,7 +1006,7 @@ function toPublicAgentDescriptor(record: unknown): PublicAgentDescriptor | null 
  */
 export const listAgentsDescriptor = Object.freeze({
   name: SANDBOX_TOOLS.LIST_AGENTS,
-  description: 'List active agents in the sandbox runtime visible to the calling agent, with optional status and role filtering.',
+  description: 'List active agents in the sandbox runtime visible to the calling agent, with optional status and role filtering. Each entry carries the effective tool policy the agent can invoke.',
   schema: Object.freeze({
     type: 'object',
     properties: {

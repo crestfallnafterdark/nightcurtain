@@ -92,7 +92,15 @@ test('4. Schema Draft-07 Conformance', () => {
     assert.ok(typeof tool.function.name === 'string', 'Tool name must be string');
     assert.ok(typeof tool.function.description === 'string', 'Tool description must be string');
     assert.ok(tool.function.parameters && typeof tool.function.parameters === 'object', 'Parameters must be object');
-    assert.strictEqual(tool.function.parameters.additionalProperties, false);
+    // The emitted keyword always matches the runtime boundary: closed for every
+    // descriptor except the ratified spawn_agent accept-and-warn boundary
+    // (decision ticket f41f838).
+    const isSpawn = tool.function.name === SANDBOX_TOOLS.SPAWN_AGENT;
+    assert.strictEqual(
+      tool.function.parameters.additionalProperties,
+      isSpawn,
+      `${tool.function.name} additionalProperties must match its boundary policy`
+    );
     assert.ok(Array.isArray(tool.function.parameters.required), 'required must be array');
   }
 });
@@ -101,6 +109,11 @@ test('5. AgentRuntime & Dispatcher Integration', async () => {
   const vfs = new VirtualFS();
   const bus = new MessagingBus();
   const runtime = new AgentRuntime({ virtualFs: vfs, messagingBus: bus });
+  // The spawn_agent dispatcher below is bound to `director`; bootstrapping it
+  // first keeps the spawn an agent-principal launch (the ratified capability
+  // default applies to resolved agent callers; principal-less host launches
+  // keep their legacy behavior).
+  await runtime.ensureDirector();
 
   const agentA = await runtime.launchAgent({
     id: 'agent_ro_collab',
@@ -129,5 +142,10 @@ test('5. AgentRuntime & Dispatcher Integration', async () => {
   assert.strictEqual(spawnRes.success, true);
   const spawned = runtime.getAgent('spawned_child_agent');
   assert.ok(spawned);
-  assert.deepStrictEqual(spawned.config.allowedTools, []);
+  // Ratified default (decision ticket f41f838): a spawn with no capability
+  // selector leaves the child the readonly_collaborator ∩ spawner set —
+  // never the legacy zero-tool child. The director spawner here holds `'*'`,
+  // so the full readonly_collaborator preset applies.
+  assert.deepStrictEqual(spawned.config.allowedTools, [...TOOL_PRESETS.readonly_collaborator]);
+  assert.deepStrictEqual(spawnRes.allowedTools, [...TOOL_PRESETS.readonly_collaborator]);
 });

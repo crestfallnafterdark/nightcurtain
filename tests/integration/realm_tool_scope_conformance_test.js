@@ -1072,26 +1072,49 @@ test('9. every canonical tool receipt is realm-free for two realm scopes', async
     assert.equal(JSON.stringify(registryView), JSON.stringify(genericView), 'describe_tool is caller-invariant for Generic callers');
 
     // --- Caller-input echo exclusion (blocking since Wave I, d57cbc1) ------
-    // A denied call must not echo a caller-supplied `realm:<id>:global` claim
-    // in its error text (ticket eab4e51, folded into Wave I): the tool
-    // boundary sanitizes the denial to a uniform phrase, so the receipt is
-    // realm-opaque while the uniform-denial-without-an-authority-oracle
-    // property below is preserved.
+    // The model-facing tool boundary never forwards a caller-supplied
+    // `workspace` claim (ratified parameter surface, f41f838 follow-up): the
+    // spawn succeeds on the child's own key and the receipt stays realm-opaque
+    // with no echo channel at all. The lifecycle gate that used to be reached
+    // through this parameter is verified directly below.
     const claimOutcomes = [];
+    let claimIndex = 0;
     for (const claim of [`realm:${ALPHA}:global`, `realm:${BETA}:global`, 'global']) {
-      const claimId = `claim_${claim.replace(/[^a-zA-Z0-9]/g, '_')}`;
-      const denied = await dispatcherFor(runtime, 'alpha_worker').executeTool('spawn_agent', {
+      claimIndex += 1;
+      // Index-based ids: a claim-derived id would itself echo the realm id.
+      const claimId = `claim_child_${claimIndex}`;
+      const stripped = await dispatcherFor(runtime, 'alpha_root').executeTool('spawn_agent', {
         id: claimId,
         workspace: claim
       });
-      assert.equal(denied.success, false, `the reserved-workspace claim '${claim}' must be refused`);
-      assert.equal(denied.code, 'PERMISSION_DENIED', `the reserved-workspace claim '${claim}' must fail closed`);
-      assertRealmOpaque(JSON.stringify(denied), `the reserved-workspace claim denial (${claim})`);
-      assert.equal(runtime.getAgent(claimId), null, `no record registers for the claim '${claim}'`);
-      claimOutcomes.push({ success: denied.success, code: denied.code });
+      assert.equal(stripped.success, true, `the tool strips the workspace claim '${claim}' and still spawns`);
+      assert.equal(stripped.workspace, claimId, `the child keeps its own private key, not '${claim}'`);
+      assertRealmOpaque(JSON.stringify(stripped), `the stripped workspace-claim receipt (${claim})`);
+      assert.deepStrictEqual(stripped.warnings, ["ignored unknown parameter 'workspace'"]);
+      const child = runtime.getAgent(claimId);
+      assert.ok(child, `the child registers on its own key for the claim '${claim}'`);
+      assert.notEqual(child.config.workspaceId, claim, `the claim '${claim}' never selects the workspace`);
+      runtime.killAgent(claimId, 'claim sweep cleanup', { callerAgentId: 'alpha_root' });
+
+      // Direct lifecycle defense in depth: a non-authority workspace pin to
+      // the reserved shape is refused fail-closed with a realm-opaque denial.
+      let denial = null;
+      try {
+        await runtime.launchAgent({
+          config: { id: `${claimId}_direct`, workspace: claim, allowedTools: ['read_file'] },
+          callerContext: { callerAgentId: 'alpha_worker' }
+        });
+      } catch (err) {
+        denial = err;
+      }
+      assert.ok(denial, `the reserved-workspace claim '${claim}' must be refused at the lifecycle gate`);
+      assert.equal(denial.code, 'PERMISSION_DENIED', `the reserved-workspace claim '${claim}' must fail closed`);
+      assertRealmOpaque(String(denial.message || ''), `the reserved-workspace claim denial (${claim})`);
+      assert.equal(runtime.getAgent(`${claimId}_direct`), null, `no record registers for the claim '${claim}'`);
+      claimOutcomes.push({ code: denial.code });
     }
     assert.equal(
-      claimOutcomes.every((outcome) => outcome.success === false && outcome.code === 'PERMISSION_DENIED'),
+      claimOutcomes.every((outcome) => outcome.code === 'PERMISSION_DENIED'),
       true,
       'caller-supplied realm claims are refused uniformly (no authority oracle)'
     );

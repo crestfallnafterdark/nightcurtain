@@ -616,8 +616,26 @@ export interface LaunchAgentOptions {
   readonly model?: ModelInterface | null;
   /** Optional pre-instantiated concrete ProviderInterface instance */
   readonly provider?: ProviderInterface | null;
-  /** Optional initial prompt to trigger immediate turn execution upon launch */
+  /** Optional initial prompt to trigger turn execution upon launch */
   readonly initialPrompt?: string | null;
+  /**
+   * Trusted initial-turn execution policy for {@link initialPrompt} (ratified
+   * `spawn_agent` prompt contract, ticket 4692014).
+   *
+   * - `'await'` (default): the launch awaits the child's completed first turn
+   *   and rejects with the turn error on failure — the child stays registered
+   *   either way (destructive rollback covers registration-time failures
+   *   only); the model-facing `spawn_agent` tool selects this mode only for
+   *   its `await_completion: true` opt-in.
+   * - `'detach'`: the turn is queued and the launch resolves immediately; a
+   *   later turn failure is recorded on the child (`lastError`/state detail)
+   *   and never unwinds it. The model-facing `spawn_agent` tool defaults to
+   *   this mode.
+   *
+   * Read from this unified options object only; legacy positional launches
+   * cannot carry it.
+   */
+  readonly initialTurnMode?: 'await' | 'detach';
   /**
    * Trusted baked prologue seeded at launch, composed as
    * `[system message (when a system prompt exists), ...declared entries]` in

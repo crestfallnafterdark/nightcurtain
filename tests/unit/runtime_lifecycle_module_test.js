@@ -1302,10 +1302,10 @@ test('5d. Unauthorized kill of a recycled agent is denied without mutation (f016
 });
 
 // ============================================================================
-// 5e. Failed post-gate relaunch of a recycled ID restores its record
+// 5e. A failed initial turn never unwinds a registered relaunch
 // ============================================================================
 
-test('5e. Failed post-gate relaunch of a recycled ID restores its recycle-bin record', async () => {
+test('5e. A failed initial turn propagates but never unwinds the registered relaunch', async () => {
   let turnFailure = null;
   const lifecycle = new AgentLifecycleManager({
     runtime: {
@@ -1324,7 +1324,10 @@ test('5e. Failed post-gate relaunch of a recycled ID restores its recycle-bin re
   const recycled = lifecycle.getRecycledAgent('relaunch-victim');
   assert.ok(recycled, 'setup: victim must be in the recycle bin');
 
-  // Authorized relaunch that clears every gate but whose initial prompt turn fails.
+  // Authorized relaunch that clears every gate but whose initial prompt turn
+  // fails. Ratified prompt contract (ticket 4692014): destructive rollback
+  // covers registration-time failures only; the registered replacement stays
+  // and the turn failure is recorded observably on it.
   turnFailure = new InferenceError('Upstream inference failure', {
     code: 'ERR_UPSTREAM',
     status: 500,
@@ -1339,30 +1342,32 @@ test('5e. Failed post-gate relaunch of a recycled ID restores its recycle-bin re
     'The post-gate inference failure must propagate to the caller'
   );
 
-  // The failed relaunch must leave the record byte-identical and retryable.
+  const replacement = lifecycle.getAgent('relaunch-victim');
+  assert.ok(replacement, 'the failed-turn replacement stays registered (no destructive rollback)');
+  assert.strictEqual(replacement.config.name, 'Replacement');
+  assert.match(
+    String(replacement.lastError),
+    /Upstream inference failure/,
+    'the failure is recorded observably on the child'
+  );
   assert.strictEqual(
     lifecycle.getRecycledAgent('relaunch-victim'),
-    recycled,
-    'Failed relaunch must restore the identical recycled record'
+    null,
+    'the registration succeeded, so the consumed recycled record is not restored'
   );
-  assert.strictEqual(lifecycle.getAgent('relaunch-victim'), null, 'Failed relaunch must unwind the replacement registration');
-  assert.strictEqual(lifecycle.isAgentTerminated('relaunch-victim'), true);
-
-  const restored = lifecycle.restoreAgent('relaunch-victim', { principal: TEST_PRINCIPAL });
-  assert.strictEqual(restored, recycled, 'restoreAgent must return the preserved record');
-  assert.strictEqual(restored.state, AGENT_STATES.IDLE);
+  assert.strictEqual(lifecycle.isAgentTerminated('relaunch-victim'), false);
 
   // Control: a successful authorized relaunch still consumes the record as before.
   lifecycle.killAgent('relaunch-victim', 'Recycle for success control', { principal: TEST_PRINCIPAL });
   assert.ok(lifecycle.getRecycledAgent('relaunch-victim'), 'setup: victim recycled again');
   turnFailure = null;
-  const replacement = await lifecycle.launchAgent({
+  const replacement2 = await lifecycle.launchAgent({
     config: { id: 'relaunch-victim', name: 'Replacement' },
     initialPrompt: 'This turn succeeds'
   });
   assert.strictEqual(lifecycle.getRecycledAgent('relaunch-victim'), null, 'Successful relaunch consumes the recycled record');
-  assert.strictEqual(lifecycle.getAgent('relaunch-victim'), replacement);
-  assert.strictEqual(replacement.state, AGENT_STATES.IDLE);
+  assert.strictEqual(lifecycle.getAgent('relaunch-victim'), replacement2);
+  assert.strictEqual(replacement2.state, AGENT_STATES.IDLE);
 });
 
 // ============================================================================

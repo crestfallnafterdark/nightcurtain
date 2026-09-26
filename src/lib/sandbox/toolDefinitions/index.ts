@@ -789,8 +789,14 @@ export interface JsonSchemaDraft07 {
   /** List of required parameter names. */
   readonly required?: readonly string[];
 
-  /** Strict schema adherence: prevents undocumented parameter hallucinations. */
-  readonly additionalProperties: false;
+  /**
+   * Extra-parameter policy keyword. `false` for the closed baked/publishing
+   * descriptors; `true` for descriptors whose handler accepts the key set on
+   * the wire and ignores undocumented keys with an explicit warning (the
+   * `spawn_agent` accept-and-warn boundary) — the emitted keyword always
+   * matches the runtime behavior.
+   */
+  readonly additionalProperties: boolean;
 }
 
 /**
@@ -1057,7 +1063,7 @@ export function getSandboxToolsSchema(
         type: descriptor.schema.type,
         properties: { ...descriptor.schema.properties },
         required: Array.isArray(descriptor.schema.required) ? [...descriptor.schema.required] : [],
-        additionalProperties: Boolean(descriptor.schema.additionalProperties) as false
+        additionalProperties: Boolean(descriptor.schema.additionalProperties)
       }
     }
   }));
