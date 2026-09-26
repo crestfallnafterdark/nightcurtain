@@ -45,6 +45,7 @@ import {
 import {
   ALL_TOOL_DESCRIPTORS,
   AUTHORITY_TOOL_REGISTRY,
+  CATALOG_TOOL_DESCRIPTION_MAX_CHARS,
   TOOL_REGISTRY,
   describePresetDescriptor,
   listToolPresetsDescriptor,
@@ -52,7 +53,6 @@ import {
 } from '../../src/lib/sandbox/tools/descriptors/index.ts';
 import { getCanonToolName } from '../../src/lib/sandbox/tools/normalizers/index.ts';
 import { createSandboxToolDispatcher, getSandboxToolsSchema } from '../../src/lib/sandbox/toolDefinitions/index.ts';
-import { CATALOG_TOOL_DESCRIPTION_MAX_CHARS } from '../../src/lib/sandbox/tools/descriptors/catalogTools.ts';
 
 /** The three M5a canonical catalog reflection tool names. */
 const CATALOG_TOOLS = Object.freeze([
