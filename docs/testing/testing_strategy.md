@@ -19,7 +19,7 @@ graph TD
     end
 
     subgraph L2["Tier 2: Zero-Mock Subsystem Integration (node --test)"]
-        INT["52 Integration Suites (tests/integration/)<br/>• Real VirtualFS, MessagingBus, WorldClock, AgentRuntime<br/>• Preset Binding & Credential Vault Workflows<br/>• Precall Pipeline & Tool Security Gating Verification<br/>• Concurrency & State Persistence Fault Injection"]
+        INT["53 Integration Suites (tests/integration/)<br/>• Real VirtualFS, MessagingBus, WorldClock, AgentRuntime<br/>• Preset Binding & Credential Vault Workflows<br/>• Precall Pipeline & Tool Security Gating Verification<br/>• Concurrency & State Persistence Fault Injection"]
     end
 
     subgraph L1["Tier 1: Atomic Unit & Contract Testing (node --test)"]
@@ -101,7 +101,7 @@ The master runner executes all Unit and Integration suites in strict sub-process
 // Sample output format from tests/runner.js:
 // ======================================================================
 //   AGENTIC SANDBOX STUDIO MASTER TEST SUITE RUNNER
-//   Total Suites: 108 (56 Unit, 52 Integration)
+//   Total Suites: 109 (56 Unit, 53 Integration)
 // ======================================================================
 //   [Unit       ] deepseek_provider_test.js                  ✔ PASS (42ms)
 //   [Unit       ] deepseek_reasoning_hygiene_test.js         ✔ PASS (18ms)
@@ -109,7 +109,7 @@ The master runner executes all Unit and Integration suites in strict sub-process
 //   [Integration] tool_contract_security_gating_test.js      ✔ PASS (115ms)
 //   [Integration] mail_injection_precall_pipeline_test.js    ✔ PASS (188ms)
 // ======================================================================
-//   Suites:       108 passed, 108 total
+//   Suites:       109 passed, 109 total
 //   Failed:       0 failed
 //   Duration:     3.42s
 // ======================================================================
@@ -126,7 +126,7 @@ All Node-based test suites import [`tests/test_env.js`](../../tests/test_env.js)
 
 ## 4. Test Suite Inventory & Classification
 
-The project includes **108 native test suites** (56 unit, 52 integration) and **10 browser E2E specs**:
+The project includes **109 native test suites** (56 unit, 53 integration) and **10 browser E2E specs**:
 
 > **Canonical inventory.** This chapter is the single source of truth for test-suite counts and per-file listings; [`unit_and_integration.md`](unit_and_integration.md) cross-links here instead of duplicating it.
 
@@ -183,7 +183,7 @@ The project includes **108 native test suites** (56 unit, 52 integration) and **
 | [`tool_family_taxonomy_test.js`](../../tests/unit/tool_family_taxonomy_test.js) | `src/lib/sandbox/tools/constants/index.ts` + `toolDefinitions/index.ts` | Family-taxonomy migration (ticket 5efc129): every baked tool declares exactly one primary family, the five capability presets are generated from the frozen family plan, and the generated tiers reproduce the frozen pre-rebuild effective sets (selector window included) with only the ratified delta ledger shipping. |
 | [`tool_preset_resolve_test.js`](../../tests/unit/tool_preset_resolve_test.js) | `src/lib/components/sandbox/toolPresetResolve.ts` | Launcher preset resolution: empty custom whitelist denied (never wildcard), alias canonicalization, named presets. |
 | [`tool_presets_optimization_test.js`](../../tests/unit/tool_presets_optimization_test.js) | `src/lib/sandbox/toolDefinitions/index.ts` + `runtime/index.ts` | Preset expansion (`readonly`, `manager`, `collaborator`), token reduction, AgentRuntime integration. |
-| [`tool_system_module_test.js`](../../tests/unit/tool_system_module_test.js) | `src/lib/sandbox/toolDefinitions/index.ts`, `src/lib/sandbox/tools/` | Module 8: immutable contracts, Draft-07 schema generation, 36 canonical descriptors + the separate explicit-only publishing registry, error shielding. |
+| [`tool_system_module_test.js`](../../tests/unit/tool_system_module_test.js) | `src/lib/sandbox/toolDefinitions/index.ts`, `src/lib/sandbox/tools/` | Module 8: immutable contracts, Draft-07 schema generation, 38 canonical descriptors + the separate explicit-only publishing registry, error shielding. |
 | [`trigger_queue_module_test.js`](../../tests/unit/trigger_queue_module_test.js) | `src/lib/sandbox/triggerQueue/index.ts` | Module 4 contract: export whitelist, encapsulation, trigger typing. |
 | [`virtual_fs_module_test.js`](../../tests/unit/virtual_fs_module_test.js) | `src/lib/sandbox/virtualFs/index.ts`, `fsDownloadUtils/index.ts` | Module 1: POSIX paths, workspace isolation, pagination, JSON patch/query, grep; file-sourced plumbing (`source_file`/`append`/`replacement_source_file`/`data_source_file`/`value_file`/`output_file`) + `concat_files`. |
 | [`virtual_fs_realm_scope_test.js`](../../tests/unit/virtual_fs_realm_scope_test.js) | `src/lib/sandbox/virtualFs/index.ts` | Realm-global alias resolution, realm ACL matrix, enumeration/grep confinement, `public` retirement. |
@@ -209,6 +209,7 @@ The project includes **108 native test suites** (56 unit, 52 integration) and **
 | [`mcp_client_http_fixture_test.js`](../../tests/integration/mcp_client_http_fixture_test.js) | `mcpClient` + `node:http` fixture | Real-socket round-trips: handshake/server identity/negotiated protocol revision, `listTools` frozen projections with raw schemas, JSON + request-scoped SSE `callTool`, JSON-RPC error → protocol, timeout, cancellation with session recovery, malformed body, CORS preflight, idempotent close, session-wide abort. |
 | [`messaging_bus_test.js`](../../tests/integration/messaging_bus_test.js) | `MessagingBus` | FIFO mailbox: dequeue on read, clean drain, peek, archive fidelity. |
 | [`messaging_invocations_test.js`](../../tests/integration/messaging_invocations_test.js) | `MessagingBus` + `InvocationEngine` + `AgentRuntime` | Event-driven multi-agent flows, history purity, cascade execution. |
+| [`meta_agent_parental_test.js`](../../tests/integration/meta_agent_parental_test.js) | `ToolDispatcher` + `AgentRuntime` + `SandboxStore` + `sandboxPersistence` | parental meta tier: `inspect_agent`/`update_agent` authorization matrix (own spawns / scoped `@agent:*` / uniform denials), resulting-state ≤-editor bound, runtime safe-state queue (bounded, latest-wins, flushed at `turn_complete`), F3 scoped-grant snapshot round-trip, audit + realm-opacity receipts (ticket c8a748f). |
 | [`operator_realm_injection_test.js`](../../tests/integration/operator_realm_injection_test.js) | `SandboxStore` + `TurnExecutionEngine` + `MessagingBus` | Operator-attributed injection and manual sends into realm-bound targets; agent cross-realm denial; no-director fail-closed. |
 | [`modern_settings_workflow_test.js`](../../tests/integration/modern_settings_workflow_test.js) | `PresetCatalog` + `CredentialVault` + provider adapters | Modern settings workflow, progressive disclosure, live balance separation. |
 | [`persistence_purge_test.js`](../../tests/integration/persistence_purge_test.js) | `sandboxPersistence` + `SandboxStore` | Recycle-bin serialization, zero-zombie hydration, hard purge governance. |
@@ -219,7 +220,7 @@ The project includes **108 native test suites** (56 unit, 52 integration) and **
 | [`realm_publishing_tools_test.js`](../../tests/integration/realm_publishing_tools_test.js) | `ToolDispatcher` + `runtime` + `realmCatalog` + `SandboxStore` + `sandboxPersistence` | Publishing: `AgentSpec.authorities` shape/hash, explicit-grant-only `import_realm_template`/`submit_hydration_package` (wildcard/privileged denied, schema-exposure filtering), v1\|v2 transport import through the real catalog parser, v2 payloads and legacy v1 packages on one `validatePayload` path, `sourceFile` resolution + caps, canonical `payloadDigest` = launch provenance `packageDigest`, `dry_run` zero side effects, launch approval/trust override, candidate lifecycle, persistence round-trip, kill/purge and smuggling denials. |
 | [`realm_scheduler_scope_test.js`](../../tests/integration/realm_scheduler_scope_test.js) | `AgentRuntime` + `RuntimeScheduler` + `TriggerQueue` + `MessagingBus` | Realm-confined wake/cancel end-to-end: broadcast early-cancel cannot cross realms, foreign schedule/cancel denied, legacy parity. |
 | [`realm_template_multi_instance_test.js`](../../tests/integration/realm_template_multi_instance_test.js) | `SandboxStore` + `realmCatalog` + `AgentRuntime` + `VirtualFS` | One template, multiple realms in one store: per-realm ids/prompts/digests, package + seed isolation across realm-global/member workspaces, cross-instance denials, no turn/mail leakage. |
-| [`realm_tool_scope_conformance_test.js`](../../tests/integration/realm_tool_scope_conformance_test.js) | `ToolDispatcher` + `AgentRuntime` + `VirtualFS` + `MessagingBus` + `RuntimeScheduler` | Conformance: 36-tool classification table (fails on unclassified/unevaluated tools), correct-id adversarial matrix across mail/invoke/wait/kill/restore/VFS/schedules/clock, agent-visible receipt opacity, director sweep, realm-model sweep. |
+| [`realm_tool_scope_conformance_test.js`](../../tests/integration/realm_tool_scope_conformance_test.js) | `ToolDispatcher` + `AgentRuntime` + `VirtualFS` + `MessagingBus` + `RuntimeScheduler` | Conformance: 38-tool classification table (fails on unclassified/unevaluated tools), correct-id adversarial matrix across mail/invoke/wait/kill/restore/VFS/schedules/clock, agent-visible receipt opacity, director sweep, realm-model sweep. |
 | [`realm_visibility_lifecycle_test.js`](../../tests/integration/realm_visibility_lifecycle_test.js) | `AgentRuntime` + `AgentLifecycleManager` + `InvocationEngine` | Realm visibility predicate, same-realm kill/restore/invoke gates, authenticated `wait_for_invocation`, resolved-creator parentage binding. |
 | [`runtime_resilience_persistence_test.js`](../../tests/integration/runtime_resilience_persistence_test.js) | `sandboxPersistence` + `AgentRuntime` | Atomic snapshots, crash recovery, persistence locking, clock monotonicity. |
 | [`session_zero_generator_realm_test.js`](../../tests/integration/session_zero_generator_realm_test.js) | `templates/session_zero` + `realmCatalog` + `SandboxStore` + `AgentRuntime` + `VirtualFS` | Shipped generator realm: bundle contract, launch approvals/trust recorded, Architect dry-run → import → handoff, Genesis `source_file` assembly → dry-run → submit → candidate, privileged peer workspace reads, candidate attach seeding. |
@@ -234,7 +235,7 @@ The project includes **108 native test suites** (56 unit, 52 integration) and **
 | [`terminal_batch_precall_test.js`](../../tests/integration/terminal_batch_precall_test.js) | `AgentRuntime` + `ToolDispatcher` | `batch_precall` terminal batches, closing summary carrier, execution semantics. |
 | [`timer_rewire_after_restore_test.js`](../../tests/integration/timer_rewire_after_restore_test.js) | `AgentRuntime` + `MessagingBus` | Listener lifecycle across `reset()` and `importSnapshot()`. |
 | [`tool_compaction_hygiene_test.js`](../../tests/integration/tool_compaction_hygiene_test.js) | `runtime/messageHygiene/toolCompaction` + `AgentRuntime` | Active-turn content retention, historical tombstone compaction (`evicted_from_history`). |
-| [`tool_contract_security_gating_test.js`](../../tests/integration/tool_contract_security_gating_test.js) | `ToolDispatcher` + `VirtualFS` + `WorldClock` | 36 canonical tools + explicit-only publishing tools, fail-closed security gating, preset resolution, aliases. |
+| [`tool_contract_security_gating_test.js`](../../tests/integration/tool_contract_security_gating_test.js) | `ToolDispatcher` + `VirtualFS` + `WorldClock` | 38 canonical tools + explicit-only publishing tools, fail-closed security gating, preset resolution, aliases. |
 | [`tool_mailbox_realm_resolution_test.js`](../../tests/integration/tool_mailbox_realm_resolution_test.js) | `ToolDispatcher` + `AgentRuntime` + `MessagingBus` | Realm-exact mailbox verbs through realm-bound dispatchers (same bare id in two realms), truthful header-only `get_inbox` copy, mark/drain receipts matching post-state (tickets 5b5fe63, 636ca85). |
 | [`tool_schemas_security_test.js`](../../tests/integration/tool_schemas_security_test.js) | `src/lib/sandbox/toolDefinitions/` + alias normalizers | JSON Schema Draft-07 conformance, whitelisting, injection immunity. |
 | [`trigger_queue_test.js`](../../tests/integration/trigger_queue_test.js) | `TriggerQueue` + `AgentRuntime` | Asynchronous trigger deduplication, debounce execution, concurrency limits. |
@@ -276,12 +277,12 @@ sequenceDiagram
     participant G4 as Gate 4: Playwright E2E & Visual Suite
 
     Dev->>G1: git pre-commit / CI trigger
-    Note over G1: Schema sync check (36 canonical tools + explicit-only publishing registry across Registry, Schemas, Dispatcher, Docs)
+    Note over G1: Schema sync check (38 canonical tools + explicit-only publishing registry across Registry, Schemas, Dispatcher, Docs)
     G1-->>Dev: Gate 1 Passed (0 lint / sync errors)
 
     Dev->>G2: npm test (tests/runner.js)
-    Note over G2: Executes 108 suites (56 Unit, 52 Integration) under 120s timeout
-    G2-->>Dev: Gate 2 Passed (108/108 passed, 0 failures)
+    Note over G2: Executes 109 suites (56 Unit, 53 Integration) under 120s timeout
+    G2-->>Dev: Gate 2 Passed (109/109 passed, 0 failures)
 
     Dev->>G3: npm run build (vite build)
     Note over G3: Compiles Svelte 5 runes, WASM modules, top-level awaits
