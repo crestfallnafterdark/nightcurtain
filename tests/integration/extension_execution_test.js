@@ -412,7 +412,10 @@ test('4. batch_precall denies extension names with PRECALL_FORBIDDEN and never e
     await store.triggerTurn('p33-precaller', 'go');
 
     const receipt = receiptOf(toolMessages(store, 'p33-precaller')[0]);
-    assert.strictEqual(receipt.success, true, 'the batch itself returns a structured batch receipt');
+    assert.strictEqual(receipt.success, false, 'an all-denied batch returns an explicit failure envelope');
+    assert.strictEqual(receipt.code, 'PRECALL_FORBIDDEN', 'extension names are never precallable');
+    assert.strictEqual(receipt.executed, 0);
+    assert.strictEqual(receipt.denied, 1);
     assert.strictEqual(receipt.results[0].code, 'PRECALL_FORBIDDEN', 'extension names are never precallable');
     assert.deepStrictEqual(
       fixture.requests.filter((entry) => entry.method === 'tools/call'),
