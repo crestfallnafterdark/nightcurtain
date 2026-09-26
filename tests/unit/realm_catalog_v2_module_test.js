@@ -1719,3 +1719,64 @@ test('51. extension tool references validate, resolve, and surface in v2 plans a
     'the v1 shim resolves extension references'
   );
 });
+
+test('52. prototype-name references and duplicate provider ids fail closed at v2 validation (P2.1b)', () => {
+  /** Builds an MCP extension request. */
+  const mcpProvider = (id) => ({
+    kind: 'mcp',
+    id,
+    transport: { kind: 'http', url: `https://${id}.example/mcp` }
+  });
+
+  // `acme::__proto__` derives `__proto__`; a derived call name keys dynamic
+  // projection records, so the prototype names must be rejected at validation
+  // and materialization — not left to extension resolution.
+  for (const name of ['__proto__', 'constructor', 'prototype']) {
+    assert.throws(
+      () => validateTemplate(templateV2({
+        agents: [agentV2({ toolProfile: { tools: [`acme::${name}`] } })],
+        providers: [mcpProvider('acme')]
+      })),
+      (error) => error.message.includes(`resolves to the tool call name '${name}'`)
+        && error.message.includes('reserved tool name'),
+      `reference 'acme::${name}' must fail closed at v2 validation`
+    );
+    assert.throws(
+      () => materializeTemplate(
+        templateV2({
+          agents: [agentV2({ toolProfile: { tools: [`acme::${name}`] } })],
+          providers: [mcpProvider('acme')]
+        }),
+        { realmId: 'realm_1' }
+      ),
+      (error) => error.message.includes(`resolves to the tool call name '${name}'`)
+        && error.message.includes('reserved tool name'),
+      `reference 'acme::${name}' must fail closed at materialization`
+    );
+  }
+
+  // Duplicate provider ids fail closed, naming the id (same kind and across
+  // kinds — declared provider ids are one vocabulary).
+  assert.throws(
+    () => validateTemplate(templateV2({ providers: [mcpProvider('acme'), mcpProvider('acme')] })),
+    /carries duplicate provider id 'acme'/,
+    'duplicate MCP requests fail closed at v2 validation'
+  );
+  assert.throws(
+    () => validateTemplate(templateV2({
+      providers: [mcpProvider('acme/x'), { kind: 'pack', id: 'acme/x' }]
+    })),
+    /carries duplicate provider id 'acme\/x'/,
+    'a cross-kind duplicate fails closed too'
+  );
+
+  // The v1 shim rejects the same duplicates.
+  assert.throws(
+    () => normalizeTemplate({
+      ...legacyTemplate(),
+      providers: [mcpProvider('acme'), mcpProvider('acme')]
+    }),
+    /carries duplicate provider id 'acme'/,
+    'the v1 shim rejects duplicate provider ids'
+  );
+});

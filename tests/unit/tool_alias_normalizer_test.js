@@ -25,7 +25,9 @@ import {
 
 import {
   TOOL_ALIAS_MAP,
+  deriveToolCallName,
   getCanonToolName,
+  isReservedToolCallName,
   normalizeToolName,
   PRECALL_ALLOWLIST
 } from '../../src/lib/sandbox/tools/normalizers/index.ts';
@@ -561,4 +563,36 @@ test('11. case/dot variants of write aliases grant only the canonical write_file
     assert.strictEqual(deleteRes.code, TOOL_SYSTEM_ERROR_CODES.PERMISSION_DENIED);
     assert.deepStrictEqual(executed, ['write_file'], `variant '${variant}' must reach only write_file`);
   }
+});
+
+// ============================================================================
+// 12. Reserved call-name predicate: prototype vocabulary (P2.1b)
+// ============================================================================
+
+test('12. isReservedToolCallName rejects the prototype property names', () => {
+  // A model-facing call name keys dynamic projection/dispatch records, so the
+  // prototype names must be reserved even though they are neither baked nor
+  // publishing tools (P2.1b regression: `acme::__proto__` derived `__proto__`
+  // and used to pass realmCatalog validation).
+  for (const name of ['__proto__', 'constructor', 'prototype']) {
+    assert.strictEqual(isReservedToolCallName(name), true, `'${name}' must be reserved`);
+    assert.strictEqual(deriveToolCallName(name), name, `'${name}' derives to itself (total derivation)`);
+    assert.strictEqual(
+      getCanonToolName(name),
+      null,
+      `'${name}' has no alias entry — the prototype clause is what reserves it`
+    );
+  }
+
+  // The rest of the reserved universe is unchanged, and derived-safe names
+  // stay free.
+  assert.strictEqual(isReservedToolCallName('read_file'), true);
+  assert.strictEqual(isReservedToolCallName('import_realm_template'), true);
+  assert.strictEqual(
+    isReservedToolCallName('manage_subagents'),
+    true,
+    'the aggregate selector stays reserved through alias resolution'
+  );
+  assert.strictEqual(isReservedToolCallName('acme_scoring_similarity'), false);
+  assert.strictEqual(isReservedToolCallName('docs_search'), false);
 });

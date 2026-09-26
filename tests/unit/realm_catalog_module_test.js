@@ -1414,7 +1414,7 @@ test('32. toolContract and providers are accepted and shape-validated (deprecate
   );
   assert.ok(plan.agents[0].toolProfile.tools.includes('read_file'));
 
-  assert.strictEqual(templateRequiresProviders(declared), true, 'requirements and providers gate launch');
+  assert.strictEqual(templateRequiresProviders(declared), true, 'requirements and providers declare capability needs');
   assert.strictEqual(templateRequiresProviders(DEMO_TEMPLATE), false);
   assert.strictEqual(
     templateRequiresProviders({ ...DEMO_TEMPLATE, toolContract: { requirements: [] }, providers: [] }),
@@ -1651,6 +1651,14 @@ test('32a. derived tool call names: derivation rule, plan grants, and collision 
   for (const name of [...Object.keys(TOOL_REGISTRY), ...Object.keys(PUBLISHING_TOOL_REGISTRY)]) {
     assert.ok(isReservedToolCallName(name), `descriptor name '${name}' is reserved`);
   }
+  // The reserved universe also covers the prototype-chain property names even
+  // though they are neither baked nor publishing tools (P2.1b): a derived
+  // call name keys dynamic projection records, so `__proto__`/`constructor`/
+  // `prototype` can never be admitted.
+  for (const name of ['__proto__', 'constructor', 'prototype']) {
+    assert.ok(isReservedToolCallName(name), `prototype name '${name}' is reserved`);
+    assert.strictEqual(getCanonToolName(name), null, `'${name}' is not alias-resolvable`);
+  }
   assert.ok(!isReservedToolCallName('acme_scoring_similarity'), 'a derived-safe name stays free');
   assert.ok(!isReservedToolCallName('docs_search'), 'a derived-safe name stays free');
 
@@ -1748,14 +1756,17 @@ test('32b. extension tool references validate, resolve, and collide across the t
   );
 
   // Shape failures: empty provider id, empty server tool name, undeclared
-  // provider, and reserved derived call names.
+  // provider, reserved derived call names, and prototype-name server tools.
   const invalid = [
     [['::x'], /must name a provider id before '::'/],
     [['acme::'], /must name a non-empty server tool name after '::'/],
     [['acme::   '], /must name a non-empty server tool name after '::'/],
     [['other::x'], /references undeclared provider id 'other'/],
     [['acme::read.file'], /collides with the reserved tool name 'read_file'/],
-    [['acme::import.realm.template'], /collides with the reserved tool name 'import_realm_template'/]
+    [['acme::import.realm.template'], /collides with the reserved tool name 'import_realm_template'/],
+    [['acme::__proto__'], /resolves to the tool call name '__proto__', which collides with the reserved tool name/],
+    [['acme::constructor'], /resolves to the tool call name 'constructor', which collides with the reserved tool name/],
+    [['acme::prototype'], /resolves to the tool call name 'prototype', which collides with the reserved tool name/]
   ];
   for (const [tools, pattern] of invalid) {
     assert.throws(
@@ -1767,6 +1778,15 @@ test('32b. extension tool references validate, resolve, and collide across the t
       `'${tools[0]}' must fail closed`
     );
   }
+
+  // A prototype-name reference fails closed through the v1 shim as well.
+  assert.throws(
+    () => normalizeTemplate(
+      template({ agents: [agentSpec({ toolProfile: { tools: ['acme::__proto__'] } })], providers: [mcpProvider('acme')] })
+    ),
+    /resolves to the tool call name '__proto__'/,
+    'the v1 shim rejects a prototype-name extension reference'
+  );
 
   // Cross-source collisions: two references (across agents), a reference
   // against a legacy requirement-derived name, and two references to the same
@@ -1848,6 +1868,62 @@ test('32b. extension tool references validate, resolve, and collide across the t
     ),
     /collides with the reserved tool name 'grep'/,
     'a server tool name alias-resolving to a canonical tool fails closed'
+  );
+});
+
+test('32c. duplicate provider ids fail closed and name the id (P2.1b)', () => {
+  /** Builds an MCP extension request. */
+  const mcpProvider = (id) => ({
+    kind: 'mcp',
+    id,
+    transport: { kind: 'http', url: `https://${id}.example/mcp` }
+  });
+
+  // Same-kind duplicates: the launch collector used to be silent first-wins
+  // (a Set deduped the ids); a declared duplicate is now a template error.
+  assert.throws(
+    () => materializeTemplate(
+      template({ providers: [mcpProvider('acme'), mcpProvider('acme')] }),
+      { realmId: 'r' }
+    ),
+    /carries duplicate provider id 'acme'/,
+    'two MCP requests for one id fail closed at materialization'
+  );
+  assert.throws(
+    () => normalizeTemplate(template({ providers: [mcpProvider('acme'), mcpProvider('acme')] })),
+    /carries duplicate provider id 'acme'/,
+    'the v1 read shim rejects the same duplicate'
+  );
+
+  // Cross-kind duplicate: `publisher/name` is a legal MCP id too, and the
+  // declared provider ids are one vocabulary — the duplicate must still fail
+  // closed, naming the shared id.
+  assert.throws(
+    () => materializeTemplate(
+      template({
+        providers: [
+          mcpProvider('acme/x'),
+          { kind: 'pack', id: 'acme/x' }
+        ]
+      }),
+      { realmId: 'r' }
+    ),
+    /carries duplicate provider id 'acme\/x'/,
+    'a pack and an MCP request sharing one id fail closed'
+  );
+
+  // Unique ids across kinds are still accepted, and references resolve.
+  const plan = materializeTemplate(
+    template({
+      agents: [agentSpec({ toolProfile: { tools: ['acme::docs.search'] } })],
+      providers: [mcpProvider('acme'), { kind: 'pack', id: 'acme/bundle' }]
+    }),
+    { realmId: 'r' }
+  );
+  assert.deepStrictEqual(
+    plan.agents[0].toolProfile.tools,
+    ['docs_search'],
+    'a unique pack request does not disturb MCP reference resolution'
   );
 });
 
