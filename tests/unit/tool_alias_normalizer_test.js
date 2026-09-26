@@ -656,3 +656,24 @@ test('13b. createPassThroughSanitizer drops the prototype vocabulary without pol
   );
   assert.strictEqual({}.polluted, undefined);
 });
+
+test('13c. createPassThroughSanitizer never throws on accessor arguments', () => {
+  const sanitize = createPassThroughSanitizer();
+  const hostile = {
+    safe: 1
+  };
+  Object.defineProperty(hostile, 'boom', {
+    enumerable: true,
+    configurable: true,
+    get() {
+      throw new Error('sanitizer-getter');
+    }
+  });
+
+  let sanitized;
+  assert.doesNotThrow(() => {
+    sanitized = sanitize(hostile);
+  }, 'a throwing getter must never escape the sanitizer');
+  assert.deepStrictEqual(sanitized, {});
+  assert.strictEqual(Object.getPrototypeOf(sanitized), Object.prototype);
+});

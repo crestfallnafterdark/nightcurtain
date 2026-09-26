@@ -704,3 +704,77 @@ test('23. fidelity summary distinguishes clean, projected, degraded, and refused
   assert.throws(() => summarizeExtensionSchemaFidelity([{ status: 'weird', warnings: [] }]), TypeError);
   assert.ok(Object.isFrozen(summarizeExtensionSchemaFidelity([clean])));
 });
+
+// ============================================================================
+// 24-26. Verifier follow-up regressions (never-throw, purity, receipt freeze)
+// ============================================================================
+
+test('24. throwing schema getters refuse as malformed without throwing', () => {
+  const hostile = {
+    type: 'object',
+    properties: { ok: { type: 'string', description: 'ok' } }
+  };
+  Object.defineProperty(hostile.properties, 'boom', {
+    enumerable: true,
+    configurable: true,
+    get() {
+      throw new Error('getter-exploded');
+    }
+  });
+
+  let projection;
+  assert.doesNotThrow(() => {
+    projection = projectExtensionInputSchema(hostile);
+  }, 'a hostile getter must never escape as an arbitrary Error');
+  expectRefused(projection, EXTENSION_SCHEMA_REFUSAL_CODES.MALFORMED_SCHEMA);
+  assert.ok(Array.isArray(projection.warnings), 'refused projections still carry a warnings array');
+  assert.ok(Object.isFrozen(projection.warnings));
+
+  // A deeply nested throwing getter refuses the same way.
+  const nested = { type: 'object', properties: { a: { type: 'object', properties: {} } } };
+  Object.defineProperty(nested.properties.a.properties, 'deep', {
+    enumerable: true,
+    configurable: true,
+    get() {
+      throw new Error('nested-getter');
+    }
+  });
+  assert.doesNotThrow(() => {
+    projection = projectExtensionInputSchema(nested);
+  });
+  expectRefused(projection, EXTENSION_SCHEMA_REFUSAL_CODES.MALFORMED_SCHEMA);
+});
+
+test('25. enum members are cloned fresh and caller objects are never frozen', () => {
+  const inner = { v: 1 };
+  const projection = projectExtensionInputSchema({
+    type: 'object',
+    properties: { e: { type: 'string', enum: [inner], description: 'e' } },
+    additionalProperties: false
+  });
+  assert.strictEqual(projection.status, 'projected');
+
+  assert.strictEqual(Object.isFrozen(inner), false, 'caller-owned enum members must stay unfrozen');
+  assert.notStrictEqual(projection.schema.properties.e.enum[0], inner, 'enum members must be fresh copies');
+  assert.deepStrictEqual(projection.schema.properties.e.enum[0], { v: 1 });
+  assert.ok(Object.isFrozen(projection.schema.properties.e.enum[0]));
+
+  inner.v = 2;
+  assert.deepStrictEqual(
+    projection.schema.properties.e.enum[0],
+    { v: 1 },
+    'mutating the caller enum member must not change the projection'
+  );
+});
+
+test('26. the fail-closed missing-port receipt is frozen', async () => {
+  const { descriptor } = synthesizeExtensionToolDescriptor({
+    extensionId: 'acme-docs',
+    callName: 'docs_search',
+    serverToolName: 'docs.search',
+    inputSchema: { type: 'object' }
+  });
+  const receipt = await descriptor.handler({}, {});
+  assert.strictEqual(receipt.success, false);
+  assert.ok(Object.isFrozen(receipt), 'fail-closed receipts must be as frozen as mapped receipts');
+});
