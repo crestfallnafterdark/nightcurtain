@@ -69,7 +69,7 @@ npm run lint:docs                          # TSDoc syntax gate over sandbox .ts:
 npm run typecheck                          # scripts/typecheck.mjs: jsconfig tsc + strict contracts tsc + svelte-check all run; ratchet baselines (tsc 0 total / 0 sandbox; contracts 0; svelte-check ≤96)
 timeout 90 node tests/unit/<suite>.js      # single suite (timeout 180 for heavy suites)
 timeout 90 node tests/audit/repros/<id>.test.js # audit repros (red-before-fix evidence; not part of npm test)
-timeout 600 npm test                       # 98 suites — single-flight: lead runs after each round lands + at convergence (includes contracts_gate_test)
+timeout 600 npm test                       # 101 suites — single-flight: lead runs after each round lands + at convergence (includes contracts_gate_test)
 npm run build
 npm run test:e2e                           # Playwright (9 specs) — outside the main gate
 node tests/qa/seed_vault.mjs               # QA: seed provider keys into the MCP profile (browser closed first)
@@ -115,7 +115,7 @@ One canonical home per fact; everywhere else links. If a change isn't in the tab
 Mechanical facts (counts, file lists, command lists) are generated or omitted, never hand-copied. A hand doc that cannot be kept true is deleted (git history is the archive). A docs freshness gate (`npm run verify:docs`) will enforce links/headers/counts; until it lands, apply this table by hand.
 
 ## 7. Code & docs map
-- **Engine:** `src/lib/sandbox/` — 36 folder modules with `index.ts` surfaces (`runtime/`, `inference/`, `domain/`, `tools/`, `credentialVault/`, `modelConfig/`, `presetCatalog/`, `realmRegistry/`, `realmCatalog/`, `virtualFs/`, `messagingBus/`, `worldClock/`, `triggerQueue/`, `invocationEngine/`, `sandboxPersistence/`, `sandboxStore/index.svelte.ts`, …).
+- **Engine:** `src/lib/sandbox/` — 38 folder modules with `index.ts` surfaces (`runtime/`, `inference/`, `domain/`, `tools/`, `credentialVault/`, `modelConfig/`, `presetCatalog/`, `realmRegistry/`, `realmCatalog/`, `virtualFs/`, `messagingBus/`, `worldClock/`, `triggerQueue/`, `invocationEngine/`, `mcpClient/`, `sandboxPersistence/`, `sandboxStore/index.svelte.ts`, …).
 - **App/UI:** the shell — `src/App.svelte`, `src/main.js`, `src/app.css`, and `src/lib/components/sandbox/` (14 Svelte components + `estimateTokens.ts`, `realmGroups.ts`, `realmHydrationHelpers.ts`, `realmLauncherHelpers.ts`, `realmPayloadLibrary.ts`, `realmReviewHelpers.ts`, `realmTemplateHelpers.ts`, `toolPresetResolve.ts` + `markdown/`). No legacy stores/api/utils remain.
 - **Tests:** `tests/unit/`, `tests/integration/`, `tests/e2e/` (Playwright); runner `tests/runner.js`.
 - **Tooling:** `scripts/verify_sandbox_contracts.js`.

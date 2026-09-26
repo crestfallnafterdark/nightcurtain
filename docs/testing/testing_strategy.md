@@ -19,11 +19,11 @@ graph TD
     end
 
     subgraph L2["Tier 2: Zero-Mock Subsystem Integration (node --test)"]
-        INT["46 Integration Suites (tests/integration/)<br/>• Real VirtualFS, MessagingBus, WorldClock, AgentRuntime<br/>• Preset Binding & Credential Vault Workflows<br/>• Precall Pipeline & Tool Security Gating Verification<br/>• Concurrency & State Persistence Fault Injection"]
+        INT["47 Integration Suites (tests/integration/)<br/>• Real VirtualFS, MessagingBus, WorldClock, AgentRuntime<br/>• Preset Binding & Credential Vault Workflows<br/>• Precall Pipeline & Tool Security Gating Verification<br/>• Concurrency & State Persistence Fault Injection"]
     end
 
     subgraph L1["Tier 1: Atomic Unit & Contract Testing (node --test)"]
-        UNIT["52 Unit Suites (tests/unit/)<br/>• Pure Functions & Algorithms<br/>• DeepSeek Reasoning Hygiene (INV-REASONING-STRING)<br/>• JSON Pointers, Parsers, Preset Catalog, LoRA Tags<br/>• Module Contracts & Provider Adapters"]
+        UNIT["54 Unit Suites (tests/unit/)<br/>• Pure Functions & Algorithms<br/>• DeepSeek Reasoning Hygiene (INV-REASONING-STRING)<br/>• JSON Pointers, Parsers, Preset Catalog, LoRA Tags<br/>• Module Contracts & Provider Adapters"]
     end
 
     L1 --> L2
@@ -101,7 +101,7 @@ The master runner executes all Unit and Integration suites in strict sub-process
 // Sample output format from tests/runner.js:
 // ======================================================================
 //   AGENTIC SANDBOX STUDIO MASTER TEST SUITE RUNNER
-//   Total Suites: 99 (53 Unit, 46 Integration)
+//   Total Suites: 101 (54 Unit, 47 Integration)
 // ======================================================================
 //   [Unit       ] deepseek_provider_test.js                  ✔ PASS (42ms)
 //   [Unit       ] deepseek_reasoning_hygiene_test.js         ✔ PASS (18ms)
@@ -109,7 +109,7 @@ The master runner executes all Unit and Integration suites in strict sub-process
 //   [Integration] tool_contract_security_gating_test.js      ✔ PASS (115ms)
 //   [Integration] mail_injection_precall_pipeline_test.js    ✔ PASS (188ms)
 // ======================================================================
-//   Suites:       99 passed, 99 total
+//   Suites:       101 passed, 101 total
 //   Failed:       0 failed
 //   Duration:     3.42s
 // ======================================================================
@@ -126,7 +126,7 @@ All Node-based test suites import [`tests/test_env.js`](../../tests/test_env.js)
 
 ## 4. Test Suite Inventory & Classification
 
-The project includes **99 native test suites** (53 unit, 46 integration) and **8 browser E2E specs**:
+The project includes **101 native test suites** (54 unit, 47 integration) and **8 browser E2E specs**:
 
 > **Canonical inventory.** This chapter is the single source of truth for test-suite counts and per-file listings; [`unit_and_integration.md`](unit_and_integration.md) cross-links here instead of duplicating it.
 
@@ -148,6 +148,7 @@ The project includes **99 native test suites** (53 unit, 46 integration) and **8
 | [`invocation_engine_module_test.js`](../../tests/unit/invocation_engine_module_test.js) | `src/lib/sandbox/invocationEngine/index.ts` | Module 5 ICD contract, direct RPC dispatch, parameter normalization. |
 | [`lora_tag_parser_test.js`](../../tests/unit/lora_tag_parser_test.js) | Self-contained parser contract | `<lora:name:weight>` parsing, prompt stripping, weight extraction. |
 | [`markdown_parser_test.js`](../../tests/unit/markdown_parser_test.js) | `src/lib/components/sandbox/markdown/render.ts` | Prose rendering (GFM via `marked`) + DOMPurify allowlist sanitization (fail-closed fallback), XSS vectors. |
+| [`mcp_client_module_test.js`](../../tests/unit/mcp_client_module_test.js) | `src/lib/sandbox/mcpClient/index.ts` | Session-factory contract: stdio typed refusal with zero transport activity, plaintext-credential gate (refused before transport, never echoed), option-shape validation, `https:` bearer-header wiring, failure taxonomy at the `globalThis.fetch` seam (network/timeout/cancel/auth/protocol/malformed), frozen error dictionary and error shape. |
 | [`messaging_bus_module_test.js`](../../tests/unit/messaging_bus_module_test.js) | `src/lib/sandbox/messagingBus/index.ts` | Module 2 ICD: strict dequeue on read, clean drain, non-destructive peek. |
 | [`messaging_bus_realm_scope_test.js`](../../tests/unit/messaging_bus_realm_scope_test.js) | `src/lib/sandbox/messagingBus/index.ts` | Realm-scoped delivery: cross-realm direct/inline/broadcast denial, bypass principals, filtered fan-out, legacy parity. |
 | [`model_config_module_test.js`](../../tests/unit/model_config_module_test.js) | `src/lib/sandbox/modelConfig/index.ts` | Strict export whitelist, 5-entry preset catalog, provider capability flags, 100K token cap. |
@@ -201,6 +202,7 @@ The project includes **99 native test suites** (53 unit, 46 integration) and **8
 | [`lifecycle_workspace_eviction_test.js`](../../tests/integration/lifecycle_workspace_eviction_test.js) | `AgentRuntime` + `AgentLifecycleManager` + `VirtualFS` | Destructive kill/purge evict the resolved workspace key (`config.workspaceId \|\| agentId`), never peers/global/raw-id workspaces. |
 | [`list_agents_projection_test.js`](../../tests/integration/list_agents_projection_test.js) | `ToolDispatcher` + `AgentRuntime` | `list_agents` returns scoped safe descriptors (no config/history/allowlists); anonymous empty, ordinary caller self+children (director never listed), root same-scope, operator unscoped. |
 | [`mail_injection_precall_pipeline_test.js`](../../tests/integration/mail_injection_precall_pipeline_test.js) | `AgentRuntime` + `MessagingBus` + `VirtualFS` | Zero-inference mail injection, next-turn precalls, tombstone compaction. |
+| [`mcp_client_http_fixture_test.js`](../../tests/integration/mcp_client_http_fixture_test.js) | `mcpClient` + `node:http` fixture | Real-socket round-trips: handshake/server identity/negotiated protocol revision, `listTools` frozen projections with raw schemas, JSON + request-scoped SSE `callTool`, JSON-RPC error → protocol, timeout, cancellation with session recovery, malformed body, CORS preflight, idempotent close, session-wide abort. |
 | [`messaging_bus_test.js`](../../tests/integration/messaging_bus_test.js) | `MessagingBus` | FIFO mailbox: dequeue on read, clean drain, peek, archive fidelity. |
 | [`messaging_invocations_test.js`](../../tests/integration/messaging_invocations_test.js) | `MessagingBus` + `InvocationEngine` + `AgentRuntime` | Event-driven multi-agent flows, history purity, cascade execution. |
 | [`operator_realm_injection_test.js`](../../tests/integration/operator_realm_injection_test.js) | `SandboxStore` + `TurnExecutionEngine` + `MessagingBus` | Operator-attributed injection and manual sends into realm-bound targets; agent cross-realm denial; no-director fail-closed. |
@@ -270,8 +272,8 @@ sequenceDiagram
     G1-->>Dev: Gate 1 Passed (0 lint / sync errors)
 
     Dev->>G2: npm test (tests/runner.js)
-    Note over G2: Executes 99 suites (53 Unit, 46 Integration) under 120s timeout
-    G2-->>Dev: Gate 2 Passed (99/99 passed, 0 failures)
+    Note over G2: Executes 101 suites (54 Unit, 47 Integration) under 120s timeout
+    G2-->>Dev: Gate 2 Passed (101/101 passed, 0 failures)
 
     Dev->>G3: npm run build (vite build)
     Note over G3: Compiles Svelte 5 runes, WASM modules, top-level awaits

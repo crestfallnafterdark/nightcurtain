@@ -7,7 +7,7 @@ Durable engine notes: intentional quirks and accepted exceptions for the sandbox
 ## Sandbox shape (rules)
 
 - **36 folder modules**; `index.ts` (store: `index.svelte.ts`) is the sole importable surface; deep imports into module folders are banned (verifier + dependency-cruiser). No hand-written `.d.ts` pairs, no `@contractExports`, **no default exports**.
-- **Gate chain:** verifier (default + `--enforce-boundaries`) · module-contracts (Tier 1 + graph truth) · `verify:contract-types` (strict) · `verify:api-reports` (0 drift) · `gate:arch` (**0 errors / 0 warnings**) · `lint:sandbox` (0 problems) · `lint:docs` (0) · `typecheck` ratchets (`tsc` **0 total / 0 sandbox**; svelte-check ≤96); `npm test` = 98 suites (includes the 7 gate cases).
+- **Gate chain:** verifier (default + `--enforce-boundaries`) · module-contracts (Tier 1 + graph truth) · `verify:contract-types` (strict) · `verify:api-reports` (0 drift) · `gate:arch` (**0 errors / 0 warnings**) · `lint:sandbox` (0 problems) · `lint:docs` (0) · `typecheck` ratchets (`tsc` **0 total / 0 sandbox**; svelte-check ≤96); `npm test` = 101 suites (includes the 7 gate cases).
 - End state: all modules `--strict` clean; explicit `any` only at PremProvider's SDK boundary (see exceptions).
 
 ## Intentional behavioral quirks (do not "fix" without a decision)
@@ -82,6 +82,7 @@ Durable rules for publishing authorities (the format contract lives in the gener
 | 4 | `svelte-check` baseline ≤96 | Non-sandbox Svelte diagnostics (sandbox modules are clean); `tsc` is now **0 total / 0 sandbox** (`TSC_ERROR_BASELINE = 0`). Ratchet policy freezes the ceiling. |
 | 5 | Telemetry hardened-container bypass | Open, on-hold, non-blocking issue (in-process only); preserved per the no-behavior-change rule. |
 | 6 | v1 fixed-inline seed override through the read shim | A legacy v1 template's fixed inline seed normalizes to a defaulted `text` input, so a launch payload/`inputs` may override it (v1 hydration validation rejected fixed entries). Accepted: v1 is transitional (the surface is deleted at cutover), launch operators are trusted, and the shim preserves every other v1 acceptance rule. Recorded with the L2 lane (`53231bf`). |
+| 7 | Official MCP client dependency (`@modelcontextprotocol/client@2.1.0`) | D2-ratified under §8 for the pinned closure (13 packages). Imported only through a cached dynamic import inside `mcpClient`'s HTTP adapter, so the SDK ships as a lazy async chunk and the initial bundle stays byte-identical; every consumer sees only the `mcpClient` session port; the fallback is the hand-rolled client behind the same port. |
 
 ## Follow-ups
 
