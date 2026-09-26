@@ -6,7 +6,9 @@
  * @superseded-by 3f9b3d4 (spawn contract): `spawn_agent` ignores the
  *   `workspace` parameter with a warning, so the peer-pin attack test no
  *   longer reproduces; the realm-exact caller-resolution test remains as
- *   historical evidence of the F1 fix.
+ *   historical evidence of the F1 fix, and its still-valid guarantee is
+ *   guarded by the promoted R15 test in
+ *   `tests/integration/spawn_agent_contract_test.js` (d3ca880, ticket 376e37f).
  * @frozen 2026-09-26 (ticket 3838ab4, autopilot decision A14)
  * @description Red-first audit repro for Wave I I2-V finding F1 (HIGH,
  * security; ticket d57cbc1): the lifecycle tool paths from a realm-bound

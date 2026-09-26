@@ -685,8 +685,21 @@ test('12. Agent Lifecycle Descriptor Delegations (5 Tools)', async () => {
     undoAgentTurn: async (agentId, turnId) => ({ success: true, op: 'undoAgentTurn', agentId, turnId })
   };
 
+  // Launch-path identity channel (ticket 376e37f): a bound caller with no
+  // usable identity port now fails `spawn_agent` closed, so this delegation
+  // fixture supplies a minimal resolving projection. The fail-closed refusal
+  // itself is pinned by R16 in `spawn_agent_contract_test.js`.
+  const identityPortMock = {
+    getAgentIdentity: (agentId) => (
+      agentId === 'supervisor_agent'
+        ? Object.freeze({ id: agentId, key: 'canonical:supervisor_agent' })
+        : null
+    )
+  };
+
   const dispatcher = createSandboxToolDispatcher({
     lifecyclePort: lifecyclePortMock,
+    identityPort: identityPortMock,
     agentId: 'supervisor_agent',
     allowedTools: 'all'
   });
