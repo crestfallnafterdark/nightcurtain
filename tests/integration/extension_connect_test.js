@@ -982,3 +982,77 @@ test('15. a disconnect during a reconnect handshake cancels it and leaves no liv
     sharedLocalStorage.clear();
   }
 });
+
+// ============================================================================
+// 16. Realm-level attachment selection caps the catalog-driven grant universe
+// ============================================================================
+
+test('16. the attachment toolSelection narrows the catalog-driven universe before the per-agent selector', async () => {
+  sharedLocalStorage.clear();
+  const fixture = await createMcpFixtureServer({
+    tools: [
+      { name: 'echo', description: 'Echo' },
+      { name: 'sse', description: 'SSE' }
+    ]
+  });
+  const { runtime, store, unsubscribe } = createHarness();
+  try {
+    installMcp(store, 'ext-a', fixture);
+    store.attachExtension(GENERIC_REALM_ID, 'ext-a', { toolSelection: ['echo'] });
+    await store.connectExtension('ext-a');
+    assert.deepStrictEqual(
+      store.resolveExtensionCallName('sse'),
+      { extensionId: 'ext-a', serverToolName: 'sse' },
+      'the exclusion is an attachment-selection rule, not a lost catalog name'
+    );
+
+    const identityPort = runtime.createAgentIdentityPort();
+    const grantsOf = (id) => [...identityPort.getAgentIdentity(id, { realmId: GENERIC_REALM_ID }).authority.extensions];
+
+    await store.launchAgent({
+      id: 'p33-selection-all',
+      name: 'Selection all',
+      role: 'observer',
+      realmId: GENERIC_REALM_ID,
+      allowedTools: []
+    });
+    assert.deepStrictEqual(
+      grantsOf('p33-selection-all'),
+      ['echo'],
+      "an 'all' member gets only the attachment selection's catalog names"
+    );
+
+    await store.launchAgent({
+      id: 'p33-selection-selector',
+      name: 'Selection selector',
+      role: 'observer',
+      realmId: GENERIC_REALM_ID,
+      allowedTools: [],
+      extensionTools: ['sse', 'echo']
+    });
+    assert.deepStrictEqual(
+      grantsOf('p33-selection-selector'),
+      ['echo'],
+      'the per-agent selector intersects the capped universe and can never widen it'
+    );
+
+    await store.launchAgent({
+      id: 'p33-selection-excluded',
+      name: 'Selection excluded',
+      role: 'observer',
+      realmId: GENERIC_REALM_ID,
+      allowedTools: [],
+      extensionTools: ['sse']
+    });
+    assert.deepStrictEqual(
+      grantsOf('p33-selection-excluded'),
+      [],
+      'a selection-excluded name is dropped fail-closed'
+    );
+  } finally {
+    unsubscribe();
+    store.destroy();
+    await fixture.close();
+    sharedLocalStorage.clear();
+  }
+});

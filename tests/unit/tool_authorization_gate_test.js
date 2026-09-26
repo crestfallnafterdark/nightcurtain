@@ -883,23 +883,25 @@ test('32. a missing descriptor or execution port fails closed with EXECUTION_FAI
   const authority = createIdentity({ authority: createExtensionAuthority([EXTENSION_TOOL]) });
 
   // (a) Binding present, no `resolveDescriptor` member, executor bound.
-  const { port: executorA } = createExtensionExecutor();
+  const { port: executorA, calls: callsA } = createExtensionExecutor();
   const noResolver = createDispatcher(authority, {
     extensionToolProvider: createExtensionProviderPort(),
     extensionExecutionPort: executorA
   });
   assert.equal((await noResolver.executeTool(EXTENSION_TOOL, {})).code, TOOL_SYSTEM_ERROR_CODES.EXECUTION_FAILED);
+  assert.equal(callsA.length, 0, 'a missing descriptor must never reach the executor');
 
   // (b) `resolveDescriptor` resolves null (refused/disconnected), executor bound.
-  const { port: executorB } = createExtensionExecutor();
+  const { port: executorB, calls: callsB } = createExtensionExecutor();
   const nullDescriptor = createDispatcher(authority, {
     extensionToolProvider: createExtensionProviderPort({ [EXTENSION_TOOL]: EXTENSION_ID }, () => null),
     extensionExecutionPort: executorB
   });
   assert.equal((await nullDescriptor.executeTool(EXTENSION_TOOL, {})).code, TOOL_SYSTEM_ERROR_CODES.EXECUTION_FAILED);
+  assert.equal(callsB.length, 0, 'a null descriptor must never reach the executor');
 
   // (c) `resolveDescriptor` throws, executor bound.
-  const { port: executorC } = createExtensionExecutor();
+  const { port: executorC, calls: callsC } = createExtensionExecutor();
   const throwingDescriptor = createDispatcher(authority, {
     extensionToolProvider: createExtensionProviderPort(
       { [EXTENSION_TOOL]: EXTENSION_ID },
@@ -908,6 +910,7 @@ test('32. a missing descriptor or execution port fails closed with EXECUTION_FAI
     extensionExecutionPort: executorC
   });
   assert.equal((await throwingDescriptor.executeTool(EXTENSION_TOOL, {})).code, TOOL_SYSTEM_ERROR_CODES.EXECUTION_FAILED);
+  assert.equal(callsC.length, 0, 'a throwing descriptor must never reach the executor');
 
   // (d) Descriptor present, no execution port bound.
   const noExecutor = createDispatcher(authority, {
@@ -937,13 +940,14 @@ test('33. an ungranted resolved name denies, an unresolvable name stays TOOL_NOT
   assert.equal(denied.code, TOOL_SYSTEM_ERROR_CODES.PERMISSION_DENIED, 'exact membership decides authorization');
   assert.equal(calls.length, 0, 'a denied call must never reach the third-party server');
 
-  // The grant is present but the provider resolves nothing (no live catalog).
+  // The grant is present (seeded on the axis) but the provider resolves
+  // nothing (no live catalog).
   const missing = createDispatcher(
-    createIdentity({ authority: createExtensionAuthority([EXTENSION_TOOL]) }),
+    createIdentity({ authority: createExtensionAuthority([EXTENSION_TOOL, 'not_a_live_tool']) }),
     { extensionToolProvider: provider, extensionExecutionPort: executor }
   );
   const missingReceipt = await missing.executeTool('not_a_live_tool', {});
-  assert.equal(missingReceipt.code, TOOL_SYSTEM_ERROR_CODES.TOOL_NOT_FOUND, 'a catalog-less name is unknown, never an execution attempt');
+  assert.equal(missingReceipt.code, TOOL_SYSTEM_ERROR_CODES.TOOL_NOT_FOUND, 'a granted catalog-less name is unknown, never an execution attempt');
   assert.equal(calls.length, 0);
 });
 

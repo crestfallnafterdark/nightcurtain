@@ -289,7 +289,7 @@ test('2. a restricted selector sees and executes only its granted names; an ungr
   }
 });
 
-test('2b. a name absent from the live catalogs stays TOOL_NOT_FOUND even for an exact grant', async () => {
+test('2b. an exact grant for a catalog-less name stays TOOL_NOT_FOUND', async () => {
   sharedLocalStorage.clear();
   const fixture = await createMcpFixtureServer({ tools: FIXTURE_TOOLS });
   const store = createStore();
@@ -298,16 +298,51 @@ test('2b. a name absent from the live catalogs stays TOOL_NOT_FOUND even for an 
     store.attachExtension(GENERIC_REALM_ID, 'ext-a');
     await store.connectExtension('ext-a');
 
-    // No live catalog carries 'ghost_tool'; the exact-grant axis is seeded by
-    // spawning while the live catalog is active.
-    const model = createScriptedModel([
+    // Seed the exact grant through the store's trusted extension-grants
+    // channel (the same channel the template-launch loop uses): 'ghost_tool'
+    // is on the caller's axis but in no live catalog, so the provider can
+    // resolve no descriptor and the call resolves no binding.
+    const ghostModel = createScriptedModel([
       { content: 'calling ghost', toolCalls: [toolCall('g1', 'ghost_tool', {})] },
       { content: 'done' }
     ]);
-    await spawnMember(store, 'p33-ghost', model);
+    await store.launchAgent({
+      id: 'p33-ghost',
+      name: 'p33-ghost',
+      role: 'observer',
+      realmId: GENERIC_REALM_ID,
+      allowedTools: ['read_file'],
+      extensionTools: []
+    }, ghostModel, null, ['ghost_tool']);
     await store.triggerTurn('p33-ghost', 'go');
     const receipt = receiptOf(toolMessages(store, 'p33-ghost')[0]);
-    assert.strictEqual(receipt.code, 'TOOL_NOT_FOUND', 'a catalog-less name resolves no binding');
+    assert.strictEqual(receipt.code, 'TOOL_NOT_FOUND', 'a granted name with no live descriptor resolves no binding');
+
+    // Positive control for the same seed channel: an exact grant for a name
+    // the live catalog does resolve executes (the selector would otherwise
+    // grant nothing), proving the axis — not the catalog universe — was the
+    // grant source for the ghost call above.
+    const controlModel = createScriptedModel([
+      { content: 'calling echo', toolCalls: [toolCall('g2', 'echo', { text: 'control' })] },
+      { content: 'done' }
+    ]);
+    await store.launchAgent({
+      id: 'p33-ghost-control',
+      name: 'p33-ghost-control',
+      role: 'observer',
+      realmId: GENERIC_REALM_ID,
+      allowedTools: ['read_file'],
+      extensionTools: []
+    }, controlModel, null, ['echo']);
+    await store.triggerTurn('p33-ghost-control', 'go');
+    const control = receiptOf(toolMessages(store, 'p33-ghost-control')[0]);
+    assert.strictEqual(control.success, true, 'the same channel seeds a resolvable exact grant');
+    assert.strictEqual(control.content, JSON.stringify({ text: 'control' }));
+    assert.deepStrictEqual(
+      fixture.requests.filter((entry) => entry.method === 'tools/call').map((entry) => entry.toolName),
+      ['echo'],
+      'the catalog-less grant never reaches the server'
+    );
   } finally {
     store.destroy();
     await fixture.close();
@@ -540,8 +575,9 @@ test('7b. a catalog change during a turn queues and applies at turn_complete, ne
     let markStarted = () => {};
     const started = new Promise((resolve) => { markStarted = resolve; });
     const model = createScriptedModel([
-      { content: 'long turn' },
-      { content: 'calling sse', toolCalls: [toolCall('b1', 'sse', {})] },
+      { content: 'long turn', toolCalls: [toolCall('b1', 'sse', {})] },
+      { content: 'done' },
+      { content: 'calling sse', toolCalls: [toolCall('b2', 'sse', {})] },
       { content: 'done' }
     ], {
       onFirstStream: async () => {
@@ -561,16 +597,29 @@ test('7b. a catalog change during a turn queues and applies at turn_complete, ne
     releaseGate();
     await busyTurn;
 
-    // The queued sweep applied on turn_complete: the next turn exposes 'sse'.
+    const receipts = toolMessages(store, 'p33-busy').map(receiptOf);
+    // Mid-turn non-widening: the model calls the newly cataloged tool while
+    // the busy-member sweep is still queued, so the member's descriptor is
+    // unchanged and the call is denied — never executed mid-turn.
+    assert.strictEqual(receipts[0].success, false, 'the mid-turn call is denied');
+    assert.strictEqual(receipts[0].code, 'PERMISSION_DENIED', 'the busy-member sweep never mutates mid-turn');
+    const sseServerCalls = () => fixture.requests.filter(
+      (entry) => entry.method === 'tools/call' && entry.toolName === 'sse'
+    ).length;
+    assert.strictEqual(sseServerCalls(), 0, 'the mid-turn denial never reaches the server');
+
+    // The queued sweep applied on turn_complete: the next turn exposes and
+    // executes 'sse'.
     await store.triggerTurn('p33-busy', 'after');
     const afterTurnSchema = model.streamOptions[model.streamOptions.length - 2];
     assert.ok(
       schemaNames(afterTurnSchema).includes('sse'),
       'the busy member is reauthorized at its next turn_complete'
     );
-    const receipts = toolMessages(store, 'p33-busy').map(receiptOf);
-    assert.strictEqual(receipts[0].success, true, 'the newly exposed tool executes after the safe-state sweep');
-    assert.strictEqual(receipts[0].content, 'sse-mode-ok');
+    const afterReceipts = toolMessages(store, 'p33-busy').map(receiptOf);
+    assert.strictEqual(afterReceipts[1].success, true, 'the newly exposed tool executes after the safe-state sweep');
+    assert.strictEqual(afterReceipts[1].content, 'sse-mode-ok');
+    assert.strictEqual(sseServerCalls(), 1, 'exactly one server call, made after the safe state');
   } finally {
     store.destroy();
     await fixture.close();
