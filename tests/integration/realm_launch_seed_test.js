@@ -8,8 +8,9 @@
  *   Covered behavior:
  *   1. The baked demo template launches in one call: the Realm record exists,
  *      both members are active with the plain realm-opaque ids, membership,
- *      privilege, resolved tool grants (the `subagent_management` sentinel
- *      preserved), system prompts, and the catalog-default preset binding.
+ *      privilege, resolved tool grants (retired-selector entries expanded to
+ *      concrete tools, sentinel-free), system prompts, and the catalog-default
+ *      preset binding.
  *   2. Name/color/description overrides and per-key id overrides land on the
  *      record and the agent ids; the record is visible in the reactive
  *      projection.
@@ -346,12 +347,15 @@ test('1. demo launch creates the realm record and both members with realm-opaque
     assert.equal(coordinator.config.systemPrompt, DEMO_TEMPLATE.agents[0].prompt[0].text, 'the composed text part becomes the system prompt');
     assert.equal(worker.config.systemPrompt, DEMO_TEMPLATE.agents[1].prompt[0].text);
 
-    // Resolved grants: the manager preset travels verbatim, sentinel included.
+    // Resolved grants: the manager preset arrives sentinel-free as its
+    // generated concrete tools (retired-selector entries expand through the
+    // preset resolver, so no selector travels into the launched agent).
     assert.deepEqual(coordinator.config.allowedTools, [...TOOL_PRESETS.manager]);
     assert.ok(
-      coordinator.config.allowedTools.includes('subagent_management'),
-      'the aggregate subagent_management sentinel is preserved on the launched agent'
+      !coordinator.config.allowedTools.includes('subagent_management'),
+      'the retired subagent_management selector never travels on a launched agent'
     );
+    assert.ok(coordinator.config.allowedTools.includes('spawn_agent'));
     assert.deepEqual(worker.config.allowedTools, [...TOOL_PRESETS.readonly]);
 
     // Preset binding: no spec modelPresetId and no override ⇒ catalog default.

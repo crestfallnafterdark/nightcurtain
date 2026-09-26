@@ -1,6 +1,6 @@
 <script>
   import { sandboxStore } from '../../sandbox/sandboxStore/index.svelte.ts';
-  import { TOOL_PRESETS } from '$lib/sandbox/toolDefinitions/index.ts';
+  import { SANDBOX_TOOLS, TOOL_PRESETS } from '$lib/sandbox/toolDefinitions/index.ts';
   import { AGENT_AUTHORITIES } from '../../sandbox/realmCatalog/index.ts';
   import { createAgentIdentityKey } from '../../sandbox/runtime/index.ts';
   import {
@@ -69,7 +69,7 @@
     {
       id: 'manager',
       name: 'Lead / Manager',
-      desc: 'Full collaborator suite + subagent management (spawn, invoke, kill child agents).'
+      desc: 'Full collaborator suite + subagent lifecycle (spawn, invoke, list, await, kill child agents).'
     },
     {
       id: 'collaborator',
@@ -380,7 +380,7 @@
   }
 
   let activeToolCountDisplay = $derived.by(() => {
-    if (toolPreset === 'all' || toolsString.trim() === '*') return '34 (All Tools)';
+    if (toolPreset === 'all' || toolsString.trim() === '*') return `${Object.keys(SANDBOX_TOOLS).length} (All Tools)`;
     const count = toolsString.split(',').map(t => t.trim()).filter(Boolean).length;
     return `${count} active`;
   });

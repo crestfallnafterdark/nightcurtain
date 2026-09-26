@@ -24,7 +24,7 @@
  * @decision `SERVICE_UNAVAILABLE` is contract-reserved: handlers never emit it themselves, and a missing required substrate surfaces from the error shield as `EXECUTION_FAILED`
  * @decision `canonicalizeToolName` is exposed on the dispatcher as the shared alias-normalization authority so engine consumers (precall revalidation) do not duplicate alias maps
  * @decision Per-call `callerContext` is caller data, never authority: the dispatcher strips its `isAdmin`/`isPrivileged`/`privileged` flags, authority-bearing `callerRole`/`role` aliases, `principal`/`authority` objects, and `allowedTools`, deriving privilege and capability only from trusted bound construction options and the injected identity port
- * @decision Descriptor-authoritative capability: when the projection's frozen `AuthorityDescriptor` is present, capability derives from the descriptor alone — a wildcard/explicit/selector grant authorizes, any other outcome denies — and the deprecated legacy channels above apply only to descriptor-less callers
+ * @decision Descriptor-authoritative capability: when the projection's frozen `AuthorityDescriptor` is present, capability derives from the descriptor alone — a wildcard/explicit grant authorizes, and a retired-selector entry authorizes exactly its expansion — any other outcome denies, and the deprecated legacy channels above apply only to descriptor-less callers
  * @decision Publishing meta tools (`import_realm_template`/`submit_hydration_package`) are explicit-grant-only: they resolve through the separate `PUBLISHING_TOOL_REGISTRY` (never members of `TOOL_REGISTRY` or `ALL_TOOL_DESCRIPTORS`, never emitted by `getSandboxToolsSchema`), and authorization is the exact `@template:authority`/`@hydration:authority` entry on the caller's frozen descriptor — the wildcard `'*'`, `privileged`, and every legacy channel are deliberately insufficient, an engine-internal descriptor stays authorized, and descriptor-less callers deny (INV-9 refinement)
  * @decision Extension tools are exact-membership-only on the separate frozen `AuthorityDescriptor.extensions` axis: the dispatcher's extension branch is gated on an optional provider-registry port (bound at composition), authorize iff `authority.extensions.has(callName)`, with no wildcard/`privileged`/selector/alias/legacy fallback, engine-internal and anonymous/descriptor-less callers denying, and descriptor-probe throws failing closed; the axis is never populated from `allow` and an extension call never falls through to a baked handler or schema. After authorization, the branch resolves the frozen synthesized descriptor through the provider port's optional `resolveDescriptor` and executes it against the pinned `extensionExecutionPort` context key: a missing descriptor or execution port fails closed with `EXECUTION_FAILED`, an unresolved/catalog-less name stays `TOOL_NOT_FOUND`, and a port rejection propagates to the universal error shield as a redacted `EXECUTION_FAILED` receipt
  * @decision Realm/workspace/tenant scope is never caller-supplied: the scope vocabulary (`workspaceId`/`workspace_id`, `realmId`/`realm_id`, `tenantId`/`tenant_id`, `scope`) is pinned at dispatcher construction and stripped from per-call `callerContext`; a scope claim may only ride trusted bound construction (and, once Realm lands, the trusted identity projection), never a tool call
@@ -41,6 +41,7 @@
 import {
   SANDBOX_TOOLS,
   INNATE_TOOLS,
+  expandRetiredToolSelector,
   resolveToolPreset,
   TOOL_SYSTEM_ERROR_CODES
 } from '../tools/constants/index.ts';
@@ -871,7 +872,7 @@ export type ToolHandlerFn = (
 ) => unknown;
 
 /**
- * Canonical tool descriptor contract implemented by all 34 tools in the sandbox.
+ * Canonical tool descriptor contract implemented by all 35 tools in the sandbox.
  *
  * @example
  * ```typescript
@@ -1027,32 +1028,17 @@ export function getSandboxToolsSchema(
     const resolved = resolveToolPreset(allowedTools);
     if (!resolved.includes('*')) {
       const allowedSet = new Set<string>();
-      let hasSubagentManagement = false;
-
       for (const item of resolved) {
-        if (typeof item === 'string') {
-          const canon = getCanonToolName(item);
-          if (canon) {
-            allowedSet.add(canon);
-          }
-          if (
-            item === 'subagent_management' ||
-            item === 'manage_subagents' ||
-            item === 'subagents' ||
-            item === 'subagent_tools'
-          ) {
-            hasSubagentManagement = true;
-          }
+        if (typeof item !== 'string') continue;
+        const canon = getCanonToolName(item);
+        if (!canon) continue;
+        const expansion = expandRetiredToolSelector(canon);
+        if (expansion) {
+          for (const tool of expansion) allowedSet.add(tool);
+          continue;
         }
+        allowedSet.add(canon);
       }
-
-      if (hasSubagentManagement) {
-        allowedSet.add(SANDBOX_TOOLS.SPAWN_AGENT);
-        allowedSet.add(SANDBOX_TOOLS.KILL_AGENT);
-        allowedSet.add(SANDBOX_TOOLS.INVOKE_AGENT);
-        allowedSet.add(SANDBOX_TOOLS.UNDO_TURN);
-      }
-
       targetDescriptors = ALL_TOOL_DESCRIPTORS.filter(d => allowedSet.has(d.name));
     }
   }
@@ -1530,21 +1516,22 @@ function normalizeToolErrorCode(code: unknown): ToolSystemErrorCode {
     : TOOL_SYSTEM_ERROR_CODES.EXECUTION_FAILED;
 }
 
-/** Tool names unlocked by the legacy `subagent_management` preset selector. */
-const SUBAGENT_MANAGEMENT_TOOLS: Set<string> = new Set([
-  SANDBOX_TOOLS.SPAWN_AGENT,
-  SANDBOX_TOOLS.KILL_AGENT,
-  SANDBOX_TOOLS.INVOKE_AGENT,
-  SANDBOX_TOOLS.UNDO_TURN
-]);
-
-/** Preset selectors that expand to the subagent-management tool set. */
-const SUBAGENT_MANAGEMENT_SELECTORS = new Set([
-  'subagent_management',
-  'manage_subagents',
-  'subagents',
-  'subagent_tools'
-]);
+/**
+ * Retired-selector window expansion (deprecated, ticket 5efc129): a grant
+ * entry that canonicalizes to a retired selector expands to exactly the
+ * selector's frozen tool list. Non-string entries, unknown names, and
+ * alias-written canonical tool names never match here — aliases keep granting
+ * exactly their canonical tool. Module-private.
+ *
+ * @param entry - Raw grant entry from an authority descriptor or legacy allowlist
+ * @returns The frozen expansion array, or `null` when the entry is not a retired selector
+ */
+function expandRetiredSelectorGrant(entry: unknown): readonly SandboxToolName[] | null {
+  if (typeof entry !== 'string') return null;
+  const canonical = getCanonToolName(entry);
+  if (canonical === null) return null;
+  return expandRetiredToolSelector(canonical);
+}
 
 /**
  * Capability authorization gate.
@@ -1553,16 +1540,17 @@ const SUBAGENT_MANAGEMENT_SELECTORS = new Set([
  * descriptor decides alone (Realm A0-1, ticket 76fb539): a non-innate tool is
  * authorized iff the descriptor holds the wildcard `'*'`, an explicit grant for
  * the canonical tool (alias-written entries are canonicalized to their
- * canonical tool), or the matching subagent-management selector sentinel. A
- * descriptor with no matching grant denies and never falls through to legacy
- * privilege flags or allowlists, so grants cannot widen each other. Any throw
- * from the descriptor read or capability probe (`authority`/`allow`/`allow.has`
- * accessors, `has(...)` calls, or the allow-set iterator) is treated as a deny
- * (fail closed), never an unshielded exception out of `dispatch()`. The
- * deprecated legacy channels (`isAdmin`/`isPrivileged` bypass and the
- * bound/identity `allowedTools` allowlist) apply only to callers whose
- * identity projection carries no descriptor. Innate tools stay universally
- * allowed.
+ * canonical tool), or a grant entry that canonicalizes to a retired selector
+ * and thereby authorizes exactly that selector's expansion (deprecated
+ * window). A descriptor with no matching grant denies and never falls through
+ * to legacy privilege flags or allowlists, so grants cannot widen each other.
+ * Any throw from the descriptor read or capability probe
+ * (`authority`/`allow`/`allow.has` accessors, `has(...)` calls, or the
+ * allow-set iterator) is treated as a deny (fail closed), never an unshielded
+ * exception out of `dispatch()`. The deprecated legacy channels
+ * (`isAdmin`/`isPrivileged` bypass and the bound/identity `allowedTools`
+ * allowlist) apply only to callers whose identity projection carries no
+ * descriptor. Innate tools stay universally allowed.
  *
  * Wave U publishing meta tools (`requiredAuthority` non-null) refine INV-9:
  * authorization is the *exact* explicit authority on the frozen descriptor —
@@ -1615,17 +1603,20 @@ function isAuthorized(
       const allow = authority.allow;
       if (allow && typeof allow.has === 'function') {
         if (allow.has('*') || allow.has(toolName)) return true;
-        if (SUBAGENT_MANAGEMENT_TOOLS.has(toolName)) {
-          for (const selector of SUBAGENT_MANAGEMENT_SELECTORS) {
-            if (allow.has(selector)) return true;
-          }
-        }
-        // Alias-written descriptor entries grant exactly their canonical tool
-        // (e.g. 'save_file' -> write_file). The descriptor still decides alone:
-        // canonicalization never admits a tool the descriptor does not name or
-        // alias.
         if (typeof allow[Symbol.iterator] === 'function') {
           for (const entry of allow) {
+            // Deprecated selector window (ticket 5efc129): an entry that
+            // canonicalizes to a retired selector authorizes exactly that
+            // selector's expansion, nothing more.
+            const expansion = expandRetiredSelectorGrant(entry);
+            if (expansion) {
+              if (expansion.some((tool) => tool === toolName)) return true;
+              continue;
+            }
+            // Alias-written descriptor entries grant exactly their canonical
+            // tool (e.g. 'save_file' -> write_file). The descriptor still
+            // decides alone: canonicalization never admits a tool the
+            // descriptor does not name or alias.
             if (typeof entry === 'string' && entry !== toolName && getCanonToolName(entry) === toolName) {
               return true;
             }
@@ -1663,40 +1654,22 @@ function isAuthorized(
   if (resolved.includes('*')) return true;
 
   const allowedSet = new Set<string>();
-  let hasSubagentManagement = false;
-
   for (const item of resolved) {
-    if (typeof item === 'string') {
-      const canon = getCanonToolName(item);
-      if (canon) {
-        allowedSet.add(canon);
-      }
-      if (
-        item === 'subagent_management' ||
-        item === 'manage_subagents' ||
-        item === 'subagents' ||
-        item === 'subagent_tools'
-      ) {
-        hasSubagentManagement = true;
-      }
+    if (typeof item !== 'string') continue;
+    const canon = getCanonToolName(item);
+    if (canon === null) continue;
+    // Deprecated selector window (ticket 5efc129): the alias spellings
+    // (`manage_subagents`/`subagents`/`subagent_tools`) canonicalize to the
+    // retired selector and keep granting exactly its expansion.
+    const expansion = expandRetiredToolSelector(canon);
+    if (expansion) {
+      for (const tool of expansion) allowedSet.add(tool);
+      continue;
     }
+    allowedSet.add(canon);
   }
 
-  if (allowedSet.has(toolName)) return true;
-
-  if (hasSubagentManagement) {
-    const subagentTools: string[] = [
-      SANDBOX_TOOLS.SPAWN_AGENT,
-      SANDBOX_TOOLS.KILL_AGENT,
-      SANDBOX_TOOLS.INVOKE_AGENT,
-      SANDBOX_TOOLS.UNDO_TURN
-    ];
-    if (subagentTools.includes(toolName)) {
-      return true;
-    }
-  }
-
-  return false;
+  return allowedSet.has(toolName);
 }
 
 /**

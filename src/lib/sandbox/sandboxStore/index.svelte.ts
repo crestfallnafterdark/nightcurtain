@@ -8750,9 +8750,10 @@ export class SandboxStore {
    *   own registration — agent identity is the composite
    *   `(realmId, agentId)`, so realms are independent id namespaces;
    * - each member's resolved internal grant list travels as `allowedTools`
-   *   (the aggregate `subagent_management` sentinel preserved; extension-bound
-   *   derived call names are excluded because they belong to the extension
-   *   grant channel), the declared preset name as inert `toolPreset` metadata,
+   *   (retired-selector entries expand to their concrete tools through the
+   *   preset resolver; extension-bound derived call names are excluded because
+   *   they belong to the extension grant channel), the declared preset name as
+   *   inert `toolPreset` metadata,
    *   and the effective preset id — a per-key `presetBindings` override winning
    *   over the spec's `modelPresetId` — as `presetId` resolved through the
    *   owned preset catalog (no model literals);
@@ -9084,11 +9085,11 @@ export class SandboxStore {
           systemPrompt: agentPlan.systemPrompt,
           realmId: realm.id,
           privileged: agentPlan.privileged,
-          // The resolved grant list is the authoritative launch selector, so
-          // the aggregate `subagent_management` sentinel travels verbatim; the
-          // declared preset name rides along as inert metadata (the composed
-          // config consults `allowedTools` first) for consumers that display
-          // the declared selector.
+          // The resolved grant list is the authoritative launch selector
+          // (retired selectors arrive expanded as concrete tools through the
+          // preset resolver); the declared preset name rides along as inert
+          // metadata (the composed config consults `allowedTools` first) for
+          // consumers that display the declared selector.
           allowedTools: [...internalAllowedTools],
           // Per-agent extension selector state: the member's resolved
           // references when restricted, else the `'all'` default. The
@@ -11780,11 +11781,12 @@ export class SandboxStore {
    * Captures the persisted tool grants of a snapshot's ACTIVE agents as plain
    * data for the H1 heal pass: `allowedTools` (or the `tools` alias, or a
    * `toolPreset`/`tool_preset` selector when no explicit list is present) is
-   * resolved through the sandbox preset resolver so the later reconcile
-   * compares canonical lists. Entries with no selector or an empty resolved
-   * grant are skipped (default-deny stays the baseline). Deliberately never
-   * reads `privileged`, `spawnedBy`/`creatorId`, or `realmId` — authority and
-   * membership are not capability data.
+   * resolved through the sandbox preset resolver — retired-selector entries
+   * expand to their concrete tool list through the deprecated window — so the
+   * later reconcile compares canonical lists. Entries with no selector or an
+   * empty resolved grant are skipped (default-deny stays the baseline).
+   * Deliberately never reads `privileged`, `spawnedBy`/`creatorId`, or
+   * `realmId` — authority and membership are not capability data.
    *
    * @param persisted - Snapshot the heal pass reconciles from (read-only).
    */

@@ -162,6 +162,18 @@ test('3. Capability Preset Resolution Engine (resolveToolPreset)', () => {
     ['read_file', 'send_message']
   );
 
+  // Retired selector window (deprecated): the canonical selector id expands in
+  // place to its fixed legacy tool list; alias spellings keep passing through
+  // canonical resolution for consumers that canonicalize before authorizing.
+  assert.deepStrictEqual(
+    resolveToolPreset('subagent_management'),
+    ['spawn_agent', 'kill_agent', 'invoke_agent', 'undo_turn']
+  );
+  assert.deepStrictEqual(resolveToolPreset(['manager', 'subagent_management']).slice(-4), [
+    'spawn_agent', 'kill_agent', 'invoke_agent', 'undo_turn'
+  ]);
+  assert.deepStrictEqual(resolveToolPreset('manage_subagents'), ['manage_subagents']);
+
   // Falsy / invalid inputs return empty array
   assert.deepStrictEqual(resolveToolPreset(null), []);
   assert.deepStrictEqual(resolveToolPreset(undefined), []);
@@ -181,18 +193,19 @@ test('4. Draft-07 JSON Schema Generation & Invariant 4 Zero Schema Pollution', (
   const allSchemas = getSandboxToolsSchema('all');
   assert.strictEqual(allSchemas.length, 35);
 
-  // 2. Preset-filtered schema generation
+  // 2. Preset-filtered schema generation (generated family tiers; every tier
+  // carries the innate baseline, so `describe_tool` is schema-visible too)
   const managerSchemas = getSandboxToolsSchema('manager');
-  assert.strictEqual(managerSchemas.length, 28); // 24 listed in manager preset + 4 expanded subagent management tools
+  assert.strictEqual(managerSchemas.length, 31);
 
   const collabSchemas = getSandboxToolsSchema('collaborator');
-  assert.strictEqual(collabSchemas.length, 24);
+  assert.strictEqual(collabSchemas.length, 25);
 
   const readonlyCollabSchemas = getSandboxToolsSchema('readonly_collaborator');
-  assert.strictEqual(readonlyCollabSchemas.length, 13);
+  assert.strictEqual(readonlyCollabSchemas.length, 14);
 
   const readonlySchemas = getSandboxToolsSchema('readonly');
-  assert.strictEqual(readonlySchemas.length, 12);
+  assert.strictEqual(readonlySchemas.length, 13);
 
   // 3. Option: includeReflection: false
   const noReflectionSchemas = getSandboxToolsSchema('all', { includeReflection: false });

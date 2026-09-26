@@ -385,7 +385,7 @@
             <input type="radio" name="toolPreset" value="manager" bind:group={toolPreset} />
             <div class="preset-info">
               <span class="preset-name">Lead / Manager</span>
-              <span class="preset-desc">Full collaborator suite + subagent management (spawn, invoke, kill child agents).</span>
+              <span class="preset-desc">Full collaborator suite + subagent lifecycle (spawn, invoke, list, await, kill child agents).</span>
             </div>
           </label>
 

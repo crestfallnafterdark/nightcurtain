@@ -24,7 +24,7 @@ flowchart TD
         VFS["VirtualFS (Multi-Tenant Workspaces, JSON Pointers, Paginated Listing)"]
         BUS["MessagingBus (Pub/Sub Inboxes, Deduplicated Envelopes, Archive Store)"]
         CLK["WorldClock (Discrete Time Progression, Scheduled Alarm Triggers)"]
-        DISP["ToolDispatcher (34 Tools Contract, Fail-Closed Security Gating, Type Coercion)"]
+        DISP["ToolDispatcher (35 Tools Contract, Fail-Closed Security Gating, Type Coercion)"]
         RT["AgentRuntime (State Machine, Turn Execution Loop, History Compaction)"]
     end
 
@@ -113,7 +113,7 @@ stateDiagram-v2
 ---
 
 ### 2.4 `ToolDispatcher` & Security Gating
-The [`ToolDispatcher`](../../src/lib/sandbox/toolDefinitions/index.ts) is the fail-closed authorization gateway governing all 34 canonical tools.
+The [`ToolDispatcher`](../../src/lib/sandbox/toolDefinitions/index.ts) is the fail-closed authorization gateway governing all 35 canonical tools.
 
 ```mermaid
 flowchart TD
@@ -133,10 +133,11 @@ flowchart TD
 #### Canonical Tool Presets Matrix:
 | Preset Name | Tool Count | Permitted Capabilities | Restrictions |
 |---|---|---|---|
-| `all` / `*` | 34 | Full unconstrained access to all tools | Reserved for privileged Director / Admin |
-| `manager` | 25 | File read/write/patch, messaging, agent spawning, scheduling | Restricted from system clock overrides and sudo escalations |
-| `collaborator`| 24 | File read/write, messaging, inbox operations, precalls | Cannot spawn agents or modify global configurations |
-| `readonly` | 12 | `read_file`, `query_json`, `list_files`, `grep`, `whoami`, `time` | **Strictly no file writes, deletes, patches, or messaging** |
+| `all` / `*` | 35 | Full unconstrained access to all tools | Reserved for privileged Director / Admin |
+| `manager` | 31 | File read/write/patch, messaging, subagent lifecycle/invocation, scheduling | Restricted from system clock overrides and sudo escalations |
+| `collaborator`| 25 | File read/write, messaging, inbox operations, precalls | Cannot spawn agents or modify global configurations |
+| `readonly_collaborator` | 14 | Read-only VFS + inbox/mail verbs, `send_message`, precalls | No file writes, deletes, patches, or subagent/scheduler capabilities |
+| `readonly` | 13 | `read_file`, `query_json`, `list_files`, `grep`, `whoami`, `time` | **Strictly no file writes, deletes, patches, or messaging** |
 | `null` / `[]` | 4 | Safe innate primitives only (`whoami`, `time`, `describeTool`, `batchPrecall`)| Fail-closed zero-capability baseline |
 
 ---

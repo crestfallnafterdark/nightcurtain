@@ -8,7 +8,7 @@
  * (which resolves profiles only).
  */
 
-import { MUTATING_TOOLS, READ_ONLY_TOOLS, TOOL_PRESETS, resolveToolPreset } from '../tools/constants/index.ts';
+import { MUTATING_TOOLS, READ_ONLY_TOOLS, RETIRED_TOOL_SELECTORS, TOOL_PRESETS, resolveToolPreset } from '../tools/constants/index.ts';
 import type { ToolPresetName } from '../tools/constants/index.ts';
 import { deriveToolCallName, getCanonToolName, isReservedToolCallName } from '../tools/normalizers/index.ts';
 import { deepFreeze } from './freeze.ts';
@@ -222,11 +222,17 @@ const OPTIONAL_SPEC_STRING_FIELDS: readonly string[] = Object.freeze([
   'initialPrompt'
 ]);
 
-/** Canonical tool names plus the aggregate subagent-management selector. */
+/**
+ * Canonical tool names plus the retired-selector compatibility ids (deprecated,
+ * ticket 5efc129): template tool lists written against the retired
+ * `subagent_management` selector keep validating during the compatibility
+ * shim; unknown grants still throw. The resolver expands the selector to
+ * concrete tools, so plan grants never carry the sentinel.
+ */
 const RECOGNIZED_TOOL_GRANTS: ReadonlySet<string> = new Set([
   ...MUTATING_TOOLS,
   ...READ_ONLY_TOOLS,
-  'subagent_management'
+  ...Object.keys(RETIRED_TOOL_SELECTORS)
 ]);
 
 /**
@@ -423,8 +429,9 @@ function resolveExtensionToolReference(
  * `<providerId>::<serverToolName>` (provider id declared, server tool name
  * non-empty, resolved call name `deriveToolCallName(serverToolName)`); or a
  * canonical internal tool name (or an alias resolving to one, including the
- * aggregate subagent-management selector). Publishing meta-tool spellings are
- * deliberately not recognized grants. Unknown entries fail closed.
+ * retired subagent-management selector recognized through the deprecated
+ * compatibility shim). Publishing meta-tool spellings are deliberately not recognized
+ * grants. Unknown entries fail closed.
  *
  * @param entry - Declared entry (validated non-empty)
  * @param label - Human-readable label used in the error message
@@ -464,10 +471,12 @@ function resolveToolGrantEntry(
  * Explicit lists pass through the canonical resolver in declared order, but
  * every entry is validated first (see `resolveToolGrantEntry`). Declared
  * requirement ids and extension tool references resolve to their derived
- * model-facing call names (`deriveToolCallName`), so the resolved profile
- * carries exactly the names the runtime allowlist will receive; canonical
- * names, aliases, and the wildcard pass through unchanged. Unknown entries are
- * rejected instead of silently passing through as unrecognized grants.
+ * model-facing call names (`deriveToolCallName`), and the retired
+ * subagent-management selector expands through the deprecated compatibility shim to its
+ * concrete tool list, so the resolved profile carries exactly the names the
+ * runtime allowlist will receive; canonical names, aliases, and the wildcard
+ * pass through unchanged. Unknown entries are rejected instead of silently
+ * passing through as unrecognized grants.
  *
  * @param profile - Candidate tool-profile value
  * @param label - Human-readable label used in error messages

@@ -95,10 +95,12 @@ Model credentials are not part of the agent schema: agents resolve their key thr
 
 ### 2.3 Tool Permission Presets
 
+Named tiers are generated from the frozen tool-family taxonomy (`tools/constants`); the retired `subagent_management` selector is not a tier member and stays accepted only through the deprecated alias window (it expands to `spawn_agent`, `kill_agent`, `invoke_agent`, `undo_turn`).
+
 | Preset Name | Identifier | Included Tool Whitelist |
 | :--- | :--- | :--- |
 | **Full Access (*)** | `'all'` | `['*']` (All virtual filesystem, messaging, scheduling, and runtime tools). |
-| **Lead / Manager** | `'manager'` | Subagent management (`spawn_agent`, `invoke_agent`, `kill_agent`) + collaboration suite. |
+| **Lead / Manager** | `'manager'` | Subagent lifecycle (`spawn_agent`, `kill_agent`, `list_agents`, `invoke_agent`, `wait_for_invocation`, `undo_turn`) + collaboration suite. |
 | **Standard Collaborator** | `'collaborator'` | VirtualFS reading/writing, `send_message`, `schedule` deferred timers. |
 | **Read-Only Collaborator** | `'readonly_collaborator'` | File reading, AST querying, line grep, `list_inbox`, and outbound messaging. |
 | **Read-Only Observer** | `'readonly'` | Inspection, file reading, and mailbox querying only. Zero write tools. |

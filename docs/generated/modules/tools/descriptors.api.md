@@ -5905,7 +5905,7 @@ export const writeJsonDescriptor: Readonly<{
 
 ### `ALL_TOOL_DESCRIPTORS` — variable
 
-Array of all 34 Canonical Tool Descriptors
+Array of all 35 Canonical Tool Descriptors
 
 ### `batch_precall` — variable
 

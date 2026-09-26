@@ -1,7 +1,7 @@
 /**
  * @packageDocumentation
  * Module `tools/descriptors`.
- * Master catalog aggregating all 34 canonical tool descriptors and the frozen
+ * Master catalog aggregating all 35 canonical tool descriptors and the frozen
  * `TOOL_REGISTRY` table, plus the separate Wave U publishing meta-tool
  * registry (`PUBLISHING_TOOL_REGISTRY`: the two explicit-grant-only tools that
  * are never part of the canonical taxonomy and never wildcard-exposed).
@@ -173,7 +173,7 @@ export {
 export type { PublishingToolDescriptor } from './realmTools.ts';
 
 /**
- * Array of all 34 Canonical Tool Descriptors
+ * Array of all 35 Canonical Tool Descriptors
  */
 export const ALL_TOOL_DESCRIPTORS: readonly ToolDescriptor[] = Object.freeze([
   ...vfsToolDescriptors,

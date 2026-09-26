@@ -4,7 +4,7 @@
  * display model consumed by the Realm launcher preview.
  */
 
-import { MUTATING_TOOLS, READ_ONLY_TOOLS, SANDBOX_TOOLS } from '../tools/constants/index.ts';
+import { expandRetiredToolSelector, MUTATING_TOOLS, READ_ONLY_TOOLS } from '../tools/constants/index.ts';
 import { getCanonToolName } from '../tools/normalizers/index.ts';
 import { deepFreeze } from './freeze.ts';
 import { CAPABILITY_WILDCARD_SOURCES } from './types.ts';
@@ -25,27 +25,24 @@ const MUTATING_TOOL_SET: ReadonlySet<string> = new Set(MUTATING_TOOLS);
 const CANONICAL_TOOL_SET: ReadonlySet<string> = new Set([...MUTATING_TOOLS, ...READ_ONLY_TOOLS]);
 
 /**
- * Aggregate selector carried by the `manager` preset; the dispatcher expands
- * it to the subagent-management tool set.
+ * Canonical tools unlocked by the retired `subagent_management` selector,
+ * resolved through the shared deprecated compatibility shim (ticket
+ * 5efc129). Used only for the honest `subagentManagement` membership
+ * projection.
  */
-const SUBAGENT_MANAGEMENT_SELECTOR = 'subagent_management';
-
-/** Canonical tools unlocked by the aggregate selector, in canonical order. */
-const SUBAGENT_MANAGEMENT_TOOLS: readonly string[] = Object.freeze([
-  SANDBOX_TOOLS.SPAWN_AGENT,
-  SANDBOX_TOOLS.KILL_AGENT,
-  SANDBOX_TOOLS.INVOKE_AGENT,
-  SANDBOX_TOOLS.UNDO_TURN
-]);
+const LEGACY_SUBAGENT_MANAGEMENT_TOOLS: readonly string[] =
+  expandRetiredToolSelector('subagent_management') ?? [];
 
 /**
  * Builds the honest capability summary for one template agent spec.
  *
  * The declared profile resolves through the canonical preset resolver; each
  * grant is then canonicalized through the tool alias resolver and classified
- * against the canonical mutation vocabulary. The aggregate
- * subagent-management selector expands to its canonical tools, wildcard
- * grants (`'*'`) report full vocabulary coverage, declared legacy requirement
+ * against the canonical mutation vocabulary. The retired subagent-management
+ * selector (and its spellings) expands through the shared deprecated compatibility shim to
+ * its canonical tools, `subagentManagement` is an honest membership test over
+ * the effective grants (wildcard, or any legacy subagent-management tool
+ * present), wildcard grants (`'*'`) report full vocabulary coverage, declared legacy requirement
  * ids (from the owning template's `toolContract`) and extension tool
  * references (from the declared providers) surface in `grants` as their
  * derived model-facing call names (`text.similarity` → `text_similarity`,
@@ -102,7 +99,6 @@ function summarizeValidatedAgent(
   const unrecognized: string[] = [];
   const seen: Set<string> = new Set();
   let declaredWildcard = false;
-  let declaredManagement = false;
 
   for (const grant of profile.tools) {
     if (grant === '*') {
@@ -122,13 +118,14 @@ function summarizeValidatedAgent(
       grants.push(grant);
       continue;
     }
-    if (canonical === SUBAGENT_MANAGEMENT_SELECTOR) {
-      declaredManagement = true;
-      for (const tool of SUBAGENT_MANAGEMENT_TOOLS) {
+    const legacyExpansion = expandRetiredToolSelector(canonical);
+    if (legacyExpansion !== null) {
+      for (const tool of legacyExpansion) {
         if (seen.has(tool)) continue;
         seen.add(tool);
         grants.push(tool);
-        mutating.push(tool);
+        if (MUTATING_TOOL_SET.has(tool)) mutating.push(tool);
+        else readOnly.push(tool);
       }
       continue;
     }
@@ -151,6 +148,9 @@ function summarizeValidatedAgent(
       : CAPABILITY_WILDCARD_SOURCES.NONE;
   const wildcard = wildcardSource !== 'none';
 
+  const subagentManagement = wildcard
+    || grants.some((grant) => LEGACY_SUBAGENT_MANAGEMENT_TOOLS.includes(grant));
+
   return deepFreeze({
     key: validated.key,
     idPattern: validated.idPattern,
@@ -161,7 +161,7 @@ function summarizeValidatedAgent(
     grants: wildcard ? ['*'] : grants,
     wildcard,
     wildcardSource,
-    subagentManagement: wildcard || declaredManagement,
+    subagentManagement,
     mutating: wildcard ? [...MUTATING_TOOLS] : mutating,
     readOnly: wildcard ? [...READ_ONLY_TOOLS] : readOnly,
     unrecognized: wildcard ? [] : unrecognized

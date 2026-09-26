@@ -60,9 +60,9 @@ export function deriveToolCallName(capabilityId: string): string {
  * Reports whether a candidate tool call name is already reserved by the baked
  * or publishing tool surface, or is a prototype-chain property name: a name is
  * reserved when it resolves through the tool alias map (canonical names,
- * documented aliases, the aggregate `subagent_management` selector, and the
- * publishing meta-tool spellings), equals a frozen baked/publishing descriptor
- * name, or is one of `__proto__`, `constructor`, `prototype`.
+ * documented aliases, the retired `subagent_management` selector spellings,
+ * and the publishing meta-tool spellings), equals a frozen baked/publishing
+ * descriptor name, or is one of `__proto__`, `constructor`, `prototype`.
  *
  * Derived requirement and extension call names must be unreserved, so a
  * template-derived call can never shadow — or be routed as — a baked, selector,

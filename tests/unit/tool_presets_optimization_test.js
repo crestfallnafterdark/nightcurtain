@@ -28,7 +28,14 @@ test('1. TOOL_PRESETS Definition & Immutability', () => {
   }
 
   assert.deepStrictEqual(TOOL_PRESETS.all, ['*']);
-  assert.strictEqual(TOOL_PRESETS.manager.includes('subagent_management'), true);
+  // The retired selector is not a tier member; the deprecated window still
+  // resolves it to exactly the four legacy subagent-management tools.
+  assert.strictEqual(TOOL_PRESETS.manager.includes('subagent_management'), false);
+  assert.deepStrictEqual(
+    resolveToolPreset('subagent_management'),
+    ['spawn_agent', 'kill_agent', 'invoke_agent', 'undo_turn']
+  );
+  assert.strictEqual(TOOL_PRESETS.manager.includes('spawn_agent'), true);
   assert.strictEqual(TOOL_PRESETS.manager.includes('world_clock'), false);
   assert.strictEqual(TOOL_PRESETS.manager.includes('event_list'), false);
   assert.strictEqual(TOOL_PRESETS.collaborator.includes('subagent_management'), false);
@@ -59,22 +66,25 @@ test('3. getSandboxToolsSchema Integration', () => {
   assert.strictEqual(allSchemas.length, 35);
 
   const managerSchemas = getSandboxToolsSchema('manager');
-  assert.strictEqual(managerSchemas.length, 28);
+  assert.strictEqual(managerSchemas.length, 31);
   assert.ok(managerSchemas.some(t => t.function.name === SANDBOX_TOOLS.SPAWN_AGENT));
   assert.ok(managerSchemas.some(t => t.function.name === SANDBOX_TOOLS.GET_ARCHIVE));
+  assert.ok(managerSchemas.some(t => t.function.name === SANDBOX_TOOLS.LIST_AGENTS));
+  assert.ok(managerSchemas.some(t => t.function.name === SANDBOX_TOOLS.WAIT_FOR_INVOCATION));
 
   const collabSchemas = getSandboxToolsSchema('collaborator');
-  assert.strictEqual(collabSchemas.length, 24);
+  assert.strictEqual(collabSchemas.length, 25);
   assert.ok(!collabSchemas.some(t => t.function.name === SANDBOX_TOOLS.SPAWN_AGENT));
+  assert.ok(!collabSchemas.some(t => t.function.name === SANDBOX_TOOLS.LIST_AGENTS));
   assert.ok(collabSchemas.some(t => t.function.name === SANDBOX_TOOLS.SEND_MESSAGE));
 
   const readonlyCollabSchemas = getSandboxToolsSchema('readonly_collaborator');
-  assert.strictEqual(readonlyCollabSchemas.length, 13);
+  assert.strictEqual(readonlyCollabSchemas.length, 14);
   assert.ok(readonlyCollabSchemas.some(t => t.function.name === SANDBOX_TOOLS.SEND_MESSAGE));
   assert.ok(!readonlyCollabSchemas.some(t => t.function.name === SANDBOX_TOOLS.WRITE_FILE));
 
   const readonlySchemas = getSandboxToolsSchema('readonly');
-  assert.strictEqual(readonlySchemas.length, 12);
+  assert.strictEqual(readonlySchemas.length, 13);
   assert.ok(!readonlySchemas.some(t => t.function.name === SANDBOX_TOOLS.SEND_MESSAGE));
   assert.ok(readonlySchemas.some(t => t.function.name === SANDBOX_TOOLS.READ_FILE));
 });
