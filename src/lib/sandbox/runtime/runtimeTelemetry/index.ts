@@ -1419,7 +1419,7 @@ export class RuntimeTelemetry {
   /**
    * Builds a defensive metrics snapshot for an agent. Counters are primitives;
    * `lastSentContext` is projected as a fresh array of export-owned frozen
-   * copies ({@link #exportContextMessages}), never the capture-owned
+   * copies (`#exportContextMessages`), never the capture-owned
    * containers, so a leaked snapshot cannot reach internal storage (ticket
    * 06f1ecb).
    * @param metrics - Live metrics record to project.
