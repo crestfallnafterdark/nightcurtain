@@ -413,8 +413,8 @@ test('1. every canonical tool is classified exactly once (fails with unclassifie
   }
   assert.deepStrictEqual(
     counts,
-    { [CATEGORY_SCOPE_DENIED]: 28, [CATEGORY_SELF_ONLY]: 9, [CATEGORY_STATIC]: 1 },
-    'the classification table must keep its ratified shape: 28 scope-denied / 9 self-only / 1 static'
+    { [CATEGORY_SCOPE_DENIED]: 28, [CATEGORY_SELF_ONLY]: 9, [CATEGORY_STATIC]: 4 },
+    'the classification table must keep its ratified shape: 28 scope-denied / 9 self-only / 4 static'
   );
 
   // Mechanistic category invariants: a self-only/static tool never declares a
@@ -1098,6 +1098,13 @@ test('9. every canonical tool receipt is realm-free for two realm scopes', async
       await call('undo_turn', {});
       await call('describe_tool', { tool_name: 'read_file' });
       await call('batch_precall', { calls: [{ name: 'list_inbox', arguments: {} }] });
+
+      // M5a canonical catalog reflection: caller-invariant static reads; the
+      // sweep's caller-supplied membership claim is inert (the tools take no
+      // parameters) and the receipts stay realm-free.
+      await call('list_tools', {});
+      await call('list_tool_presets', {});
+      await call('describe_preset', { preset: 'readonly' });
 
       // M2 meta-plane surfaces: a peer target is neither a direct spawn nor a
       // meta-granted scope, so both calls deny uniformly (realm-opaque).
