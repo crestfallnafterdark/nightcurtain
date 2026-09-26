@@ -116,6 +116,7 @@ export type { RealmCatalogErrorCode } from './errors.ts';
 export type {
   AgentCapabilitySummary,
   AuthorityGrantRecord,
+  AuthorityGrantSnapshotEntry,
   AuthorityScopeRecord,
   BakedTemplateBundle,
   BundleFiles,

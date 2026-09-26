@@ -63,10 +63,10 @@ test('2. resolveToolPreset Resolution', () => {
 
 test('3. getSandboxToolsSchema Integration', () => {
   const allSchemas = getSandboxToolsSchema('all');
-  assert.strictEqual(allSchemas.length, 36);
+  assert.strictEqual(allSchemas.length, 38);
 
   const managerSchemas = getSandboxToolsSchema('manager');
-  assert.strictEqual(managerSchemas.length, 32);
+  assert.strictEqual(managerSchemas.length, 34);
   assert.ok(managerSchemas.some(t => t.function.name === SANDBOX_TOOLS.SPAWN_AGENT));
   assert.ok(managerSchemas.some(t => t.function.name === SANDBOX_TOOLS.GET_ARCHIVE));
   assert.ok(managerSchemas.some(t => t.function.name === SANDBOX_TOOLS.LIST_AGENTS));
@@ -92,7 +92,7 @@ test('3. getSandboxToolsSchema Integration', () => {
 
 test('4. Schema Draft-07 Conformance', () => {
   const allSchemas = getSandboxToolsSchema();
-  assert.strictEqual(allSchemas.length, 36);
+  assert.strictEqual(allSchemas.length, 38);
 
   const spawnDef = allSchemas.find(t => t.function.name === SANDBOX_TOOLS.SPAWN_AGENT);
   assert.ok(spawnDef, 'spawn_agent schema definition must exist');

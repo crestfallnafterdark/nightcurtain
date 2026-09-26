@@ -6533,16 +6533,21 @@ test('29. [M1] generic authority grants: wrappers, snapshot partitions, and hydr
     assert.ok(Object.isFrozen(listing));
     assert.ok(Object.isFrozen(listing[AGENT_AUTHORITIES.AGENT_EDIT]));
 
-    // Generic-only sessions emit the additive field and nothing legacy.
+    // Generic-only sessions emit the additive field and nothing legacy; a
+    // scoped grant carries its registry-side narrowing (M2/F3).
     let snapshot = store.serialize();
-    assert.deepStrictEqual(snapshot.authorityGrants, { [AGENT_AUTHORITIES.AGENT_EDIT]: [alphaKey] });
+    assert.deepStrictEqual(snapshot.authorityGrants, {
+      [AGENT_AUTHORITIES.AGENT_EDIT]: [{ ref: alphaKey, scope: { ownSpawns: true, fields: ['tools'] } }]
+    });
     assert.strictEqual('metaAuthorityGrants' in snapshot, false, 'the publishing pair stays out of the generic field');
 
     // Mixed sessions emit both partitions exactly.
     await store.grantTemplateAuthority('m1-beta');
     snapshot = store.serialize();
     assert.deepStrictEqual(snapshot.metaAuthorityGrants, { template: [betaKey] });
-    assert.deepStrictEqual(snapshot.authorityGrants, { [AGENT_AUTHORITIES.AGENT_EDIT]: [alphaKey] });
+    assert.deepStrictEqual(snapshot.authorityGrants, {
+      [AGENT_AUTHORITIES.AGENT_EDIT]: [{ ref: alphaKey, scope: { ownSpawns: true, fields: ['tools'] } }]
+    });
     assert.strictEqual(store.saveToStorage(), true);
 
     // A generic-only snapshot hydrates through the generic restore path.

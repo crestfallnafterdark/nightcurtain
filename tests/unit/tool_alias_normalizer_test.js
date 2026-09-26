@@ -49,8 +49,9 @@ test('1. SANDBOX_TOOLS Master Enum & Immutability', () => {
     // Messaging (8)
     'send_message', 'wait_for_mail', 'list_inbox', 'read_message', 'get_archive',
     'inline_file_in_message', 'get_inbox', 'drain_inbox',
-    // Lifecycle (5)
+    // Lifecycle (7)
     'spawn_agent', 'kill_agent', 'list_agents', 'whoami', 'undo_turn',
+    'inspect_agent', 'update_agent',
     // Invocation (3)
     'invoke_agent', 'wait_for_invocation', 'wait_for_agent',
     // Scheduler (3)
@@ -61,7 +62,7 @@ test('1. SANDBOX_TOOLS Master Enum & Immutability', () => {
     'batch_precall', 'describe_tool'
   ];
 
-  assert.strictEqual(expectedCanonicalTools.length, 36, 'Must have exactly 36 canonical tools');
+  assert.strictEqual(expectedCanonicalTools.length, 38, 'Must have exactly 38 canonical tools');
 
   for (const toolName of expectedCanonicalTools) {
     const matchingKey = Object.keys(SANDBOX_TOOLS).find(k => SANDBOX_TOOLS[k] === toolName);
@@ -115,12 +116,12 @@ test('3. TOOL_PRESETS and resolveToolPreset Resolution', () => {
   assert.deepStrictEqual(resolveToolPreset(new Set(['read_file', 'send_message'])), ['read_file', 'send_message']);
 });
 
-test('4. Master TOOL_ALIAS_MAP and getCanonToolName across all 36 tools', () => {
+test('4. Master TOOL_ALIAS_MAP and getCanonToolName across all 38 tools', () => {
   assert.ok(TOOL_ALIAS_MAP, 'TOOL_ALIAS_MAP must be exported');
   assert.ok(Object.isFrozen(TOOL_ALIAS_MAP), 'TOOL_ALIAS_MAP must be frozen');
   assert.strictEqual(normalizeToolName, getCanonToolName, 'normalizeToolName must alias getCanonToolName');
 
-  // Test all 36 canonical names and camelCase variants
+  // Test all 38 canonical names and camelCase variants
   const all36Tools = [
     { canon: 'read_file', camel: 'readFile', aliases: ['virtualFs_readFile', 'fs_readFile', 'fs.readFile', 'virtualFs.readFile', 'fs_read_file', 'vfs_read_file', 'file_read', 'read'] },
     { canon: 'write_file', camel: 'writeFile', aliases: ['virtualFs_writeFile', 'fs_writeFile', 'fs.writeFile', 'virtualFs.writeFile', 'fs_write_file', 'vfs_write_file', 'save_file', 'write'] },
@@ -147,6 +148,8 @@ test('4. Master TOOL_ALIAS_MAP and getCanonToolName across all 36 tools', () => 
     { canon: 'list_agents', camel: 'listAgents', aliases: ['runtime_listAgents', 'runtime.listAgents', 'get_agents', 'active_agents', 'all_agents'] },
     { canon: 'whoami', camel: 'whoami', aliases: ['runtime_whoami', 'runtime.whoami', 'get_identity', 'my_identity', 'self_id', 'who_am_i'] },
     { canon: 'undo_turn', camel: 'undoTurn', aliases: ['runtime_undoTurn', 'runtime.undoTurn', 'runtime_undo_turn', 'undo', 'revert_turn', 'rollback_turn'] },
+    { canon: 'inspect_agent', camel: 'inspectAgent', aliases: ['runtime_inspectAgent', 'runtime.inspectAgent', 'agent_inspect', 'inspect_child'] },
+    { canon: 'update_agent', camel: 'updateAgent', aliases: ['runtime_updateAgent', 'runtime.updateAgent', 'configure_agent', 'edit_agent'] },
     { canon: 'invoke_agent', camel: 'invokeAgent', aliases: ['runtime_invokeAgent', 'runtime.invokeAgent', 'call_agent', 'invoke', 'dispatch_agent', 'run_agent'] },
     { canon: 'wait_for_invocation', camel: 'waitForInvocation', aliases: ['runtime_waitForInvocation', 'runtime.waitForInvocation', 'wait_invocation', 'await_invocation'] },
     { canon: 'wait_for_agent', camel: 'waitForAgent', aliases: ['runtime_waitForAgent', 'runtime.waitForAgent', 'wait_agent', 'await_agent'] },
@@ -160,7 +163,7 @@ test('4. Master TOOL_ALIAS_MAP and getCanonToolName across all 36 tools', () => 
     { canon: 'describe_tool', camel: 'describeTool', aliases: ['system_describeTool', 'system.describeTool', 'tool_info', 'help', 'describe', 'inspect_tool'] }
   ];
 
-  assert.strictEqual(all36Tools.length, 36, 'Must verify all 36 tools');
+  assert.strictEqual(all36Tools.length, 38, 'Must verify all 38 tools');
 
   for (const item of all36Tools) {
     // Canonical name resolution

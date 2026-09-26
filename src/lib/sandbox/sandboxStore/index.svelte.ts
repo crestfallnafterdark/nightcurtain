@@ -47,7 +47,7 @@
  * @decision Agent ids are realm-opaque: template ids materialize as literal plain ids (the `{realm}` placeholder is retired at validation), the realm id never prefixes an agent id, and a resolved member id already registered — in the target realm or, while the registry stays globally keyed, in any other realm — is denied at launch time with an `AGENT_ALREADY_EXISTS` cause and is never auto-suffixed; realm-local id namespacing is a follow-up
  * @decision The store's operator principal is the runtime's host operator principal (`runtime.getOperatorPrincipal()`, exact-reference validated): every operator-scoped store action — runtime lifecycle/scheduler calls, substrate calls, and manual-send attribution — carries that principal, never an agent id or a director descriptor, so operator actions work with zero agents and never depend on the director's lifecycle
  * @decision `realmBypass` is a user-facing operator grant: `grantRealmBypass`/`revokeRealmBypass` validate the agent id, delegate to the runtime under the operator principal, and schedule the debounced save; targeting is additive — a canonical identity key or a realm-exact `{ realmId }` scope addresses the exact same-id registration (composed to the canonical key store-side), while a bare id keeps the unique-match rule and fails closed on ambiguity; the active grant list persists as the additive top-level snapshot field `realmBypassGrants` — canonical identity keys emitted by the lifecycle listing, so a scoped grant on a same-id pair round-trips realm-exactly — and is re-applied at hydration, after the agents are registered, through `restoreRealmBypassGrants`, which drops unknown/recycled refs fail-closed and still hydrates legacy bare-id snapshots through unique-match (an ambiguous bare id is skipped, never duplicated across realms); grant-free snapshots keep every existing field and byte
- * @decision Authority grants and trust: generic `grantAuthority`/`revokeAuthority`/`listAuthorityGrants` are operator actions delegating to the runtime under the store principal; the Wave U publishing wrappers keep their names and delegate. Grants persist additively — the publishing pair through the legacy `metaAuthorityGrants` field (canonical identity keys; unchanged bytes for publishing-only sessions) and every other authority id through the additive `authorityGrants` field (omitted when empty) — and hydration merges both fields (generic wins per id) into one operator-gated `restoreAuthorityGrants` call that skips unknown ids and unknown/recycled refs. `launchRealmFromTemplate` validates every approval against the template's declared pairs before any side effect, applies approved grants under the operator principal, and — only on a fully successful launch with `trustAuthorities: true` — persists the effective approved declared set as `templateAuthorityTrust`; later launches auto-approve exact matches only, `clearTemplateAuthorityTrust` removes the override without revoking already-applied grants, and pending instance payloads stay session-only
+ * @decision Authority grants and trust: generic `grantAuthority`/`revokeAuthority`/`listAuthorityGrants` are operator actions delegating to the runtime under the store principal; the Wave U publishing wrappers keep their names and delegate. Grants persist additively — the publishing pair through the legacy `metaAuthorityGrants` field (canonical identity keys; unchanged bytes for publishing-only sessions) and every other authority id through the additive `authorityGrants` field (omitted when empty; a scoped grant rides as a `{ ref, scope }` entry so the narrowing survives a restart — M1 finding F3) — and hydration merges both fields (generic wins per id) into one operator-gated `restoreAuthorityGrants` call that skips unknown ids and unknown/recycled/malformed-scope entries. `launchRealmFromTemplate` validates every approval against the template's declared pairs before any side effect, applies approved grants under the operator principal, and — only on a fully successful launch with `trustAuthorities: true` — persists the effective approved declared set as `templateAuthorityTrust`; later launches auto-approve exact matches only, `clearTemplateAuthorityTrust` removes the override without revoking already-applied grants, and pending instance payloads stay session-only
  * @decision Saved hydration-payload library (ticket 81d8267): the store owns the operator's named authored payloads — `saveInstancePayload`/`listSavedInstancePayloads`/`getSavedInstancePayload`/`deleteSavedInstancePayload`/`clearSavedInstancePayloads` validate fail-closed (`ERR_STORE_INVALID_PARAMS`, `ERR_STORE_PAYLOAD_LIBRARY_FULL` at the entry cap, `ERR_STORE_PAYLOAD_LIBRARY_TOO_LARGE` at the byte cap), freeze an isolated payload copy, digest it with the catalog's canonical `payloadDigest`, and persist additively as `savedInstancePayloads` (field omitted when empty; payloads re-validate only at attach). Hydration is snapshot-authoritative (malformed entries dropped, legacy snapshots without the field hydrate empty, the id counter seeds past restored numeric suffixes, and the suppression guard never rewrites persisted bytes); reset/factory-reset clears the library and its field
  * @decision `seedRealm` writes validated files through the operator-context VFS surface into the target member's resolved private workspace (or `realm:<realmId>:global` when no target), rejects traversal, reserved workspace targets, the reserved `global`/`public` seed path roots (rejected, never re-rooted, so the legacy VirtualFS prefix routing can never divert a write into the ungrouped shared workspace under a receipt that names the selected one), and empty or duplicate file lists before the first write, and delivers the directive as an operator-attributed mailbox message (the non-agent `'human'` label routes through the host operator principal by exact reference) that requires an explicit member target — never a realm-wide fan-out
  * @decision Seed targets resolve realm-scoped: a named member target is an ACTIVE member of the requested Realm by `(realmId, agentId)` — a same-literal-id registration in another Realm is never selected (only it yields the historical membership error) — and the write addresses that exact registration's private storage key (explicit pin, canonical identity key, or legacy bare id) while the directive addresses its canonical mailbox; receipt labels stay realm-opaque/bare
@@ -147,6 +147,7 @@ import {
   validatePayload
 } from '../realmCatalog/index.ts';
 import type {
+  AuthorityGrantSnapshotEntry,
   AuthorityScopeRecord,
   PendingInstancePayload,
   RealmInputValues,
@@ -207,13 +208,17 @@ type AuthorityGrantSnapshot = SandboxPersistedState & {
     readonly hydration?: readonly string[];
   };
   /**
-   * Additive generic authority-grant field (M1): authority id → canonical
-   * identity keys. Emitted only when at least one non-publishing grant is
-   * active, so publishing-only and grant-free sessions keep every existing
-   * field and byte; hydration reads it own-property-only and delegates to the
-   * runtime's operator-gated generic restore.
+   * Additive generic authority-grant field (M1; scoped entries M2): authority
+   * id → export entries. An entry is a canonical identity-key string (the
+   * legacy keys-only form, restored unscoped) or a `{ ref, scope }` record
+   * carrying the registry-side narrowing, so a narrowed grant survives the
+   * restart instead of silently widening (M1 finding F3). Emitted
+   * only when at least one non-publishing grant is active, so publishing-only
+   * and grant-free sessions keep every existing field and byte; hydration
+   * reads it own-property-only and delegates to the runtime's operator-gated
+   * generic restore.
    */
-  readonly authorityGrants?: Readonly<Record<string, readonly string[]>>;
+  readonly authorityGrants?: Readonly<Record<string, readonly AuthorityGrantSnapshotEntry[]>>;
   readonly templateAuthorityTrust?: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>>;
 };
 
@@ -10390,14 +10395,24 @@ export class SandboxStore {
     // only when non-empty, so grant-free and legacy sessions keep every
     // existing field and byte. M1: the publishing pair keeps this legacy
     // partition byte-identically; every non-publishing grant rides the additive
-    // `authorityGrants` field (Record<id, canonicalKey[]>, also omitted when
-    // empty), and a mixed session emits both.
-    const authorityGrants = this.#runtime.listAuthorityGrants();
+    // `authorityGrants` field (also omitted when empty), and a mixed session
+    // emits both. M2 (finding F3): the generic entries carry the registry-side
+    // scope (`{ ref, scope }` for a narrowed grant; a bare key string for the
+    // unscoped form) so a narrowed grant never widens across a restart.
+    const authorityGrants = this.#runtime.listAuthorityGrantRecords();
+    const refOnly = (entries: readonly AuthorityGrantSnapshotEntry[]): string[] => {
+      const refs: string[] = [];
+      for (let i = 0; i < entries.length; i++) {
+        const entry = entries[i];
+        refs[refs.length] = typeof entry === 'string' ? entry : entry.ref;
+      }
+      return refs;
+    };
     const templateGrantKeys = Array.isArray(authorityGrants[AGENT_AUTHORITIES.TEMPLATE])
-      ? authorityGrants[AGENT_AUTHORITIES.TEMPLATE]
+      ? refOnly(authorityGrants[AGENT_AUTHORITIES.TEMPLATE])
       : [];
     const hydrationGrantKeys = Array.isArray(authorityGrants[AGENT_AUTHORITIES.HYDRATION])
-      ? authorityGrants[AGENT_AUTHORITIES.HYDRATION]
+      ? refOnly(authorityGrants[AGENT_AUTHORITIES.HYDRATION])
       : [];
     if (templateGrantKeys.length > 0 || hydrationGrantKeys.length > 0) {
       withAdditions = {
@@ -10408,13 +10423,13 @@ export class SandboxStore {
         }
       };
     }
-    const genericGrants: Record<string, readonly string[]> = {};
+    const genericGrants: Record<string, readonly AuthorityGrantSnapshotEntry[]> = {};
     let genericGrantCount = 0;
     for (const authorityId of Object.keys(authorityGrants)) {
       if (PUBLISHING_AUTHORITY_ID_SET.has(authorityId)) continue;
-      const refs = authorityGrants[authorityId];
-      if (!Array.isArray(refs) || refs.length === 0) continue;
-      genericGrants[authorityId] = [...refs];
+      const entries = authorityGrants[authorityId];
+      if (!Array.isArray(entries) || entries.length === 0) continue;
+      genericGrants[authorityId] = [...entries];
       genericGrantCount += 1;
     }
     if (genericGrantCount > 0) {
@@ -11879,16 +11894,34 @@ export class SandboxStore {
    * @returns The refs the runtime actually restored, per authority id.
    */
   #restorePersistedAuthorityGrants(persisted: SandboxPersistedState): Record<string, string[]> {
-    const merged: Record<string, string[]> = Object.create(null);
-    const collect = (value: unknown): string[] => {
+    const merged: Record<string, (string | { ref: string; scope?: AuthorityScopeRecord })[]> = Object.create(null);
+    const collect = (value: unknown): (string | { ref: string; scope?: AuthorityScopeRecord })[] => {
       if (!Array.isArray(value)) return [];
-      const refs: string[] = [];
-      for (const ref of value) {
-        if (typeof ref !== 'string') continue;
-        const trimmed = ref.trim();
-        if (trimmed && !refs.includes(trimmed)) refs.push(trimmed);
+      const entries: (string | { ref: string; scope?: AuthorityScopeRecord })[] = [];
+      const seen: string[] = [];
+      for (const raw of value) {
+        if (typeof raw === 'string') {
+          const trimmed = raw.trim();
+          if (!trimmed || seen.includes(trimmed)) continue;
+          seen.push(trimmed);
+          entries.push(trimmed);
+          continue;
+        }
+        // M2 scoped entry: `{ ref, scope? }`. A malformed record or scope is
+        // dropped here; the runtime grant core re-validates the scope per id
+        // and skips a malformed entry fail-closed (never unscoped).
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+        const record = raw as { ref?: unknown; scope?: unknown };
+        if (typeof record.ref !== 'string') continue;
+        const trimmed = record.ref.trim();
+        if (!trimmed || seen.includes(trimmed)) continue;
+        seen.push(trimmed);
+        const scope = record.scope && typeof record.scope === 'object' && !Array.isArray(record.scope)
+          ? (record.scope as AuthorityScopeRecord)
+          : undefined;
+        entries.push(scope === undefined ? trimmed : { ref: trimmed, scope });
       }
-      return refs;
+      return entries;
     };
     const legacy = Object.prototype.hasOwnProperty.call(persisted, 'metaAuthorityGrants')
       ? (persisted as AuthorityGrantSnapshot).metaAuthorityGrants

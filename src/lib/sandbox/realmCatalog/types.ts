@@ -628,6 +628,25 @@ export interface AuthorityGrantRecord {
 }
 
 /**
+ * One exportable authority-grant entry (M2 scope persistence): either a bare
+ * canonical `(realmId, agentId)` identity key — the legacy keys-only form,
+ * restored unscoped — or a scoped `{ ref, scope? }` record carrying the
+ * registry-side narrowing. The entry is the persistence currency of the
+ * additive `authorityGrants` snapshot field, so a narrowed grant survives a
+ * save/hydrate restart instead of silently widening to the id's default
+ * scope. Scopes remain registry-side: they never reach a descriptor, the
+ * identity projection, or any model-facing surface.
+ */
+export type AuthorityGrantSnapshotEntry =
+  | string
+  | {
+      /** Canonical `(realmId, agentId)` identity key of the granted registration. */
+      readonly ref: string;
+      /** Optional registry-side narrowing (absent = the id's default scope). */
+      readonly scope?: AuthorityScopeRecord;
+    };
+
+/**
  * Frozen vocabulary of the known publishing-authority ids (`@template:authority`
  * and `@hydration:authority`).
  *

@@ -2266,6 +2266,38 @@ test('authority fields: generic authorityGrants validates, round-trips, and fail
   assert.strictEqual(hostileResult.code, PERSISTENCE_ERROR_CODES.PROTOTYPE_POLLUTION_DETECTED);
 });
 
+test('authority fields: scoped authorityGrants entries validate and round-trip (M2/F3)', () => {
+  // The M2 additive entry form carries the registry-side narrowing so a
+  // narrowed grant never restores unscoped (M1 verifier finding F3); legacy
+  // keys-only strings remain valid and read as unscoped.
+  const scoped = authoritySnapshot({
+    authorityGrants: {
+      '@agent:edit': [
+        { ref: 'realm:r1:parent', scope: { ownSpawns: true, fields: ['tools'] } },
+        'realm:r1:legacy'
+      ]
+    }
+  });
+  const validated = validateSandboxState(scoped);
+  assert.strictEqual(validated.valid, true);
+  assert.strictEqual(validated.state, scoped, 'valid scoped snapshots keep their identity');
+  assert.deepStrictEqual(validated.state.authorityGrants, scoped.authorityGrants);
+
+  const malformed = [
+    { authorityGrants: { '@agent:edit': [{ ref: '' }] } },
+    { authorityGrants: { '@agent:edit': [{ scope: { ownSpawns: true } }] } },
+    { authorityGrants: { '@agent:edit': [{ ref: 'realm:r1:a', scope: 'nope' }] } },
+    { authorityGrants: { '@agent:edit': [{ ref: 'realm:r1:a', scope: [] }] } },
+    { authorityGrants: { '@agent:edit': [null] } },
+    { authorityGrants: { '@agent:edit': [[]] } }
+  ];
+  for (const extra of malformed) {
+    const result = validateSandboxState(authoritySnapshot(extra));
+    assert.strictEqual(result.valid, false, `expected invalid for ${JSON.stringify(extra)}`);
+    assert.strictEqual(result.code, PERSISTENCE_ERROR_CODES.INVALID_STATE);
+  }
+});
+
 // ============================================================================
 // 25. Extension wave: install records round-trip, drop invalid, stay absent
 // ============================================================================

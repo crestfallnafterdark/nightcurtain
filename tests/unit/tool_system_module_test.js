@@ -3,7 +3,7 @@
  * @description Comprehensive unit and integration test suite for Module 8: tool_system.
  * Validates strict ICD compliance, immutable .ts contracts, Draft-07 schema generation,
  * preset resolution, O(1) table dispatch, parameter sanitization, universal error shielding,
- * and pure 1-line delegations across all 36 tool descriptors and 7 substrate domains.
+ * and pure 1-line delegations across all 38 tool descriptors and 7 substrate domains.
  */
 
 import test from 'node:test';
@@ -74,7 +74,7 @@ test('1. Strict Export Whitelist & Constants Immutability', () => {
 
   // Master tools enum
   assert.ok(Object.isFrozen(SANDBOX_TOOLS));
-  assert.strictEqual(Object.keys(SANDBOX_TOOLS).length, 36);
+  assert.strictEqual(Object.keys(SANDBOX_TOOLS).length, 38);
 
   // Innate tools list
   assert.ok(Object.isFrozen(INNATE_TOOLS));
@@ -98,10 +98,10 @@ test('1. Strict Export Whitelist & Constants Immutability', () => {
 });
 
 // ============================================================================
-// 2. Canonical Tool Taxonomy (All 36 Tools)
+// 2. Canonical Tool Taxonomy (All 38 Tools)
 // ============================================================================
 
-test('2. Canonical Tool Taxonomy Enumeration (36 Tools across 7 Domains)', () => {
+test('2. Canonical Tool Taxonomy Enumeration (38 Tools across 7 Domains)', () => {
   const expectedTools = [
     // VFS (12)
     'read_file', 'write_file', 'replace_file_content', 'copy_file', 'delete_file',
@@ -110,8 +110,9 @@ test('2. Canonical Tool Taxonomy Enumeration (36 Tools across 7 Domains)', () =>
     // Messaging (8)
     'send_message', 'wait_for_mail', 'list_inbox', 'read_message', 'get_archive',
     'inline_file_in_message', 'get_inbox', 'drain_inbox',
-    // Lifecycle (5)
+    // Lifecycle (7)
     'spawn_agent', 'kill_agent', 'list_agents', 'whoami', 'undo_turn',
+    'inspect_agent', 'update_agent',
     // Invocation (3)
     'invoke_agent', 'wait_for_invocation', 'wait_for_agent',
     // Scheduler (3)
@@ -122,14 +123,14 @@ test('2. Canonical Tool Taxonomy Enumeration (36 Tools across 7 Domains)', () =>
     'batch_precall', 'describe_tool'
   ];
 
-  assert.strictEqual(expectedTools.length, 36);
+  assert.strictEqual(expectedTools.length, 38);
   for (const name of expectedTools) {
     const found = Object.values(SANDBOX_TOOLS).includes(name);
     assert.ok(found, `Tool '${name}' must exist in SANDBOX_TOOLS enum`);
     assert.ok(TOOL_REGISTRY[name], `Tool '${name}' must be registered in frozen TOOL_REGISTRY`);
   }
 
-  assert.strictEqual(ALL_TOOL_DESCRIPTORS.length, 36);
+  assert.strictEqual(ALL_TOOL_DESCRIPTORS.length, 38);
 });
 
 // ============================================================================
@@ -191,12 +192,12 @@ test('3. Capability Preset Resolution Engine (resolveToolPreset)', () => {
 test('4. Draft-07 JSON Schema Generation & Invariant 4 Zero Schema Pollution', () => {
   // 1. Full schema generation (all tools)
   const allSchemas = getSandboxToolsSchema('all');
-  assert.strictEqual(allSchemas.length, 36);
+  assert.strictEqual(allSchemas.length, 38);
 
   // 2. Preset-filtered schema generation (generated family tiers; every tier
   // carries the innate baseline, so `describe_tool` is schema-visible too)
   const managerSchemas = getSandboxToolsSchema('manager');
-  assert.strictEqual(managerSchemas.length, 32);
+  assert.strictEqual(managerSchemas.length, 34);
 
   const collabSchemas = getSandboxToolsSchema('collaborator');
   assert.strictEqual(collabSchemas.length, 25);
@@ -209,7 +210,7 @@ test('4. Draft-07 JSON Schema Generation & Invariant 4 Zero Schema Pollution', (
 
   // 3. Option: includeReflection: false
   const noReflectionSchemas = getSandboxToolsSchema('all', { includeReflection: false });
-  assert.strictEqual(noReflectionSchemas.length, 35);
+  assert.strictEqual(noReflectionSchemas.length, 37);
   assert.ok(!noReflectionSchemas.some(s => s.function.name === 'describe_tool'));
 
   // 4. Structural validation of Draft-07 schemas
@@ -233,16 +234,20 @@ test('4. Draft-07 JSON Schema Generation & Invariant 4 Zero Schema Pollution', (
       `'${toolDef.function.name}' additionalProperties must match its boundary policy`
     );
 
-    // INVARIANT 4: Zero LLM Schema Pollution
+    // INVARIANT 4: Zero LLM Schema Pollution. The two ratified exceptions are
+    // the spawn boundary (its documented capability inputs) and the M2
+    // `update_agent` edit surface (tools/privilege/policy/prompt/maxTurns/name
+    // are exactly its ratified editable inputs, spec §3.1/§3.4).
+    const isMetaEdit = toolDef.function.name === SANDBOX_TOOLS.UPDATE_AGENT;
     const propertyKeys = Object.keys(toolDef.function.parameters.properties);
     assert.ok(!propertyKeys.includes('model'), 'Schema must not expose model parameter');
-    assert.ok(!propertyKeys.includes('maxTurns'), 'Schema must not expose maxTurns parameter');
+    assert.ok(!propertyKeys.includes('maxTurns') || isMetaEdit, 'Schema must not expose maxTurns parameter');
     assert.ok(!propertyKeys.includes('depth'), 'Schema must not expose internal depth parameter');
-    assert.ok(!propertyKeys.includes('privileged'), 'Schema must not expose privileged parameter');
+    assert.ok(!propertyKeys.includes('privileged') || isMetaEdit, 'Schema must not expose privileged parameter');
     if (!isSpawn) {
       assert.ok(!propertyKeys.includes('temperature'), 'Schema must not expose temperature parameter');
-      assert.ok(!propertyKeys.includes('allowedTools'), 'Schema must not expose allowedTools parameter');
-      assert.ok(!propertyKeys.includes('toolPreset'), 'Schema must not expose toolPreset parameter');
+      assert.ok(!propertyKeys.includes('allowedTools') || isMetaEdit, 'Schema must not expose allowedTools parameter');
+      assert.ok(!propertyKeys.includes('toolPreset') || isMetaEdit, 'Schema must not expose toolPreset parameter');
     }
   }
 

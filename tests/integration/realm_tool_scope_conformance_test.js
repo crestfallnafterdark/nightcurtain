@@ -4,7 +4,7 @@
  *   conformance sweep (WAVE_R §7). Guard rail for the whole wave and for every
  *   future canonical tool:
  *
- *   1. Classification table over all 36 canonical tools
+ *   1. Classification table over all 38 canonical tools
  *      (`realm-scope-denied` / `self-only` / `static`), derived mechanically
  *      from `ALL_TOOL_DESCRIPTORS` and cross-checked against the
  *      `SANDBOX_TOOLS` enumeration. A tool without a classification — or a
@@ -53,7 +53,7 @@ import { DEMO_TEMPLATE, materializeTemplate } from '../../src/lib/sandbox/realmC
 import { sharedLocalStorage } from '../test_env.js';
 
 // ============================================================================
-// Classification table (all 36 canonical tools)
+// Classification table (all 38 canonical tools)
 // ============================================================================
 
 /** Category: the tool has a cross-scope target surface; exact-id cross-scope attempts are denied. */
@@ -87,7 +87,7 @@ const VFS_TOOL_NAMES = Object.freeze([
  * the names of any unclassified (or stale) entries.
  */
 const TOOL_CLASSIFICATION = Object.freeze({
-  // --- realm/scope-denied (26) ---
+  // --- realm/scope-denied (28) ---
   // Every VFS tool resolves `/agents/<id>/...` mounts, so cross-scope targets
   // must be denied for the whole family.
   read_file: CATEGORY_SCOPE_DENIED,
@@ -118,6 +118,11 @@ const TOOL_CLASSIFICATION = Object.freeze({
   world_clock: CATEGORY_SCOPE_DENIED,
   event_list: CATEGORY_SCOPE_DENIED,
   batch_precall: CATEGORY_SCOPE_DENIED,
+  // M2 meta-plane agent targets: a cross-scope or non-child exact id is denied
+  // before any read/write; the same-realm own-spawn tier is the only allowed
+  // path and never discloses realm vocabulary (test 4b).
+  inspect_agent: CATEGORY_SCOPE_DENIED,
+  update_agent: CATEGORY_SCOPE_DENIED,
   // --- self-only (9) ---
   wait_for_mail: CATEGORY_SELF_ONLY,
   list_inbox: CATEGORY_SELF_ONLY,
@@ -403,8 +408,8 @@ test('1. every canonical tool is classified exactly once (fails with unclassifie
   }
   assert.deepStrictEqual(
     counts,
-    { [CATEGORY_SCOPE_DENIED]: 26, [CATEGORY_SELF_ONLY]: 9, [CATEGORY_STATIC]: 1 },
-    'the classification table must keep its ratified shape: 26 scope-denied / 9 self-only / 1 static'
+    { [CATEGORY_SCOPE_DENIED]: 28, [CATEGORY_SELF_ONLY]: 9, [CATEGORY_STATIC]: 1 },
+    'the classification table must keep its ratified shape: 28 scope-denied / 9 self-only / 1 static'
   );
 
   // Mechanistic category invariants: a self-only/static tool never declares a
@@ -685,6 +690,44 @@ test('4. cross-scope kill/restore by exact id is denied; same-id spawn is realm-
     assert.equal(betaOriginal[0].config.realmId, BETA, 'the original stays bound to its realm');
     matrixCoveredTools.add('spawn_agent');
     assert.equal(runtime.getAgent('director').config.privileged, true, 'the real director record is untouched');
+  } finally {
+    runtime.destroy();
+  }
+});
+
+// ============================================================================
+// 4b. Correct-id adversarial matrix — M2 meta-plane agent targets
+// ============================================================================
+
+test('4b. inspect_agent/update_agent deny cross-realm and unknown targets identically', async () => {
+  const { runtime } = await createRealmFixture();
+  try {
+    const model = createMockModel(async () => ({ content: 'meta probe turn complete' }));
+    // A same-realm probe holder (the manager preset grants both tools in
+    // production; the fixture grants them explicitly).
+    await runtime.launchAgent({
+      id: 'alpha_meta_probe',
+      realmId: ALPHA,
+      allowedTools: ['inspect_agent', 'update_agent'],
+      model
+    });
+    for (const tool of ['inspect_agent', 'update_agent']) {
+      const args = tool === 'inspect_agent'
+        ? { target: 'beta_worker' }
+        : { target: 'beta_worker', name: 'cross-scope sweep' };
+      const ghostArgs = tool === 'inspect_agent'
+        ? { target: 'ghost_target' }
+        : { target: 'ghost_target', name: 'cross-scope sweep' };
+      const cross = await dispatcherFor(runtime, 'alpha_meta_probe').executeTool(tool, args);
+      const ghost = await dispatcherFor(runtime, 'alpha_meta_probe').executeTool(tool, ghostArgs);
+      assert.equal(cross.success, false, `the cross-realm ${tool} target must be denied`);
+      assert.equal(cross.code, 'PERMISSION_DENIED', `the cross-realm ${tool} denial must fail closed`);
+      assert.equal(ghost.code, 'PERMISSION_DENIED', `the unknown ${tool} target must fail closed`);
+      assert.equal(cross.error, ghost.error, `the ${tool} denials must be byte-identical (no oracle)`);
+      assertRealmOpaque(JSON.stringify(cross), `the cross-realm ${tool} denial`);
+      assert.equal(JSON.stringify(cross).includes('beta_worker'), false, `the ${tool} denial never echoes the target`);
+      matrixCoveredTools.add(tool);
+    }
   } finally {
     runtime.destroy();
   }
@@ -1050,6 +1093,11 @@ test('9. every canonical tool receipt is realm-free for two realm scopes', async
       await call('undo_turn', {});
       await call('describe_tool', { tool_name: 'read_file' });
       await call('batch_precall', { calls: [{ name: 'list_inbox', arguments: {} }] });
+
+      // M2 meta-plane surfaces: a peer target is neither a direct spawn nor a
+      // meta-granted scope, so both calls deny uniformly (realm-opaque).
+      await call('inspect_agent', { target: invokeTargetId });
+      await call('update_agent', { target: invokeTargetId, name: 'sweep rename' });
 
       await call('kill_agent', { agent_id: spawned.id, reason: 'sweep cleanup' });
       return { receipts, childRealm };

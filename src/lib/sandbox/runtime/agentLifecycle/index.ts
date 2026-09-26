@@ -9,6 +9,7 @@
  * @module runtime/agentLifecycle
  * @mayImport ../agent/index.ts
  * @mayImport ../../tools/constants/index.ts
+ * @mayImport ../../tools/normalizers/index.ts
  * @mayImport ../../realmCatalog/index.ts
  * @mayImport ../../virtualFs/index.ts
  * @mayImport type-only ../../messagingBus/index.ts
@@ -44,6 +45,9 @@
  * @decision `updateAgentConfig` rejects authority-bearing fields (`privileged`, `isAdmin`/`isPrivileged`, `admin`/`system` roles, the parentage fields `spawnedBy`/`creatorId`, the Realm membership field `realmId`, and capability selectors whose resolved allow set carries the wildcard `'*'` or `@lifecycle:authority` — `allowedTools`/`tools`/`toolPreset`/`role` aliases included) with `PERMISSION_DENIED` unless the caller principal holds `@lifecycle:authority`; authority edits are operator-API-only. Realm membership is strictly immutable: any `realmId` key is denied for every caller before the authority verdict — the injected `InternalPrincipal` included — so membership changes only by terminate + relaunch into the target realm. The `realmBypass` key is likewise denied for every caller before the authority verdict; grants are applied only through the engine bootstrap or the operator grant/revoke API
  * @decision `realmBypass` is a revocable operator/engine grant recorded in the frozen registry authority inputs (`AuthorityInputRecord.realmBypass`) and rebuilt into the `AuthorityDescriptor`; `grantRealmBypass`/`revokeRealmBypass` accept only the exact injected `InternalPrincipal` reference and only active agents, emit an audit event, and never move Realm membership or touch the capability axis. Killing/purging drops the grant with the authority inputs, so a recycled record carries no grant; hydration restores grants only through the composition root's `restoreRealmBypassGrants`
  * @invariant INV-META-AUTHORITY: the explicit authorities (the publishing pair `@template:authority`/`@hydration:authority` and the meta-plane ids of `AUTHORITY_IDS`) are revocable operator/engine grants recorded in the frozen registry authority inputs (`AuthorityInputRecord.authorities`, one frozen `{id, scope?}` record per grant) and rebuilt into the `AuthorityDescriptor` allow set as the exact ids. One grant core (`#setAuthority`) serves every id: it accepts only the exact injected `InternalPrincipal` reference and only active agents, validates the id against `AUTHORITY_IDS` and the registry-side scope against the id-class vocabulary, rebuilds descriptor + inputs atomically, and never touches the capability selector axis or Realm membership. Audit keeps the legacy event names for the publishing pair (`template_authority_granted`/`revoked`, `hydration_authority_granted`/`revoked`) and emits `authority_granted`/`authority_revoked` `{authorityId, enabled, by, scopePresent}` for every other id. The root system director is engine-composed with its bootstrap grants. Killing/purging drops the grants with the authority inputs, so a recycled record carries none; hydration restores them only through the composition-root `restoreAuthorityGrants`. The wildcard `'*'` and `privileged` never imply any id, no selector path (launch, spawn, `reauthorizeAgent`, `updateAgentConfig`) can place the ids, and scopes are registry-side only (read through `getAuthorityGrants`) — the frozen descriptor shape never changes and the identity projection never carries scope data.
+ * @invariant INV-META-AGENT (M2): `inspect_agent`/`update_agent` are the only agent-facing config surface. Authorization resolves registry-side per target: self-inspection, the inherent parental tier (same Realm + stored direct parentage), or an exact scoped `@agent:inspect`/`@agent:edit` grant (`targets`/`ownSpawns`/`realmMembers` bounded by `realms`/own Realm; `fields` narrows the A18 token set). Every resolution failure — unknown, recycled, ambiguous, non-child, cross-Realm, out-of-scope — shares one uniform static `PERMISSION_DENIED` per tool, so no target-existence/relationship oracle exists; receipts, audits, and denials carry bare ids only and never scope values, canonical keys, workspace keys, or realm vocabulary. Updates validate a closed patch (denied keys fail the whole call; unknown keys/malformed values `INVALID_ARGUMENTS`), evaluate the ≤-editor bound B1–B4 on the RESULTING state before any mutation (a resulting `privileged: true` counts as TOP), apply through the same intrinsic channel as `updateAgentConfig`, and defer a busy target into a bounded runtime-owned latest-wins queue flushed at `turn_complete` (dropped on kill/recycle/purge, re-authorized at flush, exception-shielded). Self-target updates are denied.
+ * @decision M2 meta grants are operator-minted records only; launch/spawn/update/reauthorize paths cannot place them, and scopes are read exclusively through `getAuthorityGrants`. The parental tier is inherent to registered direct spawns — no grant, no id, no caller claim.
+ * @decision Scoped grants persist through the additive `authorityGrants` snapshot field as `{ ref, scope }` entries (`listAuthorityGrantRecords`; unscoped grants keep the legacy keys-only string), so a narrowed grant survives save/hydrate instead of silently widening (M1 finding F3).
  * @decision Registry-owned authority inputs (`privileged` + capability selector) are the identity projection source of truth; the live entity config is a getter-only projection for the uneditable legacy consumers only
  * @decision The injected `SubsystemEmitPort` replaces `runtime._emit` reach-backs and their `typeof` guards; the manager emits only through the port (or the `runtime.createSubsystemEmitPort()` fallback)
  * @decision `killAgent` throws an Error coded `NOT_FOUND` for an unknown agent instead of returning a null sentinel; an already-recycled id returns that agent idempotently
@@ -75,17 +79,19 @@ import type {
   LaunchHistoryEntry
 } from '../agent/index.ts';
 import { resolveToolPreset, TOOL_PRESETS } from '../../tools/constants/index.ts';
+import { getCanonToolName, toSnakeCase } from '../../tools/normalizers/index.ts';
 import {
   AGENT_AUTHORITIES,
   AUTHORITY_IDS,
   AUTHORITY_SCOPE_FIELDS
 } from '../../realmCatalog/index.ts';
-import type { AuthorityGrantRecord, AuthorityScopeRecord } from '../../realmCatalog/index.ts';
+import type { AuthorityGrantRecord, AuthorityGrantSnapshotEntry, AuthorityScopeRecord } from '../../realmCatalog/index.ts';
 import { isReservedWorkspaceKey } from '../../virtualFs/index.ts';
 import type { VirtualFS } from '../../virtualFs/index.ts';
 import type { MessagingBus } from '../../messagingBus/index.ts';
 import type { InvocationEngine } from '../../invocationEngine/index.ts';
 import type { AuthorityDescriptor, InternalPrincipal, SubsystemEmitPort } from '../index.ts';
+import type { AgentAuthoritySummary, AgentInspectProjection, AgentUpdateReceipt } from '../index.ts';
 import type { TriggerDispatcher } from '../triggerDispatcher/index.ts';
 import type { CredentialResolverPort } from '../../credentialVault/index.ts';
 import type { ModelPresetSourcePort } from '../../presetCatalog/index.ts';
@@ -640,6 +646,183 @@ const AUTHORITY_SCOPE_FORBIDDEN_NAMES: ReadonlySet<string> = new Set<string>([
   'constructor',
   'prototype'
 ]);
+
+/**
+ * Uniform target-resolution denial of the M2 `inspect_agent` surface
+ * (meta-plane spec §1.4): unknown, recycled, ambiguous, non-child, and
+ * cross-realm targets share this one static receipt — it never echoes the
+ * target claim, parentage, capability values, canonical keys, or realm
+ * vocabulary, so no target-existence/relationship oracle exists.
+ * @internal
+ */
+const META_AGENT_INSPECT_DENIED_MESSAGE = 'Agent inspection is not permitted for the requested target.';
+
+/**
+ * Uniform target-resolution denial of the M2 `update_agent` surface. Distinct
+ * from the bound denial below (one receipt per failure class per tool), and
+ * equally free of target state, canonical keys, and realm vocabulary.
+ * @internal
+ */
+const META_AGENT_EDIT_DENIED_MESSAGE = 'The requested agent edit is not permitted for the requested target.';
+
+/**
+ * Uniform field/bound denial of the M2 `update_agent` surface: a denied-key
+ * presence, a field token outside the caller's tier, or a failed B1-B4 bound
+ * produces this one distinct receipt, never echoing capability values.
+ * @internal
+ */
+const META_AGENT_EDIT_BOUND_DENIED_MESSAGE = 'The requested agent edit exceeds the permitted scope for this caller.';
+
+/**
+ * The A18 parental editable field-token set (decision A18): tools, privilege,
+ * trigger policy, and system prompt. The parental tier always carries all four;
+ * a meta-tier `@agent:edit` grant narrows them through `scope.fields`.
+ * @internal
+ */
+const PARENTAL_EDIT_FIELD_TOKENS: readonly string[] = Object.freeze(['tools', 'privilege', 'policy', 'prompt']);
+
+/**
+ * Editable `update_agent` patch key → ratified field token. `name` rides the
+ * prompt token (identity/content presentation) and `maxTurns` the policy token
+ * (operational policy), so a `scope.fields`-narrowed grant never silently
+ * reaches a field its token set does not cover.
+ * @internal
+ */
+const EDIT_FIELD_TOKEN_BY_PATCH_KEY: Readonly<Record<string, string>> = Object.freeze({
+  allowedTools: 'tools',
+  tools: 'tools',
+  toolPreset: 'tools',
+  tool_preset: 'tools',
+  privileged: 'privilege',
+  triggerPolicy: 'policy',
+  maxTurns: 'policy',
+  systemPrompt: 'prompt',
+  name: 'prompt'
+});
+
+/**
+ * Operator-only / escalation-adjacent patch keys the M2 edit surface never
+ * accepts: presence — `false`/`null` values included — fails the whole call
+ * with the uniform bound denial and zero partial mutation (§1.4, §3.1). Any
+ * exact `AUTHORITY_IDS` member is denied by the separate exact-id check.
+ * @internal
+ */
+const META_EDIT_DENIED_PATCH_KEYS: ReadonlySet<string> = new Set<string>([
+  'modelConfig',
+  'presetId',
+  'workspaceId',
+  'workspace',
+  'extensionTools',
+  'settings',
+  'customTools',
+  'customToolSchemas',
+  'role',
+  'isAdmin',
+  'isPrivileged',
+  'spawnedBy',
+  'creatorId',
+  'realmId',
+  'realmBypass',
+  'templateAuthority',
+  'hydrationAuthority',
+  'authorities'
+]);
+
+/**
+ * Bound on the runtime-owned pending-edit queue (M2 safe state): one
+ * latest-wins entry per target identity key, oldest-evicted beyond the cap.
+ * @internal
+ */
+const META_PENDING_EDITS_CAP = 128;
+
+/**
+ * One deferred parental/meta edit (M2 safe state): the exact actor and target
+ * registrations plus the frozen patch and its ratified field tokens. The queue
+ * is runtime-owned and never persisted or projected; a flush re-resolves the
+ * actor and re-evaluates the verdict against the current state before applying.
+ * @internal
+ */
+interface PendingAgentEdit {
+  readonly targetId: string;
+  readonly actorId: string;
+  readonly actorKey: string;
+  readonly tier: 'parental' | 'meta';
+  readonly patch: ConfigUpdateSnapshot;
+  readonly fields: readonly string[];
+}
+
+/**
+ * Result of the M2 tier verdict for a resolved target: which tier authorized
+ * the caller and the effective field-token set for an update.
+ * @internal
+ */
+type MetaAgentVerdict =
+  | { readonly tier: 'self'; readonly fields: readonly string[] }
+  | { readonly tier: 'parental'; readonly fields: readonly string[] }
+  | { readonly tier: 'meta'; readonly fields: readonly string[] };
+
+/**
+ * Tests whether a patch key is an operator-only / escalation-adjacent key the
+ * M2 edit surface never accepts (exact spelling, snake_case spelling, or an
+ * exact `AUTHORITY_IDS` member in either spelling).
+ *
+ * @param key - Candidate sanitized patch key.
+ * @returns True when the key must fail the whole call with the bound denial.
+ * @internal
+ */
+function isDeniedMetaEditPatchKey(key: string): boolean {
+  if (META_EDIT_DENIED_PATCH_KEYS.has(key)) return true;
+  if (AUTHORITY_ID_SET.has(key)) return true;
+  const snake = toSnakeCase(key);
+  if (snake && snake !== key) {
+    if (META_EDIT_DENIED_PATCH_KEYS.has(snake)) return true;
+    if (AUTHORITY_ID_SET.has(snake)) return true;
+  }
+  return false;
+}
+
+/**
+ * Canonicalizes an effective tool-name collection for the M2 ≤-editor bound
+ * (meta-plane spec §1.3): each member resolves through the alias normalizer
+ * (`getCanonToolName(m) ?? m`), authority ids are stripped (they are grants,
+ * never selector capability), and the wildcard `'*'` is preserved as the TOP
+ * marker. The result is a fresh mutable `Set` used only for subset probes.
+ *
+ * @param names - Effective tool names from a descriptor `allow` set or a resolved patch selector.
+ * @returns The canonicalized capability set.
+ * @internal
+ */
+function canonicalEffectiveToolNames(names: Iterable<string>): Set<string> {
+  const canonical = new Set<string>();
+  for (const name of names) {
+    if (typeof name !== 'string' || !name) continue;
+    if (name === '*') {
+      canonical.add('*');
+      continue;
+    }
+    if (AUTHORITY_ID_SET.has(name)) continue;
+    const canon = getCanonToolName(name);
+    canonical.add(typeof canon === 'string' && canon ? canon : name);
+  }
+  return canonical;
+}
+
+/**
+ * Tests `left ⊆ right` over effective capability sets; the TOP marker `'*'`
+ * on the right absorbs everything.
+ *
+ * @param left - Candidate subset.
+ * @param right - Candidate superset.
+ * @returns True when every member of `left` is in `right` (or `right` is TOP).
+ * @internal
+ */
+function isEffectiveToolSubset(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
+  if (right.has('*')) return true;
+  for (const name of left) {
+    if (!right.has(name)) return false;
+  }
+  return true;
+}
 
 /**
  * Validates and deep-freezes one authority scope record for its id (M1; spec
@@ -1248,6 +1431,15 @@ export class AgentLifecycleManager {
    * (MOD-21 W10, 5b585b7).
    */
   #authorityInputs: Map<string, AuthorityInputRecord> = new Map();
+
+  /**
+   * Runtime-owned pending-edit queue of the M2 parental/meta `update_agent`
+   * surface: one latest-wins entry per target identity key, flushed at the
+   * target's `turn_complete` (or explicitly) and dropped on kill/recycle/purge.
+   * Bounded by `META_PENDING_EDITS_CAP` with oldest-eviction; entries are
+   * re-authorized against the current actor and target state at flush.
+   */
+  #pendingAgentEdits: Map<string, PendingAgentEdit> = new Map();
 
   /**
    * Opaque owner-controlled channel injected into every entity this manager
@@ -2288,25 +2480,62 @@ export class AgentLifecycleManager {
    * same literal id from two Realms round-trips exactly, because the
    * composition-root restore resolves each key to its own registration. The
    * listing itself is registry state, not authority, and the keys are
-   * internal-only — they never reach an agent-facing surface.
+   * internal-only — they never reach an agent-facing surface. The projection
+   * drops scopes; use {@link listAuthorityGrantRecords} when persisting a
+   * narrowed grant.
    *
    * @returns Canonical identity keys per authority id (declaration order).
    */
   listAuthorityGrants(): Record<string, string[]> {
-    const perId: Record<string, string[]> = Object.create(null);
+    const records = this.listAuthorityGrantRecords();
+    const listing: Record<string, string[]> = {};
+    for (const authorityId of Object.keys(records)) {
+      const refs: string[] = [];
+      for (let i = 0; i < records[authorityId].length; i++) {
+        const entry = records[authorityId][i];
+        refs[refs.length] = typeof entry === 'string' ? entry : entry.ref;
+      }
+      listing[authorityId] = refs;
+    }
+    return listing;
+  }
+
+  /**
+   * Lists the exportable authority-grant entries of the active agents (M2),
+   * grouped per authority id: an unscoped grant stays a bare canonical
+   * identity-key string (the legacy keys-only form), a scoped grant becomes a
+   * frozen `{ ref, scope }` record. This is the persistence currency of the
+   * additive `authorityGrants` snapshot field, so a narrowed grant survives a
+   * save/hydrate restart instead of silently restoring unscoped (M1
+   * finding F3).
+   *
+   * Host-only surface: scopes never reach a descriptor, an identity
+   * projection, a model-facing schema, a receipt, or an audit payload.
+   *
+   * @returns Frozen export entries per authority id (declaration order).
+   */
+  listAuthorityGrantRecords(): Record<string, readonly AuthorityGrantSnapshotEntry[]> {
+    const perId: Record<string, AuthorityGrantSnapshotEntry[]> = Object.create(null);
     for (let i = 0; i < AUTHORITY_IDS.length; i++) perId[AUTHORITY_IDS[i]] = [];
     for (const identityKey of this.#agents.keys()) {
       const inputs = this.#authorityInputs.get(identityKey);
       if (!inputs) continue;
       for (let i = 0; i < inputs.authorities.length; i++) {
-        const id = inputs.authorities[i].id;
-        if (perId[id]) perId[id][perId[id].length] = identityKey;
+        const grant = inputs.authorities[i];
+        // An absent or empty scope is semantically the id's default scope;
+        // emit the legacy keys-only form so no snapshot grows a no-op object.
+        const scopeIsEmpty = grant.scope === undefined
+          || Object.keys(grant.scope).length === 0;
+        const entry: AuthorityGrantSnapshotEntry = scopeIsEmpty
+          ? identityKey
+          : Object.freeze({ ref: identityKey, scope: grant.scope });
+        perId[grant.id][perId[grant.id].length] = entry;
       }
     }
-    const listing: Record<string, string[]> = {};
+    const listing: Record<string, readonly AuthorityGrantSnapshotEntry[]> = {};
     for (let i = 0; i < AUTHORITY_IDS.length; i++) {
       const id = AUTHORITY_IDS[i];
-      if (perId[id].length > 0) listing[id] = perId[id];
+      if (perId[id].length > 0) listing[id] = Object.freeze(perId[id]);
     }
     return listing;
   }
@@ -2583,6 +2812,787 @@ export class AgentLifecycleManager {
     });
   }
 
+  // ====================================================================
+  // M2 meta plane: parental inspect/edit + runtime safe-state queue
+  // ====================================================================
+
+  /**
+   * Resolves the M2 caller: a registered agent descriptor with its exact
+   * canonical identity key, realm membership, and trusted authority inputs.
+   * Anonymous callers, the engine-internal principal, and unresolvable
+   * identities resolve `null` (the caller must fail closed).
+   *
+   * @param callerContext - Trusted caller context (`{ callerAgentId, callerKey }`).
+   * @returns The resolved caller facts, or `null`.
+   * @internal
+   */
+  #resolveMetaAgentCaller(callerContext: unknown): {
+    principal: AuthorityDescriptor;
+    callerId: string;
+    callerKey: string;
+    callerRealmId: string | null;
+    inputs: AuthorityInputRecord | null;
+  } | null {
+    const principal = this.#resolveCallerPrincipal({ callerContext });
+    if (!principal || principal.kind !== 'agent') return null;
+    const callerKey = this.#identityKeyForDescriptor(principal);
+    if (!callerKey) return null;
+    const record = this.#agents.get(callerKey);
+    if (!record) return null;
+    return {
+      principal,
+      callerId: principal.subject,
+      callerKey,
+      callerRealmId: this.#agentRealmId(record),
+      inputs: this.#authorityInputs.get(callerKey) || null
+    };
+  }
+
+  /**
+   * Resolves the M2 target: an active registration addressed by canonical key
+   * or unique bare id. Unknown, recycled, ambiguous, and realm-vocabulary refs
+   * resolve `null` — every one of them shares the caller's uniform denial, so
+   * no target-existence or relationship oracle exists.
+   *
+   * @param targetRef - Caller-supplied target reference.
+   * @returns The active target record, or `null`.
+   * @internal
+   */
+  #resolveMetaEditTarget(targetRef: string): Agent | null {
+    if (typeof targetRef !== 'string' || !targetRef) return null;
+    if (isRealmVocabularyId(targetRef)) return null;
+    const byKey = this.#agents.get(targetRef);
+    if (byKey) return byKey;
+    return this.#uniqueByBareId(this.#agents, targetRef);
+  }
+
+  /**
+   * Reports whether the target records the caller as its direct parent
+   * (registry parentage only, never a caller claim).
+   *
+   * @param targetAgent - Resolved target record.
+   * @param callerId - Bare caller id.
+   * @returns True for a direct spawn of the caller.
+   * @internal
+   */
+  #isDirectChildOf(targetAgent: Agent, callerId: string): boolean {
+    return Boolean(callerId) && (
+      targetAgent.config?.spawnedBy === callerId || targetAgent.config?.creatorId === callerId
+    );
+  }
+
+  /**
+   * Tests whether one `@agent:*` grant scope matches the concrete target
+   * (meta-plane spec §1.2/§1.3): the `realms` bound (or the caller's own realm
+   * when absent) confines the target, then `targets` / `ownSpawns` /
+   * `realmMembers` select it. An absent or selector-free scope uses the id's
+   * default (`ownSpawns`).
+   *
+   * @param scope - Grant scope record, or undefined.
+   * @param targetAgent - Resolved target record.
+   * @param targetRealmId - Target realm membership.
+   * @param callerId - Bare caller id.
+   * @param callerRealmId - Caller realm membership.
+   * @returns True when the scope reaches the target.
+   * @internal
+   */
+  #authorityScopeMatchesAgent(
+    scope: AuthorityScopeRecord | undefined,
+    targetAgent: Agent,
+    targetRealmId: string | null,
+    callerId: string,
+    callerRealmId: string | null
+  ): boolean {
+    if (scope && Array.isArray(scope.realms)) {
+      if (!scope.realms.includes(targetRealmId || '')) return false;
+    } else if (targetRealmId !== callerRealmId) {
+      return false;
+    }
+    const isChild = this.#isDirectChildOf(targetAgent, callerId);
+    const hasExplicitSelector = Boolean(
+      scope && (Array.isArray(scope.targets) || scope.ownSpawns === true || scope.realmMembers === true)
+    );
+    if (!hasExplicitSelector) return isChild;
+    if (scope && Array.isArray(scope.targets) && scope.targets.includes(targetAgent.id)) return true;
+    if (scope && scope.ownSpawns === true && isChild) return true;
+    if (scope && scope.realmMembers === true) return true;
+    return false;
+  }
+
+  /**
+   * Resolves the M2 tier verdict for one caller/target pair (spec §3.2):
+   * self-inspection, the inherent parental tier (same realm + registered
+   * direct parentage), or the exact scoped meta grant. Every other
+   * combination — non-child peers, other-realm targets, out-of-scope grants —
+   * resolves `null` and shares the caller's uniform denial.
+   *
+   * @param caller - Resolved caller facts.
+   * @param targetAgent - Resolved target record.
+   * @param operation - `'inspect'` or `'edit'`.
+   * @param targetRealmId - Target realm membership.
+   * @returns The verdict, or `null` when the caller is unauthorized.
+   * @internal
+   */
+  #resolveMetaAgentVerdict(
+    caller: {
+      principal: AuthorityDescriptor;
+      callerId: string;
+      callerKey: string;
+      callerRealmId: string | null;
+      inputs: AuthorityInputRecord | null;
+    },
+    targetAgent: Agent,
+    operation: 'inspect' | 'edit',
+    targetRealmId: string | null
+  ): MetaAgentVerdict | null {
+    if (operation === 'inspect' && targetAgent.id === caller.callerId) {
+      return { tier: 'self', fields: [] };
+    }
+    if (this.#isDirectChildOf(targetAgent, caller.callerId) && targetRealmId === caller.callerRealmId) {
+      return { tier: 'parental', fields: PARENTAL_EDIT_FIELD_TOKENS };
+    }
+    const authorityId = operation === 'inspect' ? AGENT_AUTHORITIES.AGENT_INSPECT : AGENT_AUTHORITIES.AGENT_EDIT;
+    const allow = caller.principal.allow;
+    if (!allow || typeof allow.has !== 'function' || !allow.has(authorityId)) return null;
+    const grants = caller.inputs ? caller.inputs.authorities : [];
+    let grant: AuthorityGrantRecord | null = null;
+    for (let i = 0; i < grants.length; i++) {
+      if (grants[i].id === authorityId) {
+        grant = grants[i];
+        break;
+      }
+    }
+    // The grant record is the trusted source for *how far*; a descriptor that
+    // allows the id without a matching registry record is inconsistent and
+    // fails closed rather than widening to the default scope.
+    if (!grant) return null;
+    if (!this.#authorityScopeMatchesAgent(grant.scope, targetAgent, targetRealmId, caller.callerId, caller.callerRealmId)) {
+      return null;
+    }
+    if (operation === 'inspect') return { tier: 'meta', fields: [] };
+    const fields = grant.scope && Array.isArray(grant.scope.fields)
+      ? grant.scope.fields
+      : PARENTAL_EDIT_FIELD_TOKENS;
+    return { tier: 'meta', fields };
+  }
+
+  /**
+   * Builds the host-side authority summary of one registration (audit/receipt
+   * payload): canonical baked list, trusted privilege flag, extension call
+   * names, and held authority ids. Never carries scopes, realm ids, or
+   * workspace keys.
+   *
+   * @param identityKey - Canonical identity key.
+   * @returns The frozen authority summary.
+   * @internal
+   */
+  #authoritySummaryOf(identityKey: string): AgentAuthoritySummary {
+    const descriptor = this.#authorityRegistry.get(identityKey) || null;
+    const inputs = this.#authorityInputs.get(identityKey) || null;
+    if (!descriptor) {
+      return Object.freeze({ baked: Object.freeze([]), privileged: false, extensions: Object.freeze([]), authorities: Object.freeze([]) });
+    }
+    const baked: string[] = [];
+    if (descriptor.allow.has('*')) {
+      baked[baked.length] = '*';
+    } else {
+      const canonical = canonicalEffectiveToolNames(descriptor.allow);
+      for (const name of canonical) baked[baked.length] = name;
+    }
+    const extensions: string[] = [];
+    for (const name of descriptor.extensions) extensions[extensions.length] = name;
+    const authorities: string[] = [];
+    if (inputs) {
+      for (let i = 0; i < inputs.authorities.length; i++) authorities[authorities.length] = inputs.authorities[i].id;
+    }
+    return Object.freeze({
+      baked: Object.freeze(baked),
+      privileged: Boolean(inputs && inputs.privileged === true) || descriptor.allow.has('*'),
+      extensions: Object.freeze(extensions),
+      authorities: Object.freeze(authorities)
+    });
+  }
+
+  /**
+   * Builds the bounded host-side inspection projection of an authorized target
+   * (spec §3.3). The `spawnedBy` link is exposed only to the parent or a
+   * meta-scoped caller; a self-inspection carries the caller's own authority
+   * ids (never scopes). The raw workspace label is masked by the tool boundary.
+   *
+   * @param targetAgent - Resolved target record.
+   * @param targetKey - Canonical target identity key.
+   * @param verdict - Resolved tier verdict.
+   * @returns The bounded projection.
+   * @internal
+   */
+  #buildAgentInspectProjection(
+    targetAgent: Agent,
+    targetKey: string,
+    verdict: MetaAgentVerdict
+  ): AgentInspectProjection {
+    const descriptor = this.#authorityRegistry.get(targetKey) || null;
+    const inputs = this.#authorityInputs.get(targetKey) || null;
+    const baked: string[] = [];
+    if (descriptor) {
+      if (descriptor.allow.has('*')) {
+        baked[baked.length] = '*';
+      } else {
+        const canonical = canonicalEffectiveToolNames(descriptor.allow);
+        for (const name of canonical) baked[baked.length] = name;
+      }
+    }
+    const extensions: string[] = descriptor ? [...descriptor.extensions] : [];
+    const config = targetAgent.config || {};
+    const model: { presetId?: string; modelId?: string; providerId?: string } = {};
+    if (typeof config.presetId === 'string' && config.presetId) model.presetId = config.presetId;
+    const modelConfig = config.modelConfig;
+    if (modelConfig && typeof modelConfig === 'object') {
+      const record = modelConfig as Record<string, unknown>;
+      if (typeof record.modelId === 'string' && record.modelId) model.modelId = record.modelId;
+      if (typeof record.providerId === 'string' && record.providerId) model.providerId = record.providerId;
+    }
+    const identityKey = targetKey;
+    const unreadCount = typeof this.#messagingBus?.getUnreadCount === 'function'
+      ? this.#messagingBus.getUnreadCount(identityKey)
+      : (this.#messagingBus?.listInbox(identityKey, { unreadOnly: true })?.length || 0);
+    const projection: {
+      id: string;
+      name: string;
+      role: string;
+      state: string;
+      stateDetail?: string | null;
+      privileged: boolean;
+      tools: { baked: readonly string[]; extensions: readonly string[] };
+      model: { presetId?: string; modelId?: string; providerId?: string };
+      workspace: string | null;
+      spawnedBy?: string | null;
+      turns: number;
+      unreadCount: number;
+      createdAt: number | null;
+      authorities?: readonly string[];
+    } = {
+      id: targetAgent.id,
+      name: targetAgent.name || config.name || targetAgent.id,
+      role: config.role || (config.privileged ? 'admin' : 'user'),
+      state: targetAgent.state,
+      stateDetail: targetAgent.stateDetail || null,
+      privileged: Boolean(inputs && inputs.privileged === true) || Boolean(descriptor && descriptor.allow.has('*')),
+      tools: { baked: Object.freeze(baked), extensions },
+      model,
+      workspace: typeof config.workspaceId === 'string' && config.workspaceId ? config.workspaceId : targetAgent.id,
+      turns: typeof targetAgent.turnCount === 'number' ? targetAgent.turnCount : 0,
+      unreadCount,
+      createdAt: typeof targetAgent.createdAt === 'number' ? targetAgent.createdAt : null
+    };
+    if (verdict.tier === 'parental' || verdict.tier === 'meta') {
+      projection.spawnedBy = config.spawnedBy || config.creatorId || null;
+    }
+    if (verdict.tier === 'self') {
+      const authorities: string[] = [];
+      if (inputs) {
+        for (let i = 0; i < inputs.authorities.length; i++) authorities[authorities.length] = inputs.authorities[i].id;
+      }
+      projection.authorities = Object.freeze(authorities);
+    }
+    return Object.freeze(projection) as AgentInspectProjection;
+  }
+
+  /**
+   * Reads and validates one M2 update patch: a non-empty plain object whose
+   * keys are either editable (maps to a ratified field token) or explicitly
+   * denied (uniform bound denial). Unknown keys and malformed values reject
+   * with `INVALID_ARGUMENTS` before any mutation; denied-key presence fails
+   * the whole call with the uniform bound denial.
+   *
+   * @param patch - Caller-supplied patch candidate.
+   * @returns The frozen patch snapshot and its field tokens.
+   * @throws `Error` - Code `PERMISSION_DENIED` (denied key) or `INVALID_ARGUMENTS` (malformed patch).
+   * @internal
+   */
+  #normalizeMetaAgentPatch(patch: unknown): { update: ConfigUpdateSnapshot; fields: readonly string[] } {
+    if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+      const err: CodedError = new Error('update_agent requires a patch object with at least one editable field');
+      err.code = 'INVALID_ARGUMENTS';
+      throw err;
+    }
+    const update = snapshotCallerObject(patch);
+    const keys = Object.keys(update);
+    if (keys.length === 0) {
+      const err: CodedError = new Error('update_agent requires a patch object with at least one editable field');
+      err.code = 'INVALID_ARGUMENTS';
+      throw err;
+    }
+    for (let i = 0; i < keys.length; i++) {
+      if (isDeniedMetaEditPatchKey(keys[i])) {
+        const err: CodedError = new Error(META_AGENT_EDIT_BOUND_DENIED_MESSAGE);
+        err.code = 'PERMISSION_DENIED';
+        throw err;
+      }
+    }
+    const fields: string[] = [];
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      const token = EDIT_FIELD_TOKEN_BY_PATCH_KEY[key];
+      if (!token) {
+        const err: CodedError = new Error(`update_agent does not accept the field '${key}'`);
+        err.code = 'INVALID_ARGUMENTS';
+        throw err;
+      }
+      if (!fields.includes(token)) fields[fields.length] = token;
+    }
+    const invalidValue = (detail: string): never => {
+      const err: CodedError = new Error(`update_agent rejected a field value: ${detail}`);
+      err.code = 'INVALID_ARGUMENTS';
+      throw err;
+    };
+    if (update.privileged !== undefined && typeof update.privileged !== 'boolean') invalidValue('privileged must be a boolean');
+    if (update.maxTurns !== undefined && (typeof update.maxTurns !== 'number' || !Number.isFinite(update.maxTurns))) {
+      invalidValue('maxTurns must be a finite number');
+    }
+    for (const key of ['systemPrompt', 'name', 'triggerPolicy', 'toolPreset']) {
+      const value = (update as Record<string, unknown>)[key];
+      if (value !== undefined && typeof value !== 'string') invalidValue(`${key} must be a string`);
+    }
+    for (const key of ['tools', 'allowedTools']) {
+      const value = (update as Record<string, unknown>)[key];
+      if (value === undefined) continue;
+      if (typeof value === 'string') continue;
+      if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string')) {
+        invalidValue(`${key} must be an array of tool names`);
+      }
+    }
+    return { update, fields: Object.freeze(fields) };
+  }
+
+  /**
+   * Tests whether a patch's tool selector claims authority vocabulary: an
+   * exact `AUTHORITY_IDS` member, a case/space spelling of one, or the
+   * lifecycle-authority capability. Such a selector is a grant attempt, never
+   * capability data, and fails the whole edit.
+   *
+   * @param update - Patch snapshot.
+   * @returns True when the selector claims authority vocabulary.
+   * @internal
+   */
+  #patchClaimsAuthoritySelector(update: ConfigUpdateSnapshot): boolean {
+    const rawTools = update.allowedTools !== undefined
+      ? update.allowedTools
+      : (update.tools !== undefined
+        ? update.tools
+        : (update.toolPreset !== undefined
+          ? update.toolPreset
+          : (update.tool_preset !== undefined ? update.tool_preset : undefined)));
+    if (rawTools === undefined) return false;
+    const resolved = resolveToolPreset(rawTools as string | readonly string[] | ReadonlySet<string> | null);
+    for (let i = 0; i < resolved.length; i++) {
+      const entry = resolved[i];
+      if (typeof entry !== 'string') continue;
+      if (entry === LIFECYCLE_AUTHORITY_CAPABILITY) return true;
+      if (AUTHORITY_ID_SET.has(entry)) return true;
+      const trimmed = entry.trim().toLowerCase();
+      if (trimmed && AUTHORITY_ID_SET.has(trimmed)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Evaluates the ≤-editor bound B1-B4 on the resulting state (spec §1.3):
+   * the resulting baked set must be a subset of the editor's (a resulting
+   * `privileged: true` counts as TOP), the target's extension grants and held
+   * authorities must be subsets of the editor's, and every requested field
+   * token must be in the editor's tier field set. The check runs before any
+   * mutation.
+   *
+   * @param caller - Resolved caller facts.
+   * @param verdict - Resolved tier verdict.
+   * @param targetKey - Canonical target identity key.
+   * @param targetDescriptor - Target frozen descriptor.
+   * @param update - Patch snapshot.
+   * @param requestedFields - Field tokens the patch touches.
+   * @returns True when the resulting state stays within the editor's bounds.
+   * @internal
+   */
+  #evaluateMetaAgentEditBound(
+    caller: { principal: AuthorityDescriptor; inputs: AuthorityInputRecord | null },
+    verdict: MetaAgentVerdict,
+    targetKey: string,
+    targetDescriptor: AuthorityDescriptor | null,
+    update: ConfigUpdateSnapshot,
+    requestedFields: readonly string[]
+  ): boolean {
+    for (let i = 0; i < requestedFields.length; i++) {
+      if (!verdict.fields.includes(requestedFields[i])) return false;
+    }
+    if (this.#patchClaimsAuthoritySelector(update)) return false;
+    if (!targetDescriptor) return false;
+    const editorBaked = canonicalEffectiveToolNames(caller.principal.allow);
+    let resultingBaked: Set<string>;
+    if (update.privileged === true) {
+      resultingBaked = new Set<string>(['*']);
+    } else {
+      const rawTools = update.allowedTools !== undefined
+        ? update.allowedTools
+        : (update.tools !== undefined
+          ? update.tools
+          : (update.toolPreset !== undefined
+            ? update.toolPreset
+            : (update.tool_preset !== undefined ? update.tool_preset : undefined)));
+      resultingBaked = rawTools === undefined
+        ? canonicalEffectiveToolNames(targetDescriptor.allow)
+        : canonicalEffectiveToolNames(resolveToolPreset(rawTools as string | readonly string[] | ReadonlySet<string> | null));
+    }
+    if (!isEffectiveToolSubset(resultingBaked, editorBaked)) return false;
+    const editorExtensions = caller.principal.extensions;
+    for (const name of targetDescriptor.extensions) {
+      if (!editorExtensions || typeof editorExtensions.has !== 'function' || !editorExtensions.has(name)) return false;
+    }
+    const targetInputs = this.#authorityInputs.get(targetKey) || null;
+    const editorAuthorities: string[] = [];
+    if (caller.inputs) {
+      for (let i = 0; i < caller.inputs.authorities.length; i++) editorAuthorities[editorAuthorities.length] = caller.inputs.authorities[i].id;
+    }
+    if (targetInputs) {
+      for (let i = 0; i < targetInputs.authorities.length; i++) {
+        if (!editorAuthorities.includes(targetInputs.authorities[i].id)) return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Emits the uniform `agent_edit_denied` audit event and throws the M2
+   * permission error. Resolution failures carry only the bare actor id (never
+   * the target claim); bound/field failures may carry the bare target id.
+   *
+   * @param message - The tool's uniform denial message.
+   * @param actorId - Bare actor id, when resolvable.
+   * @param targetId - Bare target id, when resolved.
+   * @throws `Error` - Code `PERMISSION_DENIED`.
+   * @internal
+   */
+  #denyMetaAgentEdit(message: string, actorId: string | null, targetId: string | null = null): never {
+    const payload: Record<string, unknown> = {};
+    if (actorId) payload.actorId = actorId;
+    if (targetId) payload.targetId = targetId;
+    this.#emit({
+      type: 'agent_edit_denied',
+      ...(targetId ? { agentId: targetId } : {}),
+      payload
+    });
+    throw new PermissionDeniedError(message, { callerAgentId: actorId || null, code: 'PERMISSION_DENIED' });
+  }
+
+  /**
+   * Inspects one target agent under the M2 parental (inherent, direct spawns
+   * only) or meta (exact scoped `@agent:inspect`) tier. Self-inspection is
+   * allowed. Every resolution failure shares one uniform, realm-opaque
+   * denial, so no target-existence or relationship oracle exists.
+   *
+   * @param targetRef - Target reference (bare realm-local id or canonical key).
+   * @param callerContext - Trusted caller context (`{ callerAgentId, callerKey }`).
+   * @returns The bounded inspection projection.
+   * @throws `Error` - Code `'PERMISSION_DENIED'` for every unauthorized target.
+   */
+  inspectAgent(targetRef: string, callerContext: unknown = null): AgentInspectProjection {
+    const caller = this.#resolveMetaAgentCaller(callerContext);
+    const target = caller ? this.#resolveMetaEditTarget(targetRef) : null;
+    if (!caller || !target) throw this.#denyInspect(caller ? caller.callerId : null);
+    const targetKey = this.#agentIdentityKeyOf(target);
+    const verdict = this.#resolveMetaAgentVerdict(caller, target, 'inspect', this.#agentRealmId(target));
+    if (!verdict) throw this.#denyInspect(caller.callerId);
+    const projection = this.#buildAgentInspectProjection(target, targetKey, verdict);
+    this.#emit({
+      type: 'agent_inspected',
+      agentId: target.id,
+      payload: { actorId: caller.callerId, targetId: target.id, tier: verdict.tier }
+    });
+    return projection;
+  }
+
+  /** Uniform `inspect_agent` denial: no audit event and no target echo. @internal */
+  #denyInspect(actorId: string | null): PermissionDeniedError {
+    return new PermissionDeniedError(META_AGENT_INSPECT_DENIED_MESSAGE, {
+      callerAgentId: actorId || null,
+      code: 'PERMISSION_DENIED'
+    });
+  }
+
+  /**
+   * Updates one target agent's editable settings under the M2 parental/meta
+   * tiers. The patch is validated (denied keys fail the whole call; unknown
+   * keys and malformed values reject), the ≤-editor bound is evaluated on the
+   * resulting state, and the edit either applies immediately through the same
+   * intrinsic channel as `updateAgentConfig` or is queued for the target's
+   * next safe state. Self-target updates are denied.
+   *
+   * @param targetRef - Target reference (bare realm-local id or canonical key).
+   * @param patch - Editable patch (`tools`/`allowedTools`/`toolPreset`, `privileged`, `triggerPolicy`, `systemPrompt`, `maxTurns`, `name`).
+   * @param callerContext - Trusted caller context (`{ callerAgentId, callerKey }`).
+   * @returns The applied/deferred receipt with before/after summaries.
+   * @throws `Error` - Code `'PERMISSION_DENIED'` for unauthorized targets, denied keys, or bound violations; `'INVALID_ARGUMENTS'` for malformed patches.
+   */
+  updateAgent(targetRef: string, patch: unknown, callerContext: unknown = null): AgentUpdateReceipt {
+    const caller = this.#resolveMetaAgentCaller(callerContext);
+    const target = caller ? this.#resolveMetaEditTarget(targetRef) : null;
+    if (!caller || !target || target.id === caller.callerId) {
+      this.#denyMetaAgentEdit(META_AGENT_EDIT_DENIED_MESSAGE, caller ? caller.callerId : null, null);
+    }
+    const targetKey = this.#agentIdentityKeyOf(target);
+    const targetRealmId = this.#agentRealmId(target);
+    const verdict = this.#resolveMetaAgentVerdict(caller, target, 'edit', targetRealmId);
+    if (!verdict || verdict.tier === 'self') this.#denyMetaAgentEdit(META_AGENT_EDIT_DENIED_MESSAGE, caller.callerId, null);
+    const { update, fields } = this.#normalizeMetaAgentPatch(patch);
+    const targetDescriptor = this.#authorityRegistry.get(targetKey) || null;
+    if (!this.#evaluateMetaAgentEditBound(caller, verdict, targetKey, targetDescriptor, update, fields)) {
+      this.#denyMetaAgentEdit(META_AGENT_EDIT_BOUND_DENIED_MESSAGE, caller.callerId, target.id);
+    }
+    const before = this.#authoritySummaryOf(targetKey);
+    // Safe state: a busy target queues the edit (latest-wins, bounded); the
+    // flush re-authorizes against the current actor and target state.
+    if (this.#isBusyAgentRecord(target)) {
+      this.#queuePendingAgentEdit(targetKey, {
+        targetId: target.id,
+        actorId: caller.callerId,
+        actorKey: caller.callerKey,
+        tier: verdict.tier,
+        patch: Object.freeze({ ...update }),
+        fields
+      });
+      this.#emit({
+        type: 'agent_edit_deferred',
+        agentId: target.id,
+        payload: { actorId: caller.callerId, targetId: target.id, fields, reason: 'target_busy' }
+      });
+      return Object.freeze({
+        success: true,
+        target: target.id,
+        tier: verdict.tier,
+        applied: false,
+        deferred: true,
+        fields,
+        before,
+        after: null
+      });
+    }
+    return this.#applyMetaAgentEdit(target, targetKey, update, fields, caller.callerId, verdict);
+  }
+
+  /**
+   * Applies one already-authorized edit immediately and audits the transition.
+   *
+   * @param target - Resolved target record.
+   * @param targetKey - Canonical target identity key.
+   * @param update - Validated patch snapshot.
+   * @param fields - Ratified field tokens.
+   * @param actorId - Bare actor id.
+   * @param verdict - Resolved tier verdict.
+   * @returns The applied receipt.
+   * @internal
+   */
+  #applyMetaAgentEdit(
+    target: Agent,
+    targetKey: string,
+    update: ConfigUpdateSnapshot,
+    fields: readonly string[],
+    actorId: string,
+    verdict: { readonly tier: 'parental' | 'meta'; readonly fields: readonly string[] }
+  ): AgentUpdateReceipt {
+    const before = this.#authoritySummaryOf(targetKey);
+    this.#applyConfigUpdate(target, update, null, verdict.tier);
+    const after = this.#authoritySummaryOf(targetKey);
+    this.#emit({
+      type: 'agent_edit_applied',
+      agentId: target.id,
+      payload: { actorId, targetId: target.id, tier: verdict.tier, fields, before, after }
+    });
+    return Object.freeze({
+      success: true,
+      target: target.id,
+      tier: verdict.tier,
+      applied: true,
+      deferred: false,
+      fields,
+      before,
+      after
+    });
+  }
+
+  /**
+   * Reports whether a record is busy executing a turn (the safe-state gate):
+   * an in-flight turn promise or a running/waiting/canceling state.
+   *
+   * @param agent - Candidate record.
+   * @returns True when an edit must be deferred.
+   * @internal
+   */
+  #isBusyAgentRecord(agent: Agent): boolean {
+    if (!agent) return false;
+    return Boolean(
+      agent.currentTurnPromise ||
+      agent.state === AGENT_STATES.RUNNING ||
+      agent.state === AGENT_STATES.WAITING_FOR_MESSAGE ||
+      agent.state === AGENT_STATES.WAITING_FOR_INPUT ||
+      agent.state === AGENT_STATES.WAITING_FOR_DEPENDENTS ||
+      agent.state === AGENT_STATES.CANCELING
+    );
+  }
+
+  /**
+   * Reports whether a record's lifecycle state is busy executing a turn (the
+   * flush-time safe-state gate): `turn_complete` fires after the engine has
+   * already moved the agent to `IDLE`, so the flush checks state only — the
+   * in-flight turn promise may still be settling at emission time and is not a
+   * reason to defer an already-safe edit.
+   *
+   * @param agent - Candidate record.
+   * @returns True when the edit must wait for a later safe state.
+   * @internal
+   */
+  #isAgentStateBusy(agent: Agent): boolean {
+    if (!agent) return false;
+    return agent.state === AGENT_STATES.RUNNING
+      || agent.state === AGENT_STATES.WAITING_FOR_MESSAGE
+      || agent.state === AGENT_STATES.WAITING_FOR_INPUT
+      || agent.state === AGENT_STATES.WAITING_FOR_DEPENDENTS
+      || agent.state === AGENT_STATES.CANCELING;
+  }
+
+  /**
+   * Queues one pending edit with per-target latest-wins semantics, bounded by
+   * `META_PENDING_EDITS_CAP` (oldest entry evicted first). Re-setting an
+   * existing target moves it to the newest position.
+   *
+   * @param targetKey - Canonical target identity key.
+   * @param entry - Pending edit record.
+   * @internal
+   */
+  #queuePendingAgentEdit(targetKey: string, entry: PendingAgentEdit): void {
+    if (this.#pendingAgentEdits.has(targetKey)) this.#pendingAgentEdits.delete(targetKey);
+    this.#pendingAgentEdits.set(targetKey, Object.freeze(entry));
+    while (this.#pendingAgentEdits.size > META_PENDING_EDITS_CAP) {
+      const oldest = this.#pendingAgentEdits.keys().next().value;
+      if (oldest === undefined) break;
+      const evicted = this.#pendingAgentEdits.get(oldest);
+      this.#pendingAgentEdits.delete(oldest);
+      // Bounded queue: the oldest edit is evicted fail-closed and audited, so
+      // a dropped edit is never silent.
+      if (evicted) this.#dropPendingAgentEdit(evicted, 'queue_full');
+    }
+  }
+
+  /**
+   * Flushes the pending edits queued for one target bare id (called by the
+   * runtime on the target's `turn_complete`): each entry is re-authorized
+   * against the current actor and target state, applied through the intrinsic
+   * channel when still valid, and dropped fail-closed otherwise. A target that
+   * is somehow still busy re-queues its entry rather than losing it.
+   * Exception-shielded: a flush failure drops the entry with an audit event.
+   *
+   * @param agentId - Bare realm-local target id.
+   * @returns Number of entries applied.
+   */
+  flushPendingAgentEdits(agentId: string): number {
+    if (!agentId || typeof agentId !== 'string') return 0;
+    if (this.#pendingAgentEdits.size === 0) return 0;
+    let applied = 0;
+    const entries = [...this.#pendingAgentEdits.entries()];
+    for (let i = 0; i < entries.length; i++) {
+      const [targetKey, entry] = entries[i];
+      if (entry.targetId !== agentId) continue;
+      this.#pendingAgentEdits.delete(targetKey);
+      if (this.#flushPendingAgentEdit(targetKey, entry)) applied += 1;
+    }
+    return applied;
+  }
+
+  /**
+   * Drops every pending edit queued for one target bare id (called by the
+   * runtime on kill/recycle/purge): a terminated registration never receives a
+   * deferred edit.
+   *
+   * @param agentId - Bare realm-local target id.
+   * @returns Number of entries dropped.
+   */
+  dropPendingAgentEdits(agentId: string): number {
+    if (!agentId || typeof agentId !== 'string') return 0;
+    let dropped = 0;
+    const entries = [...this.#pendingAgentEdits.entries()];
+    for (let i = 0; i < entries.length; i++) {
+      const [targetKey, entry] = entries[i];
+      if (entry.targetId !== agentId) continue;
+      this.#pendingAgentEdits.delete(targetKey);
+      this.#dropPendingAgentEdit(entry, 'target_terminated');
+      dropped += 1;
+    }
+    return dropped;
+  }
+
+  /**
+   * Flushes one queued edit against the current state (see
+   * {@link flushPendingAgentEdits}); returns true only when the edit applied.
+   *
+   * @param targetKey - Canonical target identity key.
+   * @param entry - Pending edit record.
+   * @returns True when the edit applied.
+   * @internal
+   */
+  #flushPendingAgentEdit(targetKey: string, entry: PendingAgentEdit): boolean {
+    try {
+      const target = this.#agents.get(targetKey) || null;
+      if (!target) return this.#dropPendingAgentEdit(entry, 'target_gone');
+      const actorRecord = this.#agents.get(entry.actorKey) || null;
+      const actorPrincipal = this.#authorityRegistry.get(entry.actorKey) || null;
+      if (!actorRecord || !actorPrincipal || actorPrincipal.kind !== 'agent') {
+        return this.#dropPendingAgentEdit(entry, 'actor_gone');
+      }
+      const caller = {
+        principal: actorPrincipal,
+        callerId: entry.actorId,
+        callerKey: entry.actorKey,
+        callerRealmId: this.#agentRealmId(actorRecord),
+        inputs: this.#authorityInputs.get(entry.actorKey) || null
+      };
+      const verdict = this.#resolveMetaAgentVerdict(caller, target, 'edit', this.#agentRealmId(target));
+      if (!verdict || verdict.tier === 'self') return this.#dropPendingAgentEdit(entry, 'unauthorized');
+      if (this.#isAgentStateBusy(target)) {
+        // Still busy (for example a cancellation race): keep the edit queued
+        // rather than applying mid-turn or losing it.
+        this.#queuePendingAgentEdit(targetKey, entry);
+        return false;
+      }
+      const targetDescriptor = this.#authorityRegistry.get(targetKey) || null;
+      if (!this.#evaluateMetaAgentEditBound(caller, verdict, targetKey, targetDescriptor, entry.patch, entry.fields)) {
+        return this.#dropPendingAgentEdit(entry, 'bound_changed');
+      }
+      this.#applyMetaAgentEdit(target, targetKey, entry.patch, entry.fields, entry.actorId, verdict);
+      return true;
+    } catch {
+      try {
+        this.#dropPendingAgentEdit(entry, 'flush_failed');
+      } catch {
+        // Best-effort audit; the entry is already removed from the queue.
+      }
+      return false;
+    }
+  }
+
+  /**
+   * Drops one queued edit and audits it.
+   *
+   * @param entry - Pending edit record.
+   * @param reason - Machine-readable drop reason.
+   * @returns Always false (helper return shape).
+   * @internal
+   */
+  #dropPendingAgentEdit(entry: PendingAgentEdit, reason: string): false {
+    this.#emit({
+      type: 'agent_edit_dropped',
+      agentId: entry.targetId,
+      payload: { actorId: entry.actorId, targetId: entry.targetId, fields: entry.fields, reason }
+    });
+    return false;
+  }
+
   /**
    * Clears every registered authority descriptor. Called by the facade on
    * `reset()`/`destroy()` so stale descriptor references authorize nothing.
@@ -2591,6 +3601,7 @@ export class AgentLifecycleManager {
   clearAuthorityRegistry(): void {
     this.#authorityRegistry.clear();
     this.#authorityInputs.clear();
+    this.#pendingAgentEdits.clear();
   }
 
   /**
@@ -4558,6 +5569,14 @@ export class AgentLifecycleManager {
     const allowedTools = Array.isArray(agent.config?.allowedTools)
       ? [...agent.config.allowedTools]
       : (agent.config?.allowedTools === '*' ? ['*'] : []);
+    // M2: a holder's own authority ids are inspectable; scopes never surface.
+    const inputs = this.#authorityInputs.get(this.#agentIdentityKeyOf(agent)) || null;
+    const authorities: string[] = [];
+    if (inputs) {
+      for (let i = 0; i < inputs.authorities.length; i++) {
+        authorities[authorities.length] = inputs.authorities[i].id;
+      }
+    }
     return {
       success: true,
       agentId: agent.id,
@@ -4566,7 +5585,8 @@ export class AgentLifecycleManager {
       privileged: isPrivileged,
       workspace: agent.config?.workspaceId || agent.id,
       triggerPolicy: agent.config?.triggerPolicy || 'auto',
-      allowedTools
+      allowedTools,
+      authorities: Object.freeze(authorities)
     };
   }
 
@@ -4971,6 +5991,46 @@ export class AgentLifecycleManager {
       }
     }
 
+    // Authorized: the apply phase is the shared intrinsic writer (also used by
+    // the M2 parental/meta path), so the two surfaces can never diverge into
+    // parallel writers.
+    this.#applyConfigUpdate(agent, update, callerPrincipal, 'operator');
+    return agent;
+  }
+
+  /**
+   * Applies one authorized config update through the intrinsic entity
+   * channels (M2 refactor of `updateAgentConfig`'s apply phase): the
+   * non-authority merge and model/provider re-instantiation run through
+   * `Agent.prototype.updateConfig`, authority-bearing fields through
+   * `Agent.prototype.applyAuthorityConfig` + `#registerAgentAuthority`, the bus
+   * is re-registered on a privilege change, INV-CONFIG-SYNC synchronizes the
+   * system prompt in place, and `agent_config_updated` is emitted exactly
+   * once. Authorization stays with the caller of this method — it is private
+   * and only ever reached after a gate (operator lifecycle authority or the
+   * M2 parental/meta verdict).
+   *
+   * @param agent - Resolved active target record.
+   * @param update - Snapshot of the authorized update.
+   * @param principal - Authorizing principal (carried for call-site clarity; the intrinsic channel gates the write).
+   * @param tier - Authorizing tier label (carried for call-site clarity).
+   * @internal
+   */
+  #applyConfigUpdate(agent: Agent, update: ConfigUpdateSnapshot, principal: LifecyclePrincipal | null, tier: string): void {
+    // Signature parity with the ratified shared-apply shape; the intrinsic
+    // authority channel — not these labels — owns write authorization.
+    void principal;
+    void tier;
+
+    const rawTools = update.allowedTools !== undefined
+      ? update.allowedTools
+      : (update.tools !== undefined
+        ? update.tools
+        : (update.toolPreset !== undefined
+          ? update.toolPreset
+          : (update.tool_preset !== undefined ? update.tool_preset : undefined)));
+    const resolvedTools = rawTools !== undefined ? resolveToolPreset(rawTools) : undefined;
+
     // Delegate non-authority config updates & provider/model re-instantiation
     // to the Agent domain entity. The entity channel denies authority-bearing
     // fields outright (4eaf2cc), so this gated manager strips them here and
@@ -5032,9 +6092,9 @@ export class AgentLifecycleManager {
 
     // The frozen authority descriptor is rebuilt whenever the trusted capability
     // inputs change; a stale descriptor reference immediately loses authority.
-    // The `realmBypass` grant and the Wave U publishing-authority grants ride
-    // along unchanged — a capability update never grants or revokes scope or
-    // authority (Wave I, ticket c02d0b9; Wave U, ticket 2518510).
+    // The `realmBypass` grant and the authority grants ride along unchanged —
+    // a capability update never grants or revokes scope or authority (Wave I,
+    // ticket c02d0b9; Wave U, ticket 2518510; M1, ticket 3c6197f).
     if (update.privileged !== undefined || rawTools !== undefined) {
       const identityKey = this.#agentIdentityKeyOf(agent);
       this.#registerAgentAuthority(identityKey, agent.id, {
@@ -5081,7 +6141,5 @@ export class AgentLifecycleManager {
         updatedConfig: update
       }
     });
-
-    return agent;
   }
 }

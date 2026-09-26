@@ -313,10 +313,13 @@ function carriesInternalRealmVocabulary(value: unknown): boolean {
  * internal `realm:` vocabulary is withheld (`null`) so a bounded receipt field
  * can never disclose a realm identifier. Plain keys pass through unchanged.
  *
+ * Exported for the M2 meta-plane descriptors (`metaTools.ts`), which apply the
+ * same realm-opaque masking to their bounded receipts.
+ *
  * @param value - Raw workspace key, or `null`.
  * @returns The realm-opaque label, or `null` when the key is withheld.
  */
-function toAgentVisibleWorkspaceKey(value: string | null): string | null {
+export function toAgentVisibleWorkspaceKey(value: string | null): string | null {
   if (!value) return null;
   if (REALM_GLOBAL_WORKSPACE_PATTERN.test(value)) return 'global';
   if (REALM_WORKSPACE_VOCABULARY_PATTERN.test(value)) return null;
@@ -332,10 +335,13 @@ function toAgentVisibleWorkspaceKey(value: string | null): string | null {
  * withheld (`null`) because the system scope stays unaddressable. Plain ids
  * pass through unchanged.
  *
+ * Exported for the M2 meta-plane descriptors (`metaTools.ts`), which apply the
+ * same realm-opaque masking to their bounded receipts.
+ *
  * @param value - Raw agent reference, or `null`.
  * @returns The bare registered id, or `null` when the reference is withheld.
  */
-function toAgentVisibleAgentReference(value: unknown): string | null {
+export function toAgentVisibleAgentReference(value: unknown): string | null {
   if (typeof value !== 'string' || !value) return null;
   if (value.startsWith('realm:')) {
     const rest = value.slice('realm:'.length);

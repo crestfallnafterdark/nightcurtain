@@ -106,9 +106,10 @@ const LEGACY_EFFECTIVE_SORTED = Object.freeze({
 });
 
 /**
- * Canonical-order generated tier literals for the final Wave-1 state: the
- * pre-C parity literals plus the ratified deltas (every innate tool is
- * schema-visible per tier; manager gains `list_agents`/`wait_for_invocation`).
+ * Canonical-order generated tier literals for the final Wave-1 state plus the
+ * M2 delta: the pre-C parity literals plus the ratified deltas (every innate
+ * tool is schema-visible per tier; manager gains `list_agents`/
+ * `wait_for_invocation` in Wave 2 and `inspect_agent`/`update_agent` in M2).
  */
 const GENERATED_TIER_LITERALS = Object.freeze({
   all: Object.freeze(['*']),
@@ -134,15 +135,17 @@ const GENERATED_TIER_LITERALS = Object.freeze({
     'write_json', 'query_json', 'json_patch', 'grep', 'set_permissions', 'send_message',
     'wait_for_mail', 'list_inbox', 'read_message', 'get_archive', 'inline_file_in_message',
     'get_inbox', 'spawn_agent', 'kill_agent', 'list_agents', 'whoami', 'undo_turn',
+    'inspect_agent', 'update_agent',
     'invoke_agent', 'wait_for_invocation', 'wait_for_agent', 'schedule', 'list_schedules',
     'cancel_schedule', 'get_current_time', 'batch_precall', 'describe_tool'
   ])
 });
 
-/** Ratified deltas applied on top of the parity fixtures (commit C / Wave 2). */
+/** Ratified deltas applied on top of the parity fixtures (Wave 2 + M2). */
 const RATIFIED_DELTAS = Object.freeze({
   innate: Object.freeze(['describe_tool']),
-  manager: Object.freeze(['list_agents', 'wait_for_invocation', 'wait_for_agent'])
+  manager: Object.freeze(['list_agents', 'wait_for_invocation', 'wait_for_agent']),
+  m2Manager: Object.freeze(['inspect_agent', 'update_agent'])
 });
 
 /**
@@ -181,6 +184,7 @@ function expectedEffectiveSet(tier) {
   for (const tool of RATIFIED_DELTAS.innate) expected.add(tool);
   if (tier === 'manager') {
     for (const tool of RATIFIED_DELTAS.manager) expected.add(tool);
+    for (const tool of RATIFIED_DELTAS.m2Manager) expected.add(tool);
   }
   return [...expected].sort();
 }
@@ -267,7 +271,7 @@ test('T5 generated tiers equal the frozen effective sets plus the ratified delta
       assert.ok(
         LEGACY_EFFECTIVE_SORTED[tier].includes(tool)
         || RATIFIED_DELTAS.innate.includes(tool)
-        || (tier === 'manager' && RATIFIED_DELTAS.manager.includes(tool)),
+        || (tier === 'manager' && (RATIFIED_DELTAS.manager.includes(tool) || RATIFIED_DELTAS.m2Manager.includes(tool))),
         `'${tier}' must not gain unratified member '${tool}'`
       );
     }
@@ -288,7 +292,7 @@ test('T6 per-tier schema names match the frozen literals', () => {
   }
   const allNames = getSandboxToolsSchema('all').map((def) => def.function.name);
   assert.deepStrictEqual(allNames, CANONICAL_NAMES);
-  assert.strictEqual(allNames.length, 36);
+  assert.strictEqual(allNames.length, 38);
   const allNoReflection = getSandboxToolsSchema('all', { includeReflection: false }).map((def) => def.function.name);
   assert.deepStrictEqual(allNoReflection, CANONICAL_NAMES.filter((name) => name !== 'describe_tool'));
 });
@@ -393,10 +397,10 @@ test('T11 wait_for_agent is baked in the invocation family and manager-only', ()
     }
   }
   const manager = GENERATED_TIER_LITERALS.manager;
-  assert.ok(manager.includes('wait_for_agent'), 'the manager literal carries the 36th tool');
+  assert.ok(manager.includes('wait_for_agent'), 'the manager literal carries the agent-addressed wait');
   assert.ok(
     manager.indexOf('wait_for_agent') === manager.indexOf('wait_for_invocation') + 1,
     'wait_for_agent appends directly after its id-addressed sibling'
   );
-  assert.equal(READ_ONLY_TOOLS.includes('wait_for_agent'), true, 'the 36th tool is read-only');
+  assert.equal(READ_ONLY_TOOLS.includes('wait_for_agent'), true, 'wait_for_agent is read-only');
 });

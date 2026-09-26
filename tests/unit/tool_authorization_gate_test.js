@@ -1120,11 +1120,11 @@ test('38. a wildcard descriptor authorizes the parental surfaces; an anonymous c
     { lifecyclePort }
   );
   assert.equal((await wildcard.executeTool('inspect_agent', { target: 'kid' })).success, true);
-  assert.equal((await wildcard.executeTool('update_agent', { target: 'kid' })).success, true);
+  assert.equal((await wildcard.executeTool('update_agent', { target: 'kid', name: 'x' })).success, true);
 
   const anonymous = createSandboxToolDispatcher({ lifecyclePort, virtualFs: createVfsSpy() });
   for (const tool of ['inspect_agent', 'update_agent']) {
-    const receipt = await anonymous.executeTool(tool, { target: 'kid' });
+    const receipt = await anonymous.executeTool(tool, { target: 'kid', name: 'x' });
     assert.equal(receipt.code, TOOL_SYSTEM_ERROR_CODES.PERMISSION_DENIED, `an anonymous caller never reaches ${tool}`);
   }
 });

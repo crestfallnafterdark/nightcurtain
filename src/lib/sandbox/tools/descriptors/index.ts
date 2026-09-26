@@ -1,7 +1,7 @@
 /**
  * @packageDocumentation
  * Module `tools/descriptors`.
- * Master catalog aggregating all 36 canonical tool descriptors and the frozen
+ * Master catalog aggregating all 38 canonical tool descriptors and the frozen
  * `TOOL_REGISTRY` table, plus the separate authority meta-tool registry
  * (`AUTHORITY_TOOL_REGISTRY`: explicit-grant-only tools that are never part of
  * the canonical taxonomy and never wildcard-exposed; `PUBLISHING_TOOL_REGISTRY`
@@ -13,17 +13,18 @@
  *
  * @module tools/descriptors
  * @invariant Frozen catalog: every descriptor, schema, alias map, and descriptor array is `Object.freeze`d; `TOOL_REGISTRY` is built once from `ALL_TOOL_DESCRIPTORS` as a null-prototype lookup table and frozen, with no registration or mutation path.
- * @invariant Authority meta tools: `AUTHORITY_TOOL_REGISTRY` carries every explicit-grant-only authority tool (the Wave U publishing pair today; the meta-plane phases append theirs), each declaring the exact authority id (`@template:authority`/`@hydration:authority`/…) its invocation requires; they are not members of `ALL_TOOL_DESCRIPTORS`/`TOOL_REGISTRY`, their schemas are exposed only through `getAuthorityToolSchemas()` for callers holding the matching exact id (with `getAuthorityToolDescriptors()` as the describe-merge source), and the wildcard `'*'`/`privileged` never satisfy them.
+ * @invariant Authority meta tools: `AUTHORITY_TOOL_REGISTRY` carries every explicit-grant-only authority tool (the Wave U publishing pair today; the meta-plane phases append theirs), each declaring the exact authority id (`@template:authority`/`@hydration:authority`/…) its invocation requires; they are not members of `ALL_TOOL_DESCRIPTORS`/`TOOL_REGISTRY`, their schemas are exposed only through `getAuthorityToolSchemas()` for callers holding the matching exact id (with `getAuthorityToolDescriptors()` as the describe-merge source), and the wildcard `'*'`/`privileged` never satisfy them. The M2 `inspect_agent`/`update_agent` surfaces are the deliberate exception: they are **canonical** ordinary tools (manager preset) whose parental tier is inherent and whose meta tier is enforced registry-side by the lifecycle manager, so no `requiredAuthority` gate applies.
  * @invariant Fail-closed precalls: `batch_precall` denies any call whose name does not canonically resolve to a `PRECALL_ALLOWLIST` member, so unresolved or non-allowlisted names never reach the executor.
  * @decision Identity-only caller scope: invocation, lifecycle, and scheduler handlers forward only the dispatcher-bound subject id plus the identity-port principal; per-call caller identity, privilege flags, and role aliases are never read
  * @decision `invoke_agent` pins recursion depth from the trusted bound `currentDepth`, never from a per-call `depth` key
  * @decision VFS and messaging sanitizers strip caller-supplied identity and mailbox-routing keys from the fresh sanitized parameter copy
- * @decision Realm/authority meta tools stay outside the canonical taxonomy (36 names) so no wildcard, preset, or `toolProfile` selector can expose or authorize them; descriptors resolve exclusively through `AUTHORITY_TOOL_REGISTRY`, and the dispatcher consults the caller's frozen authority descriptor for the exact explicit authority
+ * @decision Realm/authority meta tools stay outside the canonical taxonomy (38 names) so no wildcard, preset, or `toolProfile` selector can expose or authorize them; descriptors resolve exclusively through `AUTHORITY_TOOL_REGISTRY`, and the dispatcher consults the caller's frozen authority descriptor for the exact explicit authority. `inspect_agent`/`update_agent` are ordinary canonical tools by design (M2): their schemas are preset-authorized, and the parental/meta verdict is enforced registry-side per target.
  */
 
 import { vfsToolDescriptors } from './vfsTools.ts';
 import { messagingToolDescriptors } from './messagingTools.ts';
 import { lifecycleToolDescriptors } from './lifecycleTools.ts';
+import { metaToolDescriptors } from './metaTools.ts';
 import { invocationToolDescriptors } from './invocationTools.ts';
 import { schedulerToolDescriptors } from './schedulerTools.ts';
 import { clockToolDescriptors } from './clockTools.ts';
@@ -113,6 +114,16 @@ export {
 } from './lifecycleTools.ts';
 
 export {
+  metaToolDescriptors,
+  inspectAgentDescriptor,
+  inspectAgent,
+  inspect_agent,
+  updateAgentDescriptor,
+  updateAgent,
+  update_agent
+} from './metaTools.ts';
+
+export {
   invocationToolDescriptors,
   invokeAgentDescriptor,
   invokeAgent,
@@ -181,12 +192,13 @@ export {
 export type { AuthorityToolDescriptor, PublishingToolDescriptor } from './realmTools.ts';
 
 /**
- * Array of all 36 Canonical Tool Descriptors
+ * Array of all 38 Canonical Tool Descriptors
  */
 export const ALL_TOOL_DESCRIPTORS: readonly ToolDescriptor[] = Object.freeze([
   ...vfsToolDescriptors,
   ...messagingToolDescriptors,
   ...lifecycleToolDescriptors,
+  ...metaToolDescriptors,
   ...invocationToolDescriptors,
   ...schedulerToolDescriptors,
   ...clockToolDescriptors,

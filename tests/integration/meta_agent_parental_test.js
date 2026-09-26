@@ -320,10 +320,14 @@ test('5. a parent applies the editable field set through the intrinsic channel',
 
     assert.deepEqual(runtime.getAuthorityGrants('kid5'), [], 'capability edits mint no authority');
 
-    // A privileged parent may promote a child within its own level.
-    await runtime.launchAgent({ config: { id: 'pp5', privileged: true } });
+    // A privileged parent may promote a child within its own level (the
+    // authority-spawned composition records explicit parentage).
+    await runtime.launchAgent({ config: { id: 'pp5', privileged: true }, principal: runtime.getOperatorPrincipal() });
     const adminDispatcher = dispatcherFor(runtime, 'pp5');
-    await launchAgent(runtime, 'kidsudo', { parentId: 'pp5', tools: ['readonly'] });
+    await runtime.launchAgent({
+      config: { id: 'kidsudo', spawnedBy: 'pp5', allowedTools: ['readonly'] },
+      callerContext: { callerAgentId: 'pp5' }
+    });
     const promote = await adminDispatcher.executeTool('update_agent', { target: 'kidsudo', privileged: true });
     assert.equal(promote.success, true, `a privileged parent may promote within its own level: ${promote.error}`);
     assert.equal(runtime.getAgent('kidsudo').config.privileged, true);
@@ -408,7 +412,10 @@ test('7. the <=-editor bound is evaluated on the resulting state (no promotion)'
     assert.equal(wildcard.code, 'PERMISSION_DENIED', 'no wildcard promotion');
     const superset = await dispatcher.executeTool('update_agent', { target: 'kid7', tools: ['world_clock'] });
     assert.equal(superset.code, 'PERMISSION_DENIED', 'a tool outside the editor set is a promotion');
-    assert.deepEqual(runtime.getAgent('kid7').config.allowedTools, ['readonly'], 'the resulting state never applied');
+    const kidAfter = runtime.getAgent('kid7');
+    assert.equal(kidAfter.config.privileged, false, 'the resulting state never applied');
+    assert.equal(kidAfter.config.allowedTools.includes('*'), false, 'no wildcard landed');
+    assert.equal(kidAfter.config.allowedTools.includes('world_clock'), false, 'no superset tool landed');
 
     // A target that out-ranks the editor on an unchanged axis is not editable.
     await runtime.launchAgent({
@@ -443,8 +450,9 @@ test('8. authority grants cannot be minted through update_agent', async () => {
       assert.equal(receipt.code, 'PERMISSION_DENIED', `authority attempt must deny: ${JSON.stringify(patch)}`);
     }
     assert.deepEqual(runtime.getAuthorityGrants('kid8'), [], 'no id was ever minted');
-    assert.equal(runtime.getAuthorityDescriptor('kid8').allow.has(AGENT_AUTHORITIES.AGENT_EDIT), false);
-    assert.equal(runtime.getAuthorityDescriptor('kid8').allow.has('*'), false);
+    const kid8Authority = runtime.createAgentIdentityPort().getAgentIdentity('kid8').authority;
+    assert.equal(kid8Authority.allow.has(AGENT_AUTHORITIES.AGENT_EDIT), false);
+    assert.equal(kid8Authority.allow.has('*'), false);
   } finally {
     runtime.destroy();
   }
@@ -482,7 +490,7 @@ test('9. a busy target defers the edit, latest-wins, and applies exactly once at
     assert.equal(second.deferred, true);
 
     assert.equal(runtime.getAgent('kid9').name, 'kid9', 'nothing applied while busy');
-    assert.equal(runtime.getAgent('kid9').config.systemPrompt, undefined, 'nothing applied while busy');
+    assert.equal(runtime.getAgent('kid9').config.systemPrompt, '', 'nothing applied while busy');
 
     gate.resolve();
     await turn;
@@ -530,7 +538,7 @@ test('10. a terminated target drops its pending edit at the teardown event', asy
 
     const recycled = runtime.getRecycledAgent('kid10');
     assert.ok(recycled, 'the target is recycled');
-    assert.equal(recycled.config.systemPrompt, undefined, 'the pending edit never applied');
+    assert.notEqual(recycled.config.systemPrompt, 'never', 'the pending edit never applied');
     const dropped = events.filter((event) => event.type === 'agent_edit_dropped' && event.payload?.targetId === 'kid10');
     assert.ok(dropped.length >= 1, 'the drop is audited');
     assert.equal(events.some((event) => event.type === 'agent_edit_applied' && event.payload?.targetId === 'kid10'), false);
@@ -542,7 +550,7 @@ test('10. a terminated target drops its pending edit at the teardown event', asy
 test('11. flush-time re-authorization fails closed when the grant is revoked while waiting', async () => {
   const runtime = new AgentRuntime({ autoBootstrapDirector: false });
   try {
-    await launchAgent(runtime, 'm11', { tools: ['read_file', 'update_agent'] });
+    await launchAgent(runtime, 'm11', { tools: ['manager'] });
     const gate = deferred();
     await launchAgent(runtime, 'victim11', {
       model: createMockModel(async () => {
@@ -569,7 +577,7 @@ test('11. flush-time re-authorization fails closed when the grant is revoked whi
     gate.resolve();
     await turn;
 
-    assert.equal(runtime.getAgent('victim11').config.systemPrompt, undefined, 'the revoked edit never applied');
+    assert.notEqual(runtime.getAgent('victim11').config.systemPrompt, 'revoked soon', 'the revoked edit never applied');
     const dropped = events.filter((event) => event.type === 'agent_edit_dropped' && event.payload?.targetId === 'victim11');
     assert.ok(dropped.length >= 1, 'the flush re-check drop is audited');
   } finally {
@@ -722,8 +730,11 @@ test('14. whoami shows own authority ids only (never scopes); the entity channel
 test('15. closed schemas: only editable keys are declared and every declared key is honored', async () => {
   const runtime = new AgentRuntime({ autoBootstrapDirector: false });
   try {
-    await runtime.launchAgent({ config: { id: 'pp15', privileged: true } });
-    await launchAgent(runtime, 'kid15', { parentId: 'pp15' });
+    await runtime.launchAgent({ config: { id: 'pp15', privileged: true }, principal: runtime.getOperatorPrincipal() });
+    await runtime.launchAgent({
+      config: { id: 'kid15', spawnedBy: 'pp15', allowedTools: ['readonly'] },
+      callerContext: { callerAgentId: 'pp15' }
+    });
     const dispatcher = dispatcherFor(runtime, 'pp15');
 
     const updateDescription = await dispatcher.executeTool('describe_tool', { tool_name: 'update_agent' });

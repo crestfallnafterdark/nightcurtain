@@ -25,7 +25,7 @@
  * @invariant Catalog subscription lifecycle (MOD-20): when a `ModelPresetSourcePort` is injected, the runtime subscribes exactly once after reaching READY; `reset()` unsubscribes and re-subscribes (the instance stays reusable), `destroy()` unsubscribes, and no path double-subscribes. The handler never rebuilds provider/model: `preset-updated` only marks every agent bound to that preset (active and recycled) dirty, and `preset-deleted` rewrites matching bindings to the catalog default and persists the rewrite, both materializing no earlier than the next turn start.
  * @decision `SubsystemEmitPort` is the frozen emit-only DI port handed to MOD-9/10/11/12 subsystem constructors; emit failures are swallowed and never propagate into subsystem execution
  * @decision `PersistencePort` is the frozen snapshot/import-only handoff from MOD-13 to MOD-6 via MOD-14; no mutation path beyond the declared import/restore calls
- * @decision `LifecyclePort` is the frozen facade-delegation port consumed by MOD-8 descriptors, including the `whoami`/`undoAgentTurn` additions
+ * @decision `LifecyclePort` is the frozen facade-delegation port consumed by MOD-8 descriptors, including the `whoami`/`undoAgentTurn` additions and the M2 parental/meta `inspectAgent`/`updateAgent` members (identity-only caller scope; the lifecycle manager owns the tier verdict)
  * @decision `AgentIdentityPort` is the frozen identity-resolution surface injected as `ToolExecutionPort.getAgentIdentity` for MOD-8/MOD-10; it carries the agent's frozen registry `AuthorityDescriptor`, built once at launch from trusted config, never caller claims, plus the canonical `(realmId, agentId)` identity `key` and the realm-exact/bypass resolution scopes
  * @decision Realm scope rides the same frozen projection: every projection carries `realmId` (owner-controlled `config.realmId`, `null` = the bootstrap-only system scope) and `realmBypass`. `realmBypass` is `true` iff the registry authority inputs carry the `realmBypass` grant — the engine bootstrap's hardcoded composition or an operator grant through the lifecycle grant API — and is never derived from an agent id; the operator/engine branch of the locked bypass rule is the opaque `InternalPrincipal`, which substrates check by exact reference (it has no agent id and never appears here), and agent authority — including the wildcard `'*'` — never bypasses without a grant
  * @invariant Invocation and await Realm gates: the invocation engine receives the identity-port realm resolver and the opaque internal principal, so `invokeAgent` denies cross-scope pairs fail-closed (bypass principals span Realms) and `waitForInvocation` authenticates the facade/port-supplied caller as the invocation's invoker, its target, or a bypass principal; the agent-facing lifecycle port marks every wait as caller-scoped, so an unauthenticated wait fails closed, while `AgentRuntime.waitForInvocation` without a caller context stays the composition-root/host path. The operator/store listing path (`listAgents`/persistence port without a scope) stays unscoped.
@@ -69,7 +69,7 @@ import { TriggerDispatcher, TRIGGER_TYPES } from './triggerDispatcher/index.ts';
 import { RuntimeTelemetryTracker } from './runtimeTelemetry/index.ts';
 import { ensureDirectorAgent } from '../domain/directorAgent/index.ts';
 import { AGENT_AUTHORITIES, AUTHORITY_IDS } from '../realmCatalog/index.ts';
-import type { AuthorityGrantRecord, AuthorityScopeRecord } from '../realmCatalog/index.ts';
+import type { AuthorityGrantRecord, AuthorityGrantSnapshotEntry, AuthorityScopeRecord } from '../realmCatalog/index.ts';
 
 import type { CredentialResolverPort } from '../credentialVault/index.ts';
 import type { ModelPresetSourcePort, PresetChangeEvent } from '../presetCatalog/index.ts';
@@ -864,6 +864,11 @@ export interface AgentIdentityDescriptor {
   spawnedBy: string | null;
   /** Epoch millisecond creation timestamp */
   createdAt: number;
+  /**
+   * Explicit authority ids granted to this registration (M2): own ids only,
+   * never scopes, never realm vocabulary.
+   */
+  authorities: readonly string[];
 }
 
 /**
@@ -1084,6 +1089,90 @@ export interface PersistencePort {
 }
 
 /**
+ * Host-side authority summary of one agent (M2 audit/receipt payload): the
+ * canonical baked tool list (`['*']` under wildcard capability), the privilege
+ * flag, the extension call names, and the held authority ids. Never carries
+ * scopes, realm ids, workspaces, or credentials.
+ */
+export interface AgentAuthoritySummary {
+  /** Effective baked tool names (canonical); `['*']` under wildcard capability. */
+  readonly baked: readonly string[];
+  /** Whether the agent's trusted effective state is privileged/wildcard. */
+  readonly privileged: boolean;
+  /** Effective extension call names (exact sanitized names). */
+  readonly extensions: readonly string[];
+  /** Held explicit authority ids (never scopes). */
+  readonly authorities: readonly string[];
+}
+
+/**
+ * Bounded host-side inspection projection of one target agent (M2
+ * `inspect_agent`). The descriptor handler masks the raw workspace label to
+ * its realm-opaque form before it reaches a model-facing receipt.
+ */
+export interface AgentInspectProjection {
+  /** Bare realm-local agent id. */
+  readonly id: string;
+  /** Display name. */
+  readonly name: string;
+  /** Role label. */
+  readonly role: string;
+  /** Lifecycle state. */
+  readonly state: string;
+  /** State detail when recorded. */
+  readonly stateDetail?: string | null;
+  /** Trusted effective privilege flag. */
+  readonly privileged: boolean;
+  /** Effective tool policy: canonical baked list plus extension call names. */
+  readonly tools: {
+    readonly baked: readonly string[];
+    readonly extensions: readonly string[];
+  };
+  /** Bounded model-config summary (catalog identifiers only; never URLs or credentials). */
+  readonly model: {
+    readonly presetId?: string;
+    readonly modelId?: string;
+    readonly providerId?: string;
+  };
+  /** Raw configured workspace label (the tool handler masks it realm-opaquely). */
+  readonly workspace: string | null;
+  /** Bare parent id; present only for the parent or a meta-scoped caller. */
+  readonly spawnedBy?: string | null;
+  /** Cumulative completed turn count. */
+  readonly turns: number;
+  /** Pending unread mailbox count. */
+  readonly unreadCount: number;
+  /** Epoch creation timestamp, or `null` when absent. */
+  readonly createdAt: number | null;
+  /** Own authority ids; present for self-inspection only. */
+  readonly authorities?: readonly string[];
+}
+
+/**
+ * Receipt returned by the M2 `update_agent` surface: which tier authorized the
+ * edit, whether it applied immediately or was deferred to the target's next
+ * safe state, and the before/after authority summaries.
+ */
+export interface AgentUpdateReceipt {
+  /** Always `true`; a denied or malformed edit throws (the tool boundary maps it to a failure receipt). */
+  readonly success: true;
+  /** Bare realm-local target id. */
+  readonly target: string;
+  /** Authorizing tier. */
+  readonly tier: 'parental' | 'meta';
+  /** Whether the edit applied during the call (false when deferred). */
+  readonly applied: boolean;
+  /** Whether the edit is queued for the target's next safe state. */
+  readonly deferred: boolean;
+  /** Ratified field tokens the patch touched. */
+  readonly fields: readonly string[];
+  /** Authority summary before the edit. */
+  readonly before: AgentAuthoritySummary;
+  /** Authority summary after an applied edit; `null` when deferred. */
+  readonly after: AgentAuthoritySummary | null;
+}
+
+/**
  * Canonical frozen lifecycle port consumed by tool descriptors.
  */
 export interface LifecyclePort {
@@ -1175,6 +1264,21 @@ export interface LifecyclePort {
     /** Registry-resolved caller identity; authority still comes from that agent's frozen descriptor. */
     callerAgentId?: string;
   }): AgentDescriptor[];
+  /**
+   * Inspects one target agent under the M2 parental/meta tiers: the caller
+   * must be the target's registered direct parent (same realm) or hold the
+   * exact scoped `@agent:inspect` grant, or be the target itself. Denials are
+   * uniform and realm-opaque.
+   */
+  inspectAgent(targetRef: string, callerContext?: object | null): AgentInspectProjection;
+  /**
+   * Updates one target agent's editable settings under the M2 parental/meta
+   * tiers: the caller must be the target's registered direct parent (same
+   * realm) or hold the exact scoped `@agent:edit` grant, the resulting state
+   * must not out-rank the caller, and operator-only keys are rejected. A busy
+   * target defers the edit to its next `turn_complete`.
+   */
+  updateAgent(targetRef: string, patch: object, callerContext?: object | null): AgentUpdateReceipt;
   /** Restores a recycled agent via `AgentRuntime.restoreAgent`, forwarding the caller context unchanged. */
   restoreAgent(agentId: string, callerContext?: object | null): Agent;
   /** Identity and permission descriptor for the given agent (mirrors `AgentRuntime.whoami`). */
@@ -2470,28 +2574,50 @@ export class AgentRuntime {
   }
 
   /**
-   * Restores persisted authority grants after snapshot hydration (M1).
+   * Lists the exportable authority-grant entries of active agents (M2) with
+   * their registry-side scopes: an unscoped grant stays a bare canonical
+   * identity-key string (the legacy keys-only form), a scoped grant becomes a
+   * frozen `{ ref, scope }` record. The composition root persists this listing
+   * into the additive `authorityGrants` snapshot field, so a narrowed grant
+   * survives save/hydrate restart instead of silently restoring unscoped (M1
+   * finding F3).
+   *
+   * Host-only: scopes never reach a descriptor, an identity projection, a
+   * model-facing schema, a receipt, or an audit payload.
+   *
+   * @returns Frozen export entries per authority id.
+   */
+  listAuthorityGrantRecords(): Record<string, readonly AuthorityGrantSnapshotEntry[]> {
+    return this.#lifecycleManager.listAuthorityGrantRecords();
+  }
+
+  /**
+   * Restores persisted authority grants after snapshot hydration (M1; scoped
+   * entries M2).
    *
    * Engine-only path: the caller must present the exact injected
-   * `InternalPrincipal` reference. Each ref is granted through the generic
+   * `InternalPrincipal` reference. Each entry is granted through the generic
    * grant core under the operator principal; unknown authority ids are
-   * skipped, and ids that are unknown, recycled, or ambiguous resolve no
-   * registration and are skipped (fail-closed), so a tampered snapshot id can
-   * never mint a grant.
+   * skipped, ids that are unknown, recycled, or ambiguous resolve no
+   * registration and are skipped (fail-closed), and a malformed scope drops
+   * only its own entry, so a tampered snapshot can never mint or widen a
+   * grant.
    *
-   * Entries are canonical `(realmId, agentId)` identity keys as emitted by
-   * {@link listAuthorityGrants}, resolving each key to its exact registration.
-   * Legacy snapshots that persisted bare ids still hydrate through the
-   * unique-match rule; an ambiguous bare id resolves no registration and is
-   * skipped, so a legacy grant is never duplicated across two Realms.
+   * Entries are either canonical `(realmId, agentId)` identity-key strings
+   * (the legacy keys-only form, restored unscoped) or `{ ref, scope? }`
+   * records carrying the registry-side narrowing, as emitted by
+   * {@link listAuthorityGrantRecords}. Legacy snapshots that persisted bare ids
+   * still hydrate through the unique-match rule; an ambiguous bare id resolves
+   * no registration and is skipped, so a legacy grant is never duplicated
+   * across two Realms.
    *
-   * @param grants - Persisted granted refs per authority id.
+   * @param grants - Persisted entries per authority id.
    * @param callerContext - Trusted caller context carrying `{ principal }`.
    * @returns The refs that were granted per authority id (active agents only; ids with no restored ref omitted).
    * @throws `Error` - With code `'PERMISSION_DENIED'` for non-operator callers.
    */
   restoreAuthorityGrants(
-    grants: Record<string, readonly string[]> | null | undefined,
+    grants: Record<string, readonly AuthorityGrantSnapshotEntry[]> | null | undefined,
     callerContext: { principal?: InternalPrincipal | AuthorityDescriptor } | null = null
   ): Record<string, string[]> {
     this.#assertNotDestroyed();
@@ -2507,17 +2633,34 @@ export class AgentRuntime {
     const authorityIds = Object.keys(grants);
     for (const authorityId of authorityIds) {
       if (!AUTHORITY_ID_SET.has(authorityId)) continue;
-      const refs = grants[authorityId];
-      if (!Array.isArray(refs)) continue;
+      const entries = grants[authorityId];
+      if (!Array.isArray(entries)) continue;
       const granted: string[] = [];
-      for (const ref of refs) {
-        if (typeof ref !== 'string' || !ref) continue;
-        const descriptor = this.#lifecycleManager.grantAuthority(
-          ref,
-          authorityId,
-          null,
-          { principal: this.#internalPrincipal }
-        );
+      for (const entry of entries) {
+        let ref: string | null = null;
+        let scope: AuthorityScopeRecord | null = null;
+        if (typeof entry === 'string') {
+          ref = entry;
+        } else if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
+          const record = entry as { ref?: unknown; scope?: unknown };
+          if (typeof record.ref === 'string' && record.ref) {
+            ref = record.ref;
+            scope = (record.scope ?? null) as AuthorityScopeRecord | null;
+          }
+        }
+        if (!ref) continue;
+        let descriptor: AuthorityDescriptor | null = null;
+        try {
+          descriptor = this.#lifecycleManager.grantAuthority(
+            ref,
+            authorityId,
+            scope,
+            { principal: this.#internalPrincipal }
+          );
+        } catch {
+          // Fail closed per entry: a malformed scope or unresolvable ref never
+          // aborts the remaining restore, and never grants unscoped.
+        }
         if (descriptor) granted.push(ref);
       }
       if (granted.length > 0) restored[authorityId] = granted;
@@ -3010,6 +3153,41 @@ export class AgentRuntime {
   }
 
   /**
+   * Inspects one target agent under the M2 parental/meta tiers (facade
+   * pass-through to the lifecycle manager). The caller context carries the
+   * identity-only caller scope; the manager resolves the caller descriptor,
+   * the target, and the tier verdict registry-side and never reads authority
+   * claims. Every unauthorized target shares one uniform, realm-opaque
+   * `PERMISSION_DENIED`.
+   *
+   * @param targetRef - Bare realm-local target id (or canonical identity key).
+   * @param callerContext - Identity-only caller scope (`{ callerAgentId, callerKey }`).
+   * @returns The bounded inspection projection.
+   * @throws `Error` - Code `'PERMISSION_DENIED'` for every unauthorized target.
+   */
+  inspectAgent(targetRef: string, callerContext?: object | null): AgentInspectProjection {
+    this.#assertNotDestroyed();
+    return this.#lifecycleManager.inspectAgent(targetRef, callerContext ?? null);
+  }
+
+  /**
+   * Updates one target agent's editable settings under the M2 parental/meta
+   * tiers (facade pass-through to the lifecycle manager). A busy target is
+   * deferred to its next safe state; a sanctioned flush applies the edit
+   * exactly once through the same intrinsic channel as `updateAgentConfig`.
+   *
+   * @param targetRef - Bare realm-local target id (or canonical identity key).
+   * @param patch - Editable patch (tools selector, privilege, policy, prompt, maxTurns, name).
+   * @param callerContext - Identity-only caller scope (`{ callerAgentId, callerKey }`).
+   * @returns The applied/deferred receipt with before/after summaries.
+   * @throws `Error` - Code `'PERMISSION_DENIED'`/`'INVALID_ARGUMENTS'` for denied or malformed edits.
+   */
+  updateAgent(targetRef: string, patch: object, callerContext?: object | null): AgentUpdateReceipt {
+    this.#assertNotDestroyed();
+    return this.#lifecycleManager.updateAgent(targetRef, patch, callerContext ?? null);
+  }
+
+  /**
    * Introspects the identity, permissions, and status of an agent.
    */
   whoami(agentId: string): AgentIdentityDescriptor {
@@ -3026,6 +3204,11 @@ export class AgentRuntime {
       : (Array.isArray(agent.config?.tools)
         ? [...agent.config.tools]
         : (agent.config?.allowedTools === '*' || agent.config?.tools === '*' ? ['*'] : []));
+    // M2: the queried registration's own authority ids (never scopes); the
+    // agent-facing path only ever queries the bound caller.
+    const grants = this.#lifecycleManager.getAuthorityGrants(agent.id);
+    const authorities: string[] = [];
+    for (let i = 0; i < grants.length; i++) authorities[authorities.length] = grants[i].id;
 
     return {
       id: agent.id,
@@ -3036,7 +3219,8 @@ export class AgentRuntime {
       allowedTools,
       state: agent.state || 'idle',
       spawnedBy: agent.config?.spawnedBy || agent.config?.creatorId || agent.spawnedBy || null,
-      createdAt: agent.createdAt || Date.now()
+      createdAt: agent.createdAt || Date.now(),
+      authorities
     };
   }
 
@@ -3931,6 +4115,15 @@ export class AgentRuntime {
     const agentId = typeof event.agentId === 'string' && event.agentId ? event.agentId : null;
     if (!agentId) return;
     if (event.type === 'turn_complete') {
+      // M2 safe-state flush (parental/meta deferred edits): the target just
+      // settled, so its queued edit applies exactly once here — before the
+      // watcher early-return, and exception-shielded so a queue fault can
+      // never break event delivery.
+      try {
+        this.#lifecycleManager.flushPendingAgentEdits(agentId);
+      } catch {
+        // The manager shields its own flush; this guard keeps emission total.
+      }
       if (this.#agentCompletionWatchers.size === 0) return;
       const targetAgent = this.#resolveActiveAgentByIdentity(agentId);
       if (!targetAgent) return;
@@ -3955,6 +4148,12 @@ export class AgentRuntime {
       return;
     }
     if (event.type === 'agent_killed' || event.type === 'agent_purged' || event.type === 'agent_recycled') {
+      // M2 safe state: a terminated target never receives a deferred edit.
+      try {
+        this.#lifecycleManager.dropPendingAgentEdits(agentId);
+      } catch {
+        // Exception-shielded: teardown routing must stay total.
+      }
       this.#dropAgentCompletionWatchers(agentId);
     }
   }
@@ -4443,6 +4642,13 @@ export class AgentRuntime {
       // visibility from the registry descriptor, never from caller claims.
       listAgentDescriptors: (options: { principal?: InternalPrincipal | AuthorityDescriptor; callerAgentId?: string } = {}) =>
         this.#lifecycleManager.listAgentDescriptors(options),
+      // M2 parental/meta surface: the identity-only caller scope is forwarded
+      // unchanged; the lifecycle manager resolves the caller, the target, and
+      // the tier verdict registry-side and never reads caller authority claims.
+      inspectAgent: (targetRef: string, callerContext?: object | null) =>
+        this.#lifecycleManager.inspectAgent(targetRef, callerContext ?? null),
+      updateAgent: (targetRef: string, patch: object, callerContext?: object | null) =>
+        this.#lifecycleManager.updateAgent(targetRef, patch, callerContext ?? null),
       restoreAgent: (agentId: string, callerContext: (CallerContext & { principal?: InternalPrincipal | AuthorityDescriptor }) | null = null) => this.restoreAgent(agentId, callerContext),
       whoami: (agentId: string) => this.whoami(agentId),
       undoAgentTurn: (agentId: string, targetTurnId: string | null = null) => this.#historyManager.undoAgentTurn(agentId, targetTurnId)

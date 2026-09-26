@@ -449,6 +449,27 @@ export const TOOL_ALIAS_MAP: Readonly<Record<string, string>> = Object.freeze({
   'rollback_turn': SANDBOX_TOOLS.UNDO_TURN,
   'rollbackTurn': SANDBOX_TOOLS.UNDO_TURN,
 
+  // inspect_agent (M2 parental/meta surface)
+  'inspect_agent': SANDBOX_TOOLS.INSPECT_AGENT,
+  'inspectAgent': SANDBOX_TOOLS.INSPECT_AGENT,
+  'runtime_inspectAgent': SANDBOX_TOOLS.INSPECT_AGENT,
+  'runtime.inspectAgent': SANDBOX_TOOLS.INSPECT_AGENT,
+  'runtimeInspectAgent': SANDBOX_TOOLS.INSPECT_AGENT,
+  'agent_inspect': SANDBOX_TOOLS.INSPECT_AGENT,
+  'inspect_child': SANDBOX_TOOLS.INSPECT_AGENT,
+  'inspectChild': SANDBOX_TOOLS.INSPECT_AGENT,
+
+  // update_agent (M2 parental/meta surface)
+  'update_agent': SANDBOX_TOOLS.UPDATE_AGENT,
+  'updateAgent': SANDBOX_TOOLS.UPDATE_AGENT,
+  'runtime_updateAgent': SANDBOX_TOOLS.UPDATE_AGENT,
+  'runtime.updateAgent': SANDBOX_TOOLS.UPDATE_AGENT,
+  'runtimeUpdateAgent': SANDBOX_TOOLS.UPDATE_AGENT,
+  'configure_agent': SANDBOX_TOOLS.UPDATE_AGENT,
+  'configureAgent': SANDBOX_TOOLS.UPDATE_AGENT,
+  'edit_agent': SANDBOX_TOOLS.UPDATE_AGENT,
+  'editAgent': SANDBOX_TOOLS.UPDATE_AGENT,
+
   // --- Synchronous Invocation Primitives ---
 
   // invoke_agent

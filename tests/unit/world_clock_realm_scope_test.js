@@ -140,7 +140,7 @@ function makeRealmClock(recording) {
 
 test('1. Mutation-capability vocabulary partitions every canonical tool exactly once', () => {
   const canonical = Object.values(SANDBOX_TOOLS);
-  assert.equal(canonical.length, 36, 'the canonical taxonomy is 36 tools');
+  assert.equal(canonical.length, 38, 'the canonical taxonomy is 38 tools');
 
   assert.ok(Array.isArray(MUTATING_TOOLS));
   assert.ok(Array.isArray(READ_ONLY_TOOLS));
@@ -148,8 +148,8 @@ test('1. Mutation-capability vocabulary partitions every canonical tool exactly 
   assert.ok(Object.isFrozen(READ_ONLY_TOOLS), 'READ_ONLY_TOOLS must be frozen');
 
   const union = [...MUTATING_TOOLS, ...READ_ONLY_TOOLS];
-  assert.equal(union.length, 36, 'read-only + mutating covers all 36 canonical tools');
-  assert.equal(new Set(union).size, 36, 'the classification is disjoint');
+  assert.equal(union.length, 38, 'read-only + mutating covers all 38 canonical tools');
+  assert.equal(new Set(union).size, 38, 'the classification is disjoint');
   assert.deepEqual([...union].sort(), [...canonical].sort(), 'the classification uses only canonical tool names');
 
   for (const tool of union) {

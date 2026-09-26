@@ -400,8 +400,8 @@ test('5. publishing tools stay outside the canonical taxonomy and never wildcard
     Object.keys(PUBLISHING_TOOL_REGISTRY).sort(),
     [PUBLISHING_TOOLS.IMPORT_REALM_TEMPLATE, PUBLISHING_TOOLS.SUBMIT_HYDRATION_PACKAGE]
   );
-  assert.equal(ALL_TOOL_DESCRIPTORS.length, 36, 'the canonical taxonomy stays 36 descriptors');
-  assert.equal(Object.keys(TOOL_REGISTRY).length, 36, 'the canonical registry stays 36 entries');
+  assert.equal(ALL_TOOL_DESCRIPTORS.length, 38, 'the canonical taxonomy stays 38 descriptors');
+  assert.equal(Object.keys(TOOL_REGISTRY).length, 38, 'the canonical registry stays 38 entries');
   assert.equal(TOOL_REGISTRY[PUBLISHING_TOOLS.IMPORT_REALM_TEMPLATE], undefined);
   assert.equal(TOOL_REGISTRY[PUBLISHING_TOOLS.SUBMIT_HYDRATION_PACKAGE], undefined);
 
@@ -1934,14 +1934,18 @@ test('29. [M1] snapshots partition publishing grants (legacy field) from the res
   const genesisKey = `realm:${launched.realm.id}:${genesis.id}`;
   const mixed = store.serialize();
   assert.deepEqual(mixed.metaAuthorityGrants, { template: [canonical] });
-  assert.deepEqual(mixed.authorityGrants, { [AGENT_AUTHORITIES.AGENT_INSPECT]: [genesisKey] });
+  assert.deepEqual(mixed.authorityGrants, {
+    [AGENT_AUTHORITIES.AGENT_INSPECT]: [{ ref: genesisKey, scope: { realmMembers: true } }]
+  });
   assert.equal(validateSandboxState(mixed).valid, true);
 
   // Generic-only session.
   await store.revokeTemplateAuthority(canonical);
   const genericOnly = store.serialize();
   assert.equal('metaAuthorityGrants' in genericOnly, false);
-  assert.deepEqual(genericOnly.authorityGrants, { [AGENT_AUTHORITIES.AGENT_INSPECT]: [genesisKey] });
+  assert.deepEqual(genericOnly.authorityGrants, {
+    [AGENT_AUTHORITIES.AGENT_INSPECT]: [{ ref: genesisKey, scope: { realmMembers: true } }]
+  });
 
   // Hydration restores both partitions into one generic listing.
   assert.equal(store.saveToStorage(), true);

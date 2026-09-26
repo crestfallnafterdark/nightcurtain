@@ -13,6 +13,7 @@
  * @mayImport ../../inference/index.ts
  * @mayImport type-only ../../inference/ProviderInterface/index.ts
  * @mayImport ../../modelConfig/index.ts
+ * @mayImport ../../realmCatalog/index.ts
  * @mayImport type-only ../../credentialVault/index.ts
  * @mayImport type-only ../../presetCatalog/index.ts
  * @mayImport type-only ../index.ts
@@ -45,6 +46,7 @@
 
 import { createProvider } from '../../inference/index.ts';
 import { getDefaultModelConfig } from '../../modelConfig/index.ts';
+import { AUTHORITY_IDS } from '../../realmCatalog/index.ts';
 
 import type { AgentModelConfig, ProviderInterface, ModelInterface } from '../../inference/ProviderInterface/index.ts';
 import type { CredentialResolverPort } from '../../credentialVault/index.ts';
@@ -1031,6 +1033,11 @@ export interface AgentIdentityDescriptor {
   readonly triggerPolicy: TriggerPolicy;
   /** Allowed tool names */
   readonly allowedTools: string[];
+  /**
+   * Explicit authority ids granted to this agent (own ids only, M2). Scopes
+   * are registry-side and deliberately never surface here.
+   */
+  readonly authorities: readonly string[];
 }
 
 /**
@@ -1161,7 +1168,12 @@ const AUTHORITY_BEARING_UPDATE_FIELDS = Object.freeze([
   'spawnedBy',
   'creatorId',
   'realmId',
-  'realmBypass'
+  'realmBypass',
+  // M1 finding F4: the inert generic authority-grant key and every exact
+  // authority id are deny-listed for parity with the lifecycle gate, so a
+  // direct entity write can never plant authority-shaped config data.
+  'authorities',
+  ...AUTHORITY_IDS
 ]);
 
 /**

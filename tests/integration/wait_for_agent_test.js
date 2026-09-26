@@ -2,9 +2,9 @@
  * @file tests/integration/wait_for_agent_test.js
  * @description Wave 2 completion pipe (tickets 3b70d8d, 17b5c47): the manager
  * tier exposes the child observation/await surface without wildcard tools,
- * `invoke_agent` stops advertising an await, and the 36th canonical tool
+ * `invoke_agent` stops advertising an await, and the canonical tool
  * `wait_for_agent` delivers agent-addressed completion:
- *   1. surface: 36th tool registered, invocation family, manager-only, manager
+ *   1. surface: the tool registered, invocation family, manager-only, manager
  *      schema carries `list_agents`/`wait_for_invocation`/`wait_for_agent`
  *      without `'*'`;
  *   2. description truth: `invoke_agent` returns an invocation id immediately
@@ -149,13 +149,13 @@ function completionWakeCount(runtime, agentId) {
 }
 
 // ============================================================================
-// 1. Surface: the 36th canonical tool and the manager grants
+// 1. Surface: the canonical tool and the manager grants
 // ============================================================================
 
-test('1. wait_for_agent is the 36th canonical tool, invocation family, manager-only', () => {
+test('1. wait_for_agent is a canonical invocation tool, manager-only', () => {
   assert.equal(SANDBOX_TOOLS.WAIT_FOR_AGENT, 'wait_for_agent');
-  assert.equal(Object.keys(SANDBOX_TOOLS).length, 36, 'the canonical taxonomy is 36 tools');
-  assert.equal(ALL_TOOL_DESCRIPTORS.length, 36, 'the descriptor catalog carries all 36 tools');
+  assert.equal(Object.keys(SANDBOX_TOOLS).length, 38, 'the canonical taxonomy is 38 tools');
+  assert.equal(ALL_TOOL_DESCRIPTORS.length, 38, 'the descriptor catalog carries all 38 tools');
   assert.ok(TOOL_REGISTRY.wait_for_agent, 'the frozen registry resolves wait_for_agent');
   assert.equal(TOOL_FAMILIES.wait_for_agent, 'invocation', 'wait_for_agent is an invocation tool');
   assert.ok(READ_ONLY_TOOLS.includes('wait_for_agent'), 'wait_for_agent is read-only');
@@ -178,7 +178,7 @@ test('1. wait_for_agent is the 36th canonical tool, invocation family, manager-o
   for (const name of ['list_agents', 'wait_for_invocation', 'wait_for_agent']) {
     assert.ok(managerSchemaNames.includes(name), `the manager schema exposes '${name}'`);
   }
-  assert.equal(getSandboxToolsSchema('all').length, 36, 'the wildcard surface exposes 36 schemas');
+  assert.equal(getSandboxToolsSchema('all').length, 38, 'the wildcard surface exposes 38 schemas');
 });
 
 test('2. invoke_agent stops advertising an await and points at the wait primitive', () => {

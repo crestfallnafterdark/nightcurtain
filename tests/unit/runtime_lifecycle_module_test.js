@@ -3076,6 +3076,8 @@ test('26. [M2] updateAgent defers on a busy target, latest-wins, flush applies o
   assert.strictEqual(second.deferred, true);
   assert.strictEqual(lifecycle.getAgent('m2-kid').name, 'Immediate', 'nothing applied while busy');
 
+  assert.strictEqual(lifecycle.flushPendingAgentEdits('m2-kid'), 0, 'a busy state re-queues instead of applying mid-turn');
+  lifecycle.transitionAgentState('m2-kid', AGENT_STATES.IDLE, 'turn complete', { principal: TEST_PRINCIPAL });
   assert.strictEqual(lifecycle.flushPendingAgentEdits('m2-kid'), 1, 'exactly one pending edit was flushed');
   assert.strictEqual(lifecycle.getAgent('m2-kid').name, 'Immediate', 'latest-wins replaced the first patch');
   assert.strictEqual(lifecycle.getAgent('m2-kid').config.systemPrompt, 'Second wins');
