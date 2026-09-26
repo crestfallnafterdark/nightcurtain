@@ -19,7 +19,7 @@ graph TD
     end
 
     subgraph L2["Tier 2: Zero-Mock Subsystem Integration (node --test)"]
-        INT["48 Integration Suites (tests/integration/)<br/>• Real VirtualFS, MessagingBus, WorldClock, AgentRuntime<br/>• Preset Binding & Credential Vault Workflows<br/>• Precall Pipeline & Tool Security Gating Verification<br/>• Concurrency & State Persistence Fault Injection"]
+        INT["49 Integration Suites (tests/integration/)<br/>• Real VirtualFS, MessagingBus, WorldClock, AgentRuntime<br/>• Preset Binding & Credential Vault Workflows<br/>• Precall Pipeline & Tool Security Gating Verification<br/>• Concurrency & State Persistence Fault Injection"]
     end
 
     subgraph L1["Tier 1: Atomic Unit & Contract Testing (node --test)"]
@@ -101,7 +101,7 @@ The master runner executes all Unit and Integration suites in strict sub-process
 // Sample output format from tests/runner.js:
 // ======================================================================
 //   AGENTIC SANDBOX STUDIO MASTER TEST SUITE RUNNER
-//   Total Suites: 103 (55 Unit, 48 Integration)
+//   Total Suites: 104 (55 Unit, 49 Integration)
 // ======================================================================
 //   [Unit       ] deepseek_provider_test.js                  ✔ PASS (42ms)
 //   [Unit       ] deepseek_reasoning_hygiene_test.js         ✔ PASS (18ms)
@@ -109,7 +109,7 @@ The master runner executes all Unit and Integration suites in strict sub-process
 //   [Integration] tool_contract_security_gating_test.js      ✔ PASS (115ms)
 //   [Integration] mail_injection_precall_pipeline_test.js    ✔ PASS (188ms)
 // ======================================================================
-//   Suites:       103 passed, 103 total
+//   Suites:       104 passed, 104 total
 //   Failed:       0 failed
 //   Duration:     3.42s
 // ======================================================================
@@ -126,7 +126,7 @@ All Node-based test suites import [`tests/test_env.js`](../../tests/test_env.js)
 
 ## 4. Test Suite Inventory & Classification
 
-The project includes **103 native test suites** (55 unit, 48 integration) and **8 browser E2E specs**:
+The project includes **104 native test suites** (55 unit, 49 integration) and **8 browser E2E specs**:
 
 > **Canonical inventory.** This chapter is the single source of truth for test-suite counts and per-file listings; [`unit_and_integration.md`](unit_and_integration.md) cross-links here instead of duplicating it.
 
@@ -199,6 +199,7 @@ The project includes **103 native test suites** (55 unit, 48 integration) and **
 | [`director_scope_isolation_test.js`](../../tests/integration/director_scope_isolation_test.js) | `AgentRuntime` + `AgentLifecycleManager` + `MessagingBus` + `InvocationEngine` | Director system-scope isolation: never listed/addressed to agents (exact ids), one-way bypass delivery with true sender, reserved-id minting denied, system scope distinct from ungrouped. |
 | [`event_stream_message_trace_test.js`](../../tests/integration/event_stream_message_trace_test.js) | `runtime/messageHygiene/*` + `AgentRuntime` + `SandboxStore` | SSE/message trace ordering, history hygiene, compaction. |
 | [`extension_connect_test.js`](../../tests/integration/extension_connect_test.js) | `SandboxStore` + `extensionRegistry` + `mcpClient` + `node:http` fixture | Operator-initiated connection lifecycle on the real stack: gate ordering (kind/stdio/absolute URL/approved-URL boundary/plaintext credential/vault miss) with zero sockets, discovery → catalog indexing with derived call names, conflict arbitration by connection sequence + attachment-status sync, reconnect drift audit, teardown. |
+| [`extension_execution_test.js`](../../tests/integration/extension_execution_test.js) | `SandboxStore` + `toolDefinitions` + `AgentRuntime` + `TurnExecutionEngine` + `mcpClient` + `node:http` fixture | The gate-flip end-to-end: a scripted-model turn on an exact-granted agent calls a real extension tool and lands the receipt in history; ungranted/conflicted/disconnected denial with zero fixture traffic; schema exposure equals the grant set; merged `describe_tool`; `batch_precall` frozen; timeout/abort/JSON-RPC → redacted receipts; no secret/base64 in history, receipts, or snapshots. |
 | [`interrupted_turn_resend_test.js`](../../tests/integration/interrupted_turn_resend_test.js) | `AgentRuntime` + `SandboxStore` | Interrupted turn undo/resend, duplicate prevention, persistence round-trip. |
 | [`invocation_engine_test.js`](../../tests/integration/invocation_engine_test.js) | `InvocationEngine` + `MessagingBus` | Standalone invocation, secondary stream isolation, zero mail pollution. |
 | [`lifecycle_workspace_eviction_test.js`](../../tests/integration/lifecycle_workspace_eviction_test.js) | `AgentRuntime` + `AgentLifecycleManager` + `VirtualFS` | Destructive kill/purge evict the resolved workspace key (`config.workspaceId \|\| agentId`), never peers/global/raw-id workspaces. |
@@ -274,8 +275,8 @@ sequenceDiagram
     G1-->>Dev: Gate 1 Passed (0 lint / sync errors)
 
     Dev->>G2: npm test (tests/runner.js)
-    Note over G2: Executes 103 suites (55 Unit, 48 Integration) under 120s timeout
-    G2-->>Dev: Gate 2 Passed (103/103 passed, 0 failures)
+    Note over G2: Executes 104 suites (55 Unit, 49 Integration) under 120s timeout
+    G2-->>Dev: Gate 2 Passed (104/104 passed, 0 failures)
 
     Dev->>G3: npm run build (vite build)
     Note over G3: Compiles Svelte 5 runes, WASM modules, top-level awaits
