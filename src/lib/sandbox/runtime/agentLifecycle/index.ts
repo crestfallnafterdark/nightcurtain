@@ -45,6 +45,7 @@
  * @decision `updateAgentConfig` rejects authority-bearing fields (`privileged`, `isAdmin`/`isPrivileged`, `admin`/`system` roles, the parentage fields `spawnedBy`/`creatorId`, the Realm membership field `realmId`, and capability selectors whose resolved allow set carries the wildcard `'*'` or `@lifecycle:authority` — `allowedTools`/`tools`/`toolPreset`/`role` aliases included) with `PERMISSION_DENIED` unless the caller principal holds `@lifecycle:authority`; authority edits are operator-API-only. Realm membership is strictly immutable: any `realmId` key is denied for every caller before the authority verdict — the injected `InternalPrincipal` included — so membership changes only by terminate + relaunch into the target realm. The `realmBypass` key is likewise denied for every caller before the authority verdict; grants are applied only through the engine bootstrap or the operator grant/revoke API
  * @decision `realmBypass` is a revocable operator/engine grant recorded in the frozen registry authority inputs (`AuthorityInputRecord.realmBypass`) and rebuilt into the `AuthorityDescriptor`; `grantRealmBypass`/`revokeRealmBypass` accept only the exact injected `InternalPrincipal` reference and only active agents, emit an audit event, and never move Realm membership or touch the capability axis. Killing/purging drops the grant with the authority inputs, so a recycled record carries no grant; hydration restores grants only through the composition root's `restoreRealmBypassGrants`
  * @invariant INV-META-AUTHORITY: the explicit authorities (the publishing pair `@template:authority`/`@hydration:authority` and the meta-plane ids of `AUTHORITY_IDS`) are revocable operator/engine grants recorded in the frozen registry authority inputs (`AuthorityInputRecord.authorities`, one frozen `{id, scope?}` record per grant) and rebuilt into the `AuthorityDescriptor` allow set as the exact ids. One grant core (`#setAuthority`) serves every id: it accepts only the exact injected `InternalPrincipal` reference and only active agents, validates the id against `AUTHORITY_IDS` and the registry-side scope against the id-class vocabulary, rebuilds descriptor + inputs atomically, and never touches the capability selector axis or Realm membership. Audit keeps the legacy event names for the publishing pair (`template_authority_granted`/`revoked`, `hydration_authority_granted`/`revoked`) and emits `authority_granted`/`authority_revoked` `{authorityId, enabled, by, scopePresent}` for every other id. The root system director is engine-composed with its bootstrap grants. Killing/purging drops the grants with the authority inputs, so a recycled record carries none; hydration restores them only through the composition-root `restoreAuthorityGrants`. The wildcard `'*'` and `privileged` never imply any id, no selector path (launch, spawn, `reauthorizeAgent`, `updateAgentConfig`) can place the ids, and scopes are registry-side only (read through `getAuthorityGrants`) — the frozen descriptor shape never changes and the identity projection never carries scope data.
+ * @invariant INV-META-REALM (M3): the realm-admin scope resolution helper (`resolveRealmAdminScope`) is host-only and registry-side: an active registration's frozen descriptor must hold the exact realm-class id and its registry grant record must exist, so an inconsistent descriptor or a grant-less actor fails closed. The candidate realm set is `scope.targets` when present (an explicit empty list selects nothing, matching the M2 selector semantics) else the actor's own realm; edit field tokens are `scope.fields` when present else the id's declared default. Scopes never reach a descriptor, the identity projection, a receipt, or an audit payload, and the helper never performs a mutation or a capability check beyond the exact-id/grant consistency probe (the dispatcher verdict stays the authorization source).
  * @invariant INV-META-AGENT (M2): `inspect_agent`/`update_agent` are the only agent-facing config surface. Authorization resolves registry-side per target: self-inspection, the inherent parental tier (same Realm + stored direct parentage), or an exact scoped `@agent:inspect`/`@agent:edit` grant (`targets`/`ownSpawns`/`realmMembers` bounded by `realms`/own Realm; `fields` narrows the A18 token set). Every resolution failure — unknown, recycled, ambiguous, non-child, cross-Realm, out-of-scope — shares one uniform static `PERMISSION_DENIED` per tool, so no target-existence/relationship oracle exists; receipts, audits, and denials carry bare ids only and never scope values, canonical keys, workspace keys, or realm vocabulary. Updates validate a closed patch (denied keys fail the whole call; unknown keys/malformed values `INVALID_ARGUMENTS`), evaluate the ≤-editor bound B1–B4 on the RESULTING state before any mutation (a resulting `privileged: true` counts as TOP), apply through the same intrinsic channel as `updateAgentConfig`, and defer a busy target into a bounded runtime-owned latest-wins queue flushed at `turn_complete` (dropped on kill/recycle/purge, re-authorized at flush, exception-shielded). Self-target updates are denied.
  * @decision M2 meta grants are operator-minted records only; launch/spawn/update/reauthorize paths cannot place them, and scopes are read exclusively through `getAuthorityGrants`. The parental tier is inherent to registered direct spawns — no grant, no id, no caller claim.
  * @decision Scoped grants persist through the additive `authorityGrants` snapshot field as `{ ref, scope }` entries (`listAuthorityGrantRecords`; unscoped grants keep the legacy keys-only string), so a narrowed grant survives save/hydrate instead of silently widening (M1 finding F3).
@@ -483,6 +484,28 @@ export interface AuthorityInputRecord {
    * booleans of the publishing pair; a grant-free record is an empty array.
    */
   readonly authorities: readonly AuthorityGrantRecord[];
+}
+
+/**
+ * One resolved M3 realm-admin scope (host-only, registry-side): the actor's
+ * bare id and canonical identity key, the actor's own realm membership (the
+ * own-realm default), the candidate realm ids the exact grant reaches
+ * (`scope.targets`, else the own realm), and the effective field tokens for an
+ * edit (`scope.fields`, else the id's declared default). Never projected to
+ * agents: the store-side realm port consumes it and the receipts carry display
+ * labels only.
+ */
+export interface RealmAdminScopeResolution {
+  /** Bare actor id (audit attribution). */
+  readonly actorId: string;
+  /** Canonical `(realmId, agentId)` identity key of the actor. */
+  readonly actorKey: string;
+  /** Actor realm membership (own-realm default), or `null` for the system scope. */
+  readonly realmId: string | null;
+  /** Realm ids the grant reaches, in scope order (empty = nothing). */
+  readonly candidateRealmIds: readonly string[];
+  /** Field tokens an edit may touch (empty for a read-only authority id). */
+  readonly fields: readonly string[];
 }
 
 /**
@@ -2576,6 +2599,78 @@ export class AgentLifecycleManager {
     if (!agent) return Object.freeze([]);
     const inputs = this.#authorityInputs.get(this.#agentIdentityKeyOf(agent));
     return inputs ? inputs.authorities : Object.freeze([]);
+  }
+
+  /**
+   * Resolves the M3 realm-admin scope of one actor for an exact realm-class
+   * authority id (meta-plane spec §4.1, R6): registry-side only, never caller
+   * data. The actor must be an active registration whose frozen descriptor
+   * holds the exact id and whose registry grant record carries the scope; a
+   * canonical identity key resolves realm-exactly and a bare id keeps the
+   * unique-match fallback (ambiguous, unknown, recycled, descriptor-less, and
+   * grant-less actors all resolve `null`, so the store port fails closed).
+   * The candidate realm set is `scope.targets` when present (an explicit empty
+   * list selects nothing and fails closed, matching the M2 selector
+   * semantics), else the actor's own realm; the field tokens are
+   * `scope.fields` when present, else the id's declared default (empty for
+   * read-only ids).
+   *
+   * Host-only surface: scopes never reach a receipt, a schema, an audit
+   * payload, or the identity projection.
+   *
+   * @param actorRef - Canonical identity key (or unique bare id) from the dispatcher-pinned context.
+   * @param authorityId - Exact realm-class authority id (`@realm:inspect`/`@realm:edit`/`@extensions:authority`).
+   * @returns The resolved scope, or `null` when the actor carries no matching grant record.
+   */
+  resolveRealmAdminScope(actorRef: string | null, authorityId: string): RealmAdminScopeResolution | null {
+    if (typeof actorRef !== 'string' || !actorRef) return null;
+    if (typeof authorityId !== 'string' || !REALM_CLASS_AUTHORITY_IDS.has(authorityId)) return null;
+    let record: Agent | null = this.#agents.get(actorRef) || null;
+    let actorKey = record ? actorRef : '';
+    if (!record) {
+      const bare = this.#uniqueByBareId(this.#agents, actorRef);
+      if (!bare) return null;
+      record = bare;
+      actorKey = this.#agentIdentityKeyOf(bare);
+    }
+    const descriptor = this.#authorityRegistry.get(actorKey) || null;
+    if (!descriptor || descriptor.kind !== 'agent') return null;
+    const allow = descriptor.allow;
+    if (!allow || typeof allow.has !== 'function' || allow.has(authorityId) !== true) return null;
+    const inputs = this.#authorityInputs.get(actorKey) || null;
+    if (!inputs) return null;
+    let grant: AuthorityGrantRecord | null = null;
+    for (let i = 0; i < inputs.authorities.length; i++) {
+      if (inputs.authorities[i].id === authorityId) {
+        grant = inputs.authorities[i];
+        break;
+      }
+    }
+    // A descriptor that allows the id without a matching registry record is
+    // inconsistent and fails closed rather than widening to a default scope.
+    if (!grant) return null;
+    const realmId = this.#agentRealmId(record);
+    const scope = grant.scope;
+    // An explicitly present `targets` selector counts even when empty (M2
+    // selector semantics): an empty list reaches no realm and fails closed
+    // instead of widening to the own-realm default.
+    const candidateRealmIds: readonly string[] = scope && Array.isArray(scope.targets)
+      ? scope.targets
+      : (realmId ? Object.freeze([realmId]) : Object.freeze([]));
+    const declaredFields = AUTHORITY_SCOPE_FIELDS[authorityId];
+    let fields: readonly string[];
+    if (declaredFields) {
+      fields = scope && Array.isArray(scope.fields) ? scope.fields : declaredFields;
+    } else {
+      fields = Object.freeze([]);
+    }
+    return Object.freeze({
+      actorId: descriptor.subject,
+      actorKey,
+      realmId,
+      candidateRealmIds,
+      fields
+    });
   }
 
   /**

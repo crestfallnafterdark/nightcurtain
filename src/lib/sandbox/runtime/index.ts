@@ -25,7 +25,7 @@
  * @invariant Catalog subscription lifecycle (MOD-20): when a `ModelPresetSourcePort` is injected, the runtime subscribes exactly once after reaching READY; `reset()` unsubscribes and re-subscribes (the instance stays reusable), `destroy()` unsubscribes, and no path double-subscribes. The handler never rebuilds provider/model: `preset-updated` only marks every agent bound to that preset (active and recycled) dirty, and `preset-deleted` rewrites matching bindings to the catalog default and persists the rewrite, both materializing no earlier than the next turn start.
  * @decision `SubsystemEmitPort` is the frozen emit-only DI port handed to MOD-9/10/11/12 subsystem constructors; emit failures are swallowed and never propagate into subsystem execution
  * @decision `PersistencePort` is the frozen snapshot/import-only handoff from MOD-13 to MOD-6 via MOD-14; no mutation path beyond the declared import/restore calls
- * @decision `LifecyclePort` is the frozen facade-delegation port consumed by MOD-8 descriptors, including the `whoami`/`undoAgentTurn` additions and the M2 parental/meta `inspectAgent`/`updateAgent` members (identity-only caller scope; the lifecycle manager owns the tier verdict)
+ * @decision `LifecyclePort` is the frozen facade-delegation port consumed by MOD-8 descriptors, including the `whoami`/`undoAgentTurn` additions and the M2 parental/meta `inspectAgent`/`updateAgent` members (identity-only caller scope; the lifecycle manager owns the tier verdict). The M3 realm-admin port is forwarded to the turn engine and seeded as pinned dispatcher construction (`realmAdminPort`); the host-only `resolveRealmAdminScope` pass-through exposes the registry-side grant scope to the store-side port without ever projecting scopes to an agent surface
  * @decision `AgentIdentityPort` is the frozen identity-resolution surface injected as `ToolExecutionPort.getAgentIdentity` for MOD-8/MOD-10; it carries the agent's frozen registry `AuthorityDescriptor`, built once at launch from trusted config, never caller claims, plus the canonical `(realmId, agentId)` identity `key` and the realm-exact/bypass resolution scopes
  * @decision Realm scope rides the same frozen projection: every projection carries `realmId` (owner-controlled `config.realmId`, `null` = the bootstrap-only system scope) and `realmBypass`. `realmBypass` is `true` iff the registry authority inputs carry the `realmBypass` grant — the engine bootstrap's hardcoded composition or an operator grant through the lifecycle grant API — and is never derived from an agent id; the operator/engine branch of the locked bypass rule is the opaque `InternalPrincipal`, which substrates check by exact reference (it has no agent id and never appears here), and agent authority — including the wildcard `'*'` — never bypasses without a grant
  * @invariant Invocation and await Realm gates: the invocation engine receives the identity-port realm resolver and the opaque internal principal, so `invokeAgent` denies cross-scope pairs fail-closed (bypass principals span Realms) and `waitForInvocation` authenticates the facade/port-supplied caller as the invocation's invoker, its target, or a bypass principal; the agent-facing lifecycle port marks every wait as caller-scoped, so an unauthenticated wait fails closed, while `AgentRuntime.waitForInvocation` without a caller context stays the composition-root/host path. The operator/store listing path (`listAgents`/persistence port without a scope) stays unscoped.
@@ -62,6 +62,7 @@ import { InvocationEngine } from '../invocationEngine/index.ts';
 import { Agent } from './agent/index.ts';
 import { createAgentIdentityKey, parseAgentIdentityKey } from './agent/index.ts';
 import { AgentLifecycleManager } from './agentLifecycle/index.ts';
+import type { RealmAdminScopeResolution } from './agentLifecycle/index.ts';
 import { HistoryManager } from './historyManager/index.ts';
 import { TurnExecutionEngine } from './turnExecutionEngine/index.ts';
 import { RuntimeScheduler } from './runtimeScheduler/index.ts';
@@ -73,7 +74,7 @@ import type { AuthorityGrantRecord, AuthorityGrantSnapshotEntry, AuthorityScopeR
 
 import type { CredentialResolverPort } from '../credentialVault/index.ts';
 import type { ModelPresetSourcePort, PresetChangeEvent } from '../presetCatalog/index.ts';
-import type { ExtensionToolProviderPort, RealmPublishingPort } from '../toolDefinitions/index.ts';
+import type { ExtensionToolProviderPort, RealmAdminPort, RealmPublishingPort } from '../toolDefinitions/index.ts';
 import type { ExtensionExecutionPort } from '../tools/extensionTools/index.ts';
 import type { MessageEnvelope, WaitForMailOptions, WaitForMailResult } from '../messagingBus/index.ts';
 import type {
@@ -138,6 +139,15 @@ const AUTHORITY_ID_SET: ReadonlySet<string> = new Set<string>(AUTHORITY_IDS);
  * substrate sweep lanes never reimplement the encoding.
  */
 export { createAgentIdentityKey, parseAgentIdentityKey } from './agent/index.ts';
+
+/**
+ * One resolved M3 realm-admin scope (host-only, registry-side): the actor's
+ * bare id and canonical identity key, the actor's own realm membership, the
+ * candidate realm ids the exact grant reaches, and the effective edit field
+ * tokens. Consumed by the store-side realm-admin port; never projected to
+ * agents, receipts, or audits.
+ */
+export type { RealmAdminScopeResolution } from './agentLifecycle/index.ts';
 
 /**
  * Re-exported canonical await envelope returned by `AgentRuntime.waitForInvocation`
@@ -740,6 +750,15 @@ export interface AgentRuntimeOptions {
    * context.
    */
   realmPublishingPort?: RealmPublishingPort | null;
+  /**
+   * Optional M3 realm-admin host port forwarded verbatim to the turn execution
+   * engine and seeded into every tool dispatcher context. The composition root
+   * (sandbox store) implements it over the realm registry, extension live
+   * state, and runtime rosters; when absent, the realm-admin meta tools fail
+   * closed with a missing-service error. Trusted bound construction; never
+   * replaceable from per-call context.
+   */
+  realmAdminPort?: RealmAdminPort | null;
   /**
    * Optional extension provider-registry port (extension wave) handed to the
    * turn execution engine and seeded into every tool dispatcher context: a call
@@ -1579,6 +1598,12 @@ export class AgentRuntime {
    * descriptor handlers read it from the trusted dispatcher context.
    */
   #realmPublishingPort: RealmPublishingPort | null = null;
+  /**
+   * Optional M3 realm-admin host port forwarded verbatim to the turn execution
+   * engine. Never exposed on the runtime facade; the realm-admin descriptors
+   * read it from the trusted dispatcher context.
+   */
+  #realmAdminPort: RealmAdminPort | null = null;
   #extensionToolProvider: ExtensionToolProviderPort | null = null;
   #extensionExecutionPort: ExtensionExecutionPort | null = null;
 
@@ -1678,6 +1703,7 @@ export class AgentRuntime {
     credentialResolver = null,
     presetSource = null,
     realmPublishingPort = null,
+    realmAdminPort = null,
     extensionToolProvider = null,
     extensionExecutionPort = null
   }: AgentRuntimeOptions = {}) {
@@ -1732,6 +1758,7 @@ export class AgentRuntime {
     this.#credentialResolver = credentialResolver || null;
     this.#presetSource = presetSource || null;
     this.#realmPublishingPort = realmPublishingPort || null;
+    this.#realmAdminPort = realmAdminPort || null;
     this.#extensionToolProvider = extensionToolProvider || null;
     this.#extensionExecutionPort = extensionExecutionPort || null;
 
@@ -1926,6 +1953,7 @@ export class AgentRuntime {
       triggerQueue: this.#triggerQueue,
       customTools: this.#customTools,
       realmPublishingPort: this.#realmPublishingPort,
+      realmAdminPort: this.#realmAdminPort,
       extensionToolProvider: this.#extensionToolProvider,
       extensionExecutionPort: this.#extensionExecutionPort,
       mailboxAutonomy: this.#mailboxAutonomy,
@@ -2556,6 +2584,23 @@ export class AgentRuntime {
    */
   getAuthorityGrants(ref: string): readonly AuthorityGrantRecord[] {
     return this.#lifecycleManager.getAuthorityGrants(ref);
+  }
+
+  /**
+   * Resolves the M3 realm-admin scope of one actor for an exact realm-class
+   * authority id (host-only pass-through to the lifecycle registry).
+   *
+   * Consumed by the store-side realm-admin port: it re-reads the registry-side
+   * grant scope so a direct store call can never execute without a matching
+   * actor record, while the dispatcher keeps the authority verdict. Unknown,
+   * recycled, ambiguous, or grant-less actors resolve `null` (fail closed).
+   *
+   * @param actorRef - Canonical identity key (or unique bare id) from the dispatcher-pinned context.
+   * @param authorityId - Exact realm-class authority id.
+   * @returns The resolved scope, or `null`.
+   */
+  resolveRealmAdminScope(actorRef: string | null, authorityId: string): RealmAdminScopeResolution | null {
+    return this.#lifecycleManager.resolveRealmAdminScope(actorRef, authorityId);
   }
 
   /**

@@ -6616,3 +6616,114 @@ test('29. [M1] generic authority grants: wrappers, snapshot partitions, and hydr
     sharedLocalStorage.clear();
   }
 });
+
+// ============================================================================
+// M3 realm admin — setExtensionToolSelection (ticket 094de1b)
+// ============================================================================
+
+test('88. [M3] setExtensionToolSelection validates the record, fails closed without a live catalog, and audits', async () => {
+  const runtime = new AgentRuntime({ autoBootstrapDirector: false });
+  const store = new SandboxStore({ runtime, autoHydrate: false, autoBootstrapDirector: false });
+  const events = [];
+  const unsubscribe = runtime.subscribe((event) => events.push(event));
+  try {
+    store.createRealm({ id: 'realm_m3_unit', name: 'M3 Unit' });
+    store.installExtension({ id: 'unit-ext', kind: 'pack', transportHint: { kind: 'pack', source: 'test' } });
+    store.attachExtension('realm_m3_unit', 'unit-ext', { toolSelection: 'all' });
+
+    assert.throws(
+      () => store.setExtensionToolSelection('realm_missing', 'unit-ext', 'all'),
+      /unknown realm/i
+    );
+    assert.throws(
+      () => store.setExtensionToolSelection('realm_m3_unit', 'ghost-ext', 'all'),
+      /does not attach/i
+    );
+    assert.throws(
+      () => store.setExtensionToolSelection('realm_m3_unit', 'unit-ext', []),
+      /non-empty|toolSelection/i,
+      'an empty selection is malformed'
+    );
+    assert.throws(
+      () => store.setExtensionToolSelection('realm_m3_unit', 'unit-ext', ['echo']),
+      /live catalog|unknown/i,
+      'an explicit name with no live catalog fails closed'
+    );
+    assert.throws(
+      () => store.setExtensionToolSelection('realm_m3_unit', 'unit-ext', 'all', { source: 'meta-realm-edit' }),
+      /actor/i,
+      'a meta source without an actor record is refused (R6)'
+    );
+
+    const updated = store.setExtensionToolSelection('realm_m3_unit', 'unit-ext', 'all');
+    assert.equal(updated.extensions[0].toolSelection, 'all');
+    const audit = events.find((event) => event.type === 'extension_tool_selection_updated');
+    assert.ok(audit, 'the ceiling change is audited');
+    assert.equal(audit.payload.realmId, 'realm_m3_unit');
+    assert.equal(audit.payload.extensionId, 'unit-ext');
+    assert.equal(audit.payload.source, 'operator');
+    assert.equal(audit.payload.actorId, undefined, 'the operator path carries no actor');
+  } finally {
+    unsubscribe();
+    store.destroy();
+    runtime.destroy();
+    sharedLocalStorage.clear();
+  }
+});
+
+test('89. [M3] the realm-admin port is pinned and the store exposes a frozen handle', () => {
+  const runtime = new AgentRuntime({ autoBootstrapDirector: false });
+  const store = new SandboxStore({ runtime, autoHydrate: false, autoBootstrapDirector: false });
+  try {
+    const port = store.getRealmAdminPort();
+    assert.ok(Object.isFrozen(port));
+    assert.equal(typeof port.inspectRealm, 'function');
+    assert.equal(typeof port.updateRealm, 'function');
+    assert.equal(store.getRealmAdminPort(), port, 'the handle is stable');
+  } finally {
+    store.destroy();
+    runtime.destroy();
+    sharedLocalStorage.clear();
+  }
+});
+
+test('90. [M3] the realm-admin port re-validates the patch closure at nested depth', async () => {
+  const runtime = new AgentRuntime({ autoBootstrapDirector: false });
+  const store = new SandboxStore({ runtime, autoHydrate: false, autoBootstrapDirector: false });
+  try {
+    store.createRealm({ id: 'realm_m3_nested', name: 'M3 Nested' });
+    await store.launchAgent({
+      id: 'm3-nested-actor',
+      name: 'Nested Actor',
+      realmId: 'realm_m3_nested',
+      allowedTools: ['readonly'],
+      model: createMockModel()
+    });
+    await store.grantAuthority('m3-nested-actor', AGENT_AUTHORITIES.REALM_EDIT);
+    const port = store.getRealmAdminPort();
+
+    assert.throws(
+      () => port.updateRealm({
+        actorRef: 'm3-nested-actor',
+        realmLabel: null,
+        patch: { name: 'Temp', attach: { extensionId: 'ghost-ext', bogus: true } }
+      }),
+      (error) => error?.code === 'INVALID_ARGUMENTS' && /unknown fields/i.test(String(error?.message)),
+      'a nested unknown key fails closed before any precondition'
+    );
+    assert.throws(
+      () => port.updateRealm({
+        actorRef: 'm3-nested-actor',
+        realmLabel: null,
+        patch: { toolSelection: { extensionId: 'ghost-ext', selection: 'all', members: [] } }
+      }),
+      (error) => error?.code === 'PERMISSION_DENIED',
+      'a nested operator-only key fails the whole call uniformly'
+    );
+    assert.equal(store.getRealm('realm_m3_nested').name, 'M3 Nested', 'nothing was applied');
+  } finally {
+    store.destroy();
+    runtime.destroy();
+    sharedLocalStorage.clear();
+  }
+});

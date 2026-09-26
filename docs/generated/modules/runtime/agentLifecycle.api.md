@@ -53,6 +53,7 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 - Baked-history seeding (Realm Template Format v1 §5): the unified options object may declare a trusted prologue, validated fail-closed (roles `user`/`assistant` only, non-empty string content, unknown fields rejected with `INVALID_CONFIG` before any registration) and composed as `[system message, ...declared entries in order]` with launch-generated ids (INV-7) and optional `metadata.source='template'`; seeding never runs a turn or a model call, only `initialPrompt` triggers one, and legacy positional launch forms carry no declared history.
 - Preset binding forwarding (MOD-20): the injected `ModelPresetSourcePort` is forwarded to every `Agent` this manager constructs, and `presetId` survives config composition on launch and update so the binding round-trips unchanged.
 - `INV-META-AUTHORITY` — the explicit authorities (the publishing pair `@template:authority`/`@hydration:authority` and the meta-plane ids of `AUTHORITY_IDS`) are revocable operator/engine grants recorded in the frozen registry authority inputs (`AuthorityInputRecord.authorities`, one frozen `{id, scope?}` record per grant) and rebuilt into the `AuthorityDescriptor` allow set as the exact ids. One grant core (`#setAuthority`) serves every id: it accepts only the exact injected `InternalPrincipal` reference and only active agents, validates the id against `AUTHORITY_IDS` and the registry-side scope against the id-class vocabulary, rebuilds descriptor + inputs atomically, and never touches the capability selector axis or Realm membership. Audit keeps the legacy event names for the publishing pair (`template_authority_granted`/`revoked`, `hydration_authority_granted`/`revoked`) and emits `authority_granted`/`authority_revoked` `{authorityId, enabled, by, scopePresent}` for every other id. The root system director is engine-composed with its bootstrap grants. Killing/purging drops the grants with the authority inputs, so a recycled record carries none; hydration restores them only through the composition-root `restoreAuthorityGrants`. The wildcard `'*'` and `privileged` never imply any id, no selector path (launch, spawn, `reauthorizeAgent`, `updateAgentConfig`) can place the ids, and scopes are registry-side only (read through `getAuthorityGrants`) — the frozen descriptor shape never changes and the identity projection never carries scope data.
+- INV-META-REALM (M3): the realm-admin scope resolution helper (`resolveRealmAdminScope`) is host-only and registry-side: an active registration's frozen descriptor must hold the exact realm-class id and its registry grant record must exist, so an inconsistent descriptor or a grant-less actor fails closed. The candidate realm set is `scope.targets` when present (an explicit empty list selects nothing, matching the M2 selector semantics) else the actor's own realm; edit field tokens are `scope.fields` when present else the id's declared default. Scopes never reach a descriptor, the identity projection, a receipt, or an audit payload, and the helper never performs a mutation or a capability check beyond the exact-id/grant consistency probe (the dispatcher verdict stays the authorization source).
 - INV-META-AGENT (M2): `inspect_agent`/`update_agent` are the only agent-facing config surface. Authorization resolves registry-side per target: self-inspection, the inherent parental tier (same Realm + stored direct parentage), or an exact scoped `@agent:inspect`/`@agent:edit` grant (`targets`/`ownSpawns`/`realmMembers` bounded by `realms`/own Realm; `fields` narrows the A18 token set). Every resolution failure — unknown, recycled, ambiguous, non-child, cross-Realm, out-of-scope — shares one uniform static `PERMISSION_DENIED` per tool, so no target-existence/relationship oracle exists; receipts, audits, and denials carry bare ids only and never scope values, canonical keys, workspace keys, or realm vocabulary. Updates validate a closed patch (denied keys fail the whole call; unknown keys/malformed values `INVALID_ARGUMENTS`), evaluate the ≤-editor bound B1–B4 on the RESULTING state before any mutation (a resulting `privileged: true` counts as TOP), apply through the same intrinsic channel as `updateAgentConfig`, and defer a busy target into a bounded runtime-owned latest-wins queue flushed at `turn_complete` (dropped on kill/recycle/purge, re-authorized at flush, exception-shielded). Self-target updates are denied.
 
 ## Decisions
@@ -319,6 +320,7 @@ export class AgentLifecycleManager {
     resolveAgentIdentityKey(agentId: string, callerContext?: (AgentSecurityContext & {
         principal?: InternalPrincipal | AuthorityDescriptor;
     }) | null): string | null;
+    resolveRealmAdminScope(actorRef: string | null, authorityId: string): RealmAdminScopeResolution | null;
     restoreAgent(agentId: string, callerContext?: (AgentSecurityContext & {
         principal?: InternalPrincipal | AuthorityDescriptor;
     }) | null): Agent;
@@ -415,9 +417,18 @@ export interface LaunchHistoryEntry {
     readonly source?: 'template';
 }
 
+// @public
+export interface RealmAdminScopeResolution {
+    readonly actorId: string;
+    readonly actorKey: string;
+    readonly candidateRealmIds: readonly string[];
+    readonly fields: readonly string[];
+    readonly realmId: string | null;
+}
+
 // Warnings were encountered during analysis:
 //
-// <declarations>/runtime/agentLifecycle/index.d.ts:680:9 - (ae-forgotten-export) The symbol "InternalPrincipal" needs to be exported by the entry point index.d.ts
+// <declarations>/runtime/agentLifecycle/index.d.ts:724:9 - (ae-forgotten-export) The symbol "InternalPrincipal" needs to be exported by the entry point index.d.ts
 ```
 
 ## API docs
@@ -695,6 +706,7 @@ console.log(`Launched agent ${agent.id} in state ${agent.state}`);
 - **`reauthorizeAgent`** — Re-registers the frozen authority descriptor for an agent from trusted engine input (MOD-21 W7). Hydration never restores authority, so a composition root can re-assert a trusted descriptor here. This is a capability re-assertion path only: any input carrying the `realmBypass` key — `false` included — is rejected fail-closed with `PERMISSION_DENIED` before any mutation, for every caller (the exact injected `InternalPrincipal` and wildcard/authority descriptors included), because the scope grant is applied solely through the engine bootstrap or `grantRealmBypass`/`revokeRealmBypass`. Present-key replacement semantics apply to the capability axis (extension wave): each supplied key replaces its axis, every omitted key preserves its current value — so the store's extension sweep can reauthorize the `extensions` axis alone without clearing `privileged` or `allowedTools`. Authority gate: the caller must resolve to lifecycle authority — the exact injected `InternalPrincipal` reference or a registry `AuthorityDescriptor` holding `'*'`/`'@lifecycle:authority'`; everything else is denied with `PERMISSION_DENIED` before any mutation. The agent config is not touched.
 - **`registerHydratedAgent`** — Registers the re-derived frozen authority descriptor for a hydrated agent during snapshot restore. A snapshot contributes no grant — the persisted `allowedTools` whitelist and `spawnedBy`/`creatorId` parentage round-trip as config data only — so the descriptor is default-deny until a trusted operator grant lands (MOD-21 W5/W7/W10). The entity's authority-write channel is bound here (first bind wins) so later gated operator grants can reach the hydrated entity.
 - **`resolveAgentIdentityKey`** — Resolves the canonical `(realmId, agentId)` identity key of the record a lifecycle mutation addresses (Wave I, ticket d57cbc1). Keyed-mutation surface consumed by the runtime facade: kill/purge must hand the scheduler and invocation substrates the exact registration key (the same resolution the mutation itself uses — realm-scoped for a realm-bound caller, unique-match otherwise, canonical key direct), so same-id registrations in two Realms tear down their own timers and invocations only. An absent or ambiguous target resolves `null`.
+- **`resolveRealmAdminScope`** — Resolves the M3 realm-admin scope of one actor for an exact realm-class authority id (meta-plane spec §4.1, R6): registry-side only, never caller data. The actor must be an active registration whose frozen descriptor holds the exact id and whose registry grant record carries the scope; a canonical identity key resolves realm-exactly and a bare id keeps the unique-match fallback (ambiguous, unknown, recycled, descriptor-less, and grant-less actors all resolve `null`, so the store port fails closed). The candidate realm set is `scope.targets` when present (an explicit empty list selects nothing and fails closed, matching the M2 selector semantics), else the actor's own realm; the field tokens are `scope.fields` when present, else the id's declared default (empty for read-only ids). Host-only surface: scopes never reach a receipt, a schema, an audit payload, or the identity projection.
 - **`restoreAgent`** — Restores a soft-killed agent from the recycle bin back to active status in `IDLE` state (INV-RESTORE). Operational Flow: 1. Validates agent exists in `recycleBin`. 2. Authorizes the restore: a resolved principal is mandatory; a live-construction record whose descriptor would regain authority (`privileged` or wildcard/lifecycle capability tool selectors) requires lifecycle authority, otherwise sudoer, parent creator, or the agent itself may restore. Snapshot-provenance records re-enter default-deny and never require a sudoer (f6be691). 3. Migrates agent from `recycleBin` to active registry. 4. Clears `recycledAt` and `recycleReason`, transitioning state to `AGENT_STATES.IDLE`. 5. Re-registers agent on `MessagingBus` (`unmarkAgentTerminated`, `registerAgent`). 6. Re-wires reactive mail subscription routing into `TriggerQueue`. 7. Emits `'state_change'` and `'agent_restored'` events.
 - **`revokeAuthority`** — Revokes one explicit authority id from an active agent (M1 generic grant API). Revocation ignores any stored scope: the whole grant record is removed.
 - **`revokeHydrationAuthority`** — Revokes the `@hydration:authority` publishing capability from an active agent.
@@ -839,11 +851,23 @@ const opener: LaunchHistoryEntry = {
 - **`role`** — Message author role: `'user'` (operator-attributed) or `'assistant'` (the agent itself)
 - **`source`** — Provenance tag for the entry. `'template'` marks a baked template prologue; when declared, the seeded message carries `metadata: { source: 'template' }`.
 
+### `RealmAdminScopeResolution` — interface
+
+One resolved M3 realm-admin scope (host-only, registry-side): the actor's bare id and canonical identity key, the actor's own realm membership (the own-realm default), the candidate realm ids the exact grant reaches (`scope.targets`, else the own realm), and the effective field tokens for an edit (`scope.fields`, else the id's declared default). Never projected to agents: the store-side realm port consumes it and the receipts carry display labels only.
+
+#### Members
+
+- **`actorId`** — Bare actor id (audit attribution).
+- **`actorKey`** — Canonical `(realmId, agentId)` identity key of the actor.
+- **`candidateRealmIds`** — Realm ids the grant reaches, in scope order (empty = nothing).
+- **`fields`** — Field tokens an edit may touch (empty for a read-only authority id).
+- **`realmId`** — Actor realm membership (own-realm default), or `null` for the system scope.
+
 ## Doc coverage
 
-- Top-level exports: 12
-- Declarations (exports + members): 190
-- Documented declarations: 190 / 190 (100%)
+- Top-level exports: 13
+- Declarations (exports + members): 197
+- Documented declarations: 197 / 197 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): `AgentAuthorityPatch`, `AgentInspectProjection`, `AgentModelConfig`, `AgentTelemetry`, `AgentUpdateReceipt`, `AuthorityDescriptor`, `AuthorityDowngradeRecord`, `AuthorityGrantRecord`, `AuthorityGrantSnapshotEntry`, `AuthorityScopeRecord`, `CredentialResolverPort`, `HistoryMessage`, `InternalPrincipal`, `InterruptedTurn`, `InvocationEngine`, `MessagingBus`, `ModelInterface`, `ModelPresetSourcePort`, `ProviderInterface`, `SerializedAgent`, `SubsystemEmitPort`, `TriggerDispatcher`, `TriggerPolicy`, `TurnBundle`, `VirtualFS`

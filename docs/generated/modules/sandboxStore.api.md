@@ -46,6 +46,7 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 - Extension connection approval boundary: when an install record carries an explicit `approvedUrl`, it must parse as an absolute URL and be URL-equal (`href`) to the transport URL; a stale or inconsistent approval is refused with `ERR_STORE_EXTENSION_INVALID_ENDPOINT` before the plaintext gate, any vault read, and any network activity, and a connection only ever dials `transportHint.url`.
 - Extension connection credential gate: a `credentialId` on a non-`https:` endpoint is refused with `ERR_STORE_EXTENSION_PLAINTEXT_CREDENTIAL` before any vault read or network activity, a bound credential the vault cannot resolve fails closed with `ERR_STORE_EXTENSION_CREDENTIAL_UNRESOLVED` before any network activity, plaintext local servers with no `credentialId` connect unauthenticated, and connection projections/audits/errors carry no credential material.
 - Extension catalog arbitration: live catalogs arbitrate only by explicit connection-completion sequence (never map insertion order), the earlier `active` extension keeps every contested call name, each later conflicting extension is `conflict` and not activated until a re-arbitration clears it, re-arbitration runs on every connect/disconnect/reconnect and audits conflict transitions, and realm attachment statuses follow the live state (`connected` → `active`, `conflict` → `conflict`, disconnected/`error` → `unavailable`) through the existing safe-state reauthorization sweep.
+- Realm-admin port (M3, ticket 094de1b): the store is the host-side realm-admin composition root — `getRealmAdminPort()` returns the frozen `RealmAdminPort` whose `inspectRealm`/`updateRealm` resolve the actor's exact scoped grant registry-side from the dispatcher-pinned reference (missing/unknown/grant-less actors and unknown/ambiguous/out-of-scope labels throw one uniform `PERMISSION_DENIED`, so a direct store call can never run under the operator principal without an actor record — R6) and whose edits apply only through the existing registry update, `attachExtension`, and `setExtensionToolSelection` internals. `setExtensionToolSelection` validates the attachment exists and every explicit call name against the extension's live conflict-free catalog (fail closed, never silently regranted), emits `extension_tool_selection_updated`, and schedules the P2.4 safe-state sweep; non-operator audit sources require a non-empty actor id; receipts and audits carry display labels and bare ids only, never realm ids, `realm:` paths, transport URLs, or credential material.
 
 ## Decisions
 
@@ -200,8 +201,14 @@ export interface EventQueryOptions {
 }
 
 // @public
-export interface ExtensionAttachOptions {
+export interface ExtensionAttachOptions extends ExtensionAuditAttribution {
     readonly toolSelection?: 'all' | readonly string[];
+}
+
+// @public
+export interface ExtensionAuditAttribution {
+    readonly actorId?: string;
+    readonly source?: 'operator' | 'privileged-agent' | 'meta-realm-edit';
 }
 
 // @public
@@ -631,6 +638,8 @@ export class SandboxStore {
     // Warning: (ae-forgotten-export) The symbol "PresetCatalog" needs to be exported by the entry point index.svelte.d.ts
     getPresetCatalog(): PresetCatalog;
     getRealm(id: string): RealmRecord | null;
+    // Warning: (ae-forgotten-export) The symbol "RealmAdminPort" needs to be exported by the entry point index.svelte.d.ts
+    getRealmAdminPort(): RealmAdminPort;
     // Warning: (ae-forgotten-export) The symbol "RealmPublishingPort" needs to be exported by the entry point index.svelte.d.ts
     getRealmPublishingPort(): RealmPublishingPort;
     // Warning: (ae-forgotten-export) The symbol "RealmRegistry" needs to be exported by the entry point index.svelte.d.ts
@@ -732,6 +741,7 @@ export class SandboxStore {
     setActiveFsWorkspace(workspaceId: string): void;
     setActiveTab(tab: SandboxTabId): void;
     setAgentDraft(agentId: string, text: string): void;
+    setExtensionToolSelection(realmId: string, extensionId: string, selection: 'all' | readonly string[], options?: ExtensionAuditAttribution): RealmRecord;
     spawnAgent(config: AgentConfig, initialPrompt?: string | object | null): Promise<AgentStateSnapshot>;
     get stats(): SandboxTelemetryStats;
     get streamingProse(): string;
@@ -1193,11 +1203,20 @@ const activeEvents = sandboxStore.queryAgentEvents(options);
 
 ### `ExtensionAttachOptions` — interface
 
-Options accepted by `SandboxStore.attachExtension()`: the realm-level tool selection of the new attachment. Defaults to `'all'` (every tool the extension provides).
+Options accepted by `SandboxStore.attachExtension()`: the realm-level tool selection of the new attachment. Defaults to `'all'` (every tool the extension provides), plus the optional audit attribution for non-operator callers.
 
 #### Members
 
 - **`toolSelection`** — Realm-level tool selection: `'all'` or explicit sanitized call names.
+
+### `ExtensionAuditAttribution` — interface
+
+Audit attribution accepted by the extension mutation methods when the mutation originates from a non-operator path (the M3 realm-admin port or a future privileged agent path). The `actorId` is mandatory for every non-operator source, so an agent-originated mutation can never be recorded as an anonymous operator act (R6, meta-plane spec §4).
+
+#### Members
+
+- **`actorId`** — Bare id of the acting agent; required for every non-operator source.
+- **`source`** — Mutation origin; defaults to `'operator'`. `'meta-realm-edit'` is the M3 realm-admin port path and `'privileged-agent'` is reserved for M4.
 
 ### `ExtensionConnectionCatalogEntry` — interface
 
@@ -1818,6 +1837,7 @@ console.log('Agent response:', turn.output);
 - **`getPendingInstancePayload`** — Resolves one pending instance payload by template id (Wave U ticket 2518510).
 - **`getPresetCatalog`** — Retrieves the MOD-20 preset catalog owned by this store (composition root). Exposes the management contract to UI call sites (`listPresets`, `getPreset`, `savePreset`, `deletePreset`, `setActivePresetId`, `subscribe`, `createPresetSourcePort`). Catalog mutations persist through the snapshot adapter and schedule the existing debounced save; the active pointer and custom entries live in the sandbox snapshot.
 - **`getRealm`** — Resolves one Realm record through the owned registry.
+- **`getRealmAdminPort`** — Returns the frozen M3 realm-admin port (ticket 094de1b). The port is the store's host-side implementation over the realm registry, extension live state, and runtime rosters; the store-owned runtime already receives it as pinned construction, and consumers with a caller-injected runtime can bind it explicitly. Every method resolves the caller's grant scope registry-side from the dispatcher-pinned actor reference and fails closed when no matching active grant record exists.
 - **`getRealmPublishingPort`** — Returns the frozen Wave U host publishing port (ticket 2518510). The port is the store's host-side implementation over the real Wave T template registry (import/preview/effective-catalog resolution) and the session candidate surface; the store-owned runtime already receives it, and consumers with a caller-injected runtime can bind it explicitly.
 - **`getRealmRegistry`** — Retrieves the Wave A realm registry owned by this store (composition root). Exposes the management contract to UI call sites (`listRealms`, `getRealm`, `addRealm`, `updateRealm`, `removeRealm`, `subscribe`). The protected Generic default (`realm_generic`) is refused by `removeRealm` on this raw surface too — a `false` no-op without a change event — while renames and every other management operation stay available (Wave R hardening, ticket 0fe25fd). Registry mutations persist through the snapshot adapter, schedule the existing debounced save, and update the reactive `realms` projection through the registry change subscription.
 - **`getRealmTemplateBundle`** — Resolves the launch bundle behind one template id: the normalized format-v2 template plus the bundle file bodies its prompt parts, placement `file` sources, and input `defaultFile` prefills resolve against. The launcher preview reads the same normalized template and bundle files the launch materializes with, so a previewed prompt can never disagree with the launched system prompt. Unknown ids return `null`; the returned bundle and template are frozen.
@@ -1896,6 +1916,7 @@ console.log('Agent response:', turn.output);
 - **`setActiveFsWorkspace`** — Changes the active workspace filter in the VirtualFS Explorer tab. Operator surfaces pass a partition key from `fsWorkspacePartitions` (an internal snapshot key) so a realm-global partition or a same-id agent in two Realms is addressed exactly (ticket 7571ce5). Legacy callers keep the historical verbatim behavior: a public label is stored as-is and the read paths (`activeFsFiles`, `activeFsPartition`) resolve it through the unique registration when one exists.
 - **`setActiveTab`** — Changes the workstation view tab (`'chat'`, `'settings'`, `'inspector'`, `'filesystem'`, `'messaging'`).
 - **`setAgentDraft`** — Sets the draft prompt text for an agent and schedules debounced auto-persistence.
+- **`setExtensionToolSelection`** — Replaces one attachment's realm-level tool ceiling (M3 ticket 094de1b). The attachment must already exist on the Realm and the selection must resolve against the extension's **live** catalog: `'all'` always resolves, while an explicit list must be a non-empty duplicate-free list of currently active call names — any name the live catalog does not carry fails the call closed, never silently granting or dropping something else. The updated attachment is written through the realm registry, an `extension_tool_selection_updated` audit event is emitted, and the safe-state sweep reauthorizes the Realm members exactly like an attach (idle members synchronously, busy members at their next `turn_complete`).
 - **`spawnAgent`** — Ergonomic alias for launchAgent. Provisions and selects a new agent instance.
 - **`stats`** — Aggregate telemetry statistics (agent counts by state, token totals, file counts, message volume).
 - **`streamingProse`** — In-flight prose token stream currently being generated by the selected agent. Returns empty string `""` when idle.
@@ -2278,10 +2299,10 @@ console.log(`Uploaded ${receipt.count} files:`, receipt.files);
 
 ## Doc coverage
 
-- Top-level exports: 72
-- Declarations (exports + members): 515
-- Documented declarations: 515 / 515 (100%)
+- Top-level exports: 73
+- Declarations (exports + members): 520
+- Documented declarations: 520 / 520 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
-- Referenced but not exported (`ae-forgotten-export`): `Agent`, `AgentConfig`, `AgentConfigUpdate`, `AgentIdentityScope`, `AgentRuntime`, `AgentState`, `ArchiveDownloadReceipt`, `AuthorityDescriptor`, `AuthorityScopeRecord`, `BatchDownloadFailure`, `BusMessageEnvelope`, `CopyReceipt`, `CredentialResolverPort`, `CredentialStoragePort`, `CredentialVault`, `DownloadReceipt`, `ExtensionCatalogConflict`, `ExtensionCatalogDiff`, `ExtensionInstallRecord`, `ExtensionKind`, `ExtensionRegistry`, `ExtensionTransportHint`, `FileRecord`, `GrepMatch`, `GrepOptions`, `InboxHeader`, `InboxListOptions`, `LaunchHistoryEntry`, `McpClientServerInfo`, `MessageEnvelope`, `MessagingBus`, `NarrativeEvent`, `PendingInstancePayload`, `PresetCatalog`, `PresetModelConfig`, `ReadMessageResult`, `RealmExtensionAttachment`, `RealmInputValues`, `RealmPublishingPort`, `RealmRecord`, `RealmRegistry`, `RealmTemplate`, `RealmUpdatePatch`, `SandboxPersistedState`, `ScheduleReceipt`, `SendMessageReceipt`, `TurnBundle`, `TurnExecutionResult`, `TurnInput`, `VfsCopyOptions`, `VfsWriteOptions`, `VirtualFS`, `WriteReceipt`
+- Referenced but not exported (`ae-forgotten-export`): `Agent`, `AgentConfig`, `AgentConfigUpdate`, `AgentIdentityScope`, `AgentRuntime`, `AgentState`, `ArchiveDownloadReceipt`, `AuthorityDescriptor`, `AuthorityScopeRecord`, `BatchDownloadFailure`, `BusMessageEnvelope`, `CopyReceipt`, `CredentialResolverPort`, `CredentialStoragePort`, `CredentialVault`, `DownloadReceipt`, `ExtensionCatalogConflict`, `ExtensionCatalogDiff`, `ExtensionInstallRecord`, `ExtensionKind`, `ExtensionRegistry`, `ExtensionTransportHint`, `FileRecord`, `GrepMatch`, `GrepOptions`, `InboxHeader`, `InboxListOptions`, `LaunchHistoryEntry`, `McpClientServerInfo`, `MessageEnvelope`, `MessagingBus`, `NarrativeEvent`, `PendingInstancePayload`, `PresetCatalog`, `PresetModelConfig`, `ReadMessageResult`, `RealmAdminPort`, `RealmExtensionAttachment`, `RealmInputValues`, `RealmPublishingPort`, `RealmRecord`, `RealmRegistry`, `RealmTemplate`, `RealmUpdatePatch`, `SandboxPersistedState`, `ScheduleReceipt`, `SendMessageReceipt`, `TurnBundle`, `TurnExecutionResult`, `TurnInput`, `VfsCopyOptions`, `VfsWriteOptions`, `VirtualFS`, `WriteReceipt`
 - Unresolved `{@link}` targets (`ae-unresolved-link`): 10 (policy `none`; see `scripts/api_reports.mjs`)

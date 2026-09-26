@@ -52,6 +52,8 @@ import {
   BAKED_TEMPLATE_BUNDLES,
   DEMO_TEMPLATE,
   KNOWN_AGENT_AUTHORITIES,
+  REALM_ADMIN_DENIED_PATCH_KEYS,
+  REALM_ADMIN_PATCH_FIELD_TOKENS,
   REALM_CATALOG_ERROR_CODES,
   REALM_CONTENT_VERSION,
   RealmCatalogError,
@@ -166,6 +168,8 @@ test('1. runtime surface exports the demo template, the baked bundles, and the p
     'BAKED_TEMPLATE_BUNDLES',
     'DEMO_TEMPLATE',
     'KNOWN_AGENT_AUTHORITIES',
+    'REALM_ADMIN_DENIED_PATCH_KEYS',
+    'REALM_ADMIN_PATCH_FIELD_TOKENS',
     'REALM_CATALOG_ERROR_CODES',
     'REALM_CONTENT_VERSION',
     'RealmCatalogError',
@@ -2302,6 +2306,27 @@ test('19a. authority vocabulary is frozen and lists the v1 known set', () => {
     ['attachments', 'ceiling', 'name', 'description', 'color']
   );
   assert.ok(Object.isFrozen(AUTHORITY_SCOPE_FIELDS[AGENT_AUTHORITIES.AGENT_EDIT]));
+
+  // M3 realm-admin patch vocabulary: the accepted patch keys map onto the
+  // `@realm:edit` field tokens, and every operator-only key is reserved.
+  assert.ok(Object.isFrozen(REALM_ADMIN_PATCH_FIELD_TOKENS));
+  assert.deepStrictEqual({ ...REALM_ADMIN_PATCH_FIELD_TOKENS }, {
+    name: 'name',
+    description: 'description',
+    color: 'color',
+    attach: 'attachments',
+    toolSelection: 'ceiling'
+  });
+  for (const token of Object.values(REALM_ADMIN_PATCH_FIELD_TOKENS)) {
+    assert.ok(
+      AUTHORITY_SCOPE_FIELDS[AGENT_AUTHORITIES.REALM_EDIT].includes(token),
+      `patch token '${token}' is in the @realm:edit vocabulary`
+    );
+  }
+  assert.ok(Object.isFrozen(REALM_ADMIN_DENIED_PATCH_KEYS));
+  for (const key of ['members', 'realmId', 'realm_id', 'templateId', 'instance', 'provenance', 'create', 'delete', 'remove', 'detach', 'extensions', 'attachments']) {
+    assert.ok(REALM_ADMIN_DENIED_PATCH_KEYS.includes(key), `'${key}' stays operator-only`);
+  }
 });
 
 test('19b. authorities shape: unique non-empty strings, duplicates rejected, unknown ids accepted', () => {

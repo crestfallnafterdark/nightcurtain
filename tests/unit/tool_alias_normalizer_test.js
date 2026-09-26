@@ -13,6 +13,7 @@ import {
   INNATE_TOOLS,
   TOOL_PRESETS,
   PUBLISHING_TOOLS,
+  REALM_ADMIN_TOOLS,
   TOOL_SYSTEM_ERROR_CODES,
   resolveToolPreset
 } from '../../src/lib/sandbox/tools/constants/index.ts';
@@ -380,9 +381,13 @@ function normalizeAliasKey(key) {
 test('8. TOOL_ALIAS_MAP normalized keys are unique and never span canonical families', () => {
   const canonicalNames = new Set(Object.values(SANDBOX_TOOLS));
   const selectorTargets = new Set(['subagent_management']);
-  // Wave U publishing meta tools are explicit-grant-only and outside the
-  // canonical taxonomy, but they resolve through the same alias map.
-  const publishingTargets = new Set(Object.values(PUBLISHING_TOOLS));
+  // Wave U publishing meta tools and the M3 realm-admin tools are
+  // explicit-grant-only and outside the canonical taxonomy, but they resolve
+  // through the same alias map.
+  const authorityTargets = new Set([
+    ...Object.values(PUBLISHING_TOOLS),
+    ...Object.values(REALM_ADMIN_TOOLS)
+  ]);
 
   // (a) A normalized key may appear many times only when every occurrence maps
   // to the same canonical target; two different targets behind one normalized
@@ -405,10 +410,10 @@ test('8. TOOL_ALIAS_MAP normalized keys are unique and never span canonical fami
   );
 
   // (b) Every target is a declared canonical tool, a declared selector family,
-  // or a Wave U publishing meta tool.
+  // or an explicit-grant-only authority meta tool.
   for (const [key, target] of Object.entries(TOOL_ALIAS_MAP)) {
     assert.ok(
-      canonicalNames.has(target) || selectorTargets.has(target) || publishingTargets.has(target),
+      canonicalNames.has(target) || selectorTargets.has(target) || authorityTargets.has(target),
       `alias '${key}' maps to unknown target '${target}'`
     );
   }
@@ -446,6 +451,25 @@ test('8b. publishing meta-tool names resolve canonically and never join the taxo
   // Publishing tools are never precallable.
   assert.strictEqual(PRECALL_ALLOWLIST.has(PUBLISHING_TOOLS.IMPORT_REALM_TEMPLATE), false);
   assert.strictEqual(PRECALL_ALLOWLIST.has(PUBLISHING_TOOLS.SUBMIT_HYDRATION_PACKAGE), false);
+});
+
+// ============================================================================
+// 8c. M3 realm-admin meta-tool aliases (ticket 094de1b)
+// ============================================================================
+
+test('8c. realm-admin names resolve canonically and never join the taxonomy', () => {
+  assert.strictEqual(getCanonToolName('inspect_realm'), REALM_ADMIN_TOOLS.INSPECT_REALM);
+  assert.strictEqual(getCanonToolName('inspectRealm'), REALM_ADMIN_TOOLS.INSPECT_REALM);
+  assert.strictEqual(getCanonToolName('update_realm'), REALM_ADMIN_TOOLS.UPDATE_REALM);
+  assert.strictEqual(getCanonToolName('updateRealm'), REALM_ADMIN_TOOLS.UPDATE_REALM);
+  const canonicalNames = new Set(Object.values(SANDBOX_TOOLS));
+  for (const name of Object.values(REALM_ADMIN_TOOLS)) {
+    assert.strictEqual(canonicalNames.has(name), false, `${name} stays outside SANDBOX_TOOLS`);
+    assert.strictEqual(getCanonToolName(name), name, `${name} resolves to itself`);
+  }
+  // Realm-admin tools are never precallable.
+  assert.strictEqual(PRECALL_ALLOWLIST.has(REALM_ADMIN_TOOLS.INSPECT_REALM), false);
+  assert.strictEqual(PRECALL_ALLOWLIST.has(REALM_ADMIN_TOOLS.UPDATE_REALM), false);
 });
 
 // ============================================================================

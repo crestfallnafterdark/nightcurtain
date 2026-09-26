@@ -35,7 +35,7 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 
 - `SubsystemEmitPort` is the frozen emit-only DI port handed to MOD-9/10/11/12 subsystem constructors; emit failures are swallowed and never propagate into subsystem execution
 - `PersistencePort` is the frozen snapshot/import-only handoff from MOD-13 to MOD-6 via MOD-14; no mutation path beyond the declared import/restore calls
-- `LifecyclePort` is the frozen facade-delegation port consumed by MOD-8 descriptors, including the `whoami`/`undoAgentTurn` additions and the M2 parental/meta `inspectAgent`/`updateAgent` members (identity-only caller scope; the lifecycle manager owns the tier verdict)
+- `LifecyclePort` is the frozen facade-delegation port consumed by MOD-8 descriptors, including the `whoami`/`undoAgentTurn` additions and the M2 parental/meta `inspectAgent`/`updateAgent` members (identity-only caller scope; the lifecycle manager owns the tier verdict). The M3 realm-admin port is forwarded to the turn engine and seeded as pinned dispatcher construction (`realmAdminPort`); the host-only `resolveRealmAdminScope` pass-through exposes the registry-side grant scope to the store-side port without ever projecting scopes to an agent surface
 - `AgentIdentityPort` is the frozen identity-resolution surface injected as `ToolExecutionPort.getAgentIdentity` for MOD-8/MOD-10; it carries the agent's frozen registry `AuthorityDescriptor`, built once at launch from trusted config, never caller claims, plus the canonical `(realmId, agentId)` identity `key` and the realm-exact/bypass resolution scopes
 - Realm scope rides the same frozen projection: every projection carries `realmId` (owner-controlled `config.realmId`, `null` = the bootstrap-only system scope) and `realmBypass`. `realmBypass` is `true` iff the registry authority inputs carry the `realmBypass` grant — the engine bootstrap's hardcoded composition or an operator grant through the lifecycle grant API — and is never derived from an agent id; the operator/engine branch of the locked bypass rule is the opaque `InternalPrincipal`, which substrates check by exact reference (it has no agent id and never appears here), and agent authority — including the wildcard `'*'` — never bypasses without a grant
 - Authority is the frozen `AuthorityDescriptor` (`subject`/`kind`/`allow`/`extensions`/`visibility`/`realmBypass`) built once at construction from trusted config; there is no `privileged` boolean, admission is default-deny, reserved ids (`admin`/`director`/`system`) are ordinary identifiers, and every denial is uniform `PERMISSION_DENIED`
@@ -290,6 +290,7 @@ export class AgentRuntime {
     }) | null): AuthorityDescriptor | null;
     redoAgentTurn(agentId: string): RedoResult;
     reset(): void;
+    resolveRealmAdminScope(actorRef: string | null, authorityId: string): RealmAdminScopeResolution | null;
     restoreAgent(agentId: string, callerContext?: (CallerContext & {
         principal?: InternalPrincipal | AuthorityDescriptor;
     }) | null): Agent;
@@ -368,6 +369,8 @@ export interface AgentRuntimeOptions {
     messagingBus?: MessagingBus | null;
     // Warning: (ae-forgotten-export) The symbol "ModelPresetSourcePort" needs to be exported by the entry point index.d.ts
     presetSource?: ModelPresetSourcePort | null;
+    // Warning: (ae-forgotten-export) The symbol "RealmAdminPort" needs to be exported by the entry point index.d.ts
+    realmAdminPort?: RealmAdminPort | null;
     // Warning: (ae-forgotten-export) The symbol "RealmPublishingPort" needs to be exported by the entry point index.d.ts
     realmPublishingPort?: RealmPublishingPort | null;
     virtualFs?: VirtualFS | null;
@@ -588,6 +591,15 @@ export interface PersistencePort {
         exportSnapshot(): unknown;
         importSnapshot(snapshot: unknown): void;
     };
+}
+
+// @public
+export interface RealmAdminScopeResolution {
+    readonly actorId: string;
+    readonly actorKey: string;
+    readonly candidateRealmIds: readonly string[];
+    readonly fields: readonly string[];
+    readonly realmId: string | null;
 }
 
 // @public
@@ -1194,6 +1206,7 @@ const snapshot = runtime.exportSnapshot();
 - **`reauthorizeAgent`** — Re-authorizes an active agent's capability axes from trusted engine input (the extension-authorization plumbing). Authority-bearing: the caller must resolve to lifecycle authority — the exact injected `InternalPrincipal` reference or a registry `AuthorityDescriptor` holding `'*'`/`'@lifecycle:authority'`; everything else is denied with `PERMISSION_DENIED` before any mutation. The supplied `extensionTools` list is the composition-root-computed effective extension grant set (sanitized call names); it rebuilds the descriptor's `extensions` axis only when the key is present, and the scope/publishing-authority axes always ride along unchanged. A `realmBypass` key — `false` included — and the publishing-authority keys are rejected for every caller (the dedicated grant/revoke APIs are their only writers). Safe-state note: callers must apply this at a turn boundary, never mid-turn. The store's reauthorize sweep owns that scheduling (idle members immediately, busy members on their next turn completion).
 - **`redoAgentTurn`** — Redoes the most recently undone turn bundle for an agent from the redo stack.
 - **`reset`** — Flushes active runtime state: cancels in-flight turns, clears agent registries, unbinds bus subscriptions, and resets underlying primitives.
+- **`resolveRealmAdminScope`** — Resolves the M3 realm-admin scope of one actor for an exact realm-class authority id (host-only pass-through to the lifecycle registry). Consumed by the store-side realm-admin port: it re-reads the registry-side grant scope so a direct store call can never execute without a matching actor record, while the dispatcher keeps the authority verdict. Unknown, recycled, ambiguous, or grant-less actors resolve `null` (fail closed).
 - **`restoreAgent`** — Restores an agent from the recycle bin back to active idle status. Authority gate (MOD-21 W8, default-deny): a principal is mandatory; a record whose live-construction descriptor would regain authority (`privileged` or wildcard tools) requires lifecycle authority.
 - **`restoreAuthorityGrants`** — Restores persisted authority grants after snapshot hydration (M1; scoped entries M2). Engine-only path: the caller must present the exact injected `InternalPrincipal` reference. Each entry is granted through the generic grant core under the operator principal; unknown authority ids are skipped, ids that are unknown, recycled, or ambiguous resolve no registration and are skipped (fail-closed), and a malformed scope drops only its own entry, so a tampered snapshot can never mint or widen a grant. Entries are either canonical `(realmId, agentId)` identity-key strings (the legacy keys-only form, restored unscoped) or `{ ref, scope? }` records carrying the registry-side narrowing, as emitted by listAuthorityGrantRecords. Legacy snapshots that persisted bare ids still hydrate through the unique-match rule; an ambiguous bare id resolves no registration and is skipped, so a legacy grant is never duplicated across two Realms.
 - **`restoreMetaAuthorityGrants`** — Restores persisted Wave U publishing-authority grants after snapshot hydration (ticket 2518510). Engine-only path: the caller must present the exact injected `InternalPrincipal` reference. Each entry is granted through the lifecycle gate; ids that are unknown or not active are skipped (fail-closed), so a tampered snapshot id can never mint a grant. Entries are canonical `(realmId, agentId)` identity keys as emitted by listMetaAuthorityGrants; legacy bare ids still hydrate through the unique-match rule, and an ambiguous bare id is skipped rather than duplicated across Realms.
@@ -1253,6 +1266,7 @@ const runtime = createAgentRuntime({
 - **`mailboxAutonomy`** — Flag controlling autonomous mailbox dequeue on agent idle (null to inherit default)
 - **`messagingBus`** — Shared messaging bus instance (defaults to new MessagingBus())
 - **`presetSource`** — Optional MOD-20 preset-source projection handed to every agent this runtime provisions and hydrates. When supplied, a resolvable `presetId` binding determines the agent's effective model config (binding-only) and missing or stale hydration bindings heal to the source default; when absent, agents keep the legacy settings-default resolution.
+- **`realmAdminPort`** — Optional M3 realm-admin host port forwarded verbatim to the turn execution engine and seeded into every tool dispatcher context. The composition root (sandbox store) implements it over the realm registry, extension live state, and runtime rosters; when absent, the realm-admin meta tools fail closed with a missing-service error. Trusted bound construction; never replaceable from per-call context.
 - **`realmPublishingPort`** — Optional Wave U host publishing port handed to the turn execution engine and seeded into every tool dispatcher context (ticket 2518510). The composition root (sandbox store) implements it over the real Wave T template registry and session candidate surface; when absent, the publishing meta tools fail closed with a missing-service error. The port is trusted bound construction and is never replaceable from per-call context.
 - **`virtualFs`** — Shared virtual filesystem instance (defaults to new VirtualFS({ defaultBudgetBytes: 20000 }))
 - **`worldClock`** — Shared world clock instance (defaults to new WorldClock({ virtualFs }))
@@ -1656,6 +1670,18 @@ Canonical frozen persistence port; exposes only snapshot/import capabilities, ne
 - **`runtime`** — Frozen runtime-state accessor. Delegates agent registry queries and schedule/snapshot export-import to the facade without exposing the `AgentRuntime` instance; malformed snapshots fail closed with `ERR_SNAPSHOT_INVALID`.
 - **`virtualFs`** — Frozen snapshot accessor for the shared `VirtualFS` substrate.
 - **`worldClock`** — Frozen snapshot accessor for the shared `WorldClock` substrate.
+
+### `RealmAdminScopeResolution` — interface
+
+One resolved M3 realm-admin scope (host-only, registry-side): the actor's bare id and canonical identity key, the actor's own realm membership (the own-realm default), the candidate realm ids the exact grant reaches (`scope.targets`, else the own realm), and the effective field tokens for an edit (`scope.fields`, else the id's declared default). Never projected to agents: the store-side realm port consumes it and the receipts carry display labels only.
+
+#### Members
+
+- **`actorId`** — Bare actor id (audit attribution).
+- **`actorKey`** — Canonical `(realmId, agentId)` identity key of the actor.
+- **`candidateRealmIds`** — Realm ids the grant reaches, in scope order (empty = nothing).
+- **`fields`** — Field tokens an edit may touch (empty for a read-only authority id).
+- **`realmId`** — Actor realm membership (own-realm default), or `null` for the system scope.
 
 ### `RedoResult` — interface
 
@@ -2232,10 +2258,10 @@ Narrow on `success` to obtain the fully-populated delivery projection; the failu
 
 ## Doc coverage
 
-- Top-level exports: 59
-- Declarations (exports + members): 483
-- Documented declarations: 483 / 483 (100%)
+- Top-level exports: 60
+- Declarations (exports + members): 491
+- Documented declarations: 491 / 491 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
-- Referenced but not exported (`ae-forgotten-export`): `Agent`, `AGENT_STATES`, `AgentModelConfig`, `AgentSecurityContext`, `AgentTelemetry_2`, `AuthorityGrantRecord`, `AuthorityGrantSnapshotEntry`, `AuthorityScopeRecord`, `CancelScheduleSuccessReceipt`, `CredentialResolverPort`, `EngineModel`, `EngineStreamChunk`, `ExecutionErrorCode`, `ExecutionStatus`, `ExtensionExecutionPort`, `ExtensionToolProviderPort`, `HistoryToolCall`, `InterruptedTurn`, `InvocationEngine`, `InvocationReceipt`, `InvocationSingleResult`, `LaunchAgentOptions`, `MessagingBus`, `ModelPresetSourcePort`, `OrchestratorActionMode`, `RealmPublishingPort`, `ScheduledTaskProjection`, `ScheduleErrorReceipt`, `SchedulerStatus`, `ScheduleSuccessReceipt`, `TimerCondition`, `ToolCallRecord`, `TriggerPolicy`, `TriggerQueue`, `TurnInputObject`, `UndoTurnSelectionFailure`, `VirtualFS`, `WaitForMailFailureResult`, `WaitForMailSuccessResult`, `WorldClock`
+- Referenced but not exported (`ae-forgotten-export`): `Agent`, `AGENT_STATES`, `AgentModelConfig`, `AgentSecurityContext`, `AgentTelemetry_2`, `AuthorityGrantRecord`, `AuthorityGrantSnapshotEntry`, `AuthorityScopeRecord`, `CancelScheduleSuccessReceipt`, `CredentialResolverPort`, `EngineModel`, `EngineStreamChunk`, `ExecutionErrorCode`, `ExecutionStatus`, `ExtensionExecutionPort`, `ExtensionToolProviderPort`, `HistoryToolCall`, `InterruptedTurn`, `InvocationEngine`, `InvocationReceipt`, `InvocationSingleResult`, `LaunchAgentOptions`, `MessagingBus`, `ModelPresetSourcePort`, `OrchestratorActionMode`, `RealmAdminPort`, `RealmPublishingPort`, `ScheduledTaskProjection`, `ScheduleErrorReceipt`, `SchedulerStatus`, `ScheduleSuccessReceipt`, `TimerCondition`, `ToolCallRecord`, `TriggerPolicy`, `TriggerQueue`, `TurnInputObject`, `UndoTurnSelectionFailure`, `VirtualFS`, `WaitForMailFailureResult`, `WaitForMailSuccessResult`, `WorldClock`
 - Unresolved `{@link}` targets (`ae-unresolved-link`): 20 (policy `none`; see `scripts/api_reports.mjs`)

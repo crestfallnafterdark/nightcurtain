@@ -592,6 +592,50 @@ export const AUTHORITY_SCOPE_FIELDS: Readonly<Record<string, readonly string[]>>
 });
 
 /**
+ * Realm-admin edit field tokens (M3; spec §4.3): the accepted patch key maps
+ * to the ratified `@realm:edit` scope token the caller's grant must carry. A
+ * key absent from this table is never editable; a key present here but absent
+ * from the grant's effective field set fails the whole call with the uniform
+ * bound denial.
+ *
+ * The `attachments` token covers both a new attachment (`attach`) and an
+ * attachment ceiling change (`toolSelection`) — both mutate the realm's
+ * attachment set.
+ */
+export const REALM_ADMIN_PATCH_FIELD_TOKENS: Readonly<Record<string, string>> = Object.freeze({
+  name: 'name',
+  description: 'description',
+  color: 'color',
+  attach: 'attachments',
+  toolSelection: 'ceiling'
+});
+
+/**
+ * Operator-only / escalation-adjacent realm patch keys (M3; spec §4.3):
+ * membership, realm/template identity, provenance, creation/deletion,
+ * detach/removal, raw attachment arrays, and approval stamps are host-only
+ * decisions, so their presence fails the whole call with the uniform
+ * permission denial for every caller (even `false`/`null` values). Both
+ * camelCase and snake_case spellings are reserved; authority ids are handled
+ * data-driven from `AUTHORITY_IDS` by the consumers.
+ */
+export const REALM_ADMIN_DENIED_PATCH_KEYS: readonly string[] = Object.freeze([
+  'members', 'memberIds', 'member_ids', 'membership',
+  'realmId', 'realm_id',
+  'templateId', 'template_id',
+  'instance', 'provenance',
+  'create', 'delete', 'remove',
+  'detach', 'detachExtension', 'detach_extension',
+  'removeExtension', 'remove_extension', 'uninstall',
+  'extensions', 'extensionTools', 'extension_tools', 'attachments',
+  'approvedBy', 'approved_by', 'approvedAt', 'approved_at',
+  'authorities', 'templateAuthority', 'template_authority',
+  'hydrationAuthority', 'hydration_authority',
+  'authorityGrants', 'authority_grants',
+  'settings', 'owner', 'protected'
+]);
+
+/**
  * Optional bounds narrowing one authority grant (M1; spec §1.2).
  *
  * A scope is registry-side data: it never appears on the frozen

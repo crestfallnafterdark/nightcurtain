@@ -67,6 +67,7 @@
  * @invariant Extension connection approval boundary: when an install record carries an explicit `approvedUrl`, it must parse as an absolute URL and be URL-equal (`href`) to the transport URL; a stale or inconsistent approval is refused with `ERR_STORE_EXTENSION_INVALID_ENDPOINT` before the plaintext gate, any vault read, and any network activity, and a connection only ever dials `transportHint.url`.
  * @invariant Extension connection credential gate: a `credentialId` on a non-`https:` endpoint is refused with `ERR_STORE_EXTENSION_PLAINTEXT_CREDENTIAL` before any vault read or network activity, a bound credential the vault cannot resolve fails closed with `ERR_STORE_EXTENSION_CREDENTIAL_UNRESOLVED` before any network activity, plaintext local servers with no `credentialId` connect unauthenticated, and connection projections/audits/errors carry no credential material.
  * @invariant Extension catalog arbitration: live catalogs arbitrate only by explicit connection-completion sequence (never map insertion order), the earlier `active` extension keeps every contested call name, each later conflicting extension is `conflict` and not activated until a re-arbitration clears it, re-arbitration runs on every connect/disconnect/reconnect and audits conflict transitions, and realm attachment statuses follow the live state (`connected` → `active`, `conflict` → `conflict`, disconnected/`error` → `unavailable`) through the existing safe-state reauthorization sweep.
+ * @invariant Realm-admin port (M3, ticket 094de1b): the store is the host-side realm-admin composition root — `getRealmAdminPort()` returns the frozen `RealmAdminPort` whose `inspectRealm`/`updateRealm` resolve the actor's exact scoped grant registry-side from the dispatcher-pinned reference (missing/unknown/grant-less actors and unknown/ambiguous/out-of-scope labels throw one uniform `PERMISSION_DENIED`, so a direct store call can never run under the operator principal without an actor record — R6) and whose edits apply only through the existing registry update, `attachExtension`, and `setExtensionToolSelection` internals. `setExtensionToolSelection` validates the attachment exists and every explicit call name against the extension's live conflict-free catalog (fail closed, never silently regranted), emits `extension_tool_selection_updated`, and schedules the P2.4 safe-state sweep; non-operator audit sources require a non-empty actor id; receipts and audits carry display labels and bare ids only, never realm ids, `realm:` paths, transport URLs, or credential material.
  * 
  * @example
  * ```typescript
@@ -135,7 +136,10 @@ import type {
 } from '../mcpClient/index.ts';
 import {
   AGENT_AUTHORITIES,
+  AUTHORITY_IDS,
   BAKED_TEMPLATE_BUNDLES,
+  REALM_ADMIN_DENIED_PATCH_KEYS,
+  REALM_ADMIN_PATCH_FIELD_TOKENS,
   hashText,
   materializeTemplate,
   normalizeTemplate,
@@ -159,7 +163,19 @@ import type {
   RealmTemplateInput
 } from '../realmCatalog/index.ts';
 import { resolveToolPreset } from '../toolDefinitions/index.ts';
-import type { ExtensionToolProviderPort, RealmPublishingPort } from '../toolDefinitions/index.ts';
+import type {
+  ExtensionToolProviderPort,
+  RealmAdminAttachmentView,
+  RealmAdminMemberView,
+  RealmAdminPatch,
+  RealmAdminPort,
+  RealmAdminProvenanceView,
+  RealmAdminRealmSummary,
+  RealmAdminToolSelection,
+  RealmInspectReceipt,
+  RealmPublishingPort,
+  RealmUpdateReceipt
+} from '../toolDefinitions/index.ts';
 import { synthesizeExtensionToolDescriptor } from '../tools/extensionTools/index.ts';
 import type {
   ExtensionExecutionPort,
@@ -1761,11 +1777,29 @@ export interface ExtensionInstallInput {
 }
 
 /**
+ * Audit attribution accepted by the extension mutation methods when the
+ * mutation originates from a non-operator path (the M3 realm-admin port or a
+ * future privileged agent path). The `actorId` is mandatory for every
+ * non-operator source, so an agent-originated mutation can never be recorded
+ * as an anonymous operator act (R6, meta-plane spec §4).
+ */
+export interface ExtensionAuditAttribution {
+  /**
+   * Mutation origin; defaults to `'operator'`. `'meta-realm-edit'` is the M3
+   * realm-admin port path and `'privileged-agent'` is reserved for M4.
+   */
+  readonly source?: 'operator' | 'privileged-agent' | 'meta-realm-edit';
+  /** Bare id of the acting agent; required for every non-operator source. */
+  readonly actorId?: string;
+}
+
+/**
  * Options accepted by `SandboxStore.attachExtension()`: the realm-level tool
  * selection of the new attachment. Defaults to `'all'` (every tool the
- * extension provides).
+ * extension provides), plus the optional audit attribution for non-operator
+ * callers.
  */
-export interface ExtensionAttachOptions {
+export interface ExtensionAttachOptions extends ExtensionAuditAttribution {
   /** Realm-level tool selection: `'all'` or explicit sanitized call names. */
   readonly toolSelection?: 'all' | readonly string[];
 }
@@ -2580,6 +2614,161 @@ function resolveMemberRealmId(
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+/**
+ * O(1) view of the authority-id vocabulary (`AUTHORITY_IDS`): the realm-admin
+ * member projection never surfaces a grant id as a baked tool, and the patch
+ * scanner treats every id as reserved operator vocabulary.
+ */
+const AUTHORITY_ID_SET: ReadonlySet<string> = new Set(AUTHORITY_IDS);
+
+/**
+ * Realm-partition masking patterns mirrored from the M2 descriptor mask
+ * (`tools/descriptors/lifecycleTools.ts`): `realm:<id>:global` renders as
+ * `global` and every other key carrying internal realm/system vocabulary
+ * (`realm:`, the `system:` prefix, the seeded `realm_generic` id) is withheld,
+ * so an operator-pinned internal-shaped workspace key is never surfaced.
+ * Mirrored rather than imported so the composition root keeps its narrow
+ * surface imports.
+ */
+const REALM_GLOBAL_WORKSPACE_PATTERN = /^realm:.+:global$/;
+const INTERNAL_ID_VOCABULARY_PATTERN = /realm:|^system:/;
+const SEEDED_GENERIC_REALM_ID = 'realm_generic';
+
+/** Maps one internal workspace key onto its realm-opaque agent-visible label. */
+function toAgentVisibleWorkspaceKey(value: string | null): string | null {
+  if (!value) return null;
+  if (REALM_GLOBAL_WORKSPACE_PATTERN.test(value)) return 'global';
+  if (carriesInternalRealmVocabulary(value)) return null;
+  return value;
+}
+
+/** Reports whether an identifier carries internal realm/system vocabulary. */
+function carriesInternalRealmVocabulary(value: unknown): boolean {
+  if (typeof value !== 'string' || !value) return false;
+  return INTERNAL_ID_VOCABULARY_PATTERN.test(value) || value === SEEDED_GENERIC_REALM_ID;
+}
+
+/** Projects one internal agent reference onto its realm-opaque bare id. */
+function toAgentVisibleAgentReference(value: unknown): string | null {
+  if (typeof value !== 'string' || !value) return null;
+  if (value.startsWith('realm:')) {
+    const rest = value.slice('realm:'.length);
+    const separator = rest.indexOf(':');
+    if (separator <= 0) return null;
+    try {
+      const agentId = decodeURIComponent(rest.slice(separator + 1));
+      return agentId && !carriesInternalRealmVocabulary(agentId) ? agentId : null;
+    } catch {
+      return null;
+    }
+  }
+  if (value.startsWith('system:')) return null;
+  return carriesInternalRealmVocabulary(value) ? null : value;
+}
+
+/**
+ * Uniform realm-admin denials (M3; meta-plane spec §1.4): one static receipt
+ * per operation for every resolution failure (missing actor record, missing
+ * grant, unknown/ambiguous/out-of-scope label), plus a distinct static bound
+ * denial for field-token violations. None of them echoes target state, realm
+ * ids, canonical keys, or capability values.
+ */
+const REALM_ADMIN_INSPECT_DENIED_MESSAGE = 'Realm inspection is not permitted for the requested realm.';
+const REALM_ADMIN_EDIT_DENIED_MESSAGE = 'The requested realm edit is not permitted for the requested realm.';
+const REALM_ADMIN_EDIT_BOUND_DENIED_MESSAGE = 'The requested realm edit is not permitted for the requested fields.';
+
+/**
+ * Builds one coded store error for the realm-admin port path (the dispatcher
+ * maps the code onto the tool-system vocabulary).
+ */
+function realmAdminCodedError(message: string, code: string): Error & { code?: string } {
+  const err = new Error(message) as Error & { code?: string };
+  err.code = code;
+  return err;
+}
+
+/**
+ * Tests whether one sanitized realm patch key is operator-only: the shared
+ * `REALM_ADMIN_DENIED_PATCH_KEYS` vocabulary plus every exact authority id.
+ */
+function isDeniedRealmAdminPatchKey(key: string): boolean {
+  if (REALM_ADMIN_DENIED_PATCH_KEYS.includes(key)) return true;
+  return AUTHORITY_ID_SET.has(key);
+}
+
+/** Accepted nested key set of the `attach` patch container (closed at depth). */
+const REALM_ADMIN_ATTACH_KEYS: ReadonlySet<string> = new Set<string>(['extensionId', 'toolSelection']);
+
+/** Accepted nested key set of the `toolSelection` patch container (closed at depth). */
+const REALM_ADMIN_TOOL_SELECTION_KEYS: ReadonlySet<string> = new Set<string>(['extensionId', 'selection']);
+
+/**
+ * Re-validates the `attach` / `toolSelection` patch containers at depth
+ * (tool-boundary parity, spec AC-M3-04/§1.4): an operator-only nested key
+ * throws the uniform bound denial, an unknown nested key throws
+ * `INVALID_ARGUMENTS` — never silently dropped by the known-key reads below.
+ * Malformed container shapes are left to the value validation that follows.
+ *
+ * @param patch - Caller-supplied patch record.
+ * @throws `Error` - Code `'PERMISSION_DENIED'` or `'INVALID_ARGUMENTS'`.
+ */
+function assertRealmAdminNestedPatchKeys(patch: Record<string, unknown>): void {
+  const containers: Array<{ value: unknown; allowed: ReadonlySet<string> }> = [];
+  if (patch.attach !== undefined) {
+    containers[containers.length] = { value: patch.attach, allowed: REALM_ADMIN_ATTACH_KEYS };
+  }
+  if (patch.toolSelection !== undefined) {
+    containers[containers.length] = { value: patch.toolSelection, allowed: REALM_ADMIN_TOOL_SELECTION_KEYS };
+  }
+  // Denied presence across both containers first, exactly like the top-level
+  // scan: the uniform bound denial wins over unknown-key reporting.
+  for (let i = 0; i < containers.length; i++) {
+    const value = containers[i].value;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+    const nestedKeys = Object.keys(value as Record<string, unknown>);
+    for (let j = 0; j < nestedKeys.length; j++) {
+      if (isDeniedRealmAdminPatchKey(nestedKeys[j])) {
+        throw realmAdminCodedError(REALM_ADMIN_EDIT_BOUND_DENIED_MESSAGE, 'PERMISSION_DENIED');
+      }
+    }
+  }
+  for (let i = 0; i < containers.length; i++) {
+    const value = containers[i].value;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+    const nestedKeys = Object.keys(value as Record<string, unknown>);
+    for (let j = 0; j < nestedKeys.length; j++) {
+      if (!containers[i].allowed.has(nestedKeys[j])) {
+        throw realmAdminCodedError('update_realm does not accept unknown fields.', 'INVALID_ARGUMENTS');
+      }
+    }
+  }
+}
+
+/**
+ * Normalizes one realm tool-ceiling selection: `'all'` or a frozen non-empty
+ * deduplicated list of call names. Shape violations throw `INVALID_ARGUMENTS`
+ * (the store methods wrap them in the store error vocabulary).
+ */
+function normalizeRealmAdminSelection(value: unknown): 'all' | readonly string[] {
+  if (value === 'all') return 'all';
+  if (!Array.isArray(value) || value.length === 0) {
+    throw realmAdminCodedError("The tool selection must be 'all' or a non-empty array of call names.", 'INVALID_ARGUMENTS');
+  }
+  const names: string[] = [];
+  for (let i = 0; i < value.length; i++) {
+    const entry = value[i];
+    if (typeof entry !== 'string' || !entry.trim()) {
+      throw realmAdminCodedError("The tool selection must be 'all' or a non-empty array of call names.", 'INVALID_ARGUMENTS');
+    }
+    const name = entry.trim();
+    if (names.includes(name)) {
+      throw realmAdminCodedError('The tool selection carries duplicate call names.', 'INVALID_ARGUMENTS');
+    }
+    names[names.length] = name;
+  }
+  return Object.freeze(names);
 }
 
 /**
@@ -4041,6 +4230,16 @@ export class SandboxStore {
   #realmPublishingPort: RealmPublishingPort | null = null;
 
   /**
+   * M3 realm-admin port (ticket 094de1b): the store is the host-side
+   * implementation over its owned realm registry, the extension live state,
+   * and the runtime rosters. Built before the runtime so the store-owned
+   * runtime seeds it into every tool dispatcher; a caller-injected runtime is
+   * caller-owned and keeps its own wiring (tests may bind the same port from
+   * `getRealmAdminPort()`).
+   */
+  #realmAdminPort: RealmAdminPort | null = null;
+
+  /**
    * Constructs a new isolated `SandboxStore` instance with private domain engines and reactive state.
    * 
    * @param options - Optional custom engine instances and hydration flags for dependency injection.
@@ -4191,6 +4390,10 @@ export class SandboxStore {
     // caller-owned and keeps its own wiring (tests may bind the same port from
     // `getRealmPublishingPort()`).
     this.#realmPublishingPort = this.#createRealmPublishingPort();
+    // M3 realm-admin port (ticket 094de1b): the same composition-root pattern
+    // over the store-owned realm registry, extension live state, and runtime
+    // rosters.
+    this.#realmAdminPort = this.#createRealmAdminPort();
     // Only the store-owned runtime receives the MOD-20 preset source. A
     // caller-injected runtime is caller-owned (and constructor-immutable), so
     // no injection is attempted; its agents resolve presets only if the caller
@@ -4206,6 +4409,7 @@ export class SandboxStore {
       credentialResolver: this.#credentialResolver,
       presetSource: this.#presetSource,
       realmPublishingPort: this.#realmPublishingPort,
+      realmAdminPort: this.#realmAdminPort,
       extensionToolProvider: this.#extensionToolProvider,
       extensionExecutionPort: this.#extensionExecutionPort
     });
@@ -7546,6 +7750,7 @@ export class SandboxStore {
         `attachExtension: realm '${realmId}' already attaches extension '${extensionId}'`
       );
     }
+    const attribution = this.#normalizeExtensionAuditAttribution(options);
     const toolSelection = options && options.toolSelection !== undefined ? options.toolSelection : 'all';
     let attachment: RealmExtensionAttachment;
     try {
@@ -7574,7 +7779,12 @@ export class SandboxStore {
     // constraint so the attach's `active` status cannot churn against a stale
     // disconnect marker on the next install-only heal.
     this.#extensionDisconnected.delete(extensionId);
-    this.#emitExtensionAuditEvent('extension_attached', { realmId, extensionId, source: 'operator' });
+    this.#emitExtensionAuditEvent('extension_attached', {
+      realmId,
+      extensionId,
+      source: attribution.source,
+      ...(attribution.actorId ? { actorId: attribution.actorId } : {})
+    });
     // Safe-state extension sweep (extension wave, P2.4): re-attaching an
     // extension can re-activate resolved tools that were dropped while it was
     // detached; members recompute at idle or on their next turn completion.
@@ -7620,6 +7830,138 @@ export class SandboxStore {
     // completion.
     this.#sweepRealmExtensionAuthorizations(realmId);
     return updated;
+  }
+
+  /**
+   * Validates one extension-audit attribution (M3 R6): the default is the
+   * operator source; every non-operator source requires a non-empty actor id,
+   * so an agent-originated mutation can never be recorded as an anonymous
+   * operator act.
+   *
+   * @param options - Candidate attribution options.
+   * @returns The frozen normalized attribution.
+   * @throws {@link SANDBOX_STORE_ERROR_CODES.ERR_STORE_INVALID_PARAMS} When the source or actor is malformed.
+   */
+  #normalizeExtensionAuditAttribution(options: ExtensionAuditAttribution | null | undefined): {
+    readonly source: 'operator' | 'privileged-agent' | 'meta-realm-edit';
+    readonly actorId: string | null;
+  } {
+    const source = options && options.source !== undefined ? options.source : 'operator';
+    if (source !== 'operator' && source !== 'privileged-agent' && source !== 'meta-realm-edit') {
+      throw invalidRealmParams(`extension audit source must be 'operator'/'privileged-agent'/'meta-realm-edit'`);
+    }
+    const rawActor = options && typeof options.actorId === 'string' ? options.actorId.trim() : '';
+    if (source !== 'operator' && !rawActor) {
+      throw invalidRealmParams('a non-operator extension audit source requires a non-empty actorId');
+    }
+    return Object.freeze({ source, actorId: rawActor || null });
+  }
+
+  /**
+   * Replaces one attachment's realm-level tool ceiling (M3 ticket 094de1b).
+   *
+   * The attachment must already exist on the Realm and the selection must
+   * resolve against the extension's **live** catalog: `'all'` always resolves,
+   * while an explicit list must be a non-empty duplicate-free list of
+   * currently active call names — any name the live catalog does not carry
+   * fails the call closed, never silently granting or dropping something else.
+   * The updated attachment is written through the realm registry, an
+   * `extension_tool_selection_updated` audit event is emitted, and the
+   * safe-state sweep reauthorizes the Realm members exactly like an attach
+   * (idle members synchronously, busy members at their next `turn_complete`).
+   *
+   * @param realmId - Registered Realm id.
+   * @param extensionId - Id of an extension the Realm already attaches.
+   * @param selection - Replacement ceiling (`'all'` or explicit live call names).
+   * @param options - Optional audit attribution (non-operator sources require an actor id).
+   * @returns The frozen updated Realm record.
+   * @throws {@link SANDBOX_STORE_ERROR_CODES.ERR_STORE_INVALID_PARAMS} When the Realm/attachment is unknown, the selection is malformed, or a name is outside the live catalog.
+   *
+   * @example
+   * ```typescript
+   * sandboxStore.setExtensionToolSelection('realm_demo', 'acme-scoring', ['score_text']);
+   * ```
+   */
+  setExtensionToolSelection(
+    realmId: string,
+    extensionId: string,
+    selection: 'all' | readonly string[],
+    options: ExtensionAuditAttribution = {}
+  ): RealmRecord {
+    const realm = this.#realmRegistry.getRealm(realmId);
+    if (!realm) {
+      throw invalidRealmParams(`setExtensionToolSelection: unknown realm '${String(realmId)}'`);
+    }
+    if (typeof extensionId !== 'string' || extensionId.trim().length === 0) {
+      throw invalidRealmParams('setExtensionToolSelection requires a non-empty extension id');
+    }
+    const attribution = this.#normalizeExtensionAuditAttribution(options);
+    const existing = realm.extensions ?? [];
+    const index = existing.findIndex((attachment) => attachment.extensionId === extensionId);
+    if (index === -1) {
+      throw invalidRealmParams(
+        `setExtensionToolSelection: realm '${realmId}' does not attach extension '${extensionId}'`
+      );
+    }
+    let normalized: 'all' | readonly string[];
+    try {
+      normalized = normalizeRealmAdminSelection(selection);
+    } catch (error) {
+      throw invalidRealmParams(
+        `setExtensionToolSelection: invalid selection — ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+    if (normalized !== 'all') {
+      const liveNames = this.#connectedExtensionCatalogCallNames(extensionId);
+      if (!liveNames) {
+        throw invalidRealmParams(
+          `setExtensionToolSelection: extension '${extensionId}' is not connected — explicit call names cannot resolve against the live catalog`
+        );
+      }
+      for (let i = 0; i < normalized.length; i++) {
+        if (!liveNames.includes(normalized[i])) {
+          throw invalidRealmParams(
+            `setExtensionToolSelection: '${normalized[i]}' is outside extension '${extensionId}' live catalog`
+          );
+        }
+      }
+    }
+    const next = existing.map((attachment) => (
+      attachment.extensionId === extensionId
+        ? Object.freeze({ ...attachment, toolSelection: normalized })
+        : attachment
+    ));
+    const updated = this.#realmRegistry.updateRealm(realmId, { extensions: next });
+    this.#emitExtensionAuditEvent('extension_tool_selection_updated', {
+      realmId,
+      extensionId,
+      toolSelection: normalized,
+      source: attribution.source,
+      ...(attribution.actorId ? { actorId: attribution.actorId } : {})
+    });
+    // Safe-state extension sweep: a narrower ceiling removes tools from the
+    // Realm universe, a wider one restores them; members recompute at idle or
+    // on their next turn completion exactly like the attach/detach sweeps.
+    this.#sweepRealmExtensionAuthorizations(realmId);
+    return updated;
+  }
+
+  /**
+   * Live, conflict-free catalog call names of one connected extension, or
+   * `null` when the extension has no active catalog (not installed, not
+   * connected, or conflicted). Shared by the ceiling validation and the
+   * realm-admin attach/ceiling pre-checks with `#listActiveCatalogEntries`
+   * semantics.
+   *
+   * @param extensionId - Extension id.
+   * @returns Frozen call names, or `null`.
+   */
+  #connectedExtensionCatalogCallNames(extensionId: string): readonly string[] | null {
+    const entry = this.#extensionConnections.get(extensionId);
+    if (!entry || entry.status !== 'connected' || entry.conflicts.length > 0 || !entry.catalog) return null;
+    const names: string[] = [];
+    for (const tool of entry.catalog.tools) names[names.length] = tool.callName;
+    return Object.freeze(names);
   }
 
   // ==========================================================================
@@ -9134,6 +9476,25 @@ export class SandboxStore {
       this.#realmPublishingPort = this.#createRealmPublishingPort();
     }
     return this.#realmPublishingPort;
+  }
+
+  /**
+   * Returns the frozen M3 realm-admin port (ticket 094de1b).
+   *
+   * The port is the store's host-side implementation over the realm registry,
+   * extension live state, and runtime rosters; the store-owned runtime already
+   * receives it as pinned construction, and consumers with a caller-injected
+   * runtime can bind it explicitly. Every method resolves the caller's grant
+   * scope registry-side from the dispatcher-pinned actor reference and fails
+   * closed when no matching active grant record exists.
+   *
+   * @returns The frozen realm-admin port.
+   */
+  getRealmAdminPort(): RealmAdminPort {
+    if (!this.#realmAdminPort) {
+      this.#realmAdminPort = this.#createRealmAdminPort();
+    }
+    return this.#realmAdminPort;
   }
 
   /**
@@ -11661,6 +12022,583 @@ export class SandboxStore {
    *
    * @returns The frozen publishing port.
    */
+  // ==========================================================================
+  // Realm Admin Port (M3 meta plane, ticket 094de1b)
+  // ==========================================================================
+
+  /**
+   * Builds the frozen M3 realm-admin port over the store's own surfaces: the
+   * realm registry, the extension install/attachment/live-connection state,
+   * and the runtime rosters. The port resolves the caller's exact grant scope
+   * registry-side from the dispatcher-pinned actor reference (never a caller
+   * claim), mutates only through the existing attach/ceiling + safe-state
+   * sweep internals, and attributes every audit event to the actor id (R6).
+   *
+   * @returns The frozen realm-admin port.
+   */
+  #createRealmAdminPort(): RealmAdminPort {
+    return Object.freeze({
+      inspectRealm: (input: { actorRef: string | null; realmLabel: string | null }) => this.#inspectRealmForAdmin(input),
+      updateRealm: (input: { actorRef: string | null; realmLabel: string | null; patch: RealmAdminPatch }) =>
+        this.#updateRealmForAdmin(input)
+    });
+  }
+
+  /**
+   * Resolves the registry-side realm-admin scope for one actor, or throws the
+   * operation's uniform denial. The verdict stays dispatcher-side; this check
+   * only guarantees that a direct port call can never run without a matching
+   * active grant record and that the scope bounds the target.
+   *
+   * @param actorRef - Dispatcher-pinned actor reference (canonical key or bare id).
+   * @param authorityId - Exact realm-class authority id.
+   * @param denialMessage - The operation's uniform static denial message.
+   * @returns The resolved scope.
+   * @throws `Error` - Code `'PERMISSION_DENIED'`.
+   */
+  #resolveRealmAdminScopeOrDeny(
+    actorRef: string | null,
+    authorityId: string,
+    denialMessage: string
+  ): NonNullable<ReturnType<AgentRuntime['resolveRealmAdminScope']>> {
+    const actor = typeof actorRef === 'string' && actorRef ? actorRef : null;
+    const scope = actor ? this.#runtime.resolveRealmAdminScope(actor, authorityId) : null;
+    if (!scope) throw realmAdminCodedError(denialMessage, 'PERMISSION_DENIED');
+    return scope;
+  }
+
+  /**
+   * Resolves the addressed realm within the grant's candidate set: omitted or
+   * blank label means the actor's own realm (which must be inside the
+   * candidate set), an explicit label must match exactly one candidate realm
+   * display label. Zero or ambiguous matches throw the uniform denial, so no
+   * realm-existence or scope oracle exists.
+   *
+   * @param scope - Resolved grant scope.
+   * @param realmLabel - Caller-supplied display label, or `null` for own realm.
+   * @param denialMessage - The operation's uniform static denial message.
+   * @returns The resolved frozen realm record.
+   * @throws `Error` - Code `'PERMISSION_DENIED'`.
+   */
+  #resolveRealmAdminRealm(
+    scope: { readonly realmId: string | null; readonly candidateRealmIds: readonly string[] },
+    realmLabel: string | null,
+    denialMessage: string
+  ): RealmRecord {
+    const label = typeof realmLabel === 'string' && realmLabel.trim() ? realmLabel.trim() : null;
+    let realmId: string | null = null;
+    if (label === null) {
+      if (scope.realmId) {
+        for (let i = 0; i < scope.candidateRealmIds.length; i++) {
+          if (scope.candidateRealmIds[i] === scope.realmId) {
+            realmId = scope.realmId;
+            break;
+          }
+        }
+      }
+    } else {
+      const matches: string[] = [];
+      for (let i = 0; i < scope.candidateRealmIds.length; i++) {
+        const candidate = this.#realmRegistry.getRealm(scope.candidateRealmIds[i]);
+        if (candidate && candidate.name === label) matches[matches.length] = candidate.id;
+      }
+      if (matches.length === 1) realmId = matches[0];
+    }
+    const realm = realmId ? this.#realmRegistry.getRealm(realmId) : null;
+    if (!realm) throw realmAdminCodedError(denialMessage, 'PERMISSION_DENIED');
+    return realm;
+  }
+
+  /**
+   * Builds the bounded realm inspection receipt (spec §4.2): label-only realm
+   * metadata, the realm-exact member roster with effective capability,
+   * attachments with ceiling + live connection state, launch provenance, and
+   * the missing-extension disclosure. No realm ids, transport URLs, or
+   * credential material.
+   *
+   * @param realm - Resolved realm record.
+   * @returns The frozen bounded projection.
+   */
+  #buildRealmAdminInspectReceipt(realm: RealmRecord): RealmInspectReceipt {
+    const members: RealmAdminMemberView[] = [];
+    const allAgents = this.#runtime.listAgents();
+    for (let i = 0; i < allAgents.length; i++) {
+      const member = allAgents[i];
+      if (resolveMemberRealmId(member) !== realm.id) continue;
+      members[members.length] = this.#projectRealmAdminMember(member);
+    }
+    const attachments: RealmAdminAttachmentView[] = [];
+    const realmAttachments = realm.extensions ?? [];
+    for (let i = 0; i < realmAttachments.length; i++) {
+      attachments[attachments.length] = this.#projectRealmAdminAttachment(realmAttachments[i]);
+    }
+    const missingExtensions: string[] = [];
+    const provenance = realm.instance ? this.#projectRealmAdminProvenance(realm.instance) : null;
+    if (provenance && provenance.missingExtensions) {
+      for (let i = 0; i < provenance.missingExtensions.length; i++) {
+        if (!missingExtensions.includes(provenance.missingExtensions[i])) {
+          missingExtensions[missingExtensions.length] = provenance.missingExtensions[i];
+        }
+      }
+    }
+    // An attachment whose install record disappeared is disclosed too: the
+    // stored record survives but its tools are unavailable until reinstalled.
+    for (let i = 0; i < realmAttachments.length; i++) {
+      const extensionId = realmAttachments[i].extensionId;
+      if (this.#extensionRegistry.getExtension(extensionId)) continue;
+      if (!missingExtensions.includes(extensionId)) missingExtensions[missingExtensions.length] = extensionId;
+    }
+    const receipt: {
+      success: true;
+      realm: { label: string; createdAt: number; memberCount: number };
+      members: readonly RealmAdminMemberView[];
+      attachments: readonly RealmAdminAttachmentView[];
+      provenance?: RealmAdminProvenanceView;
+      disclosure: { missingExtensions: readonly string[] };
+    } = {
+      success: true,
+      realm: { label: realm.name, createdAt: realm.createdAt, memberCount: members.length },
+      members: Object.freeze(members),
+      attachments: Object.freeze(attachments),
+      disclosure: Object.freeze({ missingExtensions: Object.freeze(missingExtensions) })
+    };
+    if (provenance) receipt.provenance = provenance;
+    return Object.freeze(receipt) as RealmInspectReceipt;
+  }
+
+  /**
+   * Projects one realm member onto the bounded roster view: bare id/name/role/
+   * state, effective privilege, effective baked tools (authority ids stripped)
+   * plus granted extension call names, the realm-opaque parent reference, the
+   * masked workspace label, and the turn count.
+   *
+   * @param member - Active agent record.
+   * @returns The frozen member view.
+   */
+  #projectRealmAdminMember(member: Agent): RealmAdminMemberView {
+    const config = (member.config || {}) as unknown as Record<string, unknown>;
+    const rawRealm = typeof config.realmId === 'string' && config.realmId ? config.realmId : null;
+    const identityKey = createAgentIdentityKey(rawRealm, member.id);
+    const identity = this.#identityPort ? this.#identityPort.getAgentIdentity(identityKey) : null;
+    const descriptor = identity ? identity.authority : null;
+    const baked: string[] = [];
+    const seen = new Set<string>();
+    if (descriptor && descriptor.allow && typeof descriptor.allow.has === 'function') {
+      if (descriptor.allow.has('*')) {
+        baked[baked.length] = '*';
+      } else {
+        for (const entry of descriptor.allow) {
+          if (typeof entry !== 'string' || !entry || entry === '*') continue;
+          if (AUTHORITY_ID_SET.has(entry) || seen.has(entry)) continue;
+          seen.add(entry);
+          baked[baked.length] = entry;
+        }
+      }
+    }
+    const extensions: string[] = [];
+    if (descriptor) {
+      for (const name of descriptor.extensions) extensions[extensions.length] = name;
+    }
+    const privileged = Boolean(identity && identity.privileged === true)
+      || Boolean(descriptor && descriptor.allow.has('*'));
+    const view: {
+      id: string;
+      name: string;
+      role: string;
+      state: string;
+      privileged: boolean;
+      tools: { baked: readonly string[]; extensions: readonly string[] };
+      parent?: string | null;
+      workspace?: string;
+      turns: number;
+    } = {
+      id: member.id,
+      name: (typeof member.name === 'string' && member.name)
+        || (typeof config.name === 'string' && config.name)
+        || member.id,
+      role: (typeof config.role === 'string' && config.role) || (privileged ? 'admin' : 'user'),
+      state: member.state,
+      privileged,
+      tools: { baked: Object.freeze(baked), extensions: Object.freeze(extensions) },
+      turns: typeof member.turnCount === 'number' ? member.turnCount : 0
+    };
+    const parent = toAgentVisibleAgentReference(config.spawnedBy || config.creatorId || null);
+    if (parent) view.parent = parent;
+    const rawWorkspace = typeof config.workspaceId === 'string' && config.workspaceId ? config.workspaceId : member.id;
+    const workspace = toAgentVisibleWorkspaceKey(rawWorkspace);
+    if (workspace) view.workspace = workspace;
+    return Object.freeze(view) as RealmAdminMemberView;
+  }
+
+  /**
+   * Projects one realm attachment onto the bounded view: install display
+   * metadata, stored status, ceiling, live connection state (connected /
+   * disconnected / conflict / error / unavailable), and the ids it currently
+   * conflicts with. Never the transport URL, credential id, or raw catalog.
+   *
+   * @param attachment - Realm attachment record.
+   * @returns The frozen attachment view.
+   */
+  #projectRealmAdminAttachment(attachment: RealmExtensionAttachment): RealmAdminAttachmentView {
+    const install = this.#extensionRegistry.getExtension(attachment.extensionId);
+    const entry = this.#extensionConnections.get(attachment.extensionId);
+    let live: RealmAdminAttachmentView['live'];
+    if (!install) {
+      live = 'unavailable';
+    } else if (entry && entry.status === 'connected' && entry.conflicts.length === 0 && entry.catalog) {
+      live = 'connected';
+    } else if (entry && entry.status === 'conflict') {
+      live = 'conflict';
+    } else if (entry && entry.status === 'error') {
+      live = 'error';
+    } else if (entry && entry.status === 'connecting') {
+      live = 'disconnected';
+    } else if (this.#extensionDisconnected.has(attachment.extensionId)) {
+      live = 'disconnected';
+    } else if (attachment.status === 'conflict') {
+      live = 'conflict';
+    } else if (attachment.status === 'unavailable') {
+      live = 'unavailable';
+    } else {
+      live = 'disconnected';
+    }
+    const view: {
+      extensionId: string;
+      displayName?: string;
+      kind: string;
+      status: RealmAdminAttachmentView['status'];
+      toolSelection: RealmAdminToolSelection;
+      live: RealmAdminAttachmentView['live'];
+      conflictWith?: readonly string[];
+    } = {
+      extensionId: attachment.extensionId,
+      kind: install ? install.kind : 'unknown',
+      status: attachment.status,
+      toolSelection: attachment.toolSelection,
+      live
+    };
+    if (install && install.displayName) view.displayName = install.displayName;
+    if (entry && entry.conflicts.length > 0) {
+      const conflictedWith: string[] = [];
+      for (let i = 0; i < entry.conflicts.length; i++) {
+        const other = entry.conflicts[i].otherExtensionId;
+        if (typeof other === 'string' && other && !conflictedWith.includes(other)) {
+          conflictedWith[conflictedWith.length] = other;
+        }
+      }
+      if (conflictedWith.length > 0) view.conflictWith = Object.freeze(conflictedWith);
+    }
+    return Object.freeze(view) as RealmAdminAttachmentView;
+  }
+
+  /**
+   * Projects one realm launch provenance record (hashes and paths only; the
+   * record already carries no raw input values).
+   *
+   * @param instance - Realm instance provenance.
+   * @returns The frozen provenance view.
+   */
+  #projectRealmAdminProvenance(instance: RealmInstanceProvenance): RealmAdminProvenanceView {
+    const view: {
+      templateId: string;
+      templateVersion: string;
+      packageDigest?: string;
+      inputHashes: Readonly<Record<string, string>>;
+      seedPaths: readonly string[];
+      launchedAt: string;
+      resolvedTools?: Readonly<Record<string, string>>;
+      missingExtensions?: readonly string[];
+    } = {
+      templateId: instance.templateId,
+      templateVersion: instance.templateVersion,
+      inputHashes: Object.freeze({ ...(instance.inputHashes || {}) }),
+      seedPaths: Object.freeze([...(instance.seedPaths || [])]),
+      launchedAt: instance.launchedAt
+    };
+    if (instance.packageDigest) view.packageDigest = instance.packageDigest;
+    if (instance.resolvedTools) view.resolvedTools = Object.freeze({ ...instance.resolvedTools });
+    if (instance.missingExtensions) view.missingExtensions = Object.freeze([...instance.missingExtensions]);
+    return Object.freeze(view) as RealmAdminProvenanceView;
+  }
+
+  /**
+   * Builds the label-only realm summary used by the update receipt's
+   * before/after pair (display metadata plus attachment ids and ceilings).
+   *
+   * @param realm - Realm record.
+   * @returns The frozen summary.
+   */
+  #realmAdminSummary(realm: RealmRecord): RealmAdminRealmSummary {
+    const attachments: Array<{ extensionId: string; toolSelection: RealmAdminToolSelection }> = [];
+    const realmAttachments = realm.extensions ?? [];
+    for (let i = 0; i < realmAttachments.length; i++) {
+      attachments[attachments.length] = Object.freeze({
+        extensionId: realmAttachments[i].extensionId,
+        toolSelection: realmAttachments[i].toolSelection
+      });
+    }
+    const summary: {
+      name: string;
+      description?: string | null;
+      color?: string | null;
+      attachments: readonly { extensionId: string; toolSelection: RealmAdminToolSelection }[];
+    } = {
+      name: realm.name,
+      attachments: Object.freeze(attachments)
+    };
+    if (realm.description !== undefined) summary.description = realm.description;
+    if (realm.color !== undefined) summary.color = realm.color;
+    return Object.freeze(summary) as RealmAdminRealmSummary;
+  }
+
+  /**
+   * Reads and validates one realm-admin update patch (port-side re-validation;
+   * the tool boundary already scanned top-level and nested keys): denied keys
+   * throw the uniform bound denial, unknown top-level or nested keys or
+   * malformed values throw `INVALID_ARGUMENTS`, and the requested field tokens
+   * are returned in patch declaration order.
+   *
+   * @param patch - Caller-supplied patch.
+   * @returns The frozen patch snapshot with its requested field tokens.
+   * @throws `Error` - Code `'PERMISSION_DENIED'` or `'INVALID_ARGUMENTS'`.
+   */
+  #normalizeRealmAdminPatch(patch: unknown): {
+    readonly update: RealmAdminPatch;
+    readonly fields: readonly string[];
+  } {
+    if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+      throw realmAdminCodedError('update_realm requires a patch object with at least one editable field.', 'INVALID_ARGUMENTS');
+    }
+    const snapshot = { ...(patch as Record<string, unknown>) };
+    const keys = Object.keys(snapshot);
+    if (keys.length === 0) {
+      throw realmAdminCodedError('update_realm requires a patch object with at least one editable field.', 'INVALID_ARGUMENTS');
+    }
+    for (let i = 0; i < keys.length; i++) {
+      if (isDeniedRealmAdminPatchKey(keys[i])) {
+        throw realmAdminCodedError(REALM_ADMIN_EDIT_BOUND_DENIED_MESSAGE, 'PERMISSION_DENIED');
+      }
+    }
+    const fields: string[] = [];
+    for (let i = 0; i < keys.length; i++) {
+      const token = REALM_ADMIN_PATCH_FIELD_TOKENS[keys[i]];
+      if (!token) {
+        throw realmAdminCodedError('update_realm does not accept unknown fields.', 'INVALID_ARGUMENTS');
+      }
+      fields[fields.length] = token;
+    }
+    assertRealmAdminNestedPatchKeys(snapshot);
+    const update: Record<string, unknown> = {};
+    if (snapshot.name !== undefined) {
+      if (typeof snapshot.name !== 'string' || !snapshot.name.trim()) {
+        throw realmAdminCodedError("update_realm: 'name' must be a non-empty string.", 'INVALID_ARGUMENTS');
+      }
+      update.name = snapshot.name.trim();
+    }
+    for (const key of ['description', 'color']) {
+      const value = snapshot[key];
+      if (value === undefined) continue;
+      if (value !== null && typeof value !== 'string') {
+        throw realmAdminCodedError(`update_realm: '${key}' must be a string or null.`, 'INVALID_ARGUMENTS');
+      }
+      update[key] = value;
+    }
+    if (snapshot.attach !== undefined) {
+      const attach = snapshot.attach;
+      if (!attach || typeof attach !== 'object' || Array.isArray(attach)) {
+        throw realmAdminCodedError("update_realm: 'attach' must be an object.", 'INVALID_ARGUMENTS');
+      }
+      const attachRecord = attach as Record<string, unknown>;
+      const extensionId = typeof attachRecord.extensionId === 'string' ? attachRecord.extensionId.trim() : '';
+      if (!extensionId) {
+        throw realmAdminCodedError("update_realm: 'attach.extensionId' must be a non-empty string.", 'INVALID_ARGUMENTS');
+      }
+      const entry: { extensionId: string; toolSelection?: 'all' | readonly string[] } = { extensionId };
+      if (attachRecord.toolSelection !== undefined) {
+        entry.toolSelection = normalizeRealmAdminSelection(attachRecord.toolSelection);
+      }
+      update.attach = Object.freeze(entry);
+    }
+    if (snapshot.toolSelection !== undefined) {
+      const ceiling = snapshot.toolSelection;
+      if (!ceiling || typeof ceiling !== 'object' || Array.isArray(ceiling)) {
+        throw realmAdminCodedError("update_realm: 'toolSelection' must be an object.", 'INVALID_ARGUMENTS');
+      }
+      const ceilingRecord = ceiling as Record<string, unknown>;
+      const extensionId = typeof ceilingRecord.extensionId === 'string' ? ceilingRecord.extensionId.trim() : '';
+      if (!extensionId) {
+        throw realmAdminCodedError("update_realm: 'toolSelection.extensionId' must be a non-empty string.", 'INVALID_ARGUMENTS');
+      }
+      if (ceilingRecord.selection === undefined) {
+        throw realmAdminCodedError("update_realm: 'toolSelection.selection' is required.", 'INVALID_ARGUMENTS');
+      }
+      update.toolSelection = Object.freeze({
+        extensionId,
+        selection: normalizeRealmAdminSelection(ceilingRecord.selection)
+      });
+    }
+    return { update: Object.freeze(update) as RealmAdminPatch, fields: Object.freeze(fields) };
+  }
+
+  /**
+   * Inspects one realm under the caller's exact scoped `@realm:inspect`
+   * grant: registry-side scope resolution, label resolution within the
+   * candidate set, bounded projection, and the `realm_inspected` audit event
+   * (bare actor id + display label only).
+   *
+   * @param input - Trusted port input.
+   * @returns The frozen bounded inspection receipt.
+   * @throws `Error` - Code `'PERMISSION_DENIED'` for every resolution failure.
+   */
+  #inspectRealmForAdmin(input: { actorRef: string | null; realmLabel: string | null }): RealmInspectReceipt {
+    const scope = this.#resolveRealmAdminScopeOrDeny(
+      input?.actorRef ?? null,
+      AGENT_AUTHORITIES.REALM_INSPECT,
+      REALM_ADMIN_INSPECT_DENIED_MESSAGE
+    );
+    const realm = this.#resolveRealmAdminRealm(scope, input?.realmLabel ?? null, REALM_ADMIN_INSPECT_DENIED_MESSAGE);
+    const receipt = this.#buildRealmAdminInspectReceipt(realm);
+    this.#emitExtensionAuditEvent('realm_inspected', { actorId: scope.actorId, realmLabel: realm.name });
+    return receipt;
+  }
+
+  /**
+   * Applies one realm edit under the caller's exact scoped `@realm:edit`
+   * grant: scope + label resolution, closed patch validation, field-token
+   * bound, complete pre-validation of every attach/ceiling precondition
+   * (installed + connected + live-catalog selection) before any mutation, then
+   * the metadata / attach / ceiling writes through the existing internals. The
+   * `realm_updated` audit event carries the bare actor id, the resulting
+   * label, the field tokens, and label-only before/after summaries.
+   *
+   * @param input - Trusted port input.
+   * @returns The frozen update receipt.
+   * @throws `Error` - Code `'PERMISSION_DENIED'` for resolution/bound failures, `'INVALID_ARGUMENTS'` for malformed patches or live-catalog violations.
+   */
+  #updateRealmForAdmin(input: {
+    actorRef: string | null;
+    realmLabel: string | null;
+    patch: RealmAdminPatch;
+  }): RealmUpdateReceipt {
+    const scope = this.#resolveRealmAdminScopeOrDeny(
+      input?.actorRef ?? null,
+      AGENT_AUTHORITIES.REALM_EDIT,
+      REALM_ADMIN_EDIT_DENIED_MESSAGE
+    );
+    const realm = this.#resolveRealmAdminRealm(scope, input?.realmLabel ?? null, REALM_ADMIN_EDIT_DENIED_MESSAGE);
+    const { update, fields } = this.#normalizeRealmAdminPatch(input?.patch);
+    for (let i = 0; i < fields.length; i++) {
+      if (!scope.fields.includes(fields[i])) {
+        throw realmAdminCodedError(REALM_ADMIN_EDIT_BOUND_DENIED_MESSAGE, 'PERMISSION_DENIED');
+      }
+    }
+    // Complete pre-validation before any mutation: an attach requires the
+    // extension installed and currently connected with its selection inside
+    // the live catalog; a ceiling change requires the attachment to exist
+    // with its selection inside the live catalog. Nothing is applied on a
+    // single precondition failure.
+    const existing = realm.extensions ?? [];
+    if (update.attach) {
+      const extensionId = update.attach.extensionId;
+      if (!this.#extensionRegistry.getExtension(extensionId)) {
+        throw realmAdminCodedError(
+          `update_realm: extension '${extensionId}' is not installed.`,
+          'INVALID_ARGUMENTS'
+        );
+      }
+      const liveNames = this.#connectedExtensionCatalogCallNames(extensionId);
+      if (!liveNames) {
+        throw realmAdminCodedError(
+          `update_realm: extension '${extensionId}' is not connected.`,
+          'INVALID_ARGUMENTS'
+        );
+      }
+      if (existing.some((attachment) => attachment.extensionId === extensionId)) {
+        throw realmAdminCodedError(
+          `update_realm: realm already attaches extension '${extensionId}'.`,
+          'INVALID_ARGUMENTS'
+        );
+      }
+      const selection = update.attach.toolSelection === undefined ? 'all' : update.attach.toolSelection;
+      if (selection !== 'all') {
+        for (let i = 0; i < selection.length; i++) {
+          if (!liveNames.includes(selection[i])) {
+            throw realmAdminCodedError(
+              `update_realm: '${selection[i]}' is outside extension '${extensionId}' live catalog.`,
+              'INVALID_ARGUMENTS'
+            );
+          }
+        }
+      }
+    }
+    if (update.toolSelection) {
+      const extensionId = update.toolSelection.extensionId;
+      if (!existing.some((attachment) => attachment.extensionId === extensionId)) {
+        throw realmAdminCodedError(
+          `update_realm: realm does not attach extension '${extensionId}'.`,
+          'INVALID_ARGUMENTS'
+        );
+      }
+      const selection = update.toolSelection.selection;
+      if (selection !== 'all') {
+        const liveNames = this.#connectedExtensionCatalogCallNames(extensionId);
+        if (!liveNames) {
+          throw realmAdminCodedError(
+            `update_realm: extension '${extensionId}' is not connected; explicit call names cannot resolve.`,
+            'INVALID_ARGUMENTS'
+          );
+        }
+        for (let i = 0; i < selection.length; i++) {
+          if (!liveNames.includes(selection[i])) {
+            throw realmAdminCodedError(
+              `update_realm: '${selection[i]}' is outside extension '${extensionId}' live catalog.`,
+              'INVALID_ARGUMENTS'
+            );
+          }
+        }
+      }
+    }
+
+    const before = this.#realmAdminSummary(realm);
+    const metadata: RealmUpdatePatch = {};
+    if (update.name !== undefined) metadata.name = update.name;
+    if (update.description !== undefined) metadata.description = update.description;
+    if (update.color !== undefined) metadata.color = update.color;
+    if (Object.keys(metadata).length > 0) {
+      this.#realmRegistry.updateRealm(realm.id, metadata);
+    }
+    if (update.attach) {
+      this.attachExtension(realm.id, update.attach.extensionId, {
+        ...(update.attach.toolSelection !== undefined ? { toolSelection: update.attach.toolSelection } : {}),
+        source: 'meta-realm-edit',
+        actorId: scope.actorId
+      });
+    }
+    if (update.toolSelection) {
+      this.setExtensionToolSelection(realm.id, update.toolSelection.extensionId, update.toolSelection.selection, {
+        source: 'meta-realm-edit',
+        actorId: scope.actorId
+      });
+    }
+    const updatedRealm = this.#realmRegistry.getRealm(realm.id) || realm;
+    const after = this.#realmAdminSummary(updatedRealm);
+    this.#emitExtensionAuditEvent('realm_updated', {
+      actorId: scope.actorId,
+      realmLabel: after.name,
+      fields,
+      before,
+      after
+    });
+    return Object.freeze({
+      success: true,
+      realm: after.name,
+      fields,
+      applied: true,
+      before,
+      after
+    }) as RealmUpdateReceipt;
+  }
+
   #createRealmPublishingPort(): RealmPublishingPort {
     return Object.freeze({
       importTemplate: (canonicalPayload: string) => this.importRealmTemplate(canonicalPayload),
@@ -13166,13 +14104,14 @@ export class SandboxStore {
   }
 
   /**
-   * Emits one extension audit event on the runtime event stream (the same
-   * channel the publishing-grant events use), so host subscribers observe
-   * install/attach/detach decisions. Emission is observational: a missing or
-   * throwing emit port never fails the mutation, and the payload carries ids
-   * and non-secret metadata only.
+   * Emits one store audit event on the runtime event stream (the same channel
+   * the publishing-grant events use): extension lifecycle/connection events
+   * and the M3 realm-admin inspection/update events, so host subscribers
+   * observe install/attach/detach and realm decisions. Emission is
+   * observational: a missing or throwing emit port never fails the mutation,
+   * and the payload carries ids, display labels, and non-secret metadata only.
    *
-   * @param type - Event type (`extension_installed`/`extension_removed`/`extension_attached`/`extension_detached`).
+   * @param type - Event type (`extension_installed`/`extension_removed`/`extension_attached`/`extension_detached`/`extension_tool_selection_updated`/`realm_inspected`/`realm_updated`).
    * @param payload - Non-secret event payload.
    */
   #emitExtensionAuditEvent(type: string, payload: Record<string, unknown>): void {

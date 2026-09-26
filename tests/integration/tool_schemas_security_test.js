@@ -21,7 +21,7 @@ import {
   getAuthorityToolSchemas,
   getPublishingToolSchemas
 } from '../../src/lib/sandbox/tools/descriptors/index.ts';
-import { PUBLISHING_TOOLS, TOOL_PRESETS, INNATE_TOOLS } from '../../src/lib/sandbox/tools/constants/index.ts';
+import { PUBLISHING_TOOLS, REALM_ADMIN_TOOLS, TOOL_PRESETS, INNATE_TOOLS } from '../../src/lib/sandbox/tools/constants/index.ts';
 import { AGENT_AUTHORITIES, AUTHORITY_IDS, KNOWN_AGENT_AUTHORITIES } from '../../src/lib/sandbox/realmCatalog/index.ts';
 import { VirtualFS, PermissionDeniedError, FileNotFoundError } from '../../src/lib/sandbox/virtualFs/index.ts';
 import { MessagingBus } from '../../src/lib/sandbox/messagingBus/index.ts';
@@ -790,8 +790,13 @@ async function runEpic6UnitTests() {
     console.log('\n--- 12. Generic authority-set exposure (M1) ---');
     assert(
       Object.keys(AUTHORITY_TOOL_REGISTRY).sort().join(',')
-        === [PUBLISHING_TOOLS.IMPORT_REALM_TEMPLATE, PUBLISHING_TOOLS.SUBMIT_HYDRATION_PACKAGE].sort().join(','),
-      'AUTHORITY_TOOL_REGISTRY is the full authority name->descriptor table (the publishing pair in M1)'
+        === [
+          PUBLISHING_TOOLS.IMPORT_REALM_TEMPLATE,
+          PUBLISHING_TOOLS.SUBMIT_HYDRATION_PACKAGE,
+          REALM_ADMIN_TOOLS.INSPECT_REALM,
+          REALM_ADMIN_TOOLS.UPDATE_REALM
+        ].sort().join(','),
+      'AUTHORITY_TOOL_REGISTRY carries the publishing pair plus the M3 realm-admin pair'
     );
     assert(
       getAuthorityToolSchemas(KNOWN_AGENT_AUTHORITIES).length === getPublishingToolSchemas(KNOWN_AGENT_AUTHORITIES).length,
@@ -800,20 +805,24 @@ async function runEpic6UnitTests() {
     assert(getAuthorityToolSchemas(['*']).length === 0, 'the wildcard is never an authority id in the generic filter');
     assert(getAuthorityToolSchemas([]).length === 0, 'no ids expose no schemas');
     assert(
-      getAuthorityToolSchemas(AUTHORITY_IDS).length === 2
+      getAuthorityToolSchemas(AUTHORITY_IDS).length === 4
         && getAuthorityToolSchemas(AUTHORITY_IDS).every((def) => def.function.name !== undefined),
-      'only ids with a registered descriptor expose a schema (the publishing pair)'
+      'only ids with a registered descriptor expose a schema (publishing pair + realm-admin pair)'
     );
     assert(
-      getAuthorityToolSchemas([AGENT_AUTHORITIES.REALM_INSPECT]).length === 0,
-      'a descriptor-less non-publishing id exposes nothing'
+      getAuthorityToolSchemas([AGENT_AUTHORITIES.REALM_INSPECT])[0]?.function?.name === REALM_ADMIN_TOOLS.INSPECT_REALM,
+      'the realm inspect id exposes exactly its own tool'
     );
     assert(
-      getAuthorityToolSchemas([AGENT_AUTHORITIES.TEMPLATE, AGENT_AUTHORITIES.REALM_INSPECT]).length === 1,
+      getAuthorityToolSchemas([AGENT_AUTHORITIES.REALM_EDIT])[0]?.function?.name === REALM_ADMIN_TOOLS.UPDATE_REALM,
+      'the realm edit id exposes exactly its own tool'
+    );
+    assert(
+      getAuthorityToolSchemas([AGENT_AUTHORITIES.TEMPLATE, AGENT_AUTHORITIES.REALM_INSPECT]).length === 2,
       'the generic filter is exact-id membership'
     );
     assert(
-      getAuthorityToolDescriptors([AGENT_AUTHORITIES.TEMPLATE, AGENT_AUTHORITIES.REALM_INSPECT]).length === 1
+      getAuthorityToolDescriptors([AGENT_AUTHORITIES.TEMPLATE, AGENT_AUTHORITIES.REALM_INSPECT]).length === 2
         && getAuthorityToolDescriptors([]).length === 0
         && getAuthorityToolDescriptors(['*']).length === 0,
       'the descriptor filter mirrors the schema filter'
