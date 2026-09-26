@@ -17,7 +17,7 @@
  * @invariant O(1) dispatcher on a frozen registry: routing is a direct property lookup on the frozen `TOOL_REGISTRY`, built once from the frozen descriptor catalog — zero `switch` statements and no registration or mutation path.
  * @invariant Zero LLM schema pollution: schemas exposed to LLMs carry only `name`, `description`, and `descriptor.schema` fields; infrastructure configuration and execution-context fields (`model`, `temperature`, `maxTurns`, `privileged`, `toolPreset`, `allowedTools`, `depth`, `sinceTimestamp`, raw byte limits) never appear in them.
  * @invariant Uniform result envelope: every dispatcher return value is a `ToolResult` — descriptor handler returns are normalized at the dispatcher boundary, objects without a `success` discriminator gain `success: true`, bare arrays are wrapped as `{ success: true, result }`, and primitives become `{ success: true, result }`.
- * @invariant Universal error shielding: the dispatcher never throws unhandled exceptions to the caller — every failure is captured as a typed `{ success: false, error, code }` receipt (`TOOL_NOT_FOUND` for unknown tools, `PERMISSION_DENIED` for unauthorized callers, `EXECUTION_FAILED` for sanitizer/handler failures); every emitted `code` is a declared `TOOL_SYSTEM_ERROR_CODES` member, with downstream codes outside the dictionary normalized to `EXECUTION_FAILED`.
+ * @invariant Universal error shielding: the dispatcher never throws unhandled exceptions to the caller — every failure is captured as a typed `{ success: false, error, code }` receipt (`TOOL_NOT_FOUND` for unknown tools, `PERMISSION_DENIED` for unauthorized callers and for a throwing identity port, `EXECUTION_FAILED` for sanitizer/handler failures); every emitted `code` is a declared `TOOL_SYSTEM_ERROR_CODES` member, with downstream codes outside the dictionary normalized to `EXECUTION_FAILED`.
  * @decision `ToolExecutionPort` is declared in this contract; the dispatcher factory seeds both members into every descriptor context — the identity member (the `AgentIdentityPort` from `runtime/index.ts`, exposed via `identityPort`) and a trusted `executeTool` (the construction-bound executor when one was injected, otherwise the dispatcher's own re-entrant closure). A per-call `executeTool` is never consumed
  * @decision The dead `defaultTimeoutMs` dispatcher option was dropped rather than implemented; `SandboxDispatcherOptions` exposes no timeout knob
  * @decision `SERVICE_UNAVAILABLE` is contract-reserved: handlers never emit it themselves, and a missing required substrate surfaces from the error shield as `EXECUTION_FAILED`
@@ -28,7 +28,7 @@
  * @decision Extension tools are exact-membership-only on the separate frozen `AuthorityDescriptor.extensions` axis: the dispatcher's extension branch is gated on an optional provider-registry port (unbound until P3, so the branch is inert in P2), authorize iff `authority.extensions.has(callName)`, with no wildcard/`privileged`/selector/alias/legacy fallback, engine-internal and anonymous/descriptor-less callers denying, and descriptor-probe throws failing closed; the axis is never populated from `allow` and an extension call never falls through to a baked handler or schema
  * @decision Realm/workspace/tenant scope is never caller-supplied: the scope vocabulary (`workspaceId`/`workspace_id`, `realmId`/`realm_id`, `tenantId`/`tenant_id`, `scope`) is pinned at dispatcher construction and stripped from per-call `callerContext`; a scope claim may only ride trusted bound construction (and, once Realm lands, the trusted identity projection), never a tool call
  * @decision Realm-exact caller resolution and canonical key binding: a construction-bound `realmId` resolves the caller projection for exactly that `(realmId, agentId)` registration and binds its canonical identity `key` as the execution context's `callerKey` (a pinned key — per-call `callerKey`/`caller_key` claims are stripped), so substrate contexts disambiguate the same literal id across Realms; an omitted Realm keeps the unique-match resolution and the bare-id channel
- * @decision The identity subject is pinned to construction: `callerAgentId`/`agentId`/nested `callerContext` on a per-call context never select whose `AgentIdentityProjection`/`AuthorityDescriptor` is consulted. The bound `agentId`/`callerAgentId` is the only subject source, and an anonymous dispatcher has no subject and fails closed
+ * @decision The identity subject is pinned to construction: `callerAgentId`/`agentId`/nested `callerContext` on a per-call context never select whose `AgentIdentityProjection`/`AuthorityDescriptor` is consulted. The bound `agentId`/`callerAgentId` is the only subject source, and an anonymous dispatcher has no subject and fails closed; a throwing identity port is shielded as a uniform `PERMISSION_DENIED` denial before any dispatch (never an unshielded throw, never a fallback to legacy channels)
  * @decision Identity-bearing substrate operations stay anonymous for an anonymous dispatcher: the dispatcher binds `callerAgentId: null`, and the VFS/messaging substrates resolve identity from the supplied context only — payload `callerAgentId`/`agentId`/`recipient`/`from`/`sender` keys are never promoted, mailbox reads return empty, `wait_for_mail` fails `INVALID_ARGUMENTS`, `send_message` attributes the fixed `'anonymous'` label, and `inline_file_in_message` fails closed
  * @decision Injected capabilities/substrates are pinned to construction: `virtualFs`, `messagingBus`, `worldClock`, `signal`, `currentDepth`, `depth`, `executeTool`, `toolRegistry`, the narrow ports, and engine handles are dropped from per-call contexts and never override bound values; `batch_precall` consumes the bound executor (or the dispatcher's own re-entrant closure when none was bound), so a per-call executor or substrate can never be substituted
  * @decision The per-call `depth` alias is stripped along with the pinned capability keys: handlers read only the construction-bound `currentDepth`, so a caller-supplied depth can neither reset nor inflate the invocation engine's recursion guard
@@ -1215,7 +1215,24 @@ export function createSandboxToolDispatcher(options: SandboxDispatcherOptions = 
     const identityScope: AgentIdentityScope | undefined = hasBoundRealmScope
       ? { realmId: rawBoundRealmId === null ? null : rawBoundRealmId as string }
       : undefined;
-    const agentIdentity = getAgentIdentity ? getAgentIdentity(agentId, identityScope) : null;
+    // Identity-port shielding (P2.4-O1): identity resolution is trusted
+    // construction, but a throwing `getAgentIdentity` must never escape
+    // `dispatch()`. The failure fails closed as a uniform typed denial — an
+    // identity the dispatcher cannot resolve is treated as unauthorized, never
+    // as a fallback to the legacy descriptor-less channels (which could widen
+    // a descriptor-present caller whose projection failed mid-read).
+    let agentIdentity: AgentIdentityProjection | null = null;
+    if (getAgentIdentity) {
+      try {
+        agentIdentity = getAgentIdentity(agentId, identityScope);
+      } catch {
+        return {
+          success: false,
+          error: `Agent '${agentId || 'anonymous'}' identity could not be resolved; the request is denied.`,
+          code: TOOL_SYSTEM_ERROR_CODES.PERMISSION_DENIED
+        };
+      }
+    }
 
     // Canonical identity key of the resolved caller (Wave I, ticket d57cbc1):
     // bound into the execution context only when the caller resolved through

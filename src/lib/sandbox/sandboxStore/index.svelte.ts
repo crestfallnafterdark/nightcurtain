@@ -4400,6 +4400,12 @@ export class SandboxStore {
     this.#syncFsSnapshot();
     this.#syncClockSnapshot();
     const restoredSnapshot = this.#requireAgentSnapshot(restored.id, restored.config?.realmId ?? null);
+    // Extension wave (P2.4-F2): a restore re-registers the frozen descriptor
+    // from the trusted config, and the extension axis is not part of that
+    // re-registration — recompute it from the live Realm universe + the
+    // member's selector and re-apply at the safe state (a restored member is
+    // idle, so the sweep applies immediately; never a manual nudge).
+    this.#queueExtensionReauthorize(restoredSnapshot.identityKey);
     this.selectAgent(restoredSnapshot.identityKey);
     this.#scheduleAutoSave();
     return restoredSnapshot;
@@ -10547,11 +10553,18 @@ export class SandboxStore {
       // selector stays fail-closed-empty on the absent config property).
       const hasExtensionField = Object.prototype.hasOwnProperty.call(record, 'extensionTools');
       if (!hasAllowedField && !hasExtensionField) continue;
+      // The persisted selector is honored only as the literal `'all'` or an
+      // array. Every other persisted value (`null`, a foreign string, a
+      // number, an object) captures the empty fail-closed selector: a
+      // tampered or malformed snapshot heals default-deny and must never
+      // resolve the `'all'` default against the Realm universe (F1).
+      const rawPersistedSelector = record.extensionTools;
+      const persistedSelectorIsValid = rawPersistedSelector === 'all' || Array.isArray(rawPersistedSelector);
       grants.push({
         agentId,
         allowedTools: Object.freeze(resolved),
-        extensionSelector: hasExtensionField
-          ? normalizeExtensionSelector(record.extensionTools)
+        extensionSelector: hasExtensionField && persistedSelectorIsValid
+          ? normalizeExtensionSelector(rawPersistedSelector)
           : Object.freeze([])
       });
     }

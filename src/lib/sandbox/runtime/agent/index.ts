@@ -1274,6 +1274,31 @@ function normalizeExtensionToolSelector(rawSelector: unknown): 'all' | readonly 
 }
 
 /**
+ * Normalizes explicit entity-level extension grant names (P2.4-O2): starts
+ * from the explicit-string selector list and drops every name that can never
+ * be a sanitized model-facing extension call name — the wildcard `'*'`,
+ * `@`-authority spellings, and anything outside `[A-Za-z0-9_]`. Duplicates and
+ * non-strings are already removed by {@link normalizeAllowedToolNames}, so the
+ * entity descriptor axis is fail-closed by construction and can never carry a
+ * selector spelling, alias, or authority id.
+ *
+ * @param rawExtensions - Explicit selector list (array only).
+ * @returns Sanitized, duplicate-free extension grant names.
+ * @internal
+ */
+function normalizeExtensionGrantNames(rawExtensions: unknown): string[] {
+  const names = normalizeAllowedToolNames(rawExtensions);
+  const filtered: string[] = [];
+  for (let i = 0; i < names.length; i++) {
+    const name = names[i];
+    if (name === '*' || name.charAt(0) === '@') continue;
+    if (!/^[A-Za-z0-9_]+$/.test(name)) continue;
+    filtered[filtered.length] = name;
+  }
+  return filtered;
+}
+
+/**
  * Reads a caller-supplied options object exactly once into plain data before
  * any authorization or application step (MOD-21 W10, 7db884b). A stateful
  * `Proxy` cannot answer the authority-gate reads differently from the apply
@@ -1425,11 +1450,12 @@ function createReadonlyAuthorityAllow(names: unknown): Set<string> {
  * - Unprivileged agents get exactly their configured `allowedTools` names and
  *   `visibility: 'owned'` (self plus descendants).
  * - The separate `extensions` axis holds exactly the explicit
- *   `config.extensionTools` list when one was constructed; `'all'` (the
- *   default) and absent values yield an empty set — the wildcard and privilege
- *   never imply an extension entry, and the effective store-computed grant set
- *   lives on the registry descriptor built at launch/reauthorize time
- *   (extension wave).
+ *   `config.extensionTools` list when one was constructed, sanitized so only
+ *   model-facing call names can land on it (`'all'`, absent values, the
+ *   wildcard, authority spellings, and invalid characters yield no entry) —
+ *   the wildcard and privilege never imply an extension entry, and the
+ *   effective store-computed grant set lives on the registry descriptor built
+ *   at launch/reauthorize time (extension wave).
  * - Authority is never assembled from caller context, snapshot data, or a
  *   reserved id; the id is the descriptor subject only.
  */
@@ -1438,7 +1464,7 @@ function buildAgentAuthority(id: string, config: Record<string, unknown> | null)
   const rawAllowed = config?.allowedTools !== undefined ? config.allowedTools : config?.tools;
   const names = normalizeAllowedToolNames(rawAllowed);
   const rawExtensions = config?.extensionTools;
-  const extensions = Array.isArray(rawExtensions) ? normalizeAllowedToolNames(rawExtensions) : [];
+  const extensions = Array.isArray(rawExtensions) ? normalizeExtensionGrantNames(rawExtensions) : [];
   if (privileged) {
     let hasWildcard = false;
     for (let i = 0; i < names.length; i++) {
