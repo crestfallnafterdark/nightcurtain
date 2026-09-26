@@ -91,7 +91,7 @@ docs/
 │
 └── testing/                                   # Verification, QA & Test Harnesses
     ├── testing_strategy.md                    # Multi-Tier Testing Pyramid, Zero-Mock Philosophy, CI/CD Gates
-    ├── unit_and_integration.md                # Node Native Runner (104 suites: 55 Unit / 49 Integration), Integration Test Contracts
+    ├── unit_and_integration.md                # Node Native Runner (105 suites: 55 Unit / 50 Integration), Integration Test Contracts
     ├── e2e_and_visual.md                      # Playwright Browser E2E Specs (8), Responsive Visual Baselines, Test Auditor
     ├── exploratory_qa_plan.md                 # Agent-Driven Exploratory QA via Playwright MCP, Charters, Secret Handling
     └── audit_and_repro.md                     # Audit Repro Mechanics, Test-First Fix Waves, Provider Smoke Pre-flight
@@ -156,7 +156,7 @@ npm run preview   # Preview production build locally
 # Default static battery: contracts + module contracts + contract types + api-report freshness + arch + lints + typecheck
 npm run verify
 
-# Execute master test suite (104 suites: 55 unit + 49 integration)
+# Execute master test suite (105 suites: 55 unit + 50 integration)
 npm test
 
 # Execute fast unit tests only

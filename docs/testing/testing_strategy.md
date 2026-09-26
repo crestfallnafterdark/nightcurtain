@@ -19,7 +19,7 @@ graph TD
     end
 
     subgraph L2["Tier 2: Zero-Mock Subsystem Integration (node --test)"]
-        INT["49 Integration Suites (tests/integration/)<br/>• Real VirtualFS, MessagingBus, WorldClock, AgentRuntime<br/>• Preset Binding & Credential Vault Workflows<br/>• Precall Pipeline & Tool Security Gating Verification<br/>• Concurrency & State Persistence Fault Injection"]
+        INT["50 Integration Suites (tests/integration/)<br/>• Real VirtualFS, MessagingBus, WorldClock, AgentRuntime<br/>• Preset Binding & Credential Vault Workflows<br/>• Precall Pipeline & Tool Security Gating Verification<br/>• Concurrency & State Persistence Fault Injection"]
     end
 
     subgraph L1["Tier 1: Atomic Unit & Contract Testing (node --test)"]
@@ -101,7 +101,7 @@ The master runner executes all Unit and Integration suites in strict sub-process
 // Sample output format from tests/runner.js:
 // ======================================================================
 //   AGENTIC SANDBOX STUDIO MASTER TEST SUITE RUNNER
-//   Total Suites: 104 (55 Unit, 49 Integration)
+//   Total Suites: 105 (55 Unit, 50 Integration)
 // ======================================================================
 //   [Unit       ] deepseek_provider_test.js                  ✔ PASS (42ms)
 //   [Unit       ] deepseek_reasoning_hygiene_test.js         ✔ PASS (18ms)
@@ -109,7 +109,7 @@ The master runner executes all Unit and Integration suites in strict sub-process
 //   [Integration] tool_contract_security_gating_test.js      ✔ PASS (115ms)
 //   [Integration] mail_injection_precall_pipeline_test.js    ✔ PASS (188ms)
 // ======================================================================
-//   Suites:       104 passed, 104 total
+//   Suites:       105 passed, 105 total
 //   Failed:       0 failed
 //   Duration:     3.42s
 // ======================================================================
@@ -126,7 +126,7 @@ All Node-based test suites import [`tests/test_env.js`](../../tests/test_env.js)
 
 ## 4. Test Suite Inventory & Classification
 
-The project includes **104 native test suites** (55 unit, 49 integration) and **10 browser E2E specs**:
+The project includes **105 native test suites** (55 unit, 50 integration) and **10 browser E2E specs**:
 
 > **Canonical inventory.** This chapter is the single source of truth for test-suite counts and per-file listings; [`unit_and_integration.md`](unit_and_integration.md) cross-links here instead of duplicating it.
 
@@ -223,6 +223,7 @@ The project includes **104 native test suites** (55 unit, 49 integration) and **
 | [`runtime_resilience_persistence_test.js`](../../tests/integration/runtime_resilience_persistence_test.js) | `sandboxPersistence` + `AgentRuntime` | Atomic snapshots, crash recovery, persistence locking, clock monotonicity. |
 | [`session_zero_generator_realm_test.js`](../../tests/integration/session_zero_generator_realm_test.js) | `templates/session_zero` + `realmCatalog` + `SandboxStore` + `AgentRuntime` + `VirtualFS` | Shipped generator realm: bundle contract, launch approvals/trust recorded, Architect dry-run → import → handoff, Genesis `source_file` assembly → dry-run → submit → candidate, privileged peer workspace reads, candidate attach seeding. |
 | [`settings_modal_modern_test.js`](../../tests/integration/settings_modal_modern_test.js) | `CredentialVault` + `inference/index.ts` | Catalog/vault settings architecture, provider registry, fixed 100K token cap. |
+| [`spawn_agent_contract_test.js`](../../tests/integration/spawn_agent_contract_test.js) | `ToolDispatcher` + `AgentRuntime` + `AgentLifecycleManager` | Ratified spawn contract: `role` as label, `toolPreset`/`allowedTools` surface, boundary allowlist + warnings, child ⊆ spawner, default `readonly_collaborator ∩ spawner`, prompt policy (detach default / `await_completion` opt-in), receipt handle + effective policy, validation codes, malformed-record failure. |
 | [`spawn_receipt_opacity_test.js`](../../tests/integration/spawn_receipt_opacity_test.js) | `ToolDispatcher` + `AgentRuntime` | `spawn_agent` receipt bounded projection (no raw `Agent`/`realmId`), denial opacity, workspace-label sanitization, real-turn history receipt. |
 | [`studio_recycle_bin_test.js`](../../tests/integration/studio_recycle_bin_test.js) | `SandboxStore` + `AgentRuntime` | Recycle bin state, badge counters, restore/purge lifecycle. |
 | [`template_baked_history_test.js`](../../tests/integration/template_baked_history_test.js) | `SandboxStore` + `realmCatalog` + `AgentRuntime` + persistence | Baked prologue opener: system + declared history present before any turn, no model call, launch-generated message ids (INV-7), byte-stable runtime/store snapshot round-trips. |
@@ -276,8 +277,8 @@ sequenceDiagram
     G1-->>Dev: Gate 1 Passed (0 lint / sync errors)
 
     Dev->>G2: npm test (tests/runner.js)
-    Note over G2: Executes 104 suites (55 Unit, 49 Integration) under 120s timeout
-    G2-->>Dev: Gate 2 Passed (104/104 passed, 0 failures)
+    Note over G2: Executes 105 suites (55 Unit, 50 Integration) under 120s timeout
+    G2-->>Dev: Gate 2 Passed (105/105 passed, 0 failures)
 
     Dev->>G3: npm run build (vite build)
     Note over G3: Compiles Svelte 5 runes, WASM modules, top-level awaits
