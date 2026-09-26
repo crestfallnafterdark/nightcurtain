@@ -64,6 +64,9 @@ export interface AgentTelemetrySnapshot {
 }
 
 // @public
+export function buildRealmArchiveFilename(realmName: string, archiveId: string): string;
+
+// @public
 export function clearSandboxState(options?: StorageOptions): boolean;
 
 // @public
@@ -104,7 +107,13 @@ export interface HistoryMessageSnapshot {
 }
 
 // @public
+export function isSafeRealmArchiveEndpointUrl(url: unknown): boolean;
+
+// @public
 export function loadSandboxState(options?: StorageOptions): SandboxPersistedState | null;
+
+// @public
+export function parseRealmArchive(text: string): RealmArchiveValidationResult;
 
 // Warning: (ae-forgotten-export) The symbol "AuthorityGrantSnapshotEntry" needs to be exported by the entry point index.d.ts
 //
@@ -231,6 +240,108 @@ export interface PersistenceEnvironmentObject {
 
 // @public
 export type PersistenceErrorCode = typeof PERSISTENCE_ERROR_CODES[keyof typeof PERSISTENCE_ERROR_CODES];
+
+// @public
+export const REALM_ARCHIVE_FORMAT: "ai-story.realm-archive";
+
+// @public
+export const REALM_ARCHIVE_FORMAT_VERSION: 1;
+
+// @public
+export interface RealmArchiveAuthority {
+    readonly hostGrants: readonly RealmArchiveAuthorityHostGrant[];
+    readonly members: Readonly<Record<string, RealmArchiveAuthorityMemberProjection>>;
+}
+
+// @public
+export interface RealmArchiveAuthorityHostGrant {
+    readonly authorityId: string;
+    readonly memberId: string;
+}
+
+// @public
+export interface RealmArchiveAuthorityMemberProjection {
+    readonly allow: readonly string[];
+    readonly extensions: readonly string[];
+    readonly kind: string;
+    readonly privileged: boolean;
+    readonly realmBypass: boolean;
+    readonly visibility: string;
+}
+
+// @public
+export interface RealmArchiveEnvelope {
+    readonly archiveId: string;
+    readonly authority: RealmArchiveAuthority;
+    readonly exportedAt: string;
+    readonly format: typeof REALM_ARCHIVE_FORMAT;
+    readonly formatVersion: typeof REALM_ARCHIVE_FORMAT_VERSION;
+    readonly members: RealmArchiveMembers;
+    readonly messaging: RealmArchiveMessaging;
+    readonly persistenceVersion: string;
+    readonly realm: PersistedRealmRecord;
+    readonly savedPayloads?: readonly RealmArchiveSavedPayload[];
+    readonly schedules: readonly SerializedScheduledTimer[];
+    readonly source: RealmArchiveSource;
+    readonly template?: RealmArchiveTemplate;
+    readonly vfs: RealmArchiveVfs;
+    readonly warnings?: readonly string[];
+    readonly worldClock: RealmArchiveWorldClock;
+}
+
+// @public
+export interface RealmArchiveMembers {
+    readonly active: readonly SerializedAgent[];
+    readonly recycled: readonly SerializedRecycledAgent[];
+}
+
+// @public
+export interface RealmArchiveMessaging {
+    // Warning: (ae-forgotten-export) The symbol "MessageEnvelope" needs to be exported by the entry point index.d.ts
+    readonly activeQueues: Readonly<Record<string, readonly MessageEnvelope[]>>;
+    readonly archives: Readonly<Record<string, readonly MessageEnvelope[]>>;
+    readonly auditLog: readonly MessageEnvelope[];
+    readonly registeredAgents: readonly string[];
+    readonly terminatedAgents: readonly string[];
+}
+
+// @public
+export type RealmArchiveSavedPayload = PersistedSavedInstancePayload;
+
+// @public
+export interface RealmArchiveSource {
+    readonly realmId: string;
+}
+
+// @public
+export interface RealmArchiveTemplate {
+    readonly id: string;
+    readonly payload: string;
+    readonly version: string;
+}
+
+// @public
+export interface RealmArchiveValidationResult {
+    readonly code?: 'ERR_ARCHIVE_FORMAT' | 'ERR_ARCHIVE_VERSION' | 'ERR_ARCHIVE_INVALID' | 'ERR_ARCHIVE_UNPARSEABLE';
+    readonly envelope?: RealmArchiveEnvelope;
+    readonly error?: string;
+    readonly valid: boolean;
+}
+
+// @public
+export interface RealmArchiveVfs {
+    readonly members: Readonly<Record<string, Readonly<Record<string, VirtualFsPersistedFile>>>>;
+    readonly realmGlobal: Readonly<Record<string, VirtualFsPersistedFile>>;
+}
+
+// @public
+export interface RealmArchiveWorldClock {
+    readonly clocks: Readonly<Record<string, PartitionClockSnapshot>>;
+    // Warning: (ae-forgotten-export) The symbol "WorldEvent" needs to be exported by the entry point index.d.ts
+    readonly events: Readonly<Record<string, readonly WorldEvent[]>>;
+    // Warning: (ae-forgotten-export) The symbol "PartitionClockSnapshot" needs to be exported by the entry point index.d.ts
+    readonly global: PartitionClockSnapshot;
+}
 
 // @public
 export function resetSaveLockQueue(): void;
@@ -365,7 +476,6 @@ export interface SerializedAgent {
 export interface SerializedMessagingBus {
     readonly activeQueues: Record<string, MessageEnvelope[]>;
     readonly archives: Record<string, MessageEnvelope[]>;
-    // Warning: (ae-forgotten-export) The symbol "MessageEnvelope" needs to be exported by the entry point index.d.ts
     readonly auditLog: MessageEnvelope[];
     readonly inboxes?: Record<string, MessageEnvelope[]>;
     readonly registeredAgents: Record<string, {
@@ -409,14 +519,23 @@ export interface SerializedScheduledTimer {
 
 // @public
 export interface SerializedWorldClock {
-    // Warning: (ae-forgotten-export) The symbol "PartitionClockSnapshot" needs to be exported by the entry point index.d.ts
     readonly agentClocks?: Record<string, PartitionClockSnapshot>;
     readonly agentEvents?: Record<string, WorldEvent[]>;
     readonly date: string;
-    // Warning: (ae-forgotten-export) The symbol "WorldEvent" needs to be exported by the entry point index.d.ts
     readonly events: WorldEvent[];
     readonly totalSeconds: number;
 }
+
+// @public
+export function serializeRealmArchive(envelope: RealmArchiveEnvelope): string;
+
+// Warning: (ae-forgotten-export) The symbol "Agent" needs to be exported by the entry point index.d.ts
+//
+// @public
+export function serializeRealmArchiveAgent(agent: Agent): SerializedAgent;
+
+// @public
+export function serializeRealmArchiveRecycledAgent(agent: Agent): SerializedRecycledAgent;
 
 // @public
 export function serializeRuntimeEnvironment(env: PersistenceEnvironment, meta?: SessionMetadata): SandboxPersistedState;
@@ -450,6 +569,9 @@ export interface SubsystemImportReceipt {
     readonly subsystem: 'virtualFs' | 'worldClock' | 'messagingBus';
     readonly success: boolean;
 }
+
+// @public
+export function validateRealmArchive(value: unknown): RealmArchiveValidationResult;
 
 // @public
 export function validateSandboxState(state: unknown): ValidationResult;
@@ -500,6 +622,19 @@ Prompt tokens split into an uncached tier (`inputTokens` / `lastPromptTokens`) a
 - **`terminalStops`** — Count of terminal turn stops.
 - **`totalTokens`** — Total cumulative tokens consumed (`inputTokens + cachedInputTokens + outputTokens`).
 - **`turnCount`** — Total conversation turns executed.
+
+### `buildRealmArchiveFilename` — function
+
+Builds the canonical download filename for one archive: `<realm-slug>-realm-<archiveId8>.realm.json`.
+
+#### Parameters
+
+- `realmName` — Realm display name (slugified).
+- `archiveId` — Archive id (first 8 sanitized characters are used).
+
+#### Returns
+
+Canonical `.realm.json` filename.
 
 ### `clearSandboxState` — function
 
@@ -671,6 +806,18 @@ Conversational message snapshot with a guaranteed stable identifier. Every messa
 - **`tool_call_id`** — Matching tool call ID for role 'tool'.
 - **`tool_calls`** — Array of tool call descriptors requested by assistant.
 
+### `isSafeRealmArchiveEndpointUrl` — function
+
+Tests whether a model-config endpoint URL may leave the host inside an archive: it must parse as an absolute `http:`/`https:` URL with no userinfo and no credential-shaped query parameter (`key`/`token`/`secret`/ `password`/`sig`-family names). Endpoint references are retained by the snapshot design; credentials embedded in them are archive-only drops.
+
+#### Parameters
+
+- `url` — Candidate endpoint reference.
+
+#### Returns
+
+True when the URL is safe to archive.
+
 ### `loadSandboxState` — function
 
 Reads, deserializes, and validates the persisted sandbox state from browser LocalStorage.
@@ -699,6 +846,18 @@ if (state) {
   console.log('No prior sandbox state found. Starting fresh session.');
 }
 ```
+
+### `parseRealmArchive` — function
+
+Parses canonical archive JSON text and validates it fail-closed.
+
+#### Parameters
+
+- `text` — Archive JSON text.
+
+#### Returns
+
+Validation result with the normalized envelope on success.
 
 ### `PersistedAuthorityGrants` — type alias
 
@@ -858,6 +1017,141 @@ Execution environment container passed to serialization and restoration function
 ### `PersistenceErrorCode` — type alias
 
 Union type representing valid persistence error code strings.
+
+### `REALM_ARCHIVE_FORMAT_VERSION` — variable
+
+Canonical schema version of `RealmArchiveEnvelope`. Independent of `SANDBOX_PERSISTENCE_VERSION` (the envelope records the persistence version it was produced against in `persistenceVersion`), and an unknown version is rejected fail-closed.
+
+### `REALM_ARCHIVE_FORMAT` — variable
+
+Canonical transport format tag of a full-realm archive (`RealmArchiveEnvelope`). An envelope with any other `format` value is rejected fail-closed — the archive path never parses best-effort.
+
+### `RealmArchiveAuthority` — interface
+
+Descriptive authority state of the archived realm (never applied on import).
+
+#### Members
+
+- **`hostGrants`** — Realm-filtered explicit grant records (`realmBypass` + authority ids), bare member ids.
+- **`members`** — Bare member id → descriptor projection, active members only.
+
+### `RealmArchiveAuthorityHostGrant` — interface
+
+One descriptive authority grant record: authority id plus the member it targets (bare member id).
+
+#### Members
+
+- **`authorityId`** — Exact authority id (`realmBypass`, or an `AUTHORITY_IDS` member).
+- **`memberId`** — Bare realm-local member id the grant belonged to.
+
+### `RealmArchiveAuthorityMemberProjection` — interface
+
+Descriptive projection of one active member's frozen authority descriptor. Recorded for operator reference only: import never consumes it — hydration is default-deny and every dropped item is receipted instead.
+
+#### Members
+
+- **`allow`** — Descriptor allow set (may include the wildcard `'*'`).
+- **`extensions`** — Descriptor extension-tool allow set.
+- **`kind`** — Descriptor principal class.
+- **`privileged`** — Legacy privilege boolean projection.
+- **`realmBypass`** — Cross-realm scope grant flag.
+- **`visibility`** — Descriptor read visibility.
+
+### `RealmArchiveEnvelope` — interface
+
+Canonical full-realm archive envelope (format v1). Only canonical fields are emitted; unknown input fields are dropped at the validation boundary. Optional sections (`template`, `savedPayloads`, `warnings`) are omitted when empty; member/partition dictionaries are emitted as empty containers.
+
+#### Members
+
+- **`archiveId`** — Unique archive id (`crypto.randomUUID()` or a timestamp/random fallback).
+- **`authority`** — Descriptive authority state (never applied on import).
+- **`exportedAt`** — ISO-8601 export timestamp.
+- **`format`** — Transport format tag; always REALM_ARCHIVE_FORMAT.
+- **`formatVersion`** — Envelope schema version; always REALM_ARCHIVE_FORMAT_VERSION.
+- **`members`** — Active + recycled member snapshots.
+- **`messaging`** — Realm-scoped messaging-bus partitions + audit.
+- **`persistenceVersion`** — `SANDBOX_PERSISTENCE_VERSION` the exporting session ran.
+- **`realm`** — The realm record (canonical registry fields incl. provenance + attachments).
+- **`savedPayloads`** — Realm-scoped saved hydration payloads (only entries targeting the realm template).
+- **`schedules`** — Realm-scoped scheduled timers (`agentRef` = source canonical dispatch key).
+- **`source`** — Export provenance; never trusted on import.
+- **`template`** — Launch-template section; omitted when the template is absent/unresolvable.
+- **`vfs`** — Realm-scoped VirtualFS containers.
+- **`warnings`** — Export-time completeness disclosures (missing template, bare-key workspace fallback, ...).
+- **`worldClock`** — Realm-scoped world clock partitions + events.
+
+### `RealmArchiveMembers` — interface
+
+Member snapshots of the archived realm: active entity snapshots plus recycle-bin snapshots.
+
+#### Members
+
+- **`active`** — Sanitized active member snapshots (histories, redo stacks, telemetry, configs).
+- **`recycled`** — Sanitized recycled member snapshots.
+
+### `RealmArchiveMessaging` — interface
+
+Realm-scoped messaging-bus slice. Keys are the source canonical `(realmId, agentId)` registration keys exactly as `exportSnapshot` emits them; the audit log carries only entries attributable to the realm (fail-closed recipient resolution).
+
+#### Members
+
+- **`activeQueues`** — Source registration key → unread envelopes.
+- **`archives`** — Source registration key → read/archived envelopes.
+- **`auditLog`** — Realm-attributable audit entries, verbatim.
+- **`registeredAgents`** — Source canonical registration keys of registered agents.
+- **`terminatedAgents`** — Source canonical registration keys of terminated agents.
+
+### `RealmArchiveSavedPayload` — type alias
+
+Realm-scoped saved hydration payload carried by the archive. Reuses the snapshot contract shape (`PersistedSavedInstancePayload`) so payloads travel without a second schema; the library digest is recomputed on import.
+
+### `RealmArchiveSource` — interface
+
+Provenance block of one realm archive; never trusted on import (fresh-realm remap).
+
+#### Members
+
+- **`realmId`** — Source realm id the archive was exported from.
+
+### `RealmArchiveTemplate` — interface
+
+One launch-template section carried by a realm archive: the authored-form content version pin plus the canonical transport JSON text exactly as exported. Omitted when the realm has no resolvable template; a template id already known to the importing host is skipped on import (never shadowed).
+
+#### Members
+
+- **`id`** — Template id the realm was launched from.
+- **`payload`** — Canonical transport JSON text of the bundle (`{ formatVersion, template, files }`).
+- **`version`** — Authored-form content version (`sha256:<hex>`) at export time.
+
+### `RealmArchiveValidationResult` — interface
+
+Result returned by validateRealmArchive and parseRealmArchive. `envelope` is a normalized canonical-field projection (unknown input fields dropped) and is present only when `valid` is true.
+
+#### Members
+
+- **`code`** — Machine-readable failure class.
+- **`envelope`** — Normalized envelope, present only when `valid` is true.
+- **`error`** — Single human-readable failure reason when `valid` is false.
+- **`valid`** — True when the candidate is a well-formed supported archive.
+
+### `RealmArchiveVfs` — interface
+
+Realm-scoped VirtualFS slice: the realm-global container plus the resolved member workspace containers. File records are the export-time projection (`VirtualFsPersistedFile`; `mode`/`permissions` are not part of the export contract, and `updatedAt` is import-time best-effort).
+
+#### Members
+
+- **`members`** — Resolved member workspace key → path → file record (explicit pins preserved verbatim).
+- **`realmGlobal`** — Realm-global container (`realm:<source>:global`) files keyed by path.
+
+### `RealmArchiveWorldClock` — interface
+
+Realm-scoped world-clock slice. Partition keys are the source canonical `(realmId, agentId)` keys plus the source realm-global key (`realm:<realmId>:global`); the envelope never splits or parses them in the clock layer — the store owns the remap.
+
+#### Members
+
+- **`clocks`** — Source partition key → clock snapshot (member partitions + realm-global).
+- **`events`** — Source partition key → events.
+- **`global`** — Source realm-global partition clock snapshot.
 
 ### `resetSaveLockQueue` — function
 
@@ -1240,6 +1534,42 @@ Serialized state of the WorldClock simulation and narrative events. Mirrors the 
 - **`events`** — Flat array of all registered world events across partitions.
 - **`totalSeconds`** — Total elapsed simulation seconds on the primary / global timeline.
 
+### `serializeRealmArchive` — function
+
+Serializes a normalized archive envelope to canonical JSON text (recursively sorted keys, no insignificant whitespace) via the realm-catalog canonical stringifier, so re-exporting the same envelope is byte-stable.
+
+#### Parameters
+
+- `envelope` — Normalized archive envelope.
+
+#### Returns
+
+Canonical archive JSON text.
+
+### `serializeRealmArchiveAgent` — function
+
+Serializes one live active agent for the realm archive: the existing credential/authority-stripped entity snapshot plus the archive-only drops (model-config `keyId`, credential-shaped endpoint URLs).
+
+#### Parameters
+
+- `agent` — Live agent entity.
+
+#### Returns
+
+Sanitized, archive-redacted member snapshot.
+
+### `serializeRealmArchiveRecycledAgent` — function
+
+Serializes one live recycled agent for the realm archive (same redaction as serializeRealmArchiveAgent, with the recycle-bin metadata required).
+
+#### Parameters
+
+- `agent` — Live recycled agent entity.
+
+#### Returns
+
+Sanitized, archive-redacted recycled member snapshot.
+
 ### `serializeRuntimeEnvironment` — function
 
 Serializes live subsystem states (AgentRuntime, VirtualFS, MessagingBus, WorldClock) into an isolated, deep-cloned, credential-sanitized `SandboxPersistedState` snapshot.
@@ -1317,6 +1647,27 @@ Structured receipt captured from a subsystem snapshot import during `restoreRunt
 - **`subsystem`** — Subsystem that was hydrated, in topological order.
 - **`success`** — False when the subsystem explicitly rejected its snapshot.
 
+### `validateRealmArchive` — function
+
+Validates a candidate `RealmArchiveEnvelope` fail-closed: unknown `format`/`formatVersion` values reject (no best-effort parse), malformed sections reject, prototype-pollution keys reject, and unknown input fields are dropped from the normalized envelope. Never throws.
+
+#### Parameters
+
+- `value` — Raw candidate archive.
+
+#### Returns
+
+Validation result with the normalized envelope on success.
+
+#### Examples
+
+```typescript
+const result = validateRealmArchive(JSON.parse(text));
+if (result.valid && result.envelope) {
+  console.log(result.envelope.source.realmId);
+}
+```
+
 ### `validateSandboxState` — function
 
 Validates the schema and structural integrity of a SandboxPersistedState object. Enforces prototype pollution defenses across virtualFs, messagingBus, and agentDraftInputs.
@@ -1380,10 +1731,10 @@ Serialized file record within a virtual filesystem workspace partition. Mirrors 
 
 ## Doc coverage
 
-- Top-level exports: 50
-- Declarations (exports + members): 262
-- Documented declarations: 262 / 262 (100%)
+- Top-level exports: 71
+- Declarations (exports + members): 329
+- Documented declarations: 329 / 329 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
-- Referenced but not exported (`ae-forgotten-export`): `AgentRuntime`, `AgentState`, `AuthorityGrantSnapshotEntry`, `InterruptedTurn`, `MessageEnvelope`, `MessagingBus`, `PartitionClockSnapshot`, `SchedulerStatus`, `TimerCondition`, `VirtualFS`, `WorldClock`, `WorldEvent`
+- Referenced but not exported (`ae-forgotten-export`): `Agent`, `AgentRuntime`, `AgentState`, `AuthorityGrantSnapshotEntry`, `InterruptedTurn`, `MessageEnvelope`, `MessagingBus`, `PartitionClockSnapshot`, `SchedulerStatus`, `TimerCondition`, `VirtualFS`, `WorldClock`, `WorldEvent`
 - Unresolved `{@link}` targets (`ae-unresolved-link`): 0 (policy `none`; see `scripts/api_reports.mjs`)

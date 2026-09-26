@@ -369,6 +369,51 @@ export const REALM_TEMPLATE_IMPORT_MAX_BUNDLE_BYTES: number;
 export const REALM_TEMPLATE_IMPORT_MAX_TOTAL_BYTES: number;
 
 // @public
+export interface RealmArchiveDroppedAuthority {
+    readonly authorities: readonly string[];
+    readonly memberId: string;
+}
+
+// @public
+export interface RealmArchiveExportResult {
+    readonly archiveId?: string;
+    readonly code?: string;
+    readonly filename?: string;
+    readonly json?: string;
+    readonly success: boolean;
+    readonly warnings: readonly string[];
+}
+
+// @public
+export interface RealmArchiveImportReceipt {
+    readonly archiveId: string | null;
+    readonly attachmentsImported: number;
+    readonly attachmentsSkipped: number;
+    readonly code?: string;
+    readonly droppedAuthority: readonly RealmArchiveDroppedAuthority[];
+    readonly filesImported: number;
+    readonly membersImported: number;
+    readonly membersRecycled: number;
+    readonly payloadsImported: number;
+    readonly realmId: string | null;
+    readonly realmName: string | null;
+    readonly schedulesImported: number;
+    readonly success: boolean;
+    readonly templateImported: boolean;
+    readonly warnings: readonly string[];
+}
+
+// @public
+export interface RealmArchiveImportRollbackReport {
+    readonly evictedFiles: readonly string[];
+    readonly failedStage: string;
+    readonly failures: readonly string[];
+    readonly realmId: string | null;
+    readonly rolledBack: boolean;
+    readonly terminatedMembers: readonly string[];
+}
+
+// @public
 export interface RealmDeleteOptions {
     readonly recursive?: boolean;
 }
@@ -533,6 +578,7 @@ export const SANDBOX_STORE_ERROR_CODES: {
     readonly ERR_STORE_REALM_PROTECTED: 'ERR_STORE_REALM_PROTECTED';
     readonly ERR_STORE_REALM_DELETE_FAILED: 'ERR_STORE_REALM_DELETE_FAILED';
     readonly ERR_STORE_REALM_LAUNCH_FAILED: 'ERR_STORE_REALM_LAUNCH_FAILED';
+    readonly ERR_STORE_REALM_NOT_FOUND: 'ERR_STORE_REALM_NOT_FOUND';
     readonly ERR_TEMPLATE_PROVIDERS_UNSUPPORTED: 'ERR_TEMPLATE_PROVIDERS_UNSUPPORTED';
     readonly ERR_TEMPLATE_AUTHORITY_UNSUPPORTED: 'ERR_TEMPLATE_AUTHORITY_UNSUPPORTED';
     readonly ERR_STORE_TEMPLATE_TOO_LARGE: 'ERR_STORE_TEMPLATE_TOO_LARGE';
@@ -549,6 +595,8 @@ export const SANDBOX_STORE_ERROR_CODES: {
     readonly ERR_STORE_EXTENSION_CONNECT_FAILED: 'ERR_STORE_EXTENSION_CONNECT_FAILED';
     readonly ERR_STORE_PAYLOAD_LIBRARY_FULL: 'ERR_STORE_PAYLOAD_LIBRARY_FULL';
     readonly ERR_STORE_PAYLOAD_LIBRARY_TOO_LARGE: 'ERR_STORE_PAYLOAD_LIBRARY_TOO_LARGE';
+    readonly ERR_STORE_ARCHIVE_FAILED: 'ERR_STORE_ARCHIVE_FAILED';
+    readonly ERR_STORE_REALM_IMPORT_FAILED: 'ERR_STORE_REALM_IMPORT_FAILED';
 };
 
 // @public
@@ -618,6 +666,7 @@ export class SandboxStore {
     emptyRecycleBin(): number;
     ensureDirector(): Promise<AgentStateSnapshot>;
     error: string | null;
+    exportRealmArchive(realmId: string): RealmArchiveExportResult;
     exportRealmTemplate(templateId: string): string;
     extensionConnections: readonly ExtensionConnectionProjection[];
     factoryReset(): void;
@@ -662,6 +711,9 @@ export class SandboxStore {
     healRestoredCapabilities(): CapabilityHealReport | null;
     hydrateFromStorage(): boolean;
     hydrationNotice: SandboxHydrationNotice | null;
+    importRealmArchive(text: string, options?: {
+        name?: string;
+    }): RealmArchiveImportReceipt;
     importRealmTemplate(payload: string | object): RealmTemplateImportReceipt;
     installExtension(input: ExtensionInstallInput): ExtensionInstallRecord;
     isAgentInterrupted(agentId?: string | null): boolean;
@@ -1474,6 +1526,63 @@ Per-bundle serialized size cap for runtime template imports (Wave T, ticket 0df2
 
 Total serialized size cap across every runtime template import for one store (Wave T, ticket 0df20ae, decision 3.4): the summed canonical transport JSON text may not exceed 3 MiB, so imports cannot crowd the shared localStorage snapshot quota. Enforced at import (and re-checked defensively on hydration); violations fail closed with `ERR_STORE_TEMPLATE_TOO_LARGE`.
 
+### `RealmArchiveDroppedAuthority` — interface
+
+One dropped-authority record of a realm archive import: the bare member id plus every descriptive authority item the archive carried but import never re-applied (the operator re-grants through the ordinary grant APIs).
+
+#### Members
+
+- **`authorities`** — Dropped items (`'privileged'`, `'realmBypass'`, `'*'`, exact authority ids).
+- **`memberId`** — Bare realm-local member id.
+
+### `RealmArchiveExportResult` — interface
+
+Receipt returned by `SandboxStore.exportRealmArchive()` (S2 realm-export lane, ticket 3fe5221). `success: false` carries one of the typed codes `ERR_STORE_REALM_NOT_FOUND` / `ERR_STORE_INVALID_PARAMS` / `ERR_STORE_ARCHIVE_FAILED` and never throws for a read-only projection.
+
+#### Members
+
+- **`archiveId`** — Archive id (present on success).
+- **`code`** — Typed failure code when `success` is false.
+- **`filename`** — Suggested download filename (present on success).
+- **`json`** — Canonical archive JSON text (present on success).
+- **`success`** — True when the archive was serialized.
+- **`warnings`** — Export-time completeness disclosures.
+
+### `RealmArchiveImportReceipt` — interface
+
+Receipt returned by `SandboxStore.importRealmArchive()` (S2 realm-export lane, ticket 3fe5221): the fresh realm plus per-section import counters and every dropped authority / disclosure. Post-validation failures throw an `ERR_STORE_REALM_IMPORT_FAILED` error carrying a rollback report instead.
+
+#### Members
+
+- **`archiveId`** — Source archive id.
+- **`attachmentsImported`** — Count of realm extension attachments re-attached.
+- **`attachmentsSkipped`** — Count of attachments skipped (extension not installed locally).
+- **`code`** — Typed failure code reserved for receipt-shaped failure surfaces.
+- **`droppedAuthority`** — Descriptive authority items the archive carried but import never re-applied.
+- **`filesImported`** — Count of VFS files written.
+- **`membersImported`** — Count of imported ACTIVE members.
+- **`membersRecycled`** — Count of imported recycled members.
+- **`payloadsImported`** — Count of imported saved hydration payloads.
+- **`realmId`** — Fresh realm id the slice was remapped onto.
+- **`realmName`** — Fresh realm display name.
+- **`schedulesImported`** — Count of merged scheduled timers.
+- **`success`** — True when the realm slice was installed.
+- **`templateImported`** — True when the archive's template payload was imported.
+- **`warnings`** — Import-time disclosures (skipped attachments, wildcard drops, ...).
+
+### `RealmArchiveImportRollbackReport` — interface
+
+Rollback report carried by an `ERR_STORE_REALM_IMPORT_FAILED` error (mirrors the realm deletion/launch rollback reports).
+
+#### Members
+
+- **`evictedFiles`** — File paths evicted by the rollback.
+- **`failedStage`** — Stage that failed (`vfs-preflight`, `vfs`, `template`, `payloads`, `runtime-slice`, ...).
+- **`failures`** — Rollback failures (best-effort steps that could not complete).
+- **`realmId`** — Target realm id (`null` for preflight failures before the record existed).
+- **`rolledBack`** — True when every mutation was rolled back.
+- **`terminatedMembers`** — Member ids terminated/purged by the rollback.
+
 ### `RealmDeleteOptions` — interface
 
 Options accepted by `SandboxStore.deleteRealm()`.
@@ -1714,7 +1823,7 @@ if (redoResult?.success) {
 
 Standardized error code dictionary for the sandbox store module contract. Provides frozen programmatic error constants to eliminate brittle string matching in error handlers.
 
-Codes: - `ERR_STORE_AGENT_NOT_FOUND`: Target agent ID does not exist in active registry or recycle bin. - `ERR_STORE_NO_AGENT_SELECTED`: Conversational action invoked when `selectedAgentId === null`. - `ERR_STORE_TURN_FAILED`: LLM inference stream, provider gateway, or tool execution threw an uncaught error. - `ERR_STORE_INVALID_PARAMS`: Invalid arguments passed to store methods (e.g. a missing agent config `id`, a non-positive timer duration, or an unresolvable timer target agent). - `ERR_STORE_VFS_FAILED`: VirtualFS operation failed due to quota limit, path permission, or missing source file. - `ERR_STORE_REALM_NOT_EMPTY`: `deleteRealm` was called on a Realm that still has active or recycled members (Wave R; use the recursive override). - `ERR_STORE_REALM_PROTECTED`: `deleteRealm` targeted the seeded Generic default Realm, which can never be deleted. - `ERR_STORE_REALM_DELETE_FAILED`: a recursive Realm deletion could not purge every member, so the record was left in place (fail-closed; the error carries a report). - `ERR_STORE_REALM_LAUNCH_FAILED`: a template launch failed after the Realm record existed (materialization, a member launch, a placement write, or a directive delivery), so the record and its members were rolled back first; the error carries the rollback report and the original failure as `cause`. - `ERR_TEMPLATE_PROVIDERS_UNSUPPORTED`: retired providers-gate code; `launchRealmFromTemplate` no longer emits it (provider-bearing templates resolve against installed and attached extensions and launch with missing-extension disclosure). - `ERR_TEMPLATE_AUTHORITY_UNSUPPORTED`: `launchRealmFromTemplate` targeted a template declaring a publishing authority id unknown to this host; launch is blocked fail-closed while import/validation/review accept the declaration (providers precedent). - `ERR_STORE_TEMPLATE_TOO_LARGE`: `importRealmTemplate` exceeded the per-bundle or total imported-template byte budget. - `ERR_STORE_TEMPLATE_PERSIST_FAILED`: the registry mutation could not be persisted (storage quota/unavailable), so it was rolled back — an import/delete is never silently in-memory-only. - `ERR_STORE_EXTENSION_ALREADY_INSTALLED`: `installExtension` targeted an id that already has a global install record. - `ERR_STORE_EXTENSION_NOT_INSTALLED`: `attachExtension`/`connectExtension`/`disconnectExtension`/`reconnectExtension` named an extension with no global install record. - `ERR_STORE_EXTENSION_ALREADY_ATTACHED`: `attachExtension` targeted a Realm that already attaches the extension. - `ERR_STORE_EXTENSION_ATTACHED`: `removeExtension` targeted an extension still attached to at least one Realm; detach it first. - `ERR_STORE_EXTENSION_NOT_CONNECTABLE`: `connectExtension` targeted a `pack` extension, which has no connectable transport. - `ERR_STORE_EXTENSION_TRANSPORT_UNSUPPORTED`: `connectExtension` targeted an MCP record carrying the host-only `stdio` transport hint. - `ERR_STORE_EXTENSION_INVALID_ENDPOINT`: `connectExtension` targeted a record whose transport URL is not an absolute URL, or whose explicitly approved URL (`approvedUrl`) is not an absolute URL or does not match the transport URL after URL normalization — a stale or inconsistent approval never dials. - `ERR_STORE_EXTENSION_PLAINTEXT_CREDENTIAL`: `connectExtension` targeted a `credentialId`-bearing record on a non-`https:` endpoint — refused before any vault read or network activity. - `ERR_STORE_EXTENSION_CREDENTIAL_UNRESOLVED`: `connectExtension` targeted a `credentialId` the vault cannot resolve (deleted/unknown id) — fail closed, no network activity. - `ERR_STORE_EXTENSION_CONNECT_FAILED`: the error code of an unclassified operational connection failure (a classified MCP client failure keeps its own `ERR_MCP_*` code); never thrown by the pre-connection gates. - `ERR_STORE_PAYLOAD_LIBRARY_FULL`: `saveInstancePayload` targeted a library already holding `SAVED_INSTANCE_PAYLOAD_MAX_ENTRIES` entries; delete one before saving another. - `ERR_STORE_PAYLOAD_LIBRARY_TOO_LARGE`: `saveInstancePayload` targeted a payload whose serialized size exceeds `SAVED_INSTANCE_PAYLOAD_MAX_BYTES`.
+Codes: - `ERR_STORE_AGENT_NOT_FOUND`: Target agent ID does not exist in active registry or recycle bin. - `ERR_STORE_NO_AGENT_SELECTED`: Conversational action invoked when `selectedAgentId === null`. - `ERR_STORE_TURN_FAILED`: LLM inference stream, provider gateway, or tool execution threw an uncaught error. - `ERR_STORE_INVALID_PARAMS`: Invalid arguments passed to store methods (e.g. a missing agent config `id`, a non-positive timer duration, or an unresolvable timer target agent). - `ERR_STORE_VFS_FAILED`: VirtualFS operation failed due to quota limit, path permission, or missing source file. - `ERR_STORE_REALM_NOT_EMPTY`: `deleteRealm` was called on a Realm that still has active or recycled members (Wave R; use the recursive override). - `ERR_STORE_REALM_PROTECTED`: `deleteRealm` targeted the seeded Generic default Realm, which can never be deleted. - `ERR_STORE_REALM_DELETE_FAILED`: a recursive Realm deletion could not purge every member, so the record was left in place (fail-closed; the error carries a report). - `ERR_STORE_REALM_LAUNCH_FAILED`: a template launch failed after the Realm record existed (materialization, a member launch, a placement write, or a directive delivery), so the record and its members were rolled back first; the error carries the rollback report and the original failure as `cause`. - `ERR_STORE_REALM_NOT_FOUND`: `exportRealmArchive` targeted a realm id the registry does not hold (nothing was read or written). - `ERR_TEMPLATE_PROVIDERS_UNSUPPORTED`: retired providers-gate code; `launchRealmFromTemplate` no longer emits it (provider-bearing templates resolve against installed and attached extensions and launch with missing-extension disclosure). - `ERR_TEMPLATE_AUTHORITY_UNSUPPORTED`: `launchRealmFromTemplate` targeted a template declaring a publishing authority id unknown to this host; launch is blocked fail-closed while import/validation/review accept the declaration (providers precedent). - `ERR_STORE_TEMPLATE_TOO_LARGE`: `importRealmTemplate` exceeded the per-bundle or total imported-template byte budget. - `ERR_STORE_TEMPLATE_PERSIST_FAILED`: the registry mutation could not be persisted (storage quota/unavailable), so it was rolled back — an import/delete is never silently in-memory-only. - `ERR_STORE_EXTENSION_ALREADY_INSTALLED`: `installExtension` targeted an id that already has a global install record. - `ERR_STORE_EXTENSION_NOT_INSTALLED`: `attachExtension`/`connectExtension`/`disconnectExtension`/`reconnectExtension` named an extension with no global install record. - `ERR_STORE_EXTENSION_ALREADY_ATTACHED`: `attachExtension` targeted a Realm that already attaches the extension. - `ERR_STORE_EXTENSION_ATTACHED`: `removeExtension` targeted an extension still attached to at least one Realm; detach it first. - `ERR_STORE_EXTENSION_NOT_CONNECTABLE`: `connectExtension` targeted a `pack` extension, which has no connectable transport. - `ERR_STORE_EXTENSION_TRANSPORT_UNSUPPORTED`: `connectExtension` targeted an MCP record carrying the host-only `stdio` transport hint. - `ERR_STORE_EXTENSION_INVALID_ENDPOINT`: `connectExtension` targeted a record whose transport URL is not an absolute URL, or whose explicitly approved URL (`approvedUrl`) is not an absolute URL or does not match the transport URL after URL normalization — a stale or inconsistent approval never dials. - `ERR_STORE_EXTENSION_PLAINTEXT_CREDENTIAL`: `connectExtension` targeted a `credentialId`-bearing record on a non-`https:` endpoint — refused before any vault read or network activity. - `ERR_STORE_EXTENSION_CREDENTIAL_UNRESOLVED`: `connectExtension` targeted a `credentialId` the vault cannot resolve (deleted/unknown id) — fail closed, no network activity. - `ERR_STORE_EXTENSION_CONNECT_FAILED`: the error code of an unclassified operational connection failure (a classified MCP client failure keeps its own `ERR_MCP_*` code); never thrown by the pre-connection gates. - `ERR_STORE_PAYLOAD_LIBRARY_FULL`: `saveInstancePayload` targeted a library already holding `SAVED_INSTANCE_PAYLOAD_MAX_ENTRIES` entries; delete one before saving another. - `ERR_STORE_PAYLOAD_LIBRARY_TOO_LARGE`: `saveInstancePayload` targeted a payload whose serialized size exceeds `SAVED_INSTANCE_PAYLOAD_MAX_BYTES`. - `ERR_STORE_ARCHIVE_FAILED`: a realm archive export failed unexpectedly while projecting live state (read-only; nothing was mutated). - `ERR_STORE_REALM_IMPORT_FAILED`: a realm archive import failed after validation; the error carries a rollback report (`realmId`, `failedStage`, `rolledBack`, `terminatedMembers`, `evictedFiles`, `failures`).
 
 #### Examples
 
@@ -1822,6 +1931,7 @@ console.log('Agent response:', turn.output);
 - **`emptyRecycleBin`** — Permanently purges all agents currently residing in the recycle bin. Operator-mediated (MOD-21 W8; Wave I, ticket c02d0b9): sudoer-only; the store forwards the runtime's host operator principal.
 - **`ensureDirector`** — Idempotently verifies and provisions the root Director Meta-Agent if absent.
 - **`error`** — Top-level store error message for UI alert banners and toasts, or `null` if healthy.
+- **`exportRealmArchive`** — Exports one Realm as a complete, portable `RealmArchiveEnvelope` v1 archive (operator-only; a read-only projection with zero mutation). The slice follows the D0b completeness checklist: the realm record + provenance + attachments; active and recycled member entity snapshots (histories, redo stacks, telemetry, interrupted turns, pending precalls, member configs); the realm's bus partitions and attributable audit trail; per-agent schedules; member + realm-global world-clock partitions/events; the realm-global VFS container plus resolved member workspaces (explicit pins verbatim); the launch template payload; realm-scoped saved payloads; and a **descriptive-only** authority projection. Redaction reuses the persistence strip set plus archive-only drops (model-config `keyId`, credential-shaped endpoint URLs, extension install records, host session state, foreign-realm keys/bytes). Unknown template ids export without a `template` section and disclose a warning instead of failing.
 - **`exportRealmTemplate`** — Exports one effective launch template as canonical transport JSON (Wave T, ticket 0df20ae): the exact authored bundle future launches resolve — an import when one shadows the id (its persisted canonical transport payload is re-emitted verbatim), otherwise the shipped revision rendered by `realmCatalog.serializeTemplateBundle` (recursively sorted keys, no insignificant whitespace), so re-importing the output reproduces the same authored content version.
 - **`extensionConnections`** — Reactive extension-connection projection for the UI (extension wave, P3.1): one frozen, secret-free entry per live connection in connection-completion sequence order (in-flight connects last, by extension id). Always `[]` before any operator connect — nothing auto-connects at load, hydration, or launch — and never persisted.
 - **`factoryReset`** — Factory Reset: Clears persisted storage, cancels pending debounced saves, resets VirtualFS and MessagingBus, and restores fresh Director Meta-Agent.
@@ -1853,6 +1963,7 @@ console.log('Agent response:', turn.output);
 - **`healRestoredCapabilities`** — Runs the H1 reload capability heal on demand: reconciles the tool grants captured from the persisted snapshot at hydration onto the currently registered agents, under the store's operator context. Only capability selectors (`allowedTools`/`tools`/`toolPreset`, resolved through the sandbox preset resolver) are applied — `privileged`, parentage, and realm membership are never read from the snapshot. The pass is idempotent (a second run reports `unchanged` and mutates nothing) and publishes its outcome on `capabilityHealReport`. The method is a safe retry point for the wildcard-grant case: when the operator principal was not yet registered at hydration time those grants are reported as `'skipped'` and stay default-deny; calling this method after the operator exists restores them.
 - **`hydrateFromStorage`** — Hydrates store and domain engines from stored LocalStorage snapshot. Satisfies the Zero Zombie Invariant by resetting running agents to `IDLE`. A `RestoreResult` object counts as success only when `restored.success` is true. If a critical subsystem rejects its snapshot, the store still mirrors the partially hydrated engine, raises a `hydrationNotice` with reason `'hydration-failed'`, and returns `false` — it never reports success.
 - **`hydrationNotice`** — Dismissible persisted-state recovery notice raised during hydration when the stored snapshot was unreadable and a fresh session was started (QA-013). `null` when no recovery occurred or the notice has been dismissed.
+- **`importRealmArchive`** — Imports one realm archive into the live session as a **fresh realm** (operator-only, additive; D0b import semantics). Every canonical key is remapped from the archive's source realm id onto a newly minted realm id; bare member ids and explicit workspace pins are preserved. Member hydration is default-deny — archived privilege, `realmBypass`, publishing grants, and wildcard authority are never consumed (they are receipted through `droppedAuthority` for the operator to re-grant) — while archived tool selectors are re-applied through the operator capability path. Import validates fail-closed, preflights member ids/keys/workspace collisions before any mutation, and rolls the whole slice back (record, files, template, payloads; runtime pre-state restored internally) on a post-validation failure. Re-importing the same archive mints an independent realm each time.
 - **`importRealmTemplate`** — Imports a Realm template bundle into the runtime registry (Wave T, ticket 0df20ae): parses and validates the canonical transport payload through `realmCatalog` (typed `RealmCatalogError` on malformed input), enforces the per-bundle and total byte budgets, replaces any previous import of the same id (in place — one effective entry per id), and persists the registry synchronously. Shadowing: an imported id matching a shipped (baked/injected) bundle replaces that entry in the effective catalog, so future launches resolve the import while the shipped revision stays untouched; deleting the import reveals the shipped revision again. The launcher labels the entry through SandboxStore.listRealmTemplateSources. Persistence honesty: the write is synchronous and not debounced. When the snapshot write fails (quota, unavailable storage), the import is rolled back before the typed `ERR_STORE_TEMPLATE_PERSIST_FAILED` is thrown — an accepted receipt always means the persisted snapshot agrees with the effective catalog.
 - **`installExtension`** — Installs one global extension record under the operator principal: the store stamps `createdAt`, defaults `status` to `'installed'` and `installSource` to `'operator'`, validates the record through the owned registry, and emits the `extension_installed` audit event. Installing an id that already has a record fails closed; nothing connects.
 - **`isAgentInterrupted`** — Checks if an agent has an uncompleted or interrupted turn awaiting retry.
@@ -2300,9 +2411,9 @@ console.log(`Uploaded ${receipt.count} files:`, receipt.files);
 
 ## Doc coverage
 
-- Top-level exports: 73
-- Declarations (exports + members): 520
-- Documented declarations: 520 / 520 (100%)
+- Top-level exports: 77
+- Declarations (exports + members): 555
+- Documented declarations: 555 / 555 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): `Agent`, `AgentConfig`, `AgentConfigUpdate`, `AgentIdentityScope`, `AgentRuntime`, `AgentState`, `ArchiveDownloadReceipt`, `AuthorityDescriptor`, `AuthorityScopeRecord`, `BatchDownloadFailure`, `BusMessageEnvelope`, `CopyReceipt`, `CredentialResolverPort`, `CredentialStoragePort`, `CredentialVault`, `DownloadReceipt`, `ExtensionCatalogConflict`, `ExtensionCatalogDiff`, `ExtensionInstallRecord`, `ExtensionKind`, `ExtensionRegistry`, `ExtensionTransportHint`, `FileRecord`, `GrepMatch`, `GrepOptions`, `InboxHeader`, `InboxListOptions`, `LaunchHistoryEntry`, `McpClientServerInfo`, `MessageEnvelope`, `MessagingBus`, `NarrativeEvent`, `PendingInstancePayload`, `PresetCatalog`, `PresetModelConfig`, `ReadMessageResult`, `RealmAdminPort`, `RealmExtensionAttachment`, `RealmInputValues`, `RealmPublishingPort`, `RealmRecord`, `RealmRegistry`, `RealmTemplate`, `RealmUpdatePatch`, `SandboxPersistedState`, `ScheduleReceipt`, `SendMessageReceipt`, `TurnBundle`, `TurnExecutionResult`, `TurnInput`, `VfsCopyOptions`, `VfsWriteOptions`, `VirtualFS`, `WriteReceipt`

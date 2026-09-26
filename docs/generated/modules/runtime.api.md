@@ -246,6 +246,12 @@ export class AgentRuntime {
     } | null): AuthorityDescriptor | null;
     hasAgent(agentId: string): boolean;
     hasRecycledAgent(agentId: string): boolean;
+    importRealmSlice(slice: RealmSliceImportInput, callerContext?: {
+        principal?: InternalPrincipal | AuthorityDescriptor;
+    } | null): {
+        installed: string[];
+        recycled: string[];
+    };
     importSchedules(schedulesList: ScheduledTaskSnapshot[]): void;
     importSnapshot(snapshot: RuntimeSnapshot): void;
     inspectAgent(targetRef: string, callerContext?: object | null): AgentInspectProjection;
@@ -600,6 +606,37 @@ export interface RealmAdminScopeResolution {
     readonly candidateRealmIds: readonly string[];
     readonly fields: readonly string[];
     readonly realmId: string | null;
+}
+
+// @public
+export interface RealmSliceImportInput {
+    readonly members: {
+        readonly active?: readonly AgentSnapshot[];
+        readonly recycled?: readonly AgentSnapshot[];
+    };
+    readonly messaging?: RealmSliceImportMessagingInput;
+    readonly realmId: string;
+    readonly schedules?: readonly ScheduledTaskSnapshot[];
+    readonly worldClock?: RealmSliceImportWorldClockInput;
+}
+
+// @public
+export interface RealmSliceImportMessagingInput {
+    // Warning: (ae-forgotten-export) The symbol "MessageEnvelope" needs to be exported by the entry point index.d.ts
+    readonly activeQueues?: Readonly<Record<string, readonly MessageEnvelope[]>>;
+    readonly archives?: Readonly<Record<string, readonly MessageEnvelope[]>>;
+    readonly auditLog?: readonly MessageEnvelope[];
+    readonly registeredAgents?: readonly string[];
+    readonly terminatedAgents?: readonly string[];
+}
+
+// @public
+export interface RealmSliceImportWorldClockInput {
+    readonly clocks?: Readonly<Record<string, PartitionClockSnapshot>>;
+    // Warning: (ae-forgotten-export) The symbol "WorldEvent" needs to be exported by the entry point index.d.ts
+    readonly events?: Readonly<Record<string, readonly WorldEvent[]>>;
+    // Warning: (ae-forgotten-export) The symbol "PartitionClockSnapshot" needs to be exported by the entry point index.d.ts
+    readonly global?: PartitionClockSnapshot;
 }
 
 // @public
@@ -1183,6 +1220,7 @@ const snapshot = runtime.exportSnapshot();
 - **`grantTemplateAuthority`** — Grants the explicit `@template:authority` publishing capability to an active agent (Wave U, ticket 2518510; delegates to grantAuthority). Authority-bearing: only the exact injected `InternalPrincipal` reference (the composition-root operator, also returned by getOperatorPrincipal) may grant; agent principals, caller-asserted flags, and plain lookalike objects are denied with `PERMISSION_DENIED` before any mutation. The grant is recorded in the frozen registry authority inputs and rebuilt into the descriptor's allow set as the exact authority id; the wildcard `'*'` and `privileged` never imply it, and the scope/selector axes are untouched.
 - **`hasAgent`** — Returns true if exactly one active agent carries the given identifier (an id registered in two Realms resolves `false` — fail closed); a canonical identity key resolves its exact registration (Wave I, ticket d57cbc1).
 - **`hasRecycledAgent`** — Returns true if exactly one recycled agent carries the given identifier (an id recycled in two Realms resolves `false` — fail closed); a canonical identity key resolves its exact registration (Wave I, ticket d57cbc1).
+- **`importRealmSlice`** — Additively installs one realm slice from pre-remapped plain data: members (active + recycled), messaging partitions, schedules, and world-clock partitions — without touching any other realm. The additive import path behind `SandboxStore.importRealmArchive`; it never cancels in-flight turns and never replaces the runtime registry. Authority-bearing gate: the caller must present the exact injected `InternalPrincipal` reference (composition-root only). Members hydrate through the entity snapshot contract default-deny: archived selectors are withheld, archived authority is never applied, and the members land IDLE. Atomicity: every entity is pre-hydrated and every canonical key checked for duplicates/collisions before the first mutation; the bus, clock, and schedule pre-state is captured, and any failure after the first mutation restores that pre-state and installs nothing (the thrown `ERR_SNAPSHOT_INVALID` carries the original failure as `cause`).
 - **`importSchedules`** — Hydrates scheduled timers from a persisted snapshot.
 - **`importSnapshot`** — Atomically restores runtime state from a serialized snapshot (fail-closed). Validates and hydrates every entity before mutating the current registry, so a malformed snapshot leaves prior runtime state intact and surfaces `ERR_SNAPSHOT_INVALID`. Hydrated authority is default-deny for every record (a snapshot contributes no grant, the director included): the persisted body hydrates through the entity snapshot contract, and the composition root re-applies persisted `realmBypass` grants explicitly through `restoreRealmBypassGrants` (Wave I, ticket c02d0b9). Active lifecycle claims are normalized before hydration: active entries hydrate IDLE and terminal/recycled claims route to the recycle bin (d5b583d).
 - **`inspectAgent`** — Inspects one target agent under the M2 parental/meta tiers (facade pass-through to the lifecycle manager). The caller context carries the identity-only caller scope; the manager resolves the caller descriptor, the target, and the tier verdict registry-side and never reads authority claims. Every unauthorized target shares one uniform, realm-opaque `PERMISSION_DENIED`.
@@ -1682,6 +1720,40 @@ One resolved M3 realm-admin scope (host-only, registry-side): the actor's bare i
 - **`candidateRealmIds`** — Realm ids the grant reaches, in scope order (empty = nothing).
 - **`fields`** — Field tokens an edit may touch (empty for a read-only authority id).
 - **`realmId`** — Actor realm membership (own-realm default), or `null` for the system scope.
+
+### `RealmSliceImportInput` — interface
+
+Plain-data input accepted by AgentRuntime.importRealmSlice: one realm's members, messaging partitions, schedules, and clock partitions, already remapped to the target realm by the composition root. The member runtime install is atomic (pre-hydrated, duplicate-checked, and pre-state-restoring on failure) and never disturbs other realms.
+
+#### Members
+
+- **`members`** — Member snapshots: active entity snapshots plus recycled entries (both as `SerializedAgent`).
+- **`messaging`** — Messaging partitions to merge into the live bus.
+- **`realmId`** — Target realm id every record was remapped onto.
+- **`schedules`** — Scheduled timers to merge into the live scheduler.
+- **`worldClock`** — World-clock partitions to merge into the live clock.
+
+### `RealmSliceImportMessagingInput` — interface
+
+Realm-scoped messaging input accepted by AgentRuntime.importRealmSlice. Keys are canonical `(realmId, agentId)` registration keys already remapped to the target realm by the store; envelope fields are never passed through raw.
+
+#### Members
+
+- **`activeQueues`** — Registration key → unread envelopes to merge in.
+- **`archives`** — Registration key → archived envelopes to merge in.
+- **`auditLog`** — Audit entries to append verbatim.
+- **`registeredAgents`** — Registration keys to register (merged additively).
+- **`terminatedAgents`** — Registration keys to mark terminated (merged additively).
+
+### `RealmSliceImportWorldClockInput` — interface
+
+Realm-scoped world-clock input accepted by AgentRuntime.importRealmSlice.
+
+#### Members
+
+- **`clocks`** — Partition key → clock snapshot to merge (member keys + realm-global).
+- **`events`** — Partition key → events to merge.
+- **`global`** — Target realm-global partition clock snapshot.
 
 ### `RedoResult` — interface
 
@@ -2258,10 +2330,10 @@ Narrow on `success` to obtain the fully-populated delivery projection; the failu
 
 ## Doc coverage
 
-- Top-level exports: 60
-- Declarations (exports + members): 491
-- Documented declarations: 491 / 491 (100%)
+- Top-level exports: 63
+- Declarations (exports + members): 508
+- Documented declarations: 508 / 508 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
-- Referenced but not exported (`ae-forgotten-export`): `Agent`, `AGENT_STATES`, `AgentModelConfig`, `AgentSecurityContext`, `AgentTelemetry_2`, `AuthorityGrantRecord`, `AuthorityGrantSnapshotEntry`, `AuthorityScopeRecord`, `CancelScheduleSuccessReceipt`, `CredentialResolverPort`, `EngineModel`, `EngineStreamChunk`, `ExecutionErrorCode`, `ExecutionStatus`, `ExtensionExecutionPort`, `ExtensionToolProviderPort`, `HistoryToolCall`, `InterruptedTurn`, `InvocationEngine`, `InvocationReceipt`, `InvocationSingleResult`, `LaunchAgentOptions`, `MessagingBus`, `ModelPresetSourcePort`, `OrchestratorActionMode`, `RealmAdminPort`, `RealmPublishingPort`, `ScheduledTaskProjection`, `ScheduleErrorReceipt`, `SchedulerStatus`, `ScheduleSuccessReceipt`, `TimerCondition`, `ToolCallRecord`, `TriggerPolicy`, `TriggerQueue`, `TurnInputObject`, `UndoTurnSelectionFailure`, `VirtualFS`, `WaitForMailFailureResult`, `WaitForMailSuccessResult`, `WorldClock`
+- Referenced but not exported (`ae-forgotten-export`): `Agent`, `AGENT_STATES`, `AgentModelConfig`, `AgentSecurityContext`, `AgentTelemetry_2`, `AuthorityGrantRecord`, `AuthorityGrantSnapshotEntry`, `AuthorityScopeRecord`, `CancelScheduleSuccessReceipt`, `CredentialResolverPort`, `EngineModel`, `EngineStreamChunk`, `ExecutionErrorCode`, `ExecutionStatus`, `ExtensionExecutionPort`, `ExtensionToolProviderPort`, `HistoryToolCall`, `InterruptedTurn`, `InvocationEngine`, `InvocationReceipt`, `InvocationSingleResult`, `LaunchAgentOptions`, `MessageEnvelope`, `MessagingBus`, `ModelPresetSourcePort`, `OrchestratorActionMode`, `PartitionClockSnapshot`, `RealmAdminPort`, `RealmPublishingPort`, `ScheduledTaskProjection`, `ScheduleErrorReceipt`, `SchedulerStatus`, `ScheduleSuccessReceipt`, `TimerCondition`, `ToolCallRecord`, `TriggerPolicy`, `TriggerQueue`, `TurnInputObject`, `UndoTurnSelectionFailure`, `VirtualFS`, `WaitForMailFailureResult`, `WaitForMailSuccessResult`, `WorldClock`, `WorldEvent`
 - Unresolved `{@link}` targets (`ae-unresolved-link`): 20 (policy `none`; see `scripts/api_reports.mjs`)
