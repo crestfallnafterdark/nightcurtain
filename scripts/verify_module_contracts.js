@@ -169,6 +169,7 @@ const EXPECTED_MODULES_FOLDERS = [
   'toolDefinitions',
   'tools/constants',
   'tools/descriptors',
+  'tools/extensionTools',
   'tools/normalizers',
   'triggerQueue',
   'virtualFs',

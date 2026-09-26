@@ -20,7 +20,8 @@ import {
 import {
   toSnakeCase,
   toCamelCase,
-  createParamSanitizer
+  createParamSanitizer,
+  createPassThroughSanitizer
 } from '../../src/lib/sandbox/tools/normalizers/index.ts';
 
 import {
@@ -595,4 +596,63 @@ test('12. isReservedToolCallName rejects the prototype property names', () => {
   );
   assert.strictEqual(isReservedToolCallName('acme_scoring_similarity'), false);
   assert.strictEqual(isReservedToolCallName('docs_search'), false);
+});
+
+// ============================================================================
+// 13. createPassThroughSanitizer: verbatim keys, prototype hygiene, garbage
+// ============================================================================
+
+test('13. createPassThroughSanitizer preserves wire keys verbatim', () => {
+  const sanitize = createPassThroughSanitizer();
+
+  // Unlike `createParamSanitizer`, no snake_case rewriting, alias resolution,
+  // defaults, or declared-key filtering may touch server-facing arguments.
+  const wireArgs = {
+    topK: 5,
+    snake_key: true,
+    'kebab-key': 'kept',
+    'dotted.key': null,
+    camelCase: [1, 2],
+    nested: { deep: 'value' }
+  };
+  const sanitized = sanitize(wireArgs);
+
+  assert.notStrictEqual(sanitized, wireArgs, 'must return a fresh object');
+  assert.deepStrictEqual(sanitized, wireArgs, 'every wire key must be preserved verbatim');
+  assert.deepStrictEqual(Object.keys(sanitized), Object.keys(wireArgs), 'key order must stay stable');
+
+  // JSON-object strings parse; `null` values survive; `undefined` members do not.
+  assert.deepStrictEqual(sanitize('{"topK": 5, "snake_key": true}'), { topK: 5, snake_key: true });
+  assert.deepStrictEqual(sanitize({ a: null, b: undefined }), { a: null });
+  // Colliding spellings the baked sanitizer would rewrite/merge stay distinct.
+  assert.deepStrictEqual(sanitize({ topK: 5, top_k: 6 }), { topK: 5, top_k: 6 });
+  assert.deepStrictEqual(sanitize({ filePath: 'a', file_path: 'b' }), { filePath: 'a', file_path: 'b' });
+
+  // Arrays, garbage, primitives, and unparseable strings yield a fresh empty object.
+  const rejected = ['[1,2]', [1, 2], 'not json', '{broken', 42, true, null, undefined];
+  for (const input of rejected) {
+    const output = sanitize(input);
+    assert.deepStrictEqual(output, {}, `input '${String(input)}' must sanitize to {}`);
+    assert.notStrictEqual(Object.getPrototypeOf(output), null);
+  }
+});
+
+test('13b. createPassThroughSanitizer drops the prototype vocabulary without pollution', () => {
+  const sanitize = createPassThroughSanitizer();
+
+  const hostile = JSON.parse('{"__proto__":{"polluted":true},"constructor":"c","prototype":"p","safe":"kept"}');
+  const sanitized = sanitize(hostile);
+
+  assert.deepStrictEqual(sanitized, { safe: 'kept' });
+  assert.strictEqual(Object.getPrototypeOf(sanitized), Object.prototype);
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(sanitized, '__proto__'), false);
+  assert.strictEqual(Object.prototype.polluted, undefined, 'no prototype pollution may occur');
+  assert.strictEqual({}.polluted, undefined);
+
+  // A JSON string carrying the same payload is decoded and cleaned identically.
+  assert.deepStrictEqual(
+    sanitize('{"__proto__":{"polluted":true},"constructor":1,"safe":"kept"}'),
+    { safe: 'kept' }
+  );
+  assert.strictEqual({}.polluted, undefined);
 });

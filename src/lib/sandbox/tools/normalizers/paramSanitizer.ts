@@ -92,3 +92,66 @@ export function createParamSanitizer(
     return result;
   };
 }
+
+/**
+ * Factory creating a pass-through parameter sanitizer for dynamically discovered
+ * (extension) tools, whose wire argument names must reach the server exactly as
+ * the caller sent them.
+ *
+ * Unlike {@link createParamSanitizer}, the returned function never renames or
+ * drops wire keys: no alias mapping, no snake_case rewriting, no defaults, and
+ * no declared-key filtering. It accepts the same input shapes as
+ * `createParamSanitizer` (a plain object, a JSON object/array string, or any
+ * other value) and always returns a fresh plain object. Only the
+ * prototype-pollution vocabulary (`__proto__`, `constructor`, `prototype`) is
+ * dropped; `undefined` members are omitted because JSON cannot represent them,
+ * while `null` is preserved as a legitimate wire value. Invalid, absent,
+ * array, or unparseable input yields an empty object.
+ *
+ * @returns A sanitizer function that accepts raw arguments and returns a fresh pass-through parameters object.
+ *
+ * @example
+ * ```typescript
+ * import { createPassThroughSanitizer } from './tools/normalizers/index.ts';
+ *
+ * const sanitize = createPassThroughSanitizer();
+ * sanitize('{"topK": 5, "snake_key": true}');
+ * // => { topK: 5, snake_key: true } (verbatim keys, no snake_case rewriting)
+ * ```
+ */
+export function createPassThroughSanitizer(): (rawArgs?: unknown) => Record<string, unknown> {
+  return function sanitizePassThroughParams(rawArgs = {}) {
+    let parsedArgs = rawArgs;
+
+    if (typeof rawArgs === 'string') {
+      const trimmed = rawArgs.trim();
+      if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+        try {
+          parsedArgs = JSON.parse(trimmed);
+        } catch {
+          parsedArgs = null;
+        }
+      } else {
+        parsedArgs = null;
+      }
+    }
+
+    if (!parsedArgs || typeof parsedArgs !== 'object' || Array.isArray(parsedArgs)) {
+      return {};
+    }
+
+    const result: Record<string, unknown> = {};
+
+    for (const [key, value] of Object.entries(parsedArgs)) {
+      if (value === undefined) {
+        continue;
+      }
+      if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+        continue;
+      }
+      result[key] = value;
+    }
+
+    return result;
+  };
+}

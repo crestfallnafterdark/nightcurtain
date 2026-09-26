@@ -20,8 +20,9 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 
 ## Invariants
 
-- Prototype-pollution-safe resolution: alias lookups read only own keys of the frozen alias map (`hasOwnProperty`-guarded) and of a prototype-free `Object.create(null)` lowercased dictionary; non-string or unresolvable input resolves to `null`, and the sanitizer drops `__proto__`/`constructor`/`prototype` on both source and target keys.
+- Prototype-pollution-safe resolution: alias lookups read only own keys of the frozen alias map (`hasOwnProperty`-guarded) and of a prototype-free `Object.create(null)` lowercased dictionary; non-string or unresolvable input resolves to `null`, and both sanitizers drop `__proto__`/`constructor`/`prototype` on both source and target keys.
 - Failure-safe sanitization: `createParamSanitizer` never throws and never mutates its configured `defaults`; invalid, absent, non-object, or array arguments return a fresh shallow copy of `defaults`, and `null`/`undefined` values are skipped.
+- Verbatim pass-through sanitization: `createPassThroughSanitizer` never renames, snake_cases, defaults, or filters wire keys — it returns a fresh plain object holding every own enumerable key of the accepted input except the prototype vocabulary (`undefined` members are omitted, `null` values are preserved), and invalid/absent/array/unparseable input yields an empty object.
 - Precall allowlist policy: `PRECALL_ALLOWLIST` is frozen and holds exactly 14 canonical tool names, each resolvable by `getCanonToolName`; every tool outside the set is denied by the `batch_precall` descriptor (`PRECALL_FORBIDDEN`) and by the turn-execution precall gate (`FORBIDDEN_PRECALL`).
 - Call-name hygiene: `deriveToolCallName` is total and deterministic (every character outside `[A-Za-z0-9_]` becomes `_`, per character, with no collapsing, case folding, or trimming) and `isReservedToolCallName` rejects every candidate that resolves through the alias map (canonical, alias, selector, and publishing spellings), equals a frozen baked/publishing descriptor name, or is a prototype property name (`__proto__`/`constructor`/`prototype`), so a derived requirement or extension call name can never shadow a baked tool or pollute a projection key.
 
@@ -34,6 +35,9 @@ _(none tagged)_
 ```ts
 // @public
 export function createParamSanitizer(paramAliasMap?: Record<string, string>, defaults?: Record<string, unknown>): (rawArgs?: unknown) => Record<string, unknown>;
+
+// @public
+export function createPassThroughSanitizer(): (rawArgs?: unknown) => Record<string, unknown>;
 
 // @public
 export function deriveToolCallName(capabilityId: string): string;
@@ -74,6 +78,26 @@ Factory creating a parameter sanitizer function with pre-configured alias mappin
 #### Returns
 
 A sanitizer function that accepts raw arguments (object, JSON string, or arbitrary value) and returns a fresh sanitized parameters object.
+
+### `createPassThroughSanitizer` — function
+
+Factory creating a pass-through parameter sanitizer for dynamically discovered (extension) tools, whose wire argument names must reach the server exactly as the caller sent them.
+
+Unlike createParamSanitizer, the returned function never renames or drops wire keys: no alias mapping, no snake_case rewriting, no defaults, and no declared-key filtering. It accepts the same input shapes as `createParamSanitizer` (a plain object, a JSON object/array string, or any other value) and always returns a fresh plain object. Only the prototype-pollution vocabulary (`__proto__`, `constructor`, `prototype`) is dropped; `undefined` members are omitted because JSON cannot represent them, while `null` is preserved as a legitimate wire value. Invalid, absent, array, or unparseable input yields an empty object.
+
+#### Returns
+
+A sanitizer function that accepts raw arguments and returns a fresh pass-through parameters object.
+
+#### Examples
+
+```typescript
+import { createPassThroughSanitizer } from './tools/normalizers/index.ts';
+
+const sanitize = createPassThroughSanitizer();
+sanitize('{"topK": 5, "snake_key": true}');
+// => { topK: 5, snake_key: true } (verbatim keys, no snake_case rewriting)
+```
 
 ### `deriveToolCallName` — function
 
@@ -172,9 +196,9 @@ The snake_case form of the input, or an empty string for non-string/empty input.
 
 ## Doc coverage
 
-- Top-level exports: 9
-- Declarations (exports + members): 9
-- Documented declarations: 9 / 9 (100%)
+- Top-level exports: 10
+- Declarations (exports + members): 10
+- Documented declarations: 10 / 10 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): none
