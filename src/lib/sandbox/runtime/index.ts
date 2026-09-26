@@ -54,7 +54,7 @@ import type { VirtualFsSnapshot } from '../virtualFs/index.ts';
 import { MessagingBus } from '../messagingBus/index.ts';
 import type { MessagingBusSnapshot } from '../messagingBus/index.ts';
 import { WorldClock } from '../worldClock/index.ts';
-import type { WorldClockSnapshot } from '../worldClock/index.ts';
+import type { PartitionClockSnapshot, WorldClockSnapshot, WorldEvent } from '../worldClock/index.ts';
 import { TriggerQueue } from '../triggerQueue/index.ts';
 import type { AgentTrigger } from '../triggerQueue/index.ts';
 import { InvocationEngine } from '../invocationEngine/index.ts';
@@ -1059,6 +1059,57 @@ export interface RuntimeSnapshot {
   scheduledTimers: SerializedScheduledTimer[];
   /** Epoch millisecond export timestamp */
   exportedAt: number;
+}
+
+/**
+ * Realm-scoped messaging input accepted by {@link AgentRuntime.importRealmSlice}.
+ * Keys are canonical `(realmId, agentId)` registration keys already remapped to
+ * the target realm by the store; envelope fields are never passed through raw.
+ */
+export interface RealmSliceImportMessagingInput {
+  /** Registration key → unread envelopes to merge in. */
+  readonly activeQueues?: Readonly<Record<string, readonly MessageEnvelope[]>>;
+  /** Registration key → archived envelopes to merge in. */
+  readonly archives?: Readonly<Record<string, readonly MessageEnvelope[]>>;
+  /** Registration keys to register (merged additively). */
+  readonly registeredAgents?: readonly string[];
+  /** Registration keys to mark terminated (merged additively). */
+  readonly terminatedAgents?: readonly string[];
+  /** Audit entries to append verbatim. */
+  readonly auditLog?: readonly MessageEnvelope[];
+}
+
+/** Realm-scoped world-clock input accepted by {@link AgentRuntime.importRealmSlice}. */
+export interface RealmSliceImportWorldClockInput {
+  /** Target realm-global partition clock snapshot. */
+  readonly global?: PartitionClockSnapshot;
+  /** Partition key → clock snapshot to merge (member keys + realm-global). */
+  readonly clocks?: Readonly<Record<string, PartitionClockSnapshot>>;
+  /** Partition key → events to merge. */
+  readonly events?: Readonly<Record<string, readonly WorldEvent[]>>;
+}
+
+/**
+ * Plain-data input accepted by {@link AgentRuntime.importRealmSlice}: one
+ * realm's members, messaging partitions, schedules, and clock partitions,
+ * already remapped to the target realm by the composition root. The member
+ * runtime install is atomic (pre-hydrated, duplicate-checked, and
+ * pre-state-restoring on failure) and never disturbs other realms.
+ */
+export interface RealmSliceImportInput {
+  /** Target realm id every record was remapped onto. */
+  readonly realmId: string;
+  /** Member snapshots: active entity snapshots plus recycled entries (both as `SerializedAgent`). */
+  readonly members: {
+    readonly active?: readonly SerializedAgent[];
+    readonly recycled?: readonly SerializedAgent[];
+  };
+  /** Messaging partitions to merge into the live bus. */
+  readonly messaging?: RealmSliceImportMessagingInput;
+  /** Scheduled timers to merge into the live scheduler. */
+  readonly schedules?: readonly SerializedScheduledTimer[];
+  /** World-clock partitions to merge into the live clock. */
+  readonly worldClock?: RealmSliceImportWorldClockInput;
 }
 
 // ============================================================================
@@ -5235,6 +5286,393 @@ export class AgentRuntime {
       timestamp: Date.now(),
       payload: { snapshot }
     });
+  }
+
+  // ====================================================================
+  // Realm Slice Import (S2 realm-export lane, ticket 3fe5221)
+  // ====================================================================
+
+  /**
+   * Additively installs one realm slice from pre-remapped plain data: members
+   * (active + recycled), messaging partitions, schedules, and world-clock
+   * partitions — without touching any other realm. The additive import path
+   * behind `SandboxStore.importRealmArchive`; it never cancels in-flight turns
+   * and never replaces the runtime registry.
+   *
+   * Authority-bearing gate: the caller must present the exact injected
+   * `InternalPrincipal` reference (composition-root only). Members hydrate
+   * through the entity snapshot contract default-deny: archived selectors are
+   * withheld, archived authority is never applied, and the members land IDLE.
+   *
+   * Atomicity: every entity is pre-hydrated and every canonical key checked for
+   * duplicates/collisions before the first mutation; the bus, clock, and
+   * schedule pre-state is captured, and any failure after the first mutation
+   * restores that pre-state and installs nothing (the thrown
+   * `ERR_SNAPSHOT_INVALID` carries the original failure as `cause`).
+   *
+   * @param slice - Remapped realm slice (members/messaging/schedules/worldClock).
+   * @param callerContext - Trusted caller context carrying `{ principal }`.
+   * @returns Canonical identity keys of the installed active and recycled members.
+   * @throws `Error` - With code `'PERMISSION_DENIED'` for non-operator callers, `'ERR_SNAPSHOT_INVALID'` for malformed slices or a failed atomic install.
+   */
+  importRealmSlice(
+    slice: RealmSliceImportInput,
+    callerContext: { principal?: InternalPrincipal | AuthorityDescriptor } | null = null
+  ): { installed: string[]; recycled: string[] } {
+    this.#assertNotDestroyed();
+    const principal = callerContext && typeof callerContext === 'object' ? callerContext.principal : null;
+    if (principal !== this.#internalPrincipal) {
+      throw createRuntimeError(
+        'Permission denied: only the composition-root operator principal may import a realm slice',
+        'PERMISSION_DENIED'
+      );
+    }
+    if (!slice || typeof slice !== 'object' || Array.isArray(slice)) {
+      throw createRuntimeError('Invalid realm slice: expected an object', 'ERR_SNAPSHOT_INVALID');
+    }
+    const realmId = typeof slice.realmId === 'string' ? slice.realmId.trim() : '';
+    if (!realmId) {
+      throw createRuntimeError("Invalid realm slice: missing non-empty 'realmId'", 'ERR_SNAPSHOT_INVALID');
+    }
+
+    const activeEntries = Array.isArray(slice.members?.active) ? slice.members.active : [];
+    const recycledEntries = Array.isArray(slice.members?.recycled) ? slice.members.recycled : [];
+
+    // 1. Fail-closed pre-hydration: every entity is built before any mutation.
+    const hydratedActive: Agent[] = [];
+    const hydratedRecycled: Agent[] = [];
+    try {
+      for (const entry of activeEntries) {
+        if (!entry || typeof entry !== 'object' || typeof entry.id !== 'string' || !entry.id) {
+          throw new Error('active member entry is missing a valid string id');
+        }
+        hydratedActive.push(Agent.fromSnapshot(entry, {
+          credentialResolver: this.#credentialResolver,
+          presetSource: this.#presetSource
+        }));
+      }
+      for (const entry of recycledEntries) {
+        if (!entry || typeof entry !== 'object' || typeof entry.id !== 'string' || !entry.id) {
+          throw new Error('recycled member entry is missing a valid string id');
+        }
+        hydratedRecycled.push(Agent.fromSnapshot(entry, {
+          recycled: true,
+          credentialResolver: this.#credentialResolver,
+          presetSource: this.#presetSource
+        }));
+      }
+    } catch (err) {
+      const invalid = createRuntimeError(
+        `Invalid realm slice: member hydration failed (${describeThrownValue(err)})`,
+        'ERR_SNAPSHOT_INVALID'
+      );
+      invalid.cause = err;
+      throw invalid;
+    }
+
+    // 2. Canonical-key derivation + duplicate/collision rejection before mutation.
+    const activeWithKeys: Array<[string, Agent]> = [];
+    const recycledWithKeys: Array<[string, Agent]> = [];
+    const seenIdentityKeys = new Set<string>();
+    try {
+      for (const agent of hydratedActive) {
+        const identityKey = this.#agentIdentityKeyOf(agent);
+        const parsed = parseAgentIdentityKey(identityKey);
+        if (!parsed || parsed.realmId !== realmId) {
+          throw new Error(`member '${agent.id}' does not belong to realm '${realmId}'`);
+        }
+        if (seenIdentityKeys.has(identityKey)) {
+          throw new Error(`duplicate registration for agent id '${agent.id}'`);
+        }
+        seenIdentityKeys.add(identityKey);
+        if (this.#agents.has(identityKey) || this.#recycleBin.has(identityKey)) {
+          throw new Error(`registration for agent id '${agent.id}' already exists`);
+        }
+        activeWithKeys.push([identityKey, agent]);
+      }
+      for (const agent of hydratedRecycled) {
+        const identityKey = this.#agentIdentityKeyOf(agent);
+        const parsed = parseAgentIdentityKey(identityKey);
+        if (!parsed || parsed.realmId !== realmId) {
+          throw new Error(`recycled member '${agent.id}' does not belong to realm '${realmId}'`);
+        }
+        if (seenIdentityKeys.has(identityKey)) {
+          throw new Error(`duplicate registration for agent id '${agent.id}'`);
+        }
+        seenIdentityKeys.add(identityKey);
+        if (this.#agents.has(identityKey) || this.#recycleBin.has(identityKey)) {
+          throw new Error(`registration for agent id '${agent.id}' already exists`);
+        }
+        recycledWithKeys.push([identityKey, agent]);
+      }
+    } catch (err) {
+      const invalid = createRuntimeError(
+        `Invalid realm slice: identity registration rejected (${describeThrownValue(err)})`,
+        'ERR_SNAPSHOT_INVALID'
+      );
+      invalid.cause = err;
+      throw invalid;
+    }
+
+    // 3. Capture the pre-state the merge may touch (bus, clock, schedules).
+    const preBusSnapshot = this.#messagingBus.exportSnapshot();
+    const preClockRaw = this.#worldClock.exportSnapshot({ principal: this.#internalPrincipal });
+    if (!preClockRaw || (preClockRaw as { success?: boolean }).success === false) {
+      throw createRuntimeError('Invalid realm slice: pre-import clock snapshot refused', 'ERR_SNAPSHOT_INVALID');
+    }
+    const preClockSnapshot = preClockRaw as WorldClockSnapshot;
+    const preSchedules = this.exportSchedules();
+
+    // 4. Install: registries first, then the exported→merged→imported
+    //    bus/clock/schedule state, rebinding mail subscriptions after the bus
+    //    replacement (subscriptions are never persisted).
+    const installed: string[] = [];
+    const installedRecycled: string[] = [];
+    try {
+      for (const [identityKey, agent] of activeWithKeys) {
+        this.#telemetryTracker.initializeTelemetry({ id: identityKey, telemetryLabel: agent.id }, agent.telemetry);
+        if (this.#messagingBus && typeof this.#messagingBus.registerAgent === 'function') {
+          this.#messagingBus.registerAgent(identityKey);
+        }
+        const unsub = this.#triggerDispatcher.setupAgentMailSubscription(identityKey);
+        this.#messageSubscriptions.set(identityKey, unsub);
+        this.#lifecycleManager.registerHydratedAgent(agent);
+        this.#agents.set(identityKey, agent);
+        installed.push(identityKey);
+      }
+      for (const [identityKey, agent] of recycledWithKeys) {
+        this.#telemetryTracker.initializeTelemetry({ id: identityKey, telemetryLabel: agent.id }, agent.telemetry);
+        if (this.#messagingBus && typeof this.#messagingBus.markAgentTerminated === 'function') {
+          this.#messagingBus.markAgentTerminated(identityKey);
+        }
+        this.#lifecycleManager.bindAgentAuthorityChannel(agent);
+        this.#recycleBin.set(identityKey, agent);
+        installedRecycled.push(identityKey);
+      }
+
+      const mergedBus = this.#mergeRealmSliceBus(preBusSnapshot, slice.messaging);
+      this.#messagingBus.importSnapshot(mergedBus);
+      this.#rebindActiveMailSubscriptions();
+
+      const importedSchedules = this.#remapRealmSliceScheduleIds(
+        Array.isArray(slice.schedules) ? slice.schedules : [],
+        preSchedules
+      );
+      this.importSchedules([...preSchedules, ...importedSchedules]);
+
+      const mergedClock = this.#mergeRealmSliceClock(preClockSnapshot, realmId, slice.worldClock);
+      const clockReceipt = this.#worldClock.importSnapshot(mergedClock, { principal: this.#internalPrincipal });
+      if (clockReceipt && (clockReceipt as { success?: boolean }).success === false) {
+        throw new Error('world clock import refused the merged realm slice');
+      }
+    } catch (err) {
+      // Roll back to the captured pre-state; install nothing.
+      try {
+        this.#messagingBus.importSnapshot(preBusSnapshot);
+      } catch {
+        /* Best-effort restore: the subscription rebind below still runs. */
+      }
+      for (const identityKey of installed) {
+        const unsub = this.#messageSubscriptions.get(identityKey);
+        if (unsub) {
+          try {
+            unsub();
+          } catch {
+            /* Best-effort unsubscribe; the map entry is dropped regardless. */
+          }
+        }
+        this.#messageSubscriptions.delete(identityKey);
+        this.#agents.delete(identityKey);
+        if (this.#messagingBus && typeof this.#messagingBus.unregisterAgent === 'function') {
+          this.#messagingBus.unregisterAgent(identityKey);
+        }
+      }
+      for (const identityKey of installedRecycled) {
+        this.#recycleBin.delete(identityKey);
+        if (this.#messagingBus && typeof this.#messagingBus.unmarkAgentTerminated === 'function') {
+          this.#messagingBus.unmarkAgentTerminated(identityKey);
+        }
+      }
+      try {
+        this.importSchedules(preSchedules);
+      } catch {
+        /* Best-effort restore; the store surfaces the original failure. */
+      }
+      try {
+        this.#worldClock.importSnapshot(preClockSnapshot, { principal: this.#internalPrincipal });
+      } catch {
+        /* Best-effort restore; the store surfaces the original failure. */
+      }
+      try {
+        this.#rebindActiveMailSubscriptions();
+      } catch {
+        /* Best-effort rebind; the surviving registrations keep their state. */
+      }
+      const failure = createRuntimeError(
+        `Realm slice import failed and was rolled back (${describeThrownValue(err)})`,
+        'ERR_SNAPSHOT_INVALID'
+      );
+      failure.cause = err;
+      throw failure;
+    }
+
+    return { installed, recycled: installedRecycled };
+  }
+
+  /**
+   * Remaps imported scheduled-timer ids that would collide with the live
+   * scheduler's ids (whole-state `importSchedules` keys on the id, so a copied
+   * source-session id would silently replace the source realm's live timer).
+   * Ids are internal addressing only; the dispatch reference (`agentRef`) is
+   * what carries realm identity.
+   *
+   * @param schedules - Imported schedule records.
+   * @param existing - Live schedule records captured before the merge.
+   * @returns Imported records with collision-free ids.
+   * @internal
+   */
+  #remapRealmSliceScheduleIds(
+    schedules: readonly SerializedScheduledTimer[],
+    existing: readonly SerializedScheduledTimer[]
+  ): SerializedScheduledTimer[] {
+    const usedIds = new Set<string>();
+    for (const record of existing) {
+      if (typeof record?.id === 'string' && record.id) usedIds.add(record.id);
+    }
+    let counter = 0;
+    const remapped: SerializedScheduledTimer[] = [];
+    for (const record of schedules) {
+      if (!record || typeof record !== 'object') continue;
+      const currentId = typeof record.id === 'string' && record.id
+        ? record.id
+        : (typeof record.timerId === 'string' ? record.timerId : '');
+      let nextId = currentId;
+      if (!nextId || usedIds.has(nextId)) {
+        do {
+          counter += 1;
+          nextId = `${currentId || 'timer'}_import_${Date.now().toString(36)}_${counter}`;
+        } while (usedIds.has(nextId));
+      }
+      usedIds.add(nextId);
+      remapped.push({
+        ...record,
+        id: nextId,
+        ...(record.timerId !== undefined ? { timerId: nextId } : {})
+      });
+    }
+    return remapped;
+  }
+
+  /**
+   * Merges one realm slice's messaging partitions into a bus snapshot
+   * (export→merge→import; never a whole-state replace).
+   *
+   * @param pre - Live bus snapshot captured before the merge.
+   * @param input - Realm-scoped messaging input.
+   * @returns Merged bus snapshot.
+   * @internal
+   */
+  #mergeRealmSliceBus(
+    pre: MessagingBusSnapshot,
+    input: RealmSliceImportMessagingInput | undefined
+  ): MessagingBusSnapshot {
+    const mergedActiveQueues: Record<string, MessageEnvelope[]> = { ...pre.activeQueues };
+    const mergedArchives: Record<string, MessageEnvelope[]> = { ...pre.archives };
+    const mergedRegistered: Record<string, { mode: 'queued' }> = { ...pre.registeredAgents };
+    const mergedTerminated = new Set<string>(pre.terminatedAgents);
+    const mergedAudit = [...pre.auditLog];
+
+    if (input && typeof input === 'object') {
+      for (const [key, list] of Object.entries(input.activeQueues ?? {})) {
+        if (!Array.isArray(list)) continue;
+        mergedActiveQueues[key] = [...(mergedActiveQueues[key] ?? []), ...list];
+      }
+      for (const [key, list] of Object.entries(input.archives ?? {})) {
+        if (!Array.isArray(list)) continue;
+        mergedArchives[key] = [...(mergedArchives[key] ?? []), ...list];
+      }
+      for (const key of input.registeredAgents ?? []) {
+        if (typeof key === 'string' && key) mergedRegistered[key] = { mode: 'queued' };
+      }
+      for (const key of input.terminatedAgents ?? []) {
+        if (typeof key === 'string' && key) mergedTerminated.add(key);
+      }
+      if (Array.isArray(input.auditLog)) mergedAudit.push(...input.auditLog);
+    }
+
+    return {
+      auditLog: mergedAudit,
+      activeQueues: mergedActiveQueues,
+      archives: mergedArchives,
+      inboxes: mergedActiveQueues,
+      registeredAgents: mergedRegistered,
+      terminatedAgents: [...mergedTerminated]
+    };
+  }
+
+  /**
+   * Merges one realm slice's clock partitions into a world-clock snapshot
+   * (export→merge→import). Existing partitions are preserved; the realm-global
+   * target key receives the slice's `global` snapshot.
+   *
+   * @param pre - Live clock snapshot captured before the merge.
+   * @param realmId - Target realm id (realm-global key composition).
+   * @param input - Realm-scoped clock input.
+   * @returns Merged clock snapshot.
+   * @internal
+   */
+  #mergeRealmSliceClock(
+    pre: WorldClockSnapshot,
+    realmId: string,
+    input: RealmSliceImportWorldClockInput | undefined
+  ): WorldClockSnapshot {
+    const mergedClocks: Record<string, PartitionClockSnapshot> = { ...(pre.agentClocks ?? {}) };
+    const mergedEvents: Record<string, WorldEvent[]> = { ...(pre.agentEvents ?? {}) };
+    const mergedFlat: WorldEvent[] = [...(pre.events ?? [])];
+
+    if (input && typeof input === 'object') {
+      for (const [key, clock] of Object.entries(input.clocks ?? {})) {
+        if (clock && typeof clock === 'object') mergedClocks[key] = clock;
+      }
+      for (const [key, list] of Object.entries(input.events ?? {})) {
+        if (!Array.isArray(list)) continue;
+        mergedEvents[key] = [...(mergedEvents[key] ?? []), ...list];
+        mergedFlat.push(...list);
+      }
+      const globalKey = `realm:${realmId}:global`;
+      if (input.global && typeof input.global === 'object') {
+        mergedClocks[globalKey] = input.global;
+      }
+    }
+
+    return {
+      totalSeconds: pre.totalSeconds,
+      date: pre.date,
+      events: mergedFlat,
+      agentClocks: mergedClocks,
+      agentEvents: mergedEvents
+    };
+  }
+
+  /**
+   * Re-binds mail subscriptions for every active agent after a bus snapshot
+   * import cleared the subscription map. Canceled only for entries the
+   * replacement removed; recycled agents never receive subscriptions.
+   *
+   * @internal
+   */
+  #rebindActiveMailSubscriptions(): void {
+    for (const unsub of this.#messageSubscriptions.values()) {
+      try {
+        unsub();
+      } catch {
+        /* Best-effort unsubscribe; the map is cleared regardless. */
+      }
+    }
+    this.#messageSubscriptions.clear();
+    for (const identityKey of this.#agents.keys()) {
+      this.#messageSubscriptions.set(identityKey, this.#triggerDispatcher.setupAgentMailSubscription(identityKey));
+    }
   }
 }
 
