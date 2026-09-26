@@ -4,7 +4,7 @@
  *
  * @module runtime/runtimeTelemetry
  * @mustNotImport ../agent/index.ts
- * @invariant INV-1: Telemetry state exists exclusively within private instance storage; external callers interact via immutable or defensive snapshots (frozen metric snapshots whose `lastSentContext` entries are capture-owned copies — arrays and plain objects deep-frozen, `Map`/`Set`/`Date` copies frozen with their mutators neutralized — and shallow-cloned trace arrays).
+ * @invariant INV-1: Telemetry state exists exclusively within private instance storage; external callers interact via immutable or defensive snapshots (frozen metric snapshots whose `lastSentContext` entries are export-owned copies of the capture-owned entries — arrays and plain objects deep-frozen, `Map`/`Set`/`Date` copies frozen with their mutators neutralized and re-cloned on every export so prototype-call mutation of a leaked snapshot can never reach internal storage — and shallow-cloned trace arrays).
  * @invariant INV-2: Historical execution traces and context window snapshots are bounded by fixed-capacity FIFO ring buffers with O(1) push and deterministic oldest-first eviction; zero unbounded array growth.
  * @invariant INV-3: All cumulative metric counters are strictly non-negative integers and monotonic across turns until an explicit reset; seeding from a snapshot floors finite seed values to non-negative integers and never lowers an already-recorded value.
  * @invariant INV-4: Turn token consumption follows a strict two-tier resolution hierarchy: explicit overrides, then provider usage metadata; when neither is present, turn token counts are reported as zero. Prompt tokens split into uncached and cached tiers: the cached count resolves explicit `turnCachedPromptTokens` → provider cache metadata (`prompt_tokens_details.cached_tokens`, `prompt_cache_hit_tokens`, `cache_read_input_tokens`, or `promptTotal - prompt_cache_miss_tokens` when the miss count is finite) → 0, is floored and clamped to the resolved prompt total, and the uncached count is the remaining prompt total, so `totalTokens` always equals uncached + cached + output.
@@ -17,7 +17,8 @@
  * @decision `TurnUsagePayload.durationMs` is declared because `recordTurnUsage` reads it; it is surfaced on the `TURN_COMPLETE` event payload and never feeds token accounting or cumulative metrics
  * @decision `recordToolExecution` is a public integration API with no engine-internal call sites; the runtime does not add instrumentation for it — callers record tool executions explicitly
  * @decision `lastSentContext` is latest-wins on every send: `recordTurnUsage` array payloads and `recordContextSnapshot` both replace the previous record, while snapshot/backfill hydration only fills an absent or empty context and never clobbers a non-empty in-process capture
- * @decision Non-plain message values (`Map`/`Set`/`Date`/class instances) are captured as defensive `structuredClone` copies, never by reference: class instances flatten to plain data objects, uncloneable values normalize to own-enumerable snapshots with function leaves replaced by descriptor strings, and captured `Map`/`Set`/`Date` copies are frozen with mutators neutralized, so truncation and later caller mutation can neither write through to nor alias caller-owned objects
+ * @decision Non-plain message values (`Map`/`Set`/`Date`/class instances) are captured as defensive `structuredClone` copies, never by reference: class instances flatten to plain data objects, uncloneable values normalize to own-enumerable snapshots with function leaves replaced by descriptor strings, and captured `Map`/`Set`/`Date` copies are frozen with mutators neutralized, so truncation and later caller mutation can neither write through to nor alias caller-owned objects. Exported snapshots and records re-clone this captured graph (ticket 06f1ecb): `Object.freeze` does not immobilize `Map`/`Set`/`Date` internal slots, so prototype-call mutation of a leaked exported container would otherwise reach the shared capture; exports therefore never alias internal containers
+ * @decision Trace ring-buffer events store the same defensive payload objects they dispatch; they never carry internal metric-record references, and the context-snapshot event carries the same export-owned copies as its returned record
  */
 
 // ============================================================================
@@ -184,8 +185,10 @@ export interface AgentTelemetryMetrics {
    * `structuredClone` (class instances flatten to plain data objects;
    * uncloneable values normalize to own-enumerable snapshots) and captured
    * `Map`/`Set`/`Date` copies are frozen with their mutators neutralized. The
-   * array itself is frozen, so mutating the returned reference cannot alter
-   * internal telemetry state.
+   * returned array and every entry are export-owned copies (ticket 06f1ecb),
+   * never internal capture references, so mutating the returned reference —
+   * including `Map`/`Set`/`Date` prototype calls on a leaked container — cannot
+   * alter internal telemetry state.
    */
   readonly lastSentContext: ReadonlyArray<unknown>;
   /** Unix epoch timestamp (ms) of the most recent metric mutation. */
@@ -429,9 +432,10 @@ export interface ContextSnapshotRecord {
    * Pruned and truncated defensive copy of messages with deep-frozen entries
    * (captured `Map`/`Set`/`Date` copies are frozen with mutators neutralized);
    * long string `content` gains a `... [truncated N chars]` suffix. Every entry
-   * is a capture-owned copy — non-plain values are never stored by reference —
-   * and this is a separate frozen array from the internal `lastSentContext`
-   * capture, so mutating the record cannot alter internal telemetry state.
+   * is an export-owned copy — non-plain values are never stored or exported by
+   * reference — and this is a separate frozen array over fresh copies of the
+   * internal `lastSentContext` capture (ticket 06f1ecb), so mutating the record
+   * cannot alter internal telemetry state.
    */
   readonly messages: ReadonlyArray<unknown>;
   /** Epoch timestamp (ms) when the snapshot was recorded. */
@@ -1234,10 +1238,39 @@ export class RuntimeTelemetry {
   }
 
   /**
+   * Produces an export-owned copy of captured context entries for one snapshot
+   * or record return. Internal captures are deep-frozen, but `Object.freeze`
+   * does not immobilize `Map`/`Set`/`Date` internal slots: a leaked reference
+   * could still mutate a shared container through prototype calls
+   * (`Map.prototype.set.call(...)`, `Date.prototype.setTime.call(...)`) and
+   * rewrite internal telemetry state (ticket 06f1ecb). Every export therefore
+   * deep-copies the bounded entries with the same capture rule (arrays/plain
+   * objects structurally, non-plain values via `structuredClone`, never by
+   * reference) and re-freezes/re-hardens the copies, so no export ever shares
+   * a mutable container with internal storage. Plain frozen structures could
+   * be shared safely, but cloning the bounded graph keeps one rule for all
+   * exported shapes.
+   * @param entries - Internal capture-owned entries to export-copy.
+   * @returns Frozen export-owned copies, in incoming order.
+   */
+  #exportContextMessages(entries: ReadonlyArray<unknown>): ReadonlyArray<unknown> {
+    const cloneSeen = new WeakMap<object, unknown>();
+    const clones = entries.map(entry => (entry && typeof entry === 'object' ? this.#deepCloneValue(entry, cloneSeen) : entry));
+
+    const freezeSeen = new WeakSet<object>();
+    for (const clone of clones) {
+      this.#deepFreezeValue(clone, freezeSeen);
+    }
+    return Object.freeze(clones);
+  }
+
+  /**
    * Declared-fields-only telemetry projection (never emits expandos such as
    * `toolExecutionCount`, which stays internal to Mod 12). `lastSentContext`
-   * is projected as a fresh array (elements are frozen captures), so legacy
-   * facade consumers can never alias the internal array.
+   * is projected as a fresh mutable array (the legacy facade's copy contract)
+   * over export-owned frozen entry copies, so legacy facade consumers can
+   * neither alias the internal array nor reach the capture-owned containers
+   * behind it (ticket 06f1ecb).
    * @param metrics - Live metrics record to project.
    */
   #declaredTelemetryFromMetrics(metrics: InternalAgentMetrics): Record<string, unknown> {
@@ -1253,7 +1286,7 @@ export class RuntimeTelemetry {
       terminalStops: metrics.terminalStops,
       injectedDeliveries: metrics.injectedDeliveries,
       precallCount: metrics.precallCount,
-      lastSentContext: [...metrics.lastSentContext]
+      lastSentContext: [...this.#exportContextMessages(metrics.lastSentContext)]
     };
   }
 
@@ -1383,6 +1416,15 @@ export class RuntimeTelemetry {
     return ring;
   }
 
+  /**
+   * Builds a defensive metrics snapshot for an agent. Counters are primitives;
+   * `lastSentContext` is projected as a fresh array of export-owned frozen
+   * copies ({@link #exportContextMessages}), never the capture-owned
+   * containers, so a leaked snapshot cannot reach internal storage (ticket
+   * 06f1ecb).
+   * @param metrics - Live metrics record to project.
+   * @returns Frozen defensive snapshot.
+   */
   #createSnapshot(metrics: InternalAgentMetrics): AgentTelemetryMetrics {
     return Object.freeze({
       agentId: this.#publicAgentId(metrics.agentId),
@@ -1398,7 +1440,7 @@ export class RuntimeTelemetry {
       injectedDeliveries: metrics.injectedDeliveries,
       precallCount: metrics.precallCount,
       toolExecutionCount: metrics.toolExecutionCount,
-      lastSentContext: Object.freeze([...metrics.lastSentContext]),
+      lastSentContext: this.#exportContextMessages(metrics.lastSentContext),
       lastUpdated: metrics.lastUpdated
     });
   }
@@ -1942,7 +1984,7 @@ export class RuntimeTelemetry {
    * 2. Truncates individual string message `content` to `truncateContentAt` (default: 2000 chars), appending a `... [truncated N chars]` marker.
    * 3. Calculates role distribution (`{ system: N, user: N, assistant: N, tool: N }`), counting messages without a string `role` as `'unknown'`.
    * 4. Sums reported per-message token counts across the entire pre-pruning context window, using a finite non-negative numeric `tokenCount` when present; messages without one contribute 0.
-   * 5. Updates `agentMetrics.lastSentContext` with the pruned, truncated array of deep-copied and deep-frozen entries (arrays/plain objects structurally, non-plain objects via `structuredClone`, never by reference), syncs the owning agent, and dispatches `CONTEXT_SNAPSHOT`; the returned record carries its own frozen array over the same frozen entries.
+   * 5. Updates `agentMetrics.lastSentContext` with the pruned, truncated array of deep-copied and deep-frozen entries (arrays/plain objects structurally, non-plain objects via `structuredClone`, never by reference), syncs the owning agent, and dispatches `CONTEXT_SNAPSHOT`; the returned record carries its own frozen array of export-owned copies (ticket 06f1ecb), so prototype-call mutation of a leaked container cannot reach the capture.
    *
    * Both options are normalized before use: finite values are floored and
    * clamped (`maxMessagesToRetain` ≥ 1, `truncateContentAt` ≥ 10), while
@@ -2004,7 +2046,7 @@ export class RuntimeTelemetry {
       messageCount: safeMessages.length,
       estimatedTokens,
       roleDistribution: Object.freeze(roleDistribution),
-      messages: Object.freeze([...sanitizedMessages]),
+      messages: this.#exportContextMessages(sanitizedMessages),
       timestamp: metrics.lastUpdated
     });
 
