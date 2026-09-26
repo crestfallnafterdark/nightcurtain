@@ -18,7 +18,7 @@ flowchart TD
         subgraph ModalsArea ["Modal Dialogs (Layered Over Studio Root)"]
             Launcher["AgentLauncherModal.svelte\n(Provision new agent; binds a catalog preset, Realm membership)"]
             Recycle["RecycleBinModal.svelte\n(Inspect soft-killed agents, restore, permanent purge)"]
-            Realm["RealmSettingsModal.svelte\n(Create/rename/recolor Realm records, members, provenance detail, rehydrate entry, delete-ungroup semantics)"]
+            Realm["RealmSettingsModal.svelte\n(Scalable master–detail Realm list: create/rename/recolor records, members, provenance, workspaces, rehydrate entry, delete semantics)"]
             RealmLaunch["RealmLauncherModal.svelte\n(Hydration workspace: template picker, input requirements/filesets/directives, review payload digest + pin, saved-payload library, optional seed)"]
             RealmRehydrate["RealmRehydrateModal.svelte\n(Reopen an existing Realm: replace content from a payload or write files manually)"]
             Settings["SandboxSettingsModal.svelte\n(Model presets + credential vault)"]
@@ -142,10 +142,13 @@ Opened from the agent-drawer header (Realms button, with a count badge) or a Rea
 | :--- | :--- |
 | Create / rename / recolor / describe | Operator-only store calls; duplicate ids refused; `id`/`createdAt` immutable; hex-only accent colors (invalid values fall back, never reach CSS). |
 | Members list | Active + recycled members, read-only: Realm membership is immutable after launch — there are no “Move into Realm”/“Ungroup” affordances (terminate + relaunch into the target Realm instead). |
+| Workspace partitions | Read-only visibility of the selected Realm's realm-global workspace and member workspaces (label, kind, resolved file count) from `sandboxStore.fsWorkspacePartitions`; managing the bytes stays in the Files tab (VirtualFS explorer). |
 | Provenance | For template-launched Realms, a read-only panel shows `templateId`, the effective `templateVersion`, the optional hydration-package digest, and the launch timestamp from `RealmRecord.instance` (hashes only — never raw input values). Expandable detail lists the recorded per-input hashes and seeded placement paths. Manual Realms show nothing. |
 | Rehydrate / Replace content | Opens `RealmRehydrateModal.svelte` for the selected Realm: inspect the current payload provenance, then either replace the content from a saved or local payload, or write files manually. Realms without a provenance block still get the manual file-write mode. Closing the manager first avoids stacked dialogs. |
 | Delete | Inline confirmation: deletion is refused while active or recycled members exist (“terminate or delete members first”); the operator-only recursive override purges active members, empties recycled ones, then removes the record (fail-closed report). The seeded Generic Realm is never deletable. |
 | Validation | Store/orchestrator errors render in an inline error banner; Escape/backdrop/ARIA/focus-trap follow the modal conventions below. |
+
+Redesign decomposition (ticket ca33e1b): the modal is the composition root of a master–detail layout — a fixed-height, searchable realm rail (registry order, trim-consistent member counts, missing-extension badges) plus one Realm's scrolling detail pane, so the dialog no longer grows with the realm count. Sections render through focused subcomponents: `RealmManagerList.svelte` (search + selectable rows), `RealmManagerCreateForm.svelte` (create + the shared duplicate-name guard), `RealmManagerSettingsCard.svelte` (rename/recolor/describe), `RealmManagerProvenanceCard.svelte` (launch provenance + the rehydrate/replace entry), `RealmManagerExtensionsPanel.svelte` (attachments, attach editor, missing-extensions flow), `RealmManagerMembersCard.svelte` (active + recycled members), `RealmManagerFsCard.svelte` (read-only workspace partitions), and `RealmManagerDangerCard.svelte` (deletion semantics). The list/detail models are pure projections in `realmManagerHelpers.ts` (member counts, search filter, selection fallback, attach-ceiling resolver, workspace view), and shared styles live in `realmManagerUi.css`, explicitly scoped under `.realm-modal` and imported once by the modal.
 
 Sidebar grouping follows the same registry data: groups render in registry order (Generic first) with member counts and accent dots; the director renders pinned as a separate system-scope entity; there is no Ungrouped section (every non-director agent belongs to a Realm).
 
