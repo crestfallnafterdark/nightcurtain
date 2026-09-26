@@ -2796,6 +2796,8 @@ test('20. [M1] malformed, class-invalid, and prototype scopes reject with INVALI
     [AGENT_AUTHORITIES.AGENT_EDIT, { ownSpawns: true, fields: ['bogus'] }],
     [AGENT_AUTHORITIES.AGENT_INSPECT, { fields: ['tools'] }],
     [AGENT_AUTHORITIES.TEMPLATE, { ownSpawns: true }],
+    [AGENT_AUTHORITIES.TEMPLATE, { targets: ['a'] }],
+    [AGENT_AUTHORITIES.HYDRATION, { realms: ['realm_other'] }],
     [AGENT_AUTHORITIES.REALM_EDIT, { ownSpawns: true }],
     [AGENT_AUTHORITIES.REALM_EDIT, { realms: ['realm_other'] }],
     [AGENT_AUTHORITIES.AGENT_EDIT, { targets: ['__proto__'] }],

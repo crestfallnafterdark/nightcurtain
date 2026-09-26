@@ -596,14 +596,14 @@ function freezeAuthorityMemberNames(names: unknown): ReadonlyArray<string> {
 const AUTHORITY_ID_SET: ReadonlySet<string> = new Set<string>(AUTHORITY_IDS);
 
 /**
- * Agent-class authority ids (`@template:`/`@hydration:`/`@agent:*`) whose
- * scopes accept the agent-target keys: `targets` (bare realm-local agent ids)
- * and the `realms` bound.
+ * Agent-class authority ids whose scopes accept the agent-target keys:
+ * `targets` (bare realm-local agent ids) and the `realms` bound. The Wave U
+ * publishing pair is deliberately excluded: its dispatch path is realm-bound
+ * and does not consult a scope in M1, so accepting one would advertise a
+ * narrowing that is not enforced — a publishing grant stays unscoped.
  * @internal
  */
 const AGENT_CLASS_AUTHORITY_IDS: ReadonlySet<string> = new Set<string>([
-  AGENT_AUTHORITIES.TEMPLATE,
-  AGENT_AUTHORITIES.HYDRATION,
   AGENT_AUTHORITIES.AGENT_INSPECT,
   AGENT_AUTHORITIES.AGENT_EDIT
 ]);
