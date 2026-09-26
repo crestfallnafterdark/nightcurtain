@@ -101,7 +101,7 @@ The master runner executes all Unit and Integration suites in strict sub-process
 // Sample output format from tests/runner.js:
 // ======================================================================
 //   AGENTIC SANDBOX STUDIO MASTER TEST SUITE RUNNER
-//   Total Suites: 98 (52 Unit, 46 Integration)
+//   Total Suites: 99 (53 Unit, 46 Integration)
 // ======================================================================
 //   [Unit       ] deepseek_provider_test.js                  ✔ PASS (42ms)
 //   [Unit       ] deepseek_reasoning_hygiene_test.js         ✔ PASS (18ms)
@@ -109,7 +109,7 @@ The master runner executes all Unit and Integration suites in strict sub-process
 //   [Integration] tool_contract_security_gating_test.js      ✔ PASS (115ms)
 //   [Integration] mail_injection_precall_pipeline_test.js    ✔ PASS (188ms)
 // ======================================================================
-//   Suites:       92 passed, 92 total
+//   Suites:       99 passed, 99 total
 //   Failed:       0 failed
 //   Duration:     3.42s
 // ======================================================================
@@ -126,7 +126,7 @@ All Node-based test suites import [`tests/test_env.js`](../../tests/test_env.js)
 
 ## 4. Test Suite Inventory & Classification
 
-The project includes **92 native test suites** (46 unit, 46 integration) and **8 browser E2E specs**:
+The project includes **99 native test suites** (53 unit, 46 integration) and **8 browser E2E specs**:
 
 > **Canonical inventory.** This chapter is the single source of truth for test-suite counts and per-file listings; [`unit_and_integration.md`](unit_and_integration.md) cross-links here instead of duplicating it.
 
@@ -140,6 +140,7 @@ The project includes **92 native test suites** (46 unit, 46 integration) and **8
 | [`deepseek_reasoning_hygiene_test.js`](../../tests/unit/deepseek_reasoning_hygiene_test.js) | `src/lib/sandbox/runtime/messageHygiene/` + `runtime/historyManager/` | Strict `reasoning_content` string invariant (`INV-REASONING-STRING`), reasoning eviction, orphan tool-call pruning. |
 | [`descriptor_authority_hygiene_test.js`](../../tests/unit/descriptor_authority_hygiene_test.js) | `src/lib/sandbox/toolDefinitions/index.ts` + `tools/constants/index.ts` | Descriptor scope: identity-only caller forwarding, no authority-field leakage, `AuthorityDescriptor` allow-set gating. |
 | [`domain_director_module_test.js`](../../tests/unit/domain_director_module_test.js) | `src/lib/sandbox/domain/directorAgent/index.ts` | Director domain contract, strict whitelist, verbatim directive integrity. |
+| [`extension_registry_module_test.js`](../../tests/unit/extension_registry_module_test.js) | `src/lib/sandbox/extensionRegistry/index.ts` | Install-record CRUD/freeze, realm attachment validation, exact resolution (installed + attached + selection), missing extensions/tools, adapter reconcile + malformed-entry dropping, reserved/prototype call-name hygiene. |
 | [`fs_download_utils_test.js`](../../tests/unit/fs_download_utils_test.js) | `src/lib/sandbox/fsDownloadUtils/index.ts` | VirtualFS folder/file download, upload, copy, Blob/ZIP packaging. |
 | [`gitbug_board_test.js`](../../tests/unit/gitbug_board_test.js) | `scripts/gitbug.mjs` | One-turn triage verbs (`board`/`next`/`brief`/`apply`): projections, filters, v1 JSON schemas + byte determinism, dry-run no-mutation, applied label/comment/status round-trips (isolated fixtures). |
 | [`gitbug_wrapper_test.js`](../../tests/unit/gitbug_wrapper_test.js) | `scripts/gitbug.mjs` | git-bug wrapper safety: ref resolution without silent fallback, label validation, argv builders. |
@@ -161,7 +162,7 @@ The project includes **92 native test suites** (46 unit, 46 integration) and **8
 | [`realm_content_pipeline_test.js`](../../tests/unit/realm_content_pipeline_test.js) | `scripts/embed_realm_content.mjs` → `content.generated.ts` | Embed pipeline: catalog-validated manifests (format v2, legacy v1 through the read shim), v2 bundle references (prompt/history `file` parts, `defaultFile` prefills, placement `file` sources), UTF-8-only 256 KB/file cap, dangling-reference and unsafe-path rejection, `BAKED_TEMPLATE_BUNDLES` shape (demo plus the embedded bundles), `--check` freshness. |
 | [`realm_hydration_helpers_test.js`](../../tests/unit/realm_hydration_helpers_test.js) | `src/lib/components/sandbox/realmHydrationHelpers.ts` + `realmPayloadLibrary.ts` | Hydration workspace projections (input requirement reviews, attachment views, placement destinations, directive review), pin/digest cards, saved-payload naming/filenames and library lifecycle, Realm Manager rehydrate plans (fail-closed missing members, write groups, directives) and provenance detail views. |
 | [`realm_launcher_helpers_test.js`](../../tests/unit/realm_launcher_helpers_test.js) | `src/lib/components/sandbox/realmLauncherHelpers.ts` + `realmReviewHelpers.ts` | Launcher preview projection, preset binding display, seed row parsing/validation, target options, error descriptors; shape-tagged input drafts/usage map/attachment validation, prompt/history previews and provenance, placement/directive seed views; review completion (authority approvals/trust display, payload attach, files-dialog provenance, edited-slot payload assembly). |
-| [`realm_registry_module_test.js`](../../tests/unit/realm_registry_module_test.js) | `src/lib/sandbox/realmRegistry/index.ts` | Realm record CRUD, frozen records, change events, storage adapter, invalid-entry dropping, instance-provenance freeze/validation/patch. |
+| [`realm_registry_module_test.js`](../../tests/unit/realm_registry_module_test.js) | `src/lib/sandbox/realmRegistry/index.ts` | Realm record CRUD, frozen records, change events, storage adapter, invalid-entry dropping, instance-provenance freeze/validation/patch, realm extension attachments (`RealmRecord.extensions`). |
 | [`realm_store_ui_test.js`](../../tests/unit/realm_store_ui_test.js) | `src/lib/components/sandbox/realmGroups.ts` + `realmTemplateHelpers.ts` | Realm grouping order (Generic first), director pinning, orphan/empty-realm handling, `safeRealmColor` guard; template source labels, import/export/delete actions, review projection, provenance display helpers; candidate attach → review → launch → clear. |
 | [`retry_test.js`](../../tests/unit/retry_test.js) | `src/lib/sandbox/inference/retry/index.ts` | Retry/backoff policy, abort-listener hygiene, retryability classification. |
 | [`runtime_coordinator_module_test.js`](../../tests/unit/runtime_coordinator_module_test.js) | `src/lib/sandbox/runtime/index.ts` | Module 13 coordinator: factory DI, strict whitelist, orchestration. |
@@ -170,8 +171,8 @@ The project includes **92 native test suites** (46 unit, 46 integration) and **8
 | [`runtime_scheduler_module_test.js`](../../tests/unit/runtime_scheduler_module_test.js) | `src/lib/sandbox/runtime/runtimeScheduler/index.ts`, `runtime/triggerDispatcher/index.ts` | Module 11 scheduler contract, trigger dispatch. |
 | [`runtime_telemetry_module_test.js`](../../tests/unit/runtime_telemetry_module_test.js) | `src/lib/sandbox/runtime/runtimeTelemetry/index.ts` | Module 12 telemetry: defaults, capacity clamping, defensive snapshots. |
 | [`runware_provider_test.js`](../../tests/unit/runware_provider_test.js) | `src/lib/sandbox/inference/RunwareProvider/index.ts` | Runware adapter wire contract, thinking-budget parameters, retry. |
-| [`sandbox_persistence_module_test.js`](../../tests/unit/sandbox_persistence_module_test.js) | `src/lib/sandbox/sandboxPersistence/index.ts` | Module 6 persistence: export whitelist, schema validation, hydration; imported-template payloads + realm instance provenance round-trip. |
-| [`sandbox_store_module_test.js`](../../tests/unit/sandbox_store_module_test.js) | `src/lib/sandbox/sandboxStore/index.svelte.ts` | Module 14 store: reactive state, substrate DI, encapsulation, realm registry projection/CRUD; template registry (import/export/delete, effective-catalog shadowing), package launch, caps/rollback, instance provenance, realm-scoped seed resolution; publishing grants + trust override, launch authority approvals, session-only pending payloads. |
+| [`sandbox_persistence_module_test.js`](../../tests/unit/sandbox_persistence_module_test.js) | `src/lib/sandbox/sandboxPersistence/index.ts` | Module 6 persistence: export whitelist, schema validation, hydration; imported-template payloads + realm instance provenance round-trip; extension install records + realm attachments byte-safe round-trip. |
+| [`sandbox_store_module_test.js`](../../tests/unit/sandbox_store_module_test.js) | `src/lib/sandbox/sandboxStore/index.svelte.ts` | Module 14 store: reactive state, substrate DI, encapsulation, realm registry projection/CRUD; template registry (import/export/delete, effective-catalog shadowing), package launch, caps/rollback, instance provenance, realm-scoped seed resolution; publishing grants + trust override, launch authority approvals, session-only pending payloads; extension registry (install/remove/attach/detach + audit events), launch extension resolution/provenance (`resolvedTools`/`missingExtensions`). |
 | [`scheduler_realm_scope_test.js`](../../tests/unit/scheduler_realm_scope_test.js) | `src/lib/sandbox/runtime/runtimeScheduler/index.ts` + `triggerQueue/index.ts` | Realm-confined scheduling/cancel and trigger dispatch, bypass/internal paths, legacy parity. |
 | [`sensitive_content_guard_test.js`](../../tests/unit/sensitive_content_guard_test.js) | `scripts/check_sensitive_content.mjs` + `scripts/install_git_hooks.mjs` | Staged-content guard: path deny-list, machine-path detection, credential patterns (value never echoed), oversized/binary blobs, config merge + reasoned allowlist, hook install/idempotence/foreign-refusal/uninstall. |
 | [`settings_modal_presets_test.js`](../../tests/unit/settings_modal_presets_test.js) | `src/lib/components/sandbox/SandboxSettingsModal.svelte` + `presetCatalog`/`credentialVault` | Catalog-driven settings modal, official model catalogs, custom preset persistence, credential-vault separation (no `keyId` writes). |
@@ -269,8 +270,8 @@ sequenceDiagram
     G1-->>Dev: Gate 1 Passed (0 lint / sync errors)
 
     Dev->>G2: npm test (tests/runner.js)
-    Note over G2: Executes 98 suites (52 Unit, 46 Integration) under 120s timeout
-    G2-->>Dev: Gate 2 Passed (98/98 passed, 0 failures)
+    Note over G2: Executes 99 suites (53 Unit, 46 Integration) under 120s timeout
+    G2-->>Dev: Gate 2 Passed (99/99 passed, 0 failures)
 
     Dev->>G3: npm run build (vite build)
     Note over G3: Compiles Svelte 5 runes, WASM modules, top-level awaits
