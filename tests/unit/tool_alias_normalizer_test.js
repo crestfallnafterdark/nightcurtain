@@ -14,6 +14,7 @@ import {
   TOOL_PRESETS,
   PUBLISHING_TOOLS,
   REALM_ADMIN_TOOLS,
+  EXTENSIONS_ADMIN_TOOLS,
   TOOL_SYSTEM_ERROR_CODES,
   resolveToolPreset
 } from '../../src/lib/sandbox/tools/constants/index.ts';
@@ -381,12 +382,13 @@ function normalizeAliasKey(key) {
 test('8. TOOL_ALIAS_MAP normalized keys are unique and never span canonical families', () => {
   const canonicalNames = new Set(Object.values(SANDBOX_TOOLS));
   const selectorTargets = new Set(['subagent_management']);
-  // Wave U publishing meta tools and the M3 realm-admin tools are
-  // explicit-grant-only and outside the canonical taxonomy, but they resolve
-  // through the same alias map.
+  // Wave U publishing meta tools and the M3/M4 realm- and extension-admin
+  // tools are explicit-grant-only and outside the canonical taxonomy, but they
+  // resolve through the same alias map.
   const authorityTargets = new Set([
     ...Object.values(PUBLISHING_TOOLS),
-    ...Object.values(REALM_ADMIN_TOOLS)
+    ...Object.values(REALM_ADMIN_TOOLS),
+    ...Object.values(EXTENSIONS_ADMIN_TOOLS)
   ]);
 
   // (a) A normalized key may appear many times only when every occurrence maps
@@ -470,6 +472,25 @@ test('8c. realm-admin names resolve canonically and never join the taxonomy', ()
   // Realm-admin tools are never precallable.
   assert.strictEqual(PRECALL_ALLOWLIST.has(REALM_ADMIN_TOOLS.INSPECT_REALM), false);
   assert.strictEqual(PRECALL_ALLOWLIST.has(REALM_ADMIN_TOOLS.UPDATE_REALM), false);
+});
+
+// ============================================================================
+// 8d. M4 extension-admin meta-tool aliases (ticket a02bce7)
+// ============================================================================
+
+test('8d. extension-admin names resolve canonically and never join the taxonomy', () => {
+  assert.strictEqual(getCanonToolName('list_extensions'), EXTENSIONS_ADMIN_TOOLS.LIST_EXTENSIONS);
+  assert.strictEqual(getCanonToolName('listExtensions'), EXTENSIONS_ADMIN_TOOLS.LIST_EXTENSIONS);
+  assert.strictEqual(getCanonToolName('attach_extension'), EXTENSIONS_ADMIN_TOOLS.ATTACH_EXTENSION);
+  assert.strictEqual(getCanonToolName('attachExtension'), EXTENSIONS_ADMIN_TOOLS.ATTACH_EXTENSION);
+  const canonicalNames = new Set(Object.values(SANDBOX_TOOLS));
+  for (const name of Object.values(EXTENSIONS_ADMIN_TOOLS)) {
+    assert.strictEqual(canonicalNames.has(name), false, `${name} stays outside SANDBOX_TOOLS`);
+    assert.strictEqual(getCanonToolName(name), name, `${name} resolves to itself`);
+  }
+  // Extension-admin tools are never precallable.
+  assert.strictEqual(PRECALL_ALLOWLIST.has(EXTENSIONS_ADMIN_TOOLS.LIST_EXTENSIONS), false);
+  assert.strictEqual(PRECALL_ALLOWLIST.has(EXTENSIONS_ADMIN_TOOLS.ATTACH_EXTENSION), false);
 });
 
 // ============================================================================

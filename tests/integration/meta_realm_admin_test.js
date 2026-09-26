@@ -281,7 +281,7 @@ test('1. [AC-M3-01] inspect_realm/update_realm are exact-authority tools outside
   assert.deepEqual(getAuthorityToolSchemas([]), [], 'no ids expose no schemas');
   assert.deepEqual(
     getAuthorityToolSchemas(AUTHORITY_IDS).map((definition) => definition.function.name).sort(),
-    ['import_realm_template', INSPECT_REALM, 'submit_hydration_package', UPDATE_REALM].sort(),
+    ['import_realm_template', INSPECT_REALM, 'submit_hydration_package', UPDATE_REALM, 'list_extensions', 'attach_extension'].sort(),
     'every id with a registered descriptor exposes exactly its schema'
   );
   assert.deepEqual(

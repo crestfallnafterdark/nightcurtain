@@ -71,7 +71,7 @@ import {
   getAuthorityToolSchemas,
   getPublishingToolSchemas
 } from '../../src/lib/sandbox/tools/descriptors/index.ts';
-import { PUBLISHING_TOOLS, REALM_ADMIN_TOOLS } from '../../src/lib/sandbox/tools/constants/index.ts';
+import { PUBLISHING_TOOLS, REALM_ADMIN_TOOLS, EXTENSIONS_ADMIN_TOOLS } from '../../src/lib/sandbox/tools/constants/index.ts';
 import {
   createSandboxToolDispatcher,
   getSandboxToolsSchema
@@ -1820,14 +1820,17 @@ test('26. [M1] AUTHORITY_IDS is the runtime vocabulary; KNOWN_AGENT_AUTHORITIES 
   }
   // The registry maps every known id with a registered descriptor to exactly
   // one authority tool (M1: the publishing pair; M3 appends the realm-admin
-  // pair; the remaining ids stay descriptor-less until their phase lands).
+  // pair; M4 the extension-admin pair; the remaining ids stay descriptor-less
+  // until their phase lands).
   assert.deepEqual(
     Object.keys(AUTHORITY_TOOL_REGISTRY).sort(),
     [
       PUBLISHING_TOOLS.IMPORT_REALM_TEMPLATE,
       PUBLISHING_TOOLS.SUBMIT_HYDRATION_PACKAGE,
       REALM_ADMIN_TOOLS.INSPECT_REALM,
-      REALM_ADMIN_TOOLS.UPDATE_REALM
+      REALM_ADMIN_TOOLS.UPDATE_REALM,
+      EXTENSIONS_ADMIN_TOOLS.LIST_EXTENSIONS,
+      EXTENSIONS_ADMIN_TOOLS.ATTACH_EXTENSION
     ].sort()
   );
 });
@@ -1839,7 +1842,9 @@ test('27. [M1] generic tool-schema exposure filters by exact id membership only'
     PUBLISHING_TOOLS.IMPORT_REALM_TEMPLATE,
     PUBLISHING_TOOLS.SUBMIT_HYDRATION_PACKAGE,
     REALM_ADMIN_TOOLS.INSPECT_REALM,
-    REALM_ADMIN_TOOLS.UPDATE_REALM
+    REALM_ADMIN_TOOLS.UPDATE_REALM,
+    EXTENSIONS_ADMIN_TOOLS.LIST_EXTENSIONS,
+    EXTENSIONS_ADMIN_TOOLS.ATTACH_EXTENSION
   ].sort(), 'only ids with a registered descriptor expose a schema');
   assert.deepEqual(
     getAuthorityToolSchemas([AGENT_AUTHORITIES.REALM_INSPECT]).map((def) => def.function.name),

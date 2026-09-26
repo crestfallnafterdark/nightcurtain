@@ -401,8 +401,61 @@ export interface RealmUpdateReceipt {
   readonly after: RealmAdminRealmSummary;
 }
 
+/** One installed-extension view in the M4 extension listing (no transport/credential material). */
+export interface ExtensionsAdminInstalledView {
+  /** Host-level extension id. */
+  readonly id: string;
+  /** Operator-facing display name, when declared. */
+  readonly displayName?: string;
+  /** Extension kind (`mcp`/`pack`). */
+  readonly kind: string;
+  /** Installation lifecycle status. */
+  readonly status: string;
+  /** Live connection state: `true` when a connected, conflict-free catalog is active. */
+  readonly connected: boolean;
+  /** Whether the caller's realm currently attaches the extension. */
+  readonly attached: boolean;
+  /** Live, conflict-free catalog call names; absent when no live catalog exists. */
+  readonly tools?: readonly string[];
+}
+
+/** One realm attachment view in the M4 extension listing (the M3 projection plus live call names). */
+export interface ExtensionsAdminAttachmentView extends RealmAdminAttachmentView {
+  /** Live, conflict-free catalog call names; absent when no live catalog exists. */
+  readonly tools?: readonly string[];
+}
+
+/** Bounded extension listing receipt. Label-only realm addressing. */
+export interface ExtensionsInspectReceipt {
+  /** Always `true`; failures throw instead of returning a receipt. */
+  readonly success: true;
+  /** Realm display label (never the realm id). */
+  readonly realm: string;
+  /** Every host-level install record with live connection and attachment state. */
+  readonly installed: readonly ExtensionsAdminInstalledView[];
+  /** The caller realm's attachments with ceiling and live connection state. */
+  readonly attachments: readonly ExtensionsAdminAttachmentView[];
+}
+
+/** Bounded realm-wide extension attach receipt. */
+export interface ExtensionAttachReceipt {
+  /** Always `true`; failures throw instead of returning a receipt. */
+  readonly success: true;
+  /** Realm display label (never the realm id). */
+  readonly realm: string;
+  /** Host-level id of the targeted extension. */
+  readonly extensionId: string;
+  /** Effective realm-level tool ceiling of the attachment. */
+  readonly toolSelection: RealmAdminToolSelection;
+  /** `true` when this call added the attachment; `false` on the idempotent path. */
+  readonly applied: boolean;
+  /** `true` when the realm already attached the extension (no mutation, no audit). */
+  readonly alreadyAttached: boolean;
+}
+
 /**
- * Narrow host port consumed by the M3 realm-admin meta tools.
+ * Narrow host port consumed by the M3 realm-admin and M4 extension-admin meta
+ * tools.
  *
  * The composition root (the sandbox store) implements this port over its real
  * `realmRegistry` + `extensionRegistry` live state, runtime rosters, and the
@@ -443,6 +496,37 @@ export interface RealmAdminPort {
     realmLabel: string | null;
     patch: RealmAdminPatch;
   }): RealmUpdateReceipt;
+
+  /**
+   * Lists the installed extensions and the caller realm's attachments under
+   * the caller's exact scoped `@extensions:authority` grant: install metadata
+   * (id/display name/kind/status), live connection state, and the available
+   * call names of connected conflict-free catalogs. Never transport URLs,
+   * credential ids, or realm ids.
+   *
+   * @param input - Trusted input: the dispatcher-pinned actor reference (the caller's own realm is the only target).
+   * @returns The bounded extension listing.
+   * @throws `Error` - Code `'PERMISSION_DENIED'` for every resolution failure.
+   */
+  listExtensions(input: { actorRef: string | null }): ExtensionsInspectReceipt;
+
+  /**
+   * Attaches one installed+connected extension to the caller's realm under
+   * the caller's exact scoped `@extensions:authority` grant: the realm-wide
+   * uniform set gains the attachment through the shared store path, the
+   * member safe-state sweep follows, and a repeated attach is an idempotent
+   * no-op (no mutation, no duplicate audit). Never installs, dials,
+   * disconnects, detaches, or touches credentials.
+   *
+   * @param input - Trusted input: the dispatcher-pinned actor reference, the host-level extension id, and the optional realm tool ceiling.
+   * @returns The bounded attach receipt (`applied:false` on the idempotent path).
+   * @throws `Error` - Code `'PERMISSION_DENIED'` for resolution failures, `'INVALID_ARGUMENTS'` for malformed ids/selections or gate failures.
+   */
+  attachExtension(input: {
+    actorRef: string | null;
+    extensionId: string;
+    toolSelection?: RealmAdminToolSelection;
+  }): ExtensionAttachReceipt;
 }
 
 /**

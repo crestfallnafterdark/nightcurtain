@@ -21,7 +21,7 @@ import {
   getAuthorityToolSchemas,
   getPublishingToolSchemas
 } from '../../src/lib/sandbox/tools/descriptors/index.ts';
-import { PUBLISHING_TOOLS, REALM_ADMIN_TOOLS, TOOL_PRESETS, INNATE_TOOLS } from '../../src/lib/sandbox/tools/constants/index.ts';
+import { PUBLISHING_TOOLS, REALM_ADMIN_TOOLS, EXTENSIONS_ADMIN_TOOLS, TOOL_PRESETS, INNATE_TOOLS } from '../../src/lib/sandbox/tools/constants/index.ts';
 import { AGENT_AUTHORITIES, AUTHORITY_IDS, KNOWN_AGENT_AUTHORITIES } from '../../src/lib/sandbox/realmCatalog/index.ts';
 import { VirtualFS, PermissionDeniedError, FileNotFoundError } from '../../src/lib/sandbox/virtualFs/index.ts';
 import { MessagingBus } from '../../src/lib/sandbox/messagingBus/index.ts';
@@ -794,9 +794,11 @@ async function runEpic6UnitTests() {
           PUBLISHING_TOOLS.IMPORT_REALM_TEMPLATE,
           PUBLISHING_TOOLS.SUBMIT_HYDRATION_PACKAGE,
           REALM_ADMIN_TOOLS.INSPECT_REALM,
-          REALM_ADMIN_TOOLS.UPDATE_REALM
+          REALM_ADMIN_TOOLS.UPDATE_REALM,
+          EXTENSIONS_ADMIN_TOOLS.LIST_EXTENSIONS,
+          EXTENSIONS_ADMIN_TOOLS.ATTACH_EXTENSION
         ].sort().join(','),
-      'AUTHORITY_TOOL_REGISTRY carries the publishing pair plus the M3 realm-admin pair'
+      'AUTHORITY_TOOL_REGISTRY carries the publishing pair plus the M3 realm-admin and M4 extension-admin pairs'
     );
     assert(
       getAuthorityToolSchemas(KNOWN_AGENT_AUTHORITIES).length === getPublishingToolSchemas(KNOWN_AGENT_AUTHORITIES).length,
@@ -805,9 +807,30 @@ async function runEpic6UnitTests() {
     assert(getAuthorityToolSchemas(['*']).length === 0, 'the wildcard is never an authority id in the generic filter');
     assert(getAuthorityToolSchemas([]).length === 0, 'no ids expose no schemas');
     assert(
-      getAuthorityToolSchemas(AUTHORITY_IDS).length === 4
+      getAuthorityToolSchemas(AUTHORITY_IDS).length === 6
         && getAuthorityToolSchemas(AUTHORITY_IDS).every((def) => def.function.name !== undefined),
-      'only ids with a registered descriptor expose a schema (publishing pair + realm-admin pair)'
+      'only ids with a registered descriptor expose a schema (publishing + realm-admin + extension-admin)'
+    );
+    assert(
+      getAuthorityToolSchemas([AGENT_AUTHORITIES.EXTENSIONS]).map((def) => def.function.name).sort().join(',')
+        === [EXTENSIONS_ADMIN_TOOLS.LIST_EXTENSIONS, EXTENSIONS_ADMIN_TOOLS.ATTACH_EXTENSION].sort().join(','),
+      'the extensions authority id exposes exactly its own pair'
+    );
+    for (const authorityName of [EXTENSIONS_ADMIN_TOOLS.LIST_EXTENSIONS, EXTENSIONS_ADMIN_TOOLS.ATTACH_EXTENSION]) {
+      const descriptor = AUTHORITY_TOOL_REGISTRY[authorityName];
+      assert(descriptor.schema.type === 'object', `${authorityName} schema is an object`);
+      assert(descriptor.schema.additionalProperties === false, `${authorityName} schema is closed`);
+      for (const [propertyName, property] of Object.entries(descriptor.schema.properties)) {
+        assert(
+          Array.isArray(property.type) || typeof property.type === 'string',
+          `${authorityName}.${propertyName} declares a Draft-07 type`
+        );
+        assert(typeof property.description === 'string', `${authorityName}.${propertyName} documents the parameter`);
+      }
+    }
+    assert(
+      Object.keys(AUTHORITY_TOOL_REGISTRY[EXTENSIONS_ADMIN_TOOLS.LIST_EXTENSIONS].schema.properties).length === 0,
+      'list_extensions declares no parameters'
     );
     assert(
       getAuthorityToolSchemas([AGENT_AUTHORITIES.REALM_INSPECT])[0]?.function?.name === REALM_ADMIN_TOOLS.INSPECT_REALM,

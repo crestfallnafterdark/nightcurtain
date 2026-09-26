@@ -1,7 +1,9 @@
 /**
  * Meta-plane descriptors: the M2 agent pair (`inspect_agent`/`update_agent`,
- * meta-plane spec §3, decision `c8a748f`) and the M3 realm-admin pair
- * (`inspect_realm`/`update_realm`, spec §4, ticket `094de1b`).
+ * meta-plane spec §3, decision `c8a748f`), the M3 realm-admin pair
+ * (`inspect_realm`/`update_realm`, spec §4, ticket `094de1b`), and the M4
+ * extension-admin pair (`list_extensions`/`attach_extension`, spec §5, ticket
+ * `a02bce7`).
  *
  * The M2 pair is **canonical** with ordinary preset authorization — parental
  * authority is inherent to the registered parent and needs no grant, so no
@@ -10,13 +12,17 @@
  * same canonical tool under an exact scoped `@agent:inspect`/`@agent:edit`
  * grant enforced registry-side; schemas never mention authority vocabulary.
  *
- * The M3 pair is **authority-registry** tooling (outside the canonical
- * taxonomy): each descriptor declares its exact authority id
- * (`@realm:inspect`/`@realm:edit`), so its schema is exposed only through the
- * M1 generic exact-id filter and the dispatcher gate admits only the exact
- * holder. The handler forwards the dispatcher-pinned actor reference and the
- * closed patch to the pinned `realmAdminPort`; the store-side port resolves
- * the registry grant scope and fails closed without an actor record (R6).
+ * The M3 and M4 pairs are **authority-registry** tooling (outside the
+ * canonical taxonomy): each descriptor declares its exact authority id
+ * (`@realm:inspect`/`@realm:edit`/`@extensions:authority`), so its schema is
+ * exposed only through the M1 generic exact-id filter and the dispatcher gate
+ * admits only the exact holder. The handlers forward the dispatcher-pinned
+ * actor reference (and the closed patch/selection) to the pinned
+ * `realmAdminPort`; the store-side port resolves the registry grant scope and
+ * fails closed without an actor record (R6). The M4 attach is realm-wide
+ * (decision `ce4b475`: one uniform extension set per realm), installed+
+ * connected only, idempotent when already attached, and never installs,
+ * dials, disconnects, detaches, or touches credentials.
  *
  * Tool-boundary honesty (§3.4): `update_agent` is a closed schema whose
  * property set is exactly the editable keys the handler honors; the sanitizer
@@ -24,11 +30,13 @@
  * call — `PERMISSION_DENIED` for the operator-only deny list, `INVALID_ARGUMENTS`
  * for unknown keys and malformed patches — instead of silently dropping a key.
  *
- * Realm opacity: receipts carry bare ids and labels only; the handler masks the
- * workspace label and the parent reference exactly like `whoami`.
+ * Realm opacity: receipts carry bare ids and labels only; the M2 handler masks
+ * the workspace label and the parent reference exactly like `whoami`. Ordinary
+ * agents never receive the extension vocabulary: the M4 schemas exist only for
+ * the exact `@extensions:authority` holder.
  */
 
-import { REALM_ADMIN_TOOLS, SANDBOX_TOOLS, TOOL_SYSTEM_ERROR_CODES } from '../constants/index.ts';
+import { EXTENSIONS_ADMIN_TOOLS, REALM_ADMIN_TOOLS, SANDBOX_TOOLS, TOOL_SYSTEM_ERROR_CODES } from '../constants/index.ts';
 import { toSnakeCase } from '../normalizers/index.ts';
 import {
   AGENT_AUTHORITIES,
@@ -887,4 +895,270 @@ export const update_realm = updateRealmDescriptor;
 export const realmAdminToolDescriptors = Object.freeze([
   inspectRealmDescriptor,
   updateRealmDescriptor
+]);
+
+// ============================================================================
+// M4 extension-admin meta tools (`list_extensions` / `attach_extension`, ticket a02bce7)
+// ============================================================================
+
+/**
+ * Operator-only extension-management parameter vocabulary plus every exact
+ * authority id (exact or snake_case spelling): presence fails the whole call
+ * with the uniform permission denial before any port call, even for
+ * `false`/`null` values. Install/connect/disconnect/remove and every
+ * credential/transport-shaped key stay operator-only; the tool only ever
+ * attaches an already installed+connected extension (decision `ce4b475`).
+ * @internal
+ */
+const EXTENSIONS_ADMIN_DENIED_PARAM_KEYS: ReadonlySet<string> = new Set<string>([
+  'install', 'uninstall',
+  'remove', 'removeExtension', 'remove_extension',
+  'detach', 'detachExtension', 'detach_extension',
+  'connect', 'disconnect', 'reconnect',
+  'credentials', 'credential', 'credentialId', 'credential_id',
+  'secret', 'token', 'apiKey', 'api_key',
+  'url', 'transportUrl', 'transport_url', 'transport', 'transportHint', 'transport_hint',
+  'endpoint', 'approvedUrl', 'approved_url',
+  'attachments', 'extensions', 'extensionTools', 'extension_tools',
+  'realm', 'realmId', 'realm_id', 'realmLabel', 'realm_label', 'realmName', 'realm_name',
+  'approvedBy', 'approved_by', 'approvedAt', 'approved_at',
+  'status', 'live', 'connection', 'catalog',
+  'authorities', 'authority', 'authorityGrants', 'authority_grants',
+  'templateAuthority', 'template_authority', 'hydrationAuthority', 'hydration_authority'
+]);
+
+/**
+ * Tests whether a sanitized extension-admin parameter is operator-only (exact
+ * spelling, snake_case spelling, or an exact authority id in either spelling).
+ *
+ * @param key - Sanitized parameter key.
+ * @returns True when the call must fail with the uniform permission denial.
+ * @internal
+ */
+function isDeniedExtensionsAdminParam(key: string): boolean {
+  if (EXTENSIONS_ADMIN_DENIED_PARAM_KEYS.has(key)) return true;
+  if (META_AUTHORITY_ID_SET.has(key)) return true;
+  const snake = toSnakeCase(key);
+  if (snake && snake !== key) {
+    if (EXTENSIONS_ADMIN_DENIED_PARAM_KEYS.has(snake)) return true;
+    if (META_AUTHORITY_ID_SET.has(snake)) return true;
+  }
+  return false;
+}
+
+/**
+ * Resolves the trusted pinned realm-admin port from the execution context for
+ * the M4 methods (the port is the same frozen construction the M3 tools use;
+ * a partial port without the M4 methods fails closed).
+ *
+ * @param context - Trusted execution context.
+ * @returns The host port.
+ * @throws `Error` - When no trusted port carrying the M4 methods is bound.
+ * @internal
+ */
+function extensionsAdminPortOf(context: ExecutionContext): RealmAdminPort {
+  const port = context?.realmAdminPort;
+  if (!port || typeof port.listExtensions !== 'function' || typeof port.attachExtension !== 'function') {
+    throw new Error('realmAdminPort service is not available in execution context');
+  }
+  return port;
+}
+
+/**
+ * Custom extension-admin sanitizer: normalizes alias keys through the supplied
+ * map while preserving unknown keys and `null` values so the handler can
+ * classify them explicitly (an operator-only or unknown parameter must fail the
+ * whole call, never be silently dropped). Total and prototype-pollution-safe.
+ *
+ * @param rawArgs - Raw tool arguments (object, JSON string, or arbitrary value).
+ * @param aliasMap - Parameter alias map for the specific tool.
+ * @returns A fresh sanitized parameter record.
+ * @internal
+ */
+function sanitizeExtensionsAdminParams(
+  rawArgs: unknown,
+  aliasMap: Readonly<Record<string, string>>
+): Record<string, unknown> {
+  let parsedArgs: unknown = rawArgs;
+  if (typeof rawArgs === 'string') {
+    const trimmed = rawArgs.trim();
+    if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+      try {
+        parsedArgs = JSON.parse(trimmed);
+      } catch {
+        parsedArgs = null;
+      }
+    } else {
+      parsedArgs = null;
+    }
+  }
+  if (!parsedArgs || typeof parsedArgs !== 'object' || Array.isArray(parsedArgs)) return {};
+  const result: Record<string, unknown> = {};
+  try {
+    for (const [key, value] of Object.entries(parsedArgs)) {
+      if (PROTOTYPE_POLLUTION_KEYS.has(key)) continue;
+      if (value === undefined) continue;
+      const snakeKey = toSnakeCase(key);
+      const alias = Object.prototype.hasOwnProperty.call(aliasMap, key)
+        ? aliasMap[key]
+        : (snakeKey && Object.prototype.hasOwnProperty.call(aliasMap, snakeKey)
+          ? aliasMap[snakeKey]
+          : key);
+      if (!alias || PROTOTYPE_POLLUTION_KEYS.has(alias)) continue;
+      result[alias] = value;
+    }
+  } catch {
+    // A hostile accessor or proxy trap must never escape the sanitizer.
+    return {};
+  }
+  return result;
+}
+
+/** `list_extensions` parameter alias map (the listing takes no parameters). @internal */
+const extensionsListParamAliasMap: Readonly<Record<string, string>> = Object.freeze({});
+
+/**
+ * `attach_extension` parameter alias map: extension id addressing and the
+ * tool-selection ceiling normalize to their canonical keys; every other key
+ * passes through verbatim so the deny/unknown scan sees the caller's spelling.
+ * @internal
+ */
+const extensionsAttachParamAliasMap: Readonly<Record<string, string>> = Object.freeze({
+  extensionId: 'extensionId',
+  extension_id: 'extensionId',
+  extension: 'extensionId',
+  id: 'extensionId',
+  toolSelection: 'toolSelection',
+  tool_selection: 'toolSelection',
+  selection: 'toolSelection'
+});
+
+/**
+ * `list_extensions` descriptor — exact-grant-only (`@extensions:authority`)
+ * bounded read of the host's installed extensions and the caller realm's
+ * attachments: install metadata, live connection state, and available call
+ * names. Transport URLs and credential material never appear.
+ */
+export const listExtensionsDescriptor = Object.freeze({
+  name: EXTENSIONS_ADMIN_TOOLS.LIST_EXTENSIONS,
+  authority: AGENT_AUTHORITIES.EXTENSIONS,
+  description:
+    'List the installed extensions and the extensions attached to your realm, with each extension\'s kind, installation status, '
+    + 'live connection state, whether your realm attaches it, and the call names its live tool catalog provides. '
+    + 'Requires the list_extensions capability; the listing never carries transport endpoints or credential material.',
+  schema: Object.freeze({
+    type: 'object',
+    properties: {},
+    required: [] as string[],
+    additionalProperties: false
+  }),
+  paramAliasMap: extensionsListParamAliasMap,
+  sanitize: (rawArgs?: unknown): ToolParams => sanitizeExtensionsAdminParams(rawArgs, extensionsListParamAliasMap),
+  handler: async (params: ToolParams, context: ExecutionContext) => {
+    const port = extensionsAdminPortOf(context);
+    const keys = Object.keys(params || {});
+    for (let i = 0; i < keys.length; i++) {
+      if (isDeniedExtensionsAdminParam(keys[i])) {
+        return {
+          success: false,
+          error: 'list_extensions does not permit operator-only parameters.',
+          code: TOOL_SYSTEM_ERROR_CODES.PERMISSION_DENIED
+        };
+      }
+    }
+    if (keys.length > 0) {
+      // Static message: an unknown parameter never echoes its key.
+      return invalidArguments('list_extensions does not accept unknown parameters.');
+    }
+    return port.listExtensions({ actorRef: resolveRealmAdminActorRef(context) });
+  }
+});
+/** camelCase alias of `listExtensionsDescriptor`. */
+export const listExtensions = listExtensionsDescriptor;
+/** snake_case alias of `listExtensionsDescriptor`. */
+export const list_extensions = listExtensionsDescriptor;
+
+/**
+ * `attach_extension` descriptor — exact-grant-only (`@extensions:authority`)
+ * realm-wide attach of one installed+connected extension: the caller's realm
+ * uniform set gains the attachment through the shared store path and the
+ * member safe-state sweep follows. Repeat attaches are idempotent (no mutation,
+ * no duplicate audit). Install/connect/disconnect/remove, credential handling,
+ * realm addressing, and every authority id are operator-only and fail the
+ * whole call uniformly.
+ */
+export const attachExtensionDescriptor = Object.freeze({
+  name: EXTENSIONS_ADMIN_TOOLS.ATTACH_EXTENSION,
+  authority: AGENT_AUTHORITIES.EXTENSIONS,
+  description:
+    'Attach one installed and currently connected extension to your realm as a realm-wide capability (every member\'s effective tool policy '
+    + 'recomputes at its next safe state), with an optional tool ceiling of explicit live call names or \'all\'. '
+    + 'Unknown, not-installed, and not-connected extensions fail closed, an already attached extension is an idempotent no-op, and the call '
+    + 'never installs, connects, disconnects, detaches, or touches credentials. Requires the attach_extension capability.',
+  schema: Object.freeze({
+    type: 'object',
+    properties: {
+      extensionId: {
+        type: 'string',
+        description: 'Id of an installed extension to attach to your realm.'
+      },
+      toolSelection: {
+        type: ['string', 'array'],
+        items: { type: 'string' },
+        description: "Realm tool ceiling for the new attachment: 'all' or an explicit non-empty list of live call names."
+      }
+    },
+    required: ['extensionId'],
+    additionalProperties: false
+  }),
+  paramAliasMap: extensionsAttachParamAliasMap,
+  sanitize: (rawArgs?: unknown): ToolParams => sanitizeExtensionsAdminParams(rawArgs, extensionsAttachParamAliasMap),
+  handler: async (params: ToolParams, context: ExecutionContext) => {
+    const port = extensionsAdminPortOf(context);
+    const sanitized = params && typeof params === 'object' && !Array.isArray(params) ? params : {};
+    const keys = Object.keys(sanitized);
+    // Denied-key presence fails the whole call first (even `false`/`null`);
+    // unknown keys are malformed params — nothing is silently dropped.
+    for (let i = 0; i < keys.length; i++) {
+      if (isDeniedExtensionsAdminParam(keys[i])) {
+        return {
+          success: false,
+          error: 'attach_extension does not permit operator-only parameters.',
+          code: TOOL_SYSTEM_ERROR_CODES.PERMISSION_DENIED
+        };
+      }
+    }
+    for (let i = 0; i < keys.length; i++) {
+      if (keys[i] !== 'extensionId' && keys[i] !== 'toolSelection') {
+        // Static message: an unknown parameter never echoes its key.
+        return invalidArguments('attach_extension does not accept unknown parameters.');
+      }
+    }
+    const extensionId = sanitized.extensionId;
+    if (typeof extensionId !== 'string' || !extensionId.trim()) {
+      return invalidArguments("attach_extension: 'extensionId' is required and must be a non-empty string.");
+    }
+    const rawSelection = sanitized.toolSelection;
+    return port.attachExtension({
+      actorRef: resolveRealmAdminActorRef(context),
+      extensionId,
+      // Shape validation lives in the store port (the same normalizer the M3
+      // ceiling path uses); a malformed ceiling fails the whole call.
+      ...(rawSelection !== undefined ? { toolSelection: rawSelection as 'all' | readonly string[] } : {})
+    });
+  }
+});
+/** camelCase alias of `attachExtensionDescriptor`. */
+export const attachExtension = attachExtensionDescriptor;
+/** snake_case alias of `attachExtensionDescriptor`. */
+export const attach_extension = attachExtensionDescriptor;
+
+/**
+ * Array of the M4 extension-admin authority descriptors: appended to
+ * `authorityToolDescriptors` by `realmTools.ts`, so their schemas are exposed
+ * through the generic exact-id filter and never through the canonical taxonomy.
+ */
+export const extensionsAdminToolDescriptors = Object.freeze([
+  listExtensionsDescriptor,
+  attachExtensionDescriptor
 ]);
