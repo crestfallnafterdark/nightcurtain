@@ -38,6 +38,7 @@
   "maxBytes": 1048576,
   "allowlist": [
     { "pattern": "tests/audit/repros/**", "rule": "credential-pattern", "reason": "synthetic credential fixtures in audit repros" },
+    { "pattern": "tests/integration/extension_connect_test.js", "rule": "credential-pattern", "reason": "synthetic credential fixtures in tests" },
     { "pattern": "tests/integration/modern_settings_workflow_test.js", "rule": "credential-pattern", "reason": "synthetic credential fixtures in tests" },
     { "pattern": "tests/integration/settings_modal_modern_test.js", "rule": "credential-pattern", "reason": "synthetic credential fixtures in tests" },
     { "pattern": "tests/unit/deepseek_provider_test.js", "rule": "credential-pattern", "reason": "synthetic invalid-key fixture" },

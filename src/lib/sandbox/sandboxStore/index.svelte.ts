@@ -54,12 +54,16 @@
  * @invariant Template registry honesty: `importRealmTemplate`/`deleteRealmTemplate` mutate the effective catalog and persist the snapshot synchronously; a failed write (quota/unavailable storage) rolls the mutation back and surfaces the typed `ERR_STORE_TEMPLATE_PERSIST_FAILED`, so the registry is never silently in-memory-only. Imports are capped at 2 MiB per bundle and 3 MiB total (`ERR_STORE_TEMPLATE_TOO_LARGE`), persisted as canonical transport payloads, and re-parsed/re-capped fail-closed on hydration without ever rewriting persisted bytes. `previewRealmTemplateImport` runs the identical parse → cap → label pipeline with zero side effects (`dry_run`), so preview and import can never disagree.
  * @invariant Publishing surface: the store is the host-side realm publishing composition root — it exposes the frozen `RealmPublishingPort` (real import path, effective-catalog resolution, session candidate store) to the store-owned runtime; pending instance payloads are session-only and cleared by a reset; approved template authorities are applied under the operator principal as ordinary registry grants (`metaAuthorityGrants`, canonical identity keys, hydration re-applied) and a `templateAuthorityTrust` record auto-approves only exact declared matches at a later launch. A template declaring an authority id unknown to this host fails the launch closed (`ERR_TEMPLATE_AUTHORITY_UNSUPPORTED`), approvals beyond declarations and malformed approvals are rejected (`ERR_STORE_INVALID_PARAMS`), and grant-free/trust-free snapshots keep every existing field and byte.
  * @invariant Realm launch resolution: a provider-bearing template launches — the retired providers gate no longer refuses it — and its requested extensions plus `<providerId>::<serverToolName>` references resolve against the global install registry and the Realm's attachments: installed-and-approved requests attach under the operator principal, unresolved requests ride the receipt's missing-extension disclosure and `instance.missingExtensions`, resolved tools are recorded as `instance.resolvedTools` (sanitized call name → extension id), and an attached payload/package (or the operator-assembled explicit inputs) is still validated against the effective template contract — including the pinned version — before the Realm record exists, so launch mismatches only with the explicit `allowVersionMismatch` confirmation, which rides the receipt as a warning.
- * @invariant Extension surface: the store is the extension composition root — global install records live in one injected registry persisted additively as `extensions`, realm attachments ride the realm records, install/remove/attach/detach validate and emit `extension_installed`/`extension_removed`/`extension_attached`/`extension_detached` audit events on the runtime stream, `removeExtension` refuses an extension any Realm still attaches, an `active` attachment for an unknown extension degrades to `unavailable` and returns to `active` once the extension is installed again while a `conflict` attachment is never rewritten by the heal, and nothing ever connects or grants runtime authorization from these records.
+ * @invariant Extension surface: the store is the extension composition root — global install records live in one injected registry persisted additively as `extensions`, realm attachments ride the realm records, install/remove/attach/detach validate and emit `extension_installed`/`extension_removed`/`extension_attached`/`extension_detached` audit events on the runtime stream, `removeExtension` refuses an extension any Realm still attaches (and drops its live session), an `active` attachment for an unknown extension degrades to `unavailable` and returns to `active` once the extension is installed again while the install-only heal never rewrites a `conflict` attachment, and install/attachment records alone never connect, discover a catalog, or grant runtime authorization.
  * @decision Instance provenance is hashes, paths, and resolved tool ids only: a successful template launch records `RealmRecord.instance` with the authored `templateVersion`, the canonical payload digest (`payloadDigest` over the attached payload, when one was attached), per-input hashes over each supplied value's canonical tagged JSON, the placement paths the launch actually wrote, `launchedAt`, the resolved extension tools (`resolvedTools`: sanitized call name → extension id) and the unresolved requested extension ids (`missingExtensions`); raw input values, package content, and credentials never reach the record
  * @decision The store is the extension composition root: it builds one install registry over a `{ load, save }` adapter backed by the sandbox snapshot (`extensions`), seeds it from the persisted field before construction, reconciles hydration through the registry's validated `reconcile` path, and exposes install/remove (global) plus attach/detach (realm) methods that validate against installed records and schedule the existing debounced save; realm attachments are realm-local `RealmRecord.extensions` entries, so realm deletion, rollback, and persistence carry them without a parallel store map
  * @decision `launchRealmFromTemplate` extension approvals mirror the Wave U authority approvals: `extensionApprovals` entries must match a declared template request exactly, absent approval is a decline, only installed-and-approved requests attach (an approval of an uninstalled request attaches nothing and stays disclosed), attachments are written only on a fully successful launch with the operator approval stamp and the realm-level `'all'` selection, and the effective extension grants are forwarded into the launched members' descriptors through the trusted unified-options channel (resolved names only — nothing connects and no third-party execution exists before P3)
  * @invariant Safe-state extension reauthorization (extension wave, P2.4): the store owns the queue — attach/detach and per-agent `extensionTools` selector edits recompute each affected member's effective grant set and apply it through the operator-gated `reauthorizeAgent` at the next safe point: an idle member synchronously at the mutation point, a busy member queued and applied on its next `turn_complete` (never mid-turn). A queued member that terminates is dropped. Selector names that resolve to nothing are dropped fail-closed and warned, never granted.
  * @invariant Extension authority is descriptor-exact: the effective grants computed here feed `AuthorityDescriptor.extensions`; realm attachment or selector state alone never authorizes a call, the wildcard `'*'`/privilege/selectors/aliases never imply an extension entry, and the runtime's dispatcher branch (unbound until P3) authorizes only exact membership.
+ * @invariant Extension connections are session-only and operator-initiated: live sessions, discovered catalogs, and arbitration state live in-memory (`#extensionConnections` plus the reactive `extensionConnections` projection), are never persisted (not in install records, not in realm records, not in the snapshot), are dropped at hydration/reset/destroy, and are only ever created by an explicit `connectExtension`/`reconnectExtension` call — never at load, hydration, or launch.
+ * @invariant Extension connection approval boundary: when an install record carries an explicit `approvedUrl`, it must parse as an absolute URL and be URL-equal (`href`) to the transport URL; a stale or inconsistent approval is refused with `ERR_STORE_EXTENSION_INVALID_ENDPOINT` before the plaintext gate, any vault read, and any network activity, and a connection only ever dials `transportHint.url`.
+ * @invariant Extension connection credential gate: a `credentialId` on a non-`https:` endpoint is refused with `ERR_STORE_EXTENSION_PLAINTEXT_CREDENTIAL` before any vault read or network activity, a bound credential the vault cannot resolve fails closed with `ERR_STORE_EXTENSION_CREDENTIAL_UNRESOLVED` before any network activity, plaintext local servers with no `credentialId` connect unauthenticated, and connection projections/audits/errors carry no credential material.
+ * @invariant Extension catalog arbitration: live catalogs arbitrate only by explicit connection-completion sequence (never map insertion order), the earlier `active` extension keeps every contested call name, each later conflicting extension is `conflict` and not activated until a re-arbitration clears it, re-arbitration runs on every connect/disconnect/reconnect and audits conflict transitions, and realm attachment statuses follow the live state (`connected` → `active`, `conflict` → `conflict`, disconnected/`error` → `unavailable`) through the existing safe-state reauthorization sweep.
  * 
  * @example
  * ```typescript
@@ -97,10 +101,17 @@ import type { ModelPreset, ModelPresetSourcePort, PresetCatalog, PresetModelConf
 import { createRealmRegistry } from '../realmRegistry/index.ts';
 import type { RealmInstanceProvenance, RealmRecord, RealmRegistry, RealmUpdatePatch } from '../realmRegistry/index.ts';
 import {
+  ExtensionRegistryError,
+  arbitrateExtensionCatalogs,
   createExtensionRegistry,
+  diffExtensionCatalogs,
+  indexExtensionCatalog,
   normalizeRealmExtensionAttachment
 } from '../extensionRegistry/index.ts';
 import type {
+  ExtensionCatalog,
+  ExtensionCatalogConflict,
+  ExtensionCatalogDiff,
   ExtensionInstallRecord,
   ExtensionKind,
   ExtensionRegistry,
@@ -109,6 +120,16 @@ import type {
   ExtensionTransportHint,
   RealmExtensionAttachment
 } from '../extensionRegistry/index.ts';
+import {
+  MCP_CLIENT_ERROR_CODES,
+  McpClientError,
+  createMcpClient
+} from '../mcpClient/index.ts';
+import type {
+  McpClientCredential,
+  McpClientServerInfo,
+  McpClientSession
+} from '../mcpClient/index.ts';
 import {
   AGENT_AUTHORITIES,
   BAKED_TEMPLATE_BUNDLES,
@@ -200,9 +221,15 @@ type AuthorityGrantSnapshot = SandboxPersistedState & {
  * - `ERR_STORE_TEMPLATE_TOO_LARGE`: `importRealmTemplate` exceeded the per-bundle or total imported-template byte budget.
  * - `ERR_STORE_TEMPLATE_PERSIST_FAILED`: the registry mutation could not be persisted (storage quota/unavailable), so it was rolled back — an import/delete is never silently in-memory-only.
  * - `ERR_STORE_EXTENSION_ALREADY_INSTALLED`: `installExtension` targeted an id that already has a global install record.
- * - `ERR_STORE_EXTENSION_NOT_INSTALLED`: `attachExtension` named an extension with no global install record.
+ * - `ERR_STORE_EXTENSION_NOT_INSTALLED`: `attachExtension`/`connectExtension`/`disconnectExtension`/`reconnectExtension` named an extension with no global install record.
  * - `ERR_STORE_EXTENSION_ALREADY_ATTACHED`: `attachExtension` targeted a Realm that already attaches the extension.
  * - `ERR_STORE_EXTENSION_ATTACHED`: `removeExtension` targeted an extension still attached to at least one Realm; detach it first.
+ * - `ERR_STORE_EXTENSION_NOT_CONNECTABLE`: `connectExtension` targeted a `pack` extension, which has no connectable transport.
+ * - `ERR_STORE_EXTENSION_TRANSPORT_UNSUPPORTED`: `connectExtension` targeted an MCP record carrying the host-only `stdio` transport hint.
+ * - `ERR_STORE_EXTENSION_INVALID_ENDPOINT`: `connectExtension` targeted a record whose transport URL is not an absolute URL, or whose explicitly approved URL (`approvedUrl`) is not an absolute URL or does not match the transport URL after URL normalization — a stale or inconsistent approval never dials.
+ * - `ERR_STORE_EXTENSION_PLAINTEXT_CREDENTIAL`: `connectExtension` targeted a `credentialId`-bearing record on a non-`https:` endpoint — refused before any vault read or network activity.
+ * - `ERR_STORE_EXTENSION_CREDENTIAL_UNRESOLVED`: `connectExtension` targeted a `credentialId` the vault cannot resolve (deleted/unknown id) — fail closed, no network activity.
+ * - `ERR_STORE_EXTENSION_CONNECT_FAILED`: the error code of an unclassified operational connection failure (a classified MCP client failure keeps its own `ERR_MCP_*` code); never thrown by the pre-connection gates.
  * 
  * @example
  * ```typescript
@@ -239,6 +266,12 @@ export const SANDBOX_STORE_ERROR_CODES: {
   readonly ERR_STORE_EXTENSION_NOT_INSTALLED: 'ERR_STORE_EXTENSION_NOT_INSTALLED';
   readonly ERR_STORE_EXTENSION_ALREADY_ATTACHED: 'ERR_STORE_EXTENSION_ALREADY_ATTACHED';
   readonly ERR_STORE_EXTENSION_ATTACHED: 'ERR_STORE_EXTENSION_ATTACHED';
+  readonly ERR_STORE_EXTENSION_NOT_CONNECTABLE: 'ERR_STORE_EXTENSION_NOT_CONNECTABLE';
+  readonly ERR_STORE_EXTENSION_TRANSPORT_UNSUPPORTED: 'ERR_STORE_EXTENSION_TRANSPORT_UNSUPPORTED';
+  readonly ERR_STORE_EXTENSION_INVALID_ENDPOINT: 'ERR_STORE_EXTENSION_INVALID_ENDPOINT';
+  readonly ERR_STORE_EXTENSION_PLAINTEXT_CREDENTIAL: 'ERR_STORE_EXTENSION_PLAINTEXT_CREDENTIAL';
+  readonly ERR_STORE_EXTENSION_CREDENTIAL_UNRESOLVED: 'ERR_STORE_EXTENSION_CREDENTIAL_UNRESOLVED';
+  readonly ERR_STORE_EXTENSION_CONNECT_FAILED: 'ERR_STORE_EXTENSION_CONNECT_FAILED';
 } = Object.freeze({
   ERR_STORE_AGENT_NOT_FOUND: 'ERR_STORE_AGENT_NOT_FOUND',
   ERR_STORE_NO_AGENT_SELECTED: 'ERR_STORE_NO_AGENT_SELECTED',
@@ -255,7 +288,13 @@ export const SANDBOX_STORE_ERROR_CODES: {
   ERR_STORE_EXTENSION_ALREADY_INSTALLED: 'ERR_STORE_EXTENSION_ALREADY_INSTALLED',
   ERR_STORE_EXTENSION_NOT_INSTALLED: 'ERR_STORE_EXTENSION_NOT_INSTALLED',
   ERR_STORE_EXTENSION_ALREADY_ATTACHED: 'ERR_STORE_EXTENSION_ALREADY_ATTACHED',
-  ERR_STORE_EXTENSION_ATTACHED: 'ERR_STORE_EXTENSION_ATTACHED'
+  ERR_STORE_EXTENSION_ATTACHED: 'ERR_STORE_EXTENSION_ATTACHED',
+  ERR_STORE_EXTENSION_NOT_CONNECTABLE: 'ERR_STORE_EXTENSION_NOT_CONNECTABLE',
+  ERR_STORE_EXTENSION_TRANSPORT_UNSUPPORTED: 'ERR_STORE_EXTENSION_TRANSPORT_UNSUPPORTED',
+  ERR_STORE_EXTENSION_INVALID_ENDPOINT: 'ERR_STORE_EXTENSION_INVALID_ENDPOINT',
+  ERR_STORE_EXTENSION_PLAINTEXT_CREDENTIAL: 'ERR_STORE_EXTENSION_PLAINTEXT_CREDENTIAL',
+  ERR_STORE_EXTENSION_CREDENTIAL_UNRESOLVED: 'ERR_STORE_EXTENSION_CREDENTIAL_UNRESOLVED',
+  ERR_STORE_EXTENSION_CONNECT_FAILED: 'ERR_STORE_EXTENSION_CONNECT_FAILED'
 });
 
 /**
@@ -1650,6 +1689,110 @@ export interface ExtensionAttachOptions {
 }
 
 /**
+ * Options accepted by `SandboxStore.connectExtension()` /
+ * `SandboxStore.reconnectExtension()`.
+ */
+export interface ExtensionConnectOptions {
+  /**
+   * Per-connection and per-request timeout budget in milliseconds; must be a
+   * positive finite number when present. Omitted → the `mcpClient` default.
+   */
+  readonly requestTimeoutMs?: number;
+}
+
+/**
+ * Lifecycle status of one live extension connection. `connecting` is a
+ * session in flight, `connected` an arbitration-active catalog, `conflict` a
+ * catalog that lost a call-name race (not activated), and `error` a failed or
+ * dropped session.
+ */
+export type ExtensionConnectionStatus = 'connecting' | 'connected' | 'conflict' | 'error';
+
+/**
+ * Secret-free error projection of a failed connection attempt: a classified
+ * `ERR_MCP_*` code (with the client's safe details) when the failure came from
+ * the MCP client, the typed `ERR_EXTENSION_*` code of a discovery-time catalog
+ * failure, otherwise the store's `ERR_STORE_EXTENSION_CONNECT_FAILED`. Never
+ * carries credential material or server-controlled message text.
+ */
+export interface ExtensionConnectionError {
+  /** Programmatic failure code. */
+  readonly code: string;
+  /** Optional safe machine-readable context supplied by the failure classification. */
+  readonly details?: Readonly<Record<string, unknown>>;
+}
+
+/**
+ * One catalog entry of a connected extension, keyed by the sanitized
+ * model-facing call name: the owning extension id plus the wire tool name and
+ * the server-supplied description/input schema.
+ */
+export interface ExtensionConnectionCatalogEntry {
+  /** Owning extension id. */
+  readonly extensionId: string;
+  /** Wire tool name exactly as the server advertised it. */
+  readonly serverToolName: string;
+  /** Optional server-supplied description. */
+  readonly description?: string;
+  /** Raw (deep-frozen) JSON Schema of the tool input, when supplied. */
+  readonly inputSchema?: unknown;
+}
+
+/**
+ * Frozen, secret-free live projection of one extension connection, consumed by
+ * the UI and by tests. Catalogs are session state: the projection is rebuilt
+ * on every connection-state change and is never persisted.
+ */
+export interface ExtensionConnectionProjection {
+  /** Host-unique extension id. */
+  readonly extensionId: string;
+  /** Current connection lifecycle status. */
+  readonly status: ExtensionConnectionStatus;
+  /** Server identity from the handshake, or `null` before/without a session. */
+  readonly serverInfo: McpClientServerInfo | null;
+  /** Negotiated protocol revision, or `null` before/without a session. */
+  readonly protocolVersion: string | null;
+  /** Call name → catalog entry, or `null` when no catalog was discovered. */
+  readonly catalog: Readonly<Record<string, ExtensionConnectionCatalogEntry>> | null;
+  /** Intra-server shadowed tools, in server order. */
+  readonly shadows: readonly { readonly callName: string; readonly serverToolName: string }[];
+  /** Extension↔extension conflicts from the last arbitration; empty when active. */
+  readonly conflicts: readonly ExtensionCatalogConflict[];
+  /** Drift disclosure of the last reconnect, or `null` when none was computed. */
+  readonly drift: ExtensionCatalogDiff | null;
+  /** Secret-free failure projection, or `null` when the last attempt succeeded. */
+  readonly error: ExtensionConnectionError | null;
+  /** Epoch ms the catalog completed (session connected), or `null`. */
+  readonly connectedAt: number | null;
+  /** Epoch ms the catalog was discovered, or `null`. */
+  readonly discoveredAt: number | null;
+  /** Catalog digest, or `null` when no catalog was discovered. */
+  readonly digest: string | null;
+}
+
+/**
+ * Internal live connection record (composition-root state, never persisted).
+ * `sequence` is the explicit connection-completion order the arbitration reads;
+ * `pending` carries the single-flight promise while a session is connecting.
+ */
+type LiveExtensionConnection = {
+  extensionId: string;
+  status: ExtensionConnectionStatus;
+  sequence: number;
+  session: McpClientSession | null;
+  abortController: AbortController;
+  catalog: ExtensionCatalog | null;
+  serverInfo: McpClientServerInfo | null;
+  protocolVersion: string | null;
+  conflicts: readonly ExtensionCatalogConflict[];
+  drift: ExtensionCatalogDiff | null;
+  error: ExtensionConnectionError | null;
+  connectedAt: number | null;
+  discoveredAt: number | null;
+  pending: Promise<ExtensionConnectionProjection> | null;
+};
+
+/**
  * One file to seed through `SandboxStore.seedRealm()`.
  */
 export interface RealmSeedFile {
@@ -1939,6 +2082,48 @@ function extensionSelectorsEqual(
 ): boolean {
   if (a === 'all' || b === 'all') return a === b;
   return extensionGrantsEqual(a, b);
+}
+
+/**
+ * Classifies one operational connection failure into the secret-free
+ * projection shape: a classified `McpClientError` keeps its `ERR_MCP_*` code
+ * and safe details; anything else maps to the store's unclassified
+ * `ERR_STORE_EXTENSION_CONNECT_FAILED` (no message text is ever propagated).
+ *
+ * @param error - Thrown value from the connection attempt.
+ * @returns Frozen secret-free error projection.
+ */
+function classifyExtensionConnectError(error: unknown): ExtensionConnectionError {
+  if (error instanceof McpClientError) {
+    return Object.freeze({
+      code: error.code,
+      ...(error.details !== undefined ? { details: Object.freeze({ ...error.details }) } : {})
+    });
+  }
+  if (error instanceof ExtensionRegistryError) {
+    // A discovery-time catalog failure (for example a reserved derived call
+    // name) keeps its typed registry code; the message stays out of the
+    // projection.
+    return Object.freeze({ code: error.code });
+  }
+  return Object.freeze({ code: SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_CONNECT_FAILED });
+}
+
+/**
+ * Whether a reconnect drift diff carries a disclosure: any added/removed/
+ * changed/shadow call name or a common-name reorder. Digest-only changes are
+ * already covered, since a canonical tool change lands in `changed`.
+ *
+ * @param diff - Drift diff.
+ * @returns `true` when the diff must be disclosed.
+ */
+function extensionCatalogDiffIsEmpty(diff: ExtensionCatalogDiff): boolean {
+  return diff.added.length === 0
+    && diff.removed.length === 0
+    && diff.changed.length === 0
+    && diff.shadowedAdded.length === 0
+    && diff.shadowedRemoved.length === 0
+    && !diff.reordered;
 }
 
 /**
@@ -3365,6 +3550,22 @@ export class SandboxStore {
    */
   legacyWorkspaceRemapReport = $state<LegacyWorkspaceRemapReport | null>(null);
 
+  /**
+   * Reactive extension-connection projection for the UI (extension wave,
+   * P3.1): one frozen, secret-free entry per live connection in
+   * connection-completion sequence order (in-flight connects last, by
+   * extension id). Always `[]` before any operator connect — nothing
+   * auto-connects at load, hydration, or launch — and never persisted.
+   *
+   * @example
+   * ```typescript
+   * for (const connection of sandboxStore.extensionConnections) {
+   *   console.log(connection.extensionId, connection.status, connection.digest);
+   * }
+   * ```
+   */
+  extensionConnections = $state<readonly ExtensionConnectionProjection[]>(Object.freeze([]));
+
   // --- Strict #private engine & coordinator instances ---
   #virtualFs: VirtualFS;
   #messagingBus: MessagingBus;
@@ -3427,6 +3628,25 @@ export class SandboxStore {
   #extensionRegistry: ExtensionRegistry;
   /** Snapshot-backed install-record mirror (the registry adapter's persistence write-through). */
   #extensionRecords: ExtensionInstallRecord[] = [];
+  /**
+   * Live extension connections (extension wave, P3.1): sessions, discovered
+   * catalogs, and arbitration state. Strictly session-only in-memory state —
+   * never written to an install record, a realm record, or the snapshot — and
+   * only ever populated by an explicit operator connect/reconnect.
+   */
+  #extensionConnections: Map<string, LiveExtensionConnection> = new Map();
+  /**
+   * Monotonic connection-completion sequence: assigned when a catalog
+   * completes discovery and the only ordering authority the arbitration
+   * reads (never map insertion order).
+   */
+  #extensionConnectionSequence = 0;
+  /**
+   * Active call-name → `{ extensionId, serverToolName }` resolver map
+   * (P3.3 execution seam): rebuilt by every re-arbitration from the
+   * arbitration-active catalogs in sequence order.
+   */
+  #extensionCallNameResolver: Map<string, { extensionId: string; serverToolName: string }> = new Map();
   /**
    * Frozen shipped launch catalog for this store instance: the baked demo
    * fixture plus embedded `templates/**` bundles, layered with any per-instance
@@ -6838,6 +7058,12 @@ export class SandboxStore {
     const removed = this.#extensionRegistry.removeExtension(extensionId);
     if (removed) {
       this.#emitExtensionAuditEvent('extension_removed', { extensionId });
+      // Extension wave (P3.1): a removed install record has no live session
+      // either — drop it best-effort and re-arbitrate the survivors.
+      const live = this.#extensionConnections.get(extensionId);
+      if (live) {
+        void this.#closeExtensionConnection(live, 'removed').catch(() => undefined);
+      }
     }
     return removed;
   }
@@ -6974,6 +7200,713 @@ export class SandboxStore {
     // completion.
     this.#sweepRealmExtensionAuthorizations(realmId);
     return updated;
+  }
+
+  // ==========================================================================
+  // Extension Connections (extension wave, P3.1)
+  // ==========================================================================
+
+  /**
+   * Connects one installed MCP extension over the HTTP transport and discovers
+   * its tool catalog — the explicit operator connection act (nothing
+   * auto-connects at load, hydration, or launch).
+   *
+   * Pre-connection gates run first and fail closed: an unknown id rejects with
+   * `ERR_STORE_EXTENSION_NOT_INSTALLED`, a `pack` record with
+   * `ERR_STORE_EXTENSION_NOT_CONNECTABLE`, a `stdio` transport hint with
+   * `ERR_STORE_EXTENSION_TRANSPORT_UNSUPPORTED`, and an unparseable transport
+   * URL — or a present `approvedUrl` that is unparseable or not URL-equal to
+   * the transport URL — with `ERR_STORE_EXTENSION_INVALID_ENDPOINT`. A `credentialId` on a non-`https:`
+   * endpoint is refused with `ERR_STORE_EXTENSION_PLAINTEXT_CREDENTIAL`
+   * **before any vault read or network activity** (plaintext local servers
+   * connect unauthenticated when no `credentialId` is bound); a bound
+   * credential the vault cannot resolve fails closed with
+   * `ERR_STORE_EXTENSION_CREDENTIAL_UNRESOLVED` before any network activity.
+   *
+   * The session is single-flight: a concurrent call while the same extension is
+   * `connecting` returns the in-flight promise, and a call on an already
+   * `connected`/`conflict` extension resolves the current projection without a
+   * second session. A successful discovery indexes the catalog, assigns the
+   * connection-completion sequence, re-arbitrates every live catalog, syncs the
+   * affected realm attachment statuses through the safe-state sweep, and emits
+   * `extension_connected` (plus `extension_conflict` when the new catalog lost
+   * a call-name race). An operational failure (unreachable endpoint, protocol,
+   * timeout, cancellation, auth) resolves with status `'error'` and emits
+   * `extension_connect_failed`; it never throws after the gates.
+   *
+   * @param extensionId - Id of a globally installed MCP extension.
+   * @param options - Optional per-connection timeout budget.
+   * @returns Promise of the frozen, secret-free connection projection.
+   * @throws {@link SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_NOT_INSTALLED} When no install record carries the id.
+   * @throws {@link SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_NOT_CONNECTABLE} When the record is a `pack`.
+   * @throws {@link SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_TRANSPORT_UNSUPPORTED} When the record carries the `stdio` transport hint.
+   * @throws {@link SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_INVALID_ENDPOINT} When the transport URL is not an absolute URL, or the record's explicit `approvedUrl` is invalid or not URL-equal to the transport URL.
+   * @throws {@link SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_PLAINTEXT_CREDENTIAL} When a `credentialId` is bound to a non-`https:` endpoint.
+   * @throws {@link SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_CREDENTIAL_UNRESOLVED} When the bound credential is not in the vault.
+   *
+   * @example
+   * ```typescript
+   * const connection = await sandboxStore.connectExtension('acme-scoring');
+   * if (connection.status === 'connected') {
+   *   console.log(Object.keys(connection.catalog ?? {}));
+   * }
+   * ```
+   */
+  async connectExtension(
+    extensionId: string,
+    options: ExtensionConnectOptions = {}
+  ): Promise<ExtensionConnectionProjection> {
+    return this.#startExtensionConnection(extensionId, options, null);
+  }
+
+  /**
+   * Disconnects one extension: aborts any in-flight connect, closes the live
+   * session best-effort, drops the catalog and its call-name claims, re-
+   * arbitrates the remaining catalogs (a formerly conflicted extension may
+   * activate), syncs the affected realm attachment statuses through the
+   * safe-state sweep, and emits `extension_disconnected`.
+   *
+   * A disconnect of an installed extension that has no live connection is an
+   * idempotent `false` no-op (no event); an unknown id fails closed.
+   *
+   * @param extensionId - Id of a globally installed extension.
+   * @returns `true` when a live connection existed and was closed.
+   * @throws {@link SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_NOT_INSTALLED} When no install record carries the id.
+   *
+   * @example
+   * ```typescript
+   * await sandboxStore.disconnectExtension('acme-scoring');
+   * ```
+   */
+  async disconnectExtension(extensionId: string): Promise<boolean> {
+    if (typeof extensionId !== 'string' || extensionId.trim().length === 0) {
+      throw invalidRealmParams('disconnectExtension requires a non-empty extension id');
+    }
+    if (!this.#extensionRegistry.getExtension(extensionId)) {
+      throw codedStoreError(
+        SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_NOT_INSTALLED,
+        `disconnectExtension: extension '${extensionId}' is not installed`
+      );
+    }
+    const entry = this.#extensionConnections.get(extensionId);
+    if (!entry) return false;
+    await this.#closeExtensionConnection(entry, 'operator');
+    return true;
+  }
+
+  /**
+   * Reconnects one extension as an explicit re-discovery: the previous catalog
+   * is captured, the live session is closed, a fresh connection discovers the
+   * current catalog, and the resulting drift (`added`/`removed`/`changed` call
+   * names, shadow changes, order, digest pair) is recorded on the projection
+   * and disclosed through an `extension_catalog_drift` audit event when
+   * non-empty. Re-arbitration runs on both catalog changes, and realm
+   * attachment statuses follow. Grants are never silently mutated here: grant
+   * reconciliation still flows through the P2.4 safe-state sweep.
+   *
+   * Reconnecting an extension with no live connection is a plain connect (no
+   * drift). Pre-connection gates are identical to
+   * {@link SandboxStore.connectExtension}.
+   *
+   * @param extensionId - Id of a globally installed MCP extension.
+   * @param options - Optional per-connection timeout budget.
+   * @returns Promise of the frozen connection projection.
+   * @throws {@link SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_NOT_INSTALLED} When no install record carries the id.
+   * @throws {@link SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_NOT_CONNECTABLE} When the record is a `pack`.
+   * @throws {@link SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_TRANSPORT_UNSUPPORTED} When the record carries the `stdio` transport hint.
+   * @throws {@link SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_INVALID_ENDPOINT} When the transport URL is not an absolute URL, or the record's explicit `approvedUrl` is invalid or not URL-equal to the transport URL.
+   * @throws {@link SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_PLAINTEXT_CREDENTIAL} When a `credentialId` is bound to a non-`https:` endpoint.
+   * @throws {@link SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_CREDENTIAL_UNRESOLVED} When the bound credential is not in the vault.
+   *
+   * @example
+   * ```typescript
+   * const connection = await sandboxStore.reconnectExtension('acme-scoring');
+   * console.log(connection.drift?.added ?? []);
+   * ```
+   */
+  async reconnectExtension(
+    extensionId: string,
+    options: ExtensionConnectOptions = {}
+  ): Promise<ExtensionConnectionProjection> {
+    if (typeof extensionId !== 'string' || extensionId.trim().length === 0) {
+      throw invalidRealmParams('reconnectExtension requires a non-empty extension id');
+    }
+    const existing = this.#extensionConnections.get(extensionId);
+    const previousCatalog = existing && existing.catalog ? existing.catalog : null;
+    if (existing) {
+      await this.#closeExtensionConnection(existing, 'reconnect');
+    }
+    return this.#startExtensionConnection(extensionId, options, previousCatalog);
+  }
+
+  /**
+   * Returns one frozen, secret-free live connection projection.
+   *
+   * @param extensionId - Extension id.
+   * @returns The frozen projection, or `null` when the extension is not connected.
+   */
+  getExtensionConnection(extensionId: string): ExtensionConnectionProjection | null {
+    const entry = this.#extensionConnections.get(extensionId);
+    return entry ? this.#projectExtensionConnection(entry) : null;
+  }
+
+  /**
+   * Lists every frozen live connection projection in connection-completion
+   * sequence order; an in-flight (`connecting`) entry has no sequence yet and
+   * sorts last by extension id.
+   *
+   * @returns Frozen connection projections.
+   */
+  listExtensionConnections(): readonly ExtensionConnectionProjection[] {
+    return Object.freeze(this.#listExtensionConnectionProjections());
+  }
+
+  /**
+   * Resolves one arbitration-active call name to its owning extension and wire
+   * tool name — the execution seam later phases consume. Call names of
+   * conflicted, errored, or disconnected extensions resolve to `null`.
+   *
+   * @param callName - Sanitized model-facing call name.
+   * @returns Frozen `{ extensionId, serverToolName }`, or `null` when unresolved.
+   */
+  resolveExtensionCallName(callName: string): { extensionId: string; serverToolName: string } | null {
+    const resolved = this.#extensionCallNameResolver.get(callName);
+    return resolved ? Object.freeze({ ...resolved }) : null;
+  }
+
+  /**
+   * Shared implementation of connect/reconnect: gates, single-flight,
+   * credential resolution, and session open. `previousCatalog` is non-null
+   * only on a reconnect re-discovery, where the drift diff is disclosed.
+   *
+   * @param extensionId - Extension id.
+   * @param options - Connection options.
+   * @param previousCatalog - Catalog captured before the reconnect, or `null`.
+   * @returns Promise of the frozen connection projection.
+   */
+  async #startExtensionConnection(
+    extensionId: string,
+    options: ExtensionConnectOptions,
+    previousCatalog: ExtensionCatalog | null
+  ): Promise<ExtensionConnectionProjection> {
+    if (typeof extensionId !== 'string' || extensionId.trim().length === 0) {
+      throw invalidRealmParams('connectExtension requires a non-empty extension id');
+    }
+    const record = this.#extensionRegistry.getExtension(extensionId);
+    if (!record) {
+      throw codedStoreError(
+        SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_NOT_INSTALLED,
+        `connectExtension: extension '${extensionId}' is not installed — install it first`
+      );
+    }
+    if (record.kind !== 'mcp') {
+      throw codedStoreError(
+        SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_NOT_CONNECTABLE,
+        `connectExtension refuses extension '${extensionId}' — kind '${record.kind}' carries no connectable transport`
+      );
+    }
+    const hint = record.transportHint;
+    if (hint.kind !== 'http') {
+      throw codedStoreError(
+        SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_TRANSPORT_UNSUPPORTED,
+        `connectExtension refuses extension '${extensionId}' — stdio is a host-only transport and is not supported`
+      );
+    }
+    let url: URL;
+    try {
+      url = new URL(hint.url);
+    } catch {
+      throw codedStoreError(
+        SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_INVALID_ENDPOINT,
+        `connectExtension refuses extension '${extensionId}' — the transport URL is not an absolute URL`
+      );
+    }
+
+    // Approval boundary: an explicitly approved URL is an operator statement
+    // that must agree with the transport URL. A present `approvedUrl` is
+    // parsed and URL-normalized-compared before the plaintext gate, any vault
+    // read, the single-flight check, and any network activity; a stale or
+    // inconsistent approval never dials anything.
+    if (record.approvedUrl !== undefined) {
+      let approvedUrl: URL;
+      try {
+        approvedUrl = new URL(record.approvedUrl);
+      } catch {
+        throw codedStoreError(
+          SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_INVALID_ENDPOINT,
+          `connectExtension refuses extension '${extensionId}' — the approved URL is not an absolute URL`
+        );
+      }
+      if (approvedUrl.href !== url.href) {
+        throw codedStoreError(
+          SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_INVALID_ENDPOINT,
+          `connectExtension refuses extension '${extensionId}' — the approved URL '${record.approvedUrl}' does not match the transport URL '${hint.url}'`
+        );
+      }
+    }
+
+    const requestTimeoutMs = options && options.requestTimeoutMs !== undefined ? options.requestTimeoutMs : null;
+    if (
+      requestTimeoutMs !== null
+      && (typeof requestTimeoutMs !== 'number' || !Number.isFinite(requestTimeoutMs) || requestTimeoutMs <= 0)
+    ) {
+      throw invalidRealmParams('connectExtension options.requestTimeoutMs must be a positive finite number');
+    }
+
+    // Plaintext-credential gate: refuse BEFORE any vault read or network
+    // activity. Plaintext local servers connect unauthenticated (no
+    // credentialId bound), never with a credential.
+    if (record.credentialId !== undefined && url.protocol !== 'https:') {
+      throw codedStoreError(
+        SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_PLAINTEXT_CREDENTIAL,
+        `connectExtension refuses extension '${extensionId}' — a credential is never sent over '${url.protocol}'`
+      );
+    }
+
+    // Single-flight: one live session per extension. A concurrent connect
+    // returns the in-flight promise; an already-connected extension keeps its
+    // session (re-discovery is an explicit reconnect).
+    const existing = this.#extensionConnections.get(extensionId);
+    if (existing) {
+      if (existing.status === 'connecting' && existing.pending) {
+        return existing.pending;
+      }
+      if ((existing.status === 'connected' || existing.status === 'conflict') && existing.session) {
+        return this.#projectExtensionConnection(existing);
+      }
+    }
+
+    // Credential resolution happens only after the plaintext gate passed and
+    // only over https; an unresolvable id fails closed before any network.
+    let credential: McpClientCredential | null = null;
+    if (record.credentialId !== undefined) {
+      const resolved = this.#credentialResolver.getCredential(record.credentialId);
+      const secret = resolved && typeof resolved.apiKey === 'string' ? resolved.apiKey : '';
+      if (!secret) {
+        throw codedStoreError(
+          SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_CREDENTIAL_UNRESOLVED,
+          `connectExtension refuses extension '${extensionId}' — the bound credential is not resolvable in the vault`
+        );
+      }
+      credential = Object.freeze({ id: record.credentialId, secret });
+    }
+
+    const entry: LiveExtensionConnection = {
+      extensionId,
+      status: 'connecting',
+      sequence: 0,
+      session: null,
+      abortController: new AbortController(),
+      catalog: null,
+      serverInfo: null,
+      protocolVersion: null,
+      conflicts: Object.freeze([]),
+      drift: null,
+      error: null,
+      connectedAt: null,
+      discoveredAt: null,
+      pending: null
+    };
+    this.#extensionConnections.set(extensionId, entry);
+    this.#syncExtensionConnections();
+    const pending = this.#openExtensionConnection(entry, url, credential, requestTimeoutMs, previousCatalog);
+    entry.pending = pending;
+    return pending;
+  }
+
+  /**
+   * Opens and discovers one live session for a `connecting` entry. Operational
+   * failures resolve with an `error` projection and an
+   * `extension_connect_failed` audit event; an entry that was disconnected or
+   * replaced while awaiting is abandoned silently and reported as cancelled.
+   *
+   * @param entry - The live connection entry (already registered).
+   * @param url - Validated endpoint URL.
+   * @param credential - Resolved vault credential, or `null` for anonymous.
+   * @param requestTimeoutMs - Validated timeout budget, or `null` for the default.
+   * @param previousCatalog - Catalog captured before a reconnect, or `null`.
+   * @returns Promise of the frozen connection projection.
+   */
+  async #openExtensionConnection(
+    entry: LiveExtensionConnection,
+    url: URL,
+    credential: McpClientCredential | null,
+    requestTimeoutMs: number | null,
+    previousCatalog: ExtensionCatalog | null
+  ): Promise<ExtensionConnectionProjection> {
+    try {
+      const session = await createMcpClient({
+        transport: { kind: 'http', url: url.href },
+        ...(credential !== null ? { credential } : {}),
+        ...(requestTimeoutMs !== null ? { requestTimeoutMs } : {}),
+        signal: entry.abortController.signal
+      });
+      if (!this.#isCurrentExtensionConnection(entry)) {
+        entry.status = 'error';
+        entry.error = Object.freeze({ code: MCP_CLIENT_ERROR_CODES.CANCELLED });
+        await session.close();
+        return this.#projectExtensionConnection(entry);
+      }
+      entry.session = session;
+      entry.serverInfo = session.serverInfo;
+      entry.protocolVersion = session.protocolVersion;
+      const discovered = await session.listTools();
+      if (!this.#isCurrentExtensionConnection(entry)) {
+        entry.status = 'error';
+        entry.error = Object.freeze({ code: MCP_CLIENT_ERROR_CODES.CANCELLED });
+        await session.close();
+        return this.#projectExtensionConnection(entry);
+      }
+      const catalog = indexExtensionCatalog({ extensionId: entry.extensionId, tools: discovered });
+      entry.catalog = catalog;
+      entry.sequence = this.#extensionConnectionSequence + 1;
+      this.#extensionConnectionSequence = entry.sequence;
+      entry.connectedAt = Date.now();
+      entry.discoveredAt = entry.connectedAt;
+      entry.error = null;
+      const drift = previousCatalog !== null ? diffExtensionCatalogs(previousCatalog, catalog) : null;
+      entry.drift = drift;
+      // Arbitration assigns the final `connected`/`conflict` status, rebuilds
+      // the call-name resolver, syncs attachment statuses, and emits any
+      // conflict-transition events.
+      this.#rearbitrateExtensionCatalogs([entry.extensionId]);
+      this.#emitExtensionAuditEvent('extension_connected', {
+        extensionId: entry.extensionId,
+        status: entry.status,
+        sequence: entry.sequence,
+        digest: catalog.digest,
+        toolCount: catalog.tools.length,
+        shadowedCount: catalog.shadowedTools.length,
+        protocolVersion: entry.protocolVersion
+      });
+      if (drift !== null && !extensionCatalogDiffIsEmpty(drift)) {
+        this.#emitExtensionAuditEvent('extension_catalog_drift', {
+          extensionId: entry.extensionId,
+          previousDigest: drift.digests.previous,
+          digest: drift.digests.next,
+          added: [...drift.added],
+          removed: [...drift.removed],
+          changed: [...drift.changed],
+          shadowedAdded: [...drift.shadowedAdded],
+          shadowedRemoved: [...drift.shadowedRemoved],
+          reordered: drift.reordered
+        });
+      }
+      return this.#projectExtensionConnection(entry);
+    } catch (error) {
+      const openedSession = entry.session;
+      entry.session = null;
+      if (!this.#isCurrentExtensionConnection(entry)) {
+        if (openedSession) {
+          try {
+            await openedSession.close();
+          } catch {
+            /* Best-effort teardown of the abandoned session. */
+          }
+        }
+        return this.#projectExtensionConnection(entry);
+      }
+      entry.catalog = null;
+      entry.serverInfo = null;
+      entry.protocolVersion = null;
+      entry.status = 'error';
+      entry.error = classifyExtensionConnectError(error);
+      this.#rearbitrateExtensionCatalogs([entry.extensionId]);
+      this.#emitExtensionAuditEvent('extension_connect_failed', {
+        extensionId: entry.extensionId,
+        code: entry.error.code,
+        ...(entry.error.details !== undefined ? { details: entry.error.details } : {})
+      });
+      if (openedSession) {
+        try {
+          await openedSession.close();
+        } catch {
+          /* Best-effort teardown; the failed connection never leaks a session. */
+        }
+      }
+      return this.#projectExtensionConnection(entry);
+    } finally {
+      entry.pending = null;
+      this.#syncExtensionConnections();
+    }
+  }
+
+  /**
+   * Closes and drops one live connection: the entry leaves the map immediately
+   * (so any in-flight discovery is abandoned and reported cancelled), the
+   * session is aborted and closed best-effort, the remaining catalogs re-
+   * arbitrate, the affected attachment statuses sync, and the disconnect is
+   * audited.
+   *
+   * @param entry - Live connection entry to drop.
+   * @param reason - Audit reason (`operator`, `reconnect`, or `removed`).
+   */
+  async #closeExtensionConnection(
+    entry: LiveExtensionConnection,
+    reason: 'operator' | 'reconnect' | 'removed'
+  ): Promise<void> {
+    entry.status = 'error';
+    entry.error = Object.freeze({ code: MCP_CLIENT_ERROR_CODES.CANCELLED });
+    this.#extensionConnections.delete(entry.extensionId);
+    entry.abortController.abort();
+    const session = entry.session;
+    entry.session = null;
+    entry.catalog = null;
+    entry.pending = null;
+    this.#rearbitrateExtensionCatalogs([entry.extensionId]);
+    this.#emitExtensionAuditEvent('extension_disconnected', { extensionId: entry.extensionId, reason });
+    if (session) {
+      try {
+        await session.close();
+      } catch {
+        /* Best-effort teardown; a failed close never fails the disconnect. */
+      }
+    }
+    this.#syncExtensionConnections();
+  }
+
+  /**
+   * Re-arbitrates every live catalog by explicit connection-completion
+   * sequence, updates each entry's `connected`/`conflict` status and conflict
+   * list, emits `extension_conflict` on conflict transitions (both entering
+   * and clearing), rebuilds the call-name resolver, and syncs the affected
+   * realm attachment statuses through the safe-state sweep.
+   *
+   * @param affectedExtensionIds - Extension ids whose connection state changed
+   *   (removed ids included, since they no longer appear in the map).
+   */
+  #rearbitrateExtensionCatalogs(affectedExtensionIds: readonly string[]): void {
+    const entries: Array<{ entry: LiveExtensionConnection; catalog: ExtensionCatalog }> = [];
+    for (const entry of this.#extensionConnections.values()) {
+      if (entry.catalog) entries.push({ entry, catalog: entry.catalog });
+    }
+    const outcomes = arbitrateExtensionCatalogs(entries.map(({ entry, catalog }) => ({
+      extensionId: entry.extensionId,
+      sequence: entry.sequence,
+      catalog
+    })));
+    const outcomeById = new Map(outcomes.map((outcome) => [outcome.extensionId, outcome]));
+    for (const { entry } of entries) {
+      const outcome = outcomeById.get(entry.extensionId);
+      if (!outcome) continue;
+      const wasConflicted = entry.status === 'conflict';
+      entry.conflicts = outcome.conflicts;
+      entry.status = outcome.status === 'active' ? 'connected' : 'conflict';
+      if (!wasConflicted && entry.status === 'conflict') {
+        this.#emitExtensionAuditEvent('extension_conflict', {
+          extensionId: entry.extensionId,
+          status: 'conflict',
+          conflicts: outcome.conflicts.map((conflict) => ({
+            callName: conflict.callName,
+            otherExtensionId: conflict.otherExtensionId
+          }))
+        });
+      } else if (wasConflicted && entry.status === 'connected') {
+        this.#emitExtensionAuditEvent('extension_conflict', {
+          extensionId: entry.extensionId,
+          status: 'active',
+          conflicts: []
+        });
+      }
+    }
+    this.#rebuildExtensionCallNameResolver();
+    const affected = new Set<string>(affectedExtensionIds);
+    for (const entry of this.#extensionConnections.values()) affected.add(entry.extensionId);
+    this.#syncExtensionAttachmentStatuses(affected);
+    this.#syncExtensionConnections();
+  }
+
+  /**
+   * Rebuilds the active call-name resolver from the arbitration-active
+   * catalogs in connection-completion sequence order. The first active
+   * extension to expose a call name keeps it (arbitration already guarantees
+   * exclusivity; the claim check is defense-in-depth).
+   */
+  #rebuildExtensionCallNameResolver(): void {
+    const resolver = new Map<string, { extensionId: string; serverToolName: string }>();
+    const active = [...this.#extensionConnections.values()]
+      .filter((entry) => entry.status === 'connected' && entry.conflicts.length === 0 && entry.catalog !== null)
+      .sort((a, b) => (
+        a.sequence - b.sequence
+        || (a.extensionId < b.extensionId ? -1 : a.extensionId > b.extensionId ? 1 : 0)
+      ));
+    for (const entry of active) {
+      const catalog = entry.catalog;
+      if (!catalog) continue;
+      for (const tool of catalog.tools) {
+        if (!resolver.has(tool.callName)) {
+          resolver.set(tool.callName, Object.freeze({
+            extensionId: entry.extensionId,
+            serverToolName: tool.serverToolName
+          }));
+        }
+      }
+    }
+    this.#extensionCallNameResolver = resolver;
+  }
+
+  /**
+   * Syncs the realm attachment status of every affected extension to its live
+   * connection state — `connected` → `active`, `conflict` → `conflict`,
+   * `error`/`disconnected` → `unavailable` — and invokes the P2.4 safe-state
+   * sweep for every realm whose attachment actually changed. A `connecting`
+   * entry never churns attachment state.
+   *
+   * @param extensionIds - Extension ids whose connection state changed.
+   */
+  #syncExtensionAttachmentStatuses(extensionIds: ReadonlySet<string>): void {
+    if (extensionIds.size === 0) return;
+    const desired = new Map<string, 'active' | 'conflict' | 'unavailable'>();
+    for (const extensionId of extensionIds) {
+      const entry = this.#extensionConnections.get(extensionId);
+      if (entry && entry.status === 'connecting') continue;
+      if (entry && entry.status === 'connected') {
+        desired.set(extensionId, 'active');
+      } else if (entry && entry.status === 'conflict') {
+        desired.set(extensionId, 'conflict');
+      } else {
+        desired.set(extensionId, 'unavailable');
+      }
+    }
+    if (desired.size === 0) return;
+
+    const impactedRealms = new Set<string>();
+    for (const realm of this.#realmRegistry.listRealms()) {
+      const attachments = realm.extensions;
+      if (!attachments || attachments.length === 0) continue;
+      let changed = false;
+      const synced = attachments.map((attachment) => {
+        const next = desired.get(attachment.extensionId);
+        if (next === undefined || attachment.status === next) return attachment;
+        changed = true;
+        return Object.freeze({ ...attachment, status: next });
+      });
+      if (!changed) continue;
+      try {
+        this.#realmRegistry.updateRealm(realm.id, { extensions: synced });
+        impactedRealms.add(realm.id);
+      } catch {
+        // A rejected sync leaves the persisted attachment state untouched.
+      }
+    }
+    for (const realmId of impactedRealms) {
+      this.#sweepRealmExtensionAuthorizations(realmId);
+    }
+  }
+
+  /**
+   * Live attachment status of one extension, or `null` when no live state
+   * constrains it: no live connection, or a `connecting` session (transient).
+   * Used by the attachment heal so a disconnected extension is not healed back
+   * to `active` while its live state says otherwise.
+   *
+   * @param extensionId - Extension id.
+   * @returns The live status, or `null` when unconstrained.
+   */
+  #liveAttachmentStatus(extensionId: string): 'active' | 'conflict' | 'unavailable' | null {
+    const entry = this.#extensionConnections.get(extensionId);
+    if (!entry || entry.status === 'connecting') return null;
+    if (entry.status === 'connected') return 'active';
+    if (entry.status === 'conflict') return 'conflict';
+    return 'unavailable';
+  }
+
+  /**
+   * Whether a live entry is still the map's current registration for its id.
+   *
+   * @param entry - Candidate entry.
+   * @returns `true` when the entry is current.
+   */
+  #isCurrentExtensionConnection(entry: LiveExtensionConnection): boolean {
+    return this.#extensionConnections.get(entry.extensionId) === entry;
+  }
+
+  /**
+   * Builds one frozen, secret-free connection projection.
+   *
+   * @param entry - Live connection entry.
+   * @returns Frozen projection.
+   */
+  #projectExtensionConnection(entry: LiveExtensionConnection): ExtensionConnectionProjection {
+    const catalog = entry.catalog;
+    let catalogProjection: Record<string, ExtensionConnectionCatalogEntry> | null = null;
+    const shadows: Array<{ callName: string; serverToolName: string }> = [];
+    if (catalog) {
+      catalogProjection = {};
+      for (const tool of catalog.tools) {
+        catalogProjection[tool.callName] = Object.freeze({
+          extensionId: entry.extensionId,
+          serverToolName: tool.serverToolName,
+          ...(tool.description !== undefined ? { description: tool.description } : {}),
+          ...(tool.inputSchema !== undefined ? { inputSchema: tool.inputSchema } : {})
+        });
+      }
+      for (const shadow of catalog.shadowedTools) {
+        shadows.push(Object.freeze({ callName: shadow.callName, serverToolName: shadow.serverToolName }));
+      }
+    }
+    return Object.freeze({
+      extensionId: entry.extensionId,
+      status: entry.status,
+      serverInfo: entry.serverInfo,
+      protocolVersion: entry.protocolVersion,
+      catalog: catalogProjection ? Object.freeze(catalogProjection) : null,
+      shadows: Object.freeze(shadows),
+      conflicts: entry.conflicts,
+      drift: entry.drift,
+      error: entry.error,
+      connectedAt: entry.connectedAt,
+      discoveredAt: entry.discoveredAt,
+      digest: catalog ? catalog.digest : null
+    });
+  }
+
+  /**
+   * Lists every connection projection in completion-sequence order (in-flight
+   * connects last, by extension id).
+   *
+   * @returns Projections in deterministic order.
+   */
+  #listExtensionConnectionProjections(): ExtensionConnectionProjection[] {
+    return [...this.#extensionConnections.values()]
+      .sort((a, b) => {
+        const aOrder = a.sequence > 0 ? a.sequence : Number.MAX_SAFE_INTEGER;
+        const bOrder = b.sequence > 0 ? b.sequence : Number.MAX_SAFE_INTEGER;
+        if (aOrder !== bOrder) return aOrder - bOrder;
+        return a.extensionId < b.extensionId ? -1 : a.extensionId > b.extensionId ? 1 : 0;
+      })
+      .map((entry) => this.#projectExtensionConnection(entry));
+  }
+
+  /**
+   * Mirrors the live connection map into the reactive `extensionConnections`
+   * projection.
+   */
+  #syncExtensionConnections(): void {
+    this.extensionConnections = Object.freeze(this.#listExtensionConnectionProjections());
+  }
+
+  /**
+   * Drops every live connection without audit (hydration/reset/destroy
+   * teardown): aborts in-flight connects, fires best-effort session closes,
+   * and clears the resolver map and the reactive projection.
+   */
+  #teardownExtensionConnections(): void {
+    const entries = [...this.#extensionConnections.values()];
+    this.#extensionConnections.clear();
+    this.#extensionCallNameResolver.clear();
+    this.extensionConnections = Object.freeze([]);
+    for (const entry of entries) {
+      // In-flight connect callers observe a cancelled projection, never a
+      // stale `connecting` one.
+      entry.status = 'error';
+      entry.error = Object.freeze({ code: MCP_CLIENT_ERROR_CODES.CANCELLED });
+      entry.abortController.abort();
+      const session = entry.session;
+      if (session) {
+        void session.close().catch(() => undefined);
+      }
+    }
   }
 
   // ==========================================================================
@@ -8772,6 +9705,10 @@ export class SandboxStore {
     // the safe-state sweep queue and the fail-closed guard start clean.
     this.#pendingExtensionReauthorize.clear();
     this.#extensionSweepBlocked.clear();
+    // Extension wave (P3.1): hydration is a restore boundary — live sessions
+    // and catalogs belong to the topology being replaced, and the restored
+    // state is by contract not-connected (no auto-connect here or later).
+    this.#teardownExtensionConnections();
     try {
       const persistedState = loadSandboxState({
         onRecovery: (info) => {
@@ -9016,9 +9953,12 @@ export class SandboxStore {
     this.#capabilityHealGrants = [];
     this.capabilityHealReport = null;
     // Extension wave: a reset drops the safe-state sweep queue and the
-    // fail-closed sweep guard (no agent survives a runtime reset).
+    // fail-closed sweep guard (no agent survives a runtime reset), and it
+    // tears down every live extension connection (session-only state never
+    // outlives the topology it was opened against).
     this.#pendingExtensionReauthorize.clear();
     this.#extensionSweepBlocked.clear();
+    this.#teardownExtensionConnections();
     // Wave I: a reset drops the last legacy-workspace remap report too.
     this.legacyWorkspaceRemapReport = null;
     this.#runtime.reset();
@@ -9068,6 +10008,10 @@ export class SandboxStore {
    * ```
    */
   destroy(): void {
+    // Extension wave (P3.1): no live session may outlive the store — abort
+    // in-flight connects and fire best-effort closes before the runtime
+    // subscription goes away.
+    this.#teardownExtensionConnections();
     if (typeof this.#unsubRuntime === 'function') {
       this.#unsubRuntime();
       this.#unsubRuntime = null;
@@ -10411,13 +11355,17 @@ export class SandboxStore {
    * Heals the realm-attachment topology: an `active` attachment whose extension
    * carries no install record degrades to `unavailable` (the attachment and its
    * approval stamp are never dropped), and an `unavailable` attachment whose
-   * extension is installed returns to `active`. A `conflict` attachment is
-   * never rewritten in either direction — conflict resolution belongs to
-   * catalog-time work. The sweep runs after hydration and after every
-   * in-session registry mutation (the install/reconcile paths flow through the
-   * registry's persistence seam); during hydration the suppression guard keeps
-   * the debounced autosave inert, so persisted bytes are never rewritten by the
-   * hydration pass.
+   * extension is installed returns to `active`. A live connection constraints
+   * the status when one exists: `connected` → `active`, `conflict` →
+   * `conflict`, `error` → `unavailable`; a `connecting` session (transient) and
+   * a disconnected extension impose no constraint, so P2 install-only healing
+   * still applies after hydration. When no live connection constrains the
+   * attachment, a `conflict` attachment is never rewritten in either direction
+   * — conflict resolution belongs to catalog-time work. The sweep runs after
+   * hydration and after every in-session registry mutation (the
+   * install/reconcile paths flow through the registry's persistence seam);
+   * during hydration the suppression guard keeps the debounced autosave inert,
+   * so persisted bytes are never rewritten by the hydration pass.
    */
   #healRealmExtensionAttachments(): void {
     for (const realm of this.#realmRegistry.listRealms()) {
@@ -10425,6 +11373,12 @@ export class SandboxStore {
       if (!attachments || attachments.length === 0) continue;
       let changed = false;
       const healed = attachments.map((attachment) => {
+        const live = this.#liveAttachmentStatus(attachment.extensionId);
+        if (live !== null) {
+          if (attachment.status === live) return attachment;
+          changed = true;
+          return Object.freeze({ ...attachment, status: live });
+        }
         const installed = this.#extensionRegistry.getExtension(attachment.extensionId) !== null;
         if (!installed && attachment.status === 'active') {
           changed = true;

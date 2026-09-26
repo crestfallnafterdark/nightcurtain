@@ -26,17 +26,28 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 - `INV-IDENTITY` — Install ids are unique per registry: installExtension refuses a duplicate id, removeExtension of an unknown id is a `false` no-op, and attachments are unique per extension id.
 - `INV-CALL-NAME-HYGIENE` — Attachment tool selections carry unique sanitized call names that are neither the internal wildcard nor a reserved baked/publishing name; resolution derives call names the same way and fails closed on reserving or colliding derivations.
 - `INV-EXACT-RESOLUTION` — A tool reference resolves only when its extension is installed AND carries an active attachment AND the attachment's tool selection covers the derived call name; missing extensions and missing tools are reported in declared order and never auto-satisfied.
+- `INV-CATALOG-DETERMINISM` — Indexing walks server order once and is a pure function of the discovery output: reserved derived names fail the catalog closed, intra-server duplicates resolve first-wins with the shadow recorded, the digest covers the canonical ordered tools+shadows projection and is stable across key order.
+- `INV-ARBITRATION-DETERMINISM` — Arbitration processes catalogs by ascending explicit connection-completion sequence (ties broken by extension id) and never by insertion order; the first active extension keeps every contested call name and every later conflicting extension is not activated at all.
 
 ## Decisions
 
 - The global install registry owns installation records only and carries no tool catalog or connection state; realm attachments stay realm-local records validated through this module's attachment normalizer, and realm deletion carries them without a parallel store map
-- Resolution reads host state passed by the caller (installs + attachments) and returns `resolvedTools` as a call name → extension id projection only; conflict arbitration between two active extensions that provide one call name is deferred to catalog-time work, which is the documented seam
+- Resolution reads host state passed by the caller (installs + attachments) and returns `resolvedTools` as a call name → extension id projection only; conflict arbitration between two active extensions that provide one call name is pure catalog-time logic in this module, while the live connection state that feeds it stays at the composition root
 
 ## Surface
 
 ```ts
 // @public
+export function arbitrateExtensionCatalogs(input: readonly ExtensionCatalogArbitrationInput[]): readonly ExtensionCatalogArbitration[];
+
+// @public
 export function createExtensionRegistry(options?: ExtensionRegistryOptions): ExtensionRegistry;
+
+// @public
+export function diffExtensionCatalogs(previous: ExtensionCatalog | null, next: ExtensionCatalog): ExtensionCatalogDiff;
+
+// @public
+export const EXTENSION_CATALOG_DIGEST_PREFIX = "extcat1:";
 
 // @public
 export const EXTENSION_KINDS: Readonly<{
@@ -50,10 +61,82 @@ export const EXTENSION_REGISTRY_ERROR_CODES: Readonly<{
     readonly ERR_EXTENSION_DUPLICATE_ID: 'ERR_EXTENSION_DUPLICATE_ID';
     readonly ERR_EXTENSION_INVALID_ATTACHMENT: 'ERR_EXTENSION_INVALID_ATTACHMENT';
     readonly ERR_EXTENSION_INVALID_RESOLUTION: 'ERR_EXTENSION_INVALID_RESOLUTION';
+    readonly ERR_EXTENSION_INVALID_CATALOG: 'ERR_EXTENSION_INVALID_CATALOG';
+    readonly ERR_EXTENSION_INVALID_ARBITRATION: 'ERR_EXTENSION_INVALID_ARBITRATION';
 }>;
 
 // @public
 export type ExtensionAttachmentStatus = 'active' | 'conflict' | 'unavailable';
+
+// @public
+export interface ExtensionCatalog {
+    readonly digest: string;
+    readonly shadowedTools: readonly ExtensionCatalogShadow[];
+    readonly tools: readonly ExtensionCatalogTool[];
+}
+
+// @public
+export interface ExtensionCatalogArbitration {
+    readonly conflicts: readonly ExtensionCatalogConflict[];
+    readonly extensionId: string;
+    readonly status: 'active' | 'conflict';
+}
+
+// @public
+export interface ExtensionCatalogArbitrationInput {
+    readonly catalog: ExtensionCatalog;
+    readonly extensionId: string;
+    readonly sequence: number;
+}
+
+// @public
+export interface ExtensionCatalogConflict {
+    readonly callName: string;
+    readonly otherExtensionId: string;
+}
+
+// @public
+export interface ExtensionCatalogDiff {
+    readonly added: readonly string[];
+    readonly changed: readonly string[];
+    readonly digests: {
+        readonly previous: string | null;
+        readonly next: string;
+    };
+    readonly removed: readonly string[];
+    readonly reordered: boolean;
+    readonly shadowedAdded: readonly string[];
+    readonly shadowedRemoved: readonly string[];
+}
+
+// @public
+export interface ExtensionCatalogDiscoveryTool {
+    readonly description?: string;
+    readonly inputSchema?: unknown;
+    readonly name: string;
+    readonly outputSchema?: unknown;
+}
+
+// @public
+export interface ExtensionCatalogIndexInput {
+    readonly extensionId: string;
+    readonly tools: readonly ExtensionCatalogDiscoveryTool[];
+}
+
+// @public
+export interface ExtensionCatalogShadow {
+    readonly callName: string;
+    readonly serverToolName: string;
+}
+
+// @public
+export interface ExtensionCatalogTool {
+    readonly callName: string;
+    readonly description?: string;
+    readonly inputSchema?: unknown;
+    readonly outputSchema?: unknown;
+    readonly serverToolName: string;
+}
 
 // @public
 export interface ExtensionHttpTransportHint {
@@ -164,6 +247,9 @@ export type ExtensionToolSelection = 'all' | readonly string[];
 export type ExtensionTransportHint = ExtensionHttpTransportHint | ExtensionStdioTransportHint | ExtensionPackTransportHint;
 
 // @public
+export function indexExtensionCatalog(input: ExtensionCatalogIndexInput): ExtensionCatalog;
+
+// @public
 export function isRealmExtensionAttachment(value: unknown): value is RealmExtensionAttachment;
 
 // @public
@@ -208,6 +294,39 @@ export function resolveExtensionRequests(input: ExtensionResolutionInput): Exten
 
 ## API docs
 
+### `arbitrateExtensionCatalogs` — function
+
+Arbitrates a set of live catalogs deterministically into per-extension activation statuses.
+
+Entries are processed by ascending connection-completion `sequence` (the only ordering authority; equal sequences order by extension id by UTF-16 code units, so the result never depends on map/array insertion order). Each call name is claimed by the first active extension that exposes it; every later extension exposing a claimed name is marked `conflict` with the contested `{ callName, otherExtensionId }` pairs and is **not activated at all** — its non-conflicting call names are withheld too, so a conflicting extension can never silently shadow another. A conflict-free extension is `active` and claims every one of its call names. Intra-server shadowing is already resolved inside each catalog, so it never surfaces as a global conflict.
+
+The result is frozen, in sequence order.
+
+#### Parameters
+
+- `input` — Live catalogs with their connection-completion sequences
+
+#### Returns
+
+Frozen per-extension arbitration outcomes in sequence order
+
+#### Examples
+
+```typescript
+import { arbitrateExtensionCatalogs } from './extensionRegistry/index.ts';
+
+const outcomes = arbitrateExtensionCatalogs([
+  { extensionId: 'ext-a', sequence: 1, catalog: catalogA },
+  { extensionId: 'ext-b', sequence: 2, catalog: catalogB }
+]);
+// outcomes => [{ extensionId: 'ext-a', status: 'active', conflicts: [] },
+//              { extensionId: 'ext-b', status: 'conflict', conflicts: [{ callName: 'shared', otherExtensionId: 'ext-a' }] }]
+```
+
+#### Throws
+
+- ExtensionRegistryError With `ERR_EXTENSION_INVALID_ARBITRATION` when the input is malformed
+
 ### `createExtensionRegistry` — function
 
 Creates the extension registry service.
@@ -222,6 +341,38 @@ Overlays adapter-loaded records by id (last-wins) and returns the frozen CRUD, a
 
 The frozen registry service
 
+### `diffExtensionCatalogs` — function
+
+Computes the reconnect drift diff between the previous and the new catalog of one extension.
+
+`added`/`removed`/`changed` carry call names (changed = same call name whose canonical tool projection differs, including the wire name, description, or any schema byte); `shadowedAdded`/`shadowedRemoved` disclose intra-server shadow-set changes; `reordered` reports a changed relative order of the common call names; `digests.previous`/`digests.next` carry the digest pair (`previous` is `null` when no previous catalog existed). Added/changed names follow new-catalog order, removed/shadowed-removed names follow previous-catalog order.
+
+#### Parameters
+
+- `previous` — Previous catalog, or `null` when there was none
+- `next` — New catalog
+
+#### Returns
+
+The frozen drift disclosure
+
+#### Examples
+
+```typescript
+import { diffExtensionCatalogs } from './extensionRegistry/index.ts';
+
+const diff = diffExtensionCatalogs(previousCatalog, nextCatalog);
+// diff.added/removed/changed => call-name sets; diff.digests => { previous, next }
+```
+
+#### Throws
+
+- ExtensionRegistryError With `ERR_EXTENSION_INVALID_CATALOG` when either catalog is malformed
+
+### `EXTENSION_CATALOG_DIGEST_PREFIX` — variable
+
+Version prefix of the catalog digest, so a future algorithm change is detectable instead of silently reinterpreted.
+
 ### `EXTENSION_KINDS` — variable
 
 Frozen runtime vocabulary of the extension kinds; ExtensionKind is its compile-time mirror.
@@ -233,6 +384,100 @@ Frozen dictionary of extension-registry error codes.
 ### `ExtensionAttachmentStatus` — type alias
 
 Activation state of one realm-local attachment. `active` means the realm accepts the extension; `conflict` marks a conflicting activation the operator must resolve; `unavailable` marks an attachment whose extension is not currently installed or usable.
+
+### `ExtensionCatalog` — interface
+
+Frozen catalog projection of one extension discovery. Catalogs are live session state: they are never persisted and are rebuilt on every explicit operator connect/reconnect.
+
+#### Members
+
+- **`digest`** — Deterministic non-crypto digest over the canonical ordered projection.
+- **`shadowedTools`** — Intra-server shadowed tools in server order; empty when none collided.
+- **`tools`** — Cataloged tools in server order, with intra-server shadows removed.
+
+### `ExtensionCatalogArbitration` — interface
+
+Per-extension arbitration outcome. `active` means every cataloged call name is exclusively claimed; `conflict` means the extension is not activated at all (its other, non-conflicting call names are not exposed either) until a later re-arbitration clears the conflicts.
+
+#### Members
+
+- **`conflicts`** — Contested call names in catalog order; empty for `active`.
+- **`extensionId`** — Host-unique extension id.
+- **`status`** — Arbitration status: `active` when conflict-free, `conflict` otherwise.
+
+### `ExtensionCatalogArbitrationInput` — interface
+
+One live catalog participating in `arbitrateExtensionCatalogs`.
+
+#### Members
+
+- **`catalog`** — The extension's discovered catalog.
+- **`extensionId`** — Host-unique extension id.
+- **`sequence`** — Connection-completion sequence number; the only arbitration ordering authority.
+
+### `ExtensionCatalogConflict` — interface
+
+One call-name conflict of an extension against an earlier active extension: the contested call name and the extension that claimed it first.
+
+#### Members
+
+- **`callName`** — Contested derived call name.
+- **`otherExtensionId`** — Earlier (sequence-smaller) extension that keeps the call name.
+
+### `ExtensionCatalogDiff` — interface
+
+Reconnect drift disclosure between two catalogs of one extension: call-name sets (in catalog order) plus the digest pair, so an operator reconnect can disclose exactly what changed. Never mutates grants by itself; grant reconciliation stays with the safe-state reauthorization sweep.
+
+#### Members
+
+- **`added`** — Call names present in the new catalog only, in new-catalog order.
+- **`changed`** — Common call names whose tool facts differ, in new-catalog order.
+- **`digests`** — Digest pair: the previous catalog digest (`null` when there was none) and the new one.
+- **`removed`** — Call names present in the previous catalog only, in previous-catalog order.
+- **`reordered`** — `true` when the relative order of the common call names changed.
+- **`shadowedAdded`** — Intra-server shadow call names present only in the new catalog, in new-catalog order.
+- **`shadowedRemoved`** — Intra-server shadow call names present only in the previous catalog, in previous-catalog order.
+
+### `ExtensionCatalogDiscoveryTool` — interface
+
+One tool advertised by a discovered MCP server, as catalog indexing receives it: the wire tool name plus the optional server-supplied description and raw input/output schemas (surfaced verbatim, never validated against a dialect here).
+
+#### Members
+
+- **`description`** — Optional server-supplied human-readable description.
+- **`inputSchema`** — Raw JSON Schema of the tool input, when the server supplied one.
+- **`name`** — Wire tool name exactly as the server advertised it.
+- **`outputSchema`** — Raw JSON Schema of the tool structured output, when the server supplied one.
+
+### `ExtensionCatalogIndexInput` — interface
+
+Input accepted by `indexExtensionCatalog`: the extension identity (used for validation messages only) plus the discovered tool list in server order.
+
+#### Members
+
+- **`extensionId`** — Host-unique extension id the discovery belongs to.
+- **`tools`** — Discovered tools in the server's advertised order.
+
+### `ExtensionCatalogShadow` — interface
+
+One intra-server shadowed tool: a later server tool whose derived call name was already claimed by an earlier tool of the same server. Shadowing is deterministic (first occurrence in server order wins), recorded here, and disclosed — never silently dropped and never auto-suffixed.
+
+#### Members
+
+- **`callName`** — Derived call name the earlier tool claimed.
+- **`serverToolName`** — Shadowed (later) wire tool name.
+
+### `ExtensionCatalogTool` — interface
+
+One cataloged tool: the sanitized model-facing call name plus the wire facts behind it. Absent optional facts stay absent (nothing is fabricated).
+
+#### Members
+
+- **`callName`** — Sanitized model-facing call name (`deriveToolCallName(serverToolName)`).
+- **`description`** — Optional server-supplied description.
+- **`inputSchema`** — Raw JSON Schema of the tool input, deep-frozen, when supplied.
+- **`outputSchema`** — Raw JSON Schema of the tool structured output, deep-frozen, when supplied.
+- **`serverToolName`** — Wire tool name exactly as the server advertised it.
 
 ### `ExtensionHttpTransportHint` — interface
 
@@ -402,6 +647,39 @@ Realm-level tool selection of one attachment: every tool the extension provides,
 
 Transport hint union carried by install records and resolution requests. Hints are descriptive: no connection is ever attempted from them.
 
+### `indexExtensionCatalog` — function
+
+Builds one frozen catalog projection from one extension's discovery output.
+
+Processing is in server order and fully deterministic: 1. every tool derives its model-facing call name through the canonical `deriveToolCallName` rule; 2. a derived name reserved by the baked/publishing/alias/prototype surface fails the whole catalog closed with `ERR_EXTENSION_INVALID_CATALOG`, naming every offending server tool and reserved call name; 3. an intra-server duplicate derived name resolves first-wins — the earlier server tool keeps the name and the later one is recorded in `shadowedTools` (never dropped silently, never suffixed); 4. the digest is computed over the canonical ordered projection.
+
+The result (including every embedded schema) is deeply frozen.
+
+#### Parameters
+
+- `input` — Extension id plus discovered tools in server order
+
+#### Returns
+
+The frozen catalog projection
+
+#### Examples
+
+```typescript
+import { indexExtensionCatalog } from './extensionRegistry/index.ts';
+
+const catalog = indexExtensionCatalog({
+  extensionId: 'acme-scoring',
+  tools: [{ name: 'text.similarity', inputSchema: { type: 'object' } }]
+});
+// catalog.tools[0].callName => 'text_similarity'
+// catalog.digest => 'extcat1:…'
+```
+
+#### Throws
+
+- ExtensionRegistryError With `ERR_EXTENSION_INVALID_CATALOG` when the input or a tool is malformed or a reserved call name is derived
+
 ### `isRealmExtensionAttachment` — function
 
 Narrows an unknown value to a valid attachment record. Convenience predicate over normalizeAttachment for structural filtering.
@@ -521,9 +799,9 @@ const resolution = resolveExtensionRequests({
 
 ## Doc coverage
 
-- Top-level exports: 31
-- Declarations (exports + members): 85
-- Documented declarations: 85 / 85 (100%)
+- Top-level exports: 44
+- Declarations (exports + members): 129
+- Documented declarations: 129 / 129 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): none

@@ -37,9 +37,13 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 - Template registry honesty: `importRealmTemplate`/`deleteRealmTemplate` mutate the effective catalog and persist the snapshot synchronously; a failed write (quota/unavailable storage) rolls the mutation back and surfaces the typed `ERR_STORE_TEMPLATE_PERSIST_FAILED`, so the registry is never silently in-memory-only. Imports are capped at 2 MiB per bundle and 3 MiB total (`ERR_STORE_TEMPLATE_TOO_LARGE`), persisted as canonical transport payloads, and re-parsed/re-capped fail-closed on hydration without ever rewriting persisted bytes. `previewRealmTemplateImport` runs the identical parse → cap → label pipeline with zero side effects (`dry_run`), so preview and import can never disagree.
 - Publishing surface: the store is the host-side realm publishing composition root — it exposes the frozen `RealmPublishingPort` (real import path, effective-catalog resolution, session candidate store) to the store-owned runtime; pending instance payloads are session-only and cleared by a reset; approved template authorities are applied under the operator principal as ordinary registry grants (`metaAuthorityGrants`, canonical identity keys, hydration re-applied) and a `templateAuthorityTrust` record auto-approves only exact declared matches at a later launch. A template declaring an authority id unknown to this host fails the launch closed (`ERR_TEMPLATE_AUTHORITY_UNSUPPORTED`), approvals beyond declarations and malformed approvals are rejected (`ERR_STORE_INVALID_PARAMS`), and grant-free/trust-free snapshots keep every existing field and byte.
 - Realm launch resolution: a provider-bearing template launches — the retired providers gate no longer refuses it — and its requested extensions plus `<providerId>::<serverToolName>` references resolve against the global install registry and the Realm's attachments: installed-and-approved requests attach under the operator principal, unresolved requests ride the receipt's missing-extension disclosure and `instance.missingExtensions`, resolved tools are recorded as `instance.resolvedTools` (sanitized call name → extension id), and an attached payload/package (or the operator-assembled explicit inputs) is still validated against the effective template contract — including the pinned version — before the Realm record exists, so launch mismatches only with the explicit `allowVersionMismatch` confirmation, which rides the receipt as a warning.
-- Extension surface: the store is the extension composition root — global install records live in one injected registry persisted additively as `extensions`, realm attachments ride the realm records, install/remove/attach/detach validate and emit `extension_installed`/`extension_removed`/`extension_attached`/`extension_detached` audit events on the runtime stream, `removeExtension` refuses an extension any Realm still attaches, an `active` attachment for an unknown extension degrades to `unavailable` and returns to `active` once the extension is installed again while a `conflict` attachment is never rewritten by the heal, and nothing ever connects or grants runtime authorization from these records.
+- Extension surface: the store is the extension composition root — global install records live in one injected registry persisted additively as `extensions`, realm attachments ride the realm records, install/remove/attach/detach validate and emit `extension_installed`/`extension_removed`/`extension_attached`/`extension_detached` audit events on the runtime stream, `removeExtension` refuses an extension any Realm still attaches (and drops its live session), an `active` attachment for an unknown extension degrades to `unavailable` and returns to `active` once the extension is installed again while the install-only heal never rewrites a `conflict` attachment, and install/attachment records alone never connect, discover a catalog, or grant runtime authorization.
 - Safe-state extension reauthorization (extension wave, P2.4): the store owns the queue — attach/detach and per-agent `extensionTools` selector edits recompute each affected member's effective grant set and apply it through the operator-gated `reauthorizeAgent` at the next safe point: an idle member synchronously at the mutation point, a busy member queued and applied on its next `turn_complete` (never mid-turn). A queued member that terminates is dropped. Selector names that resolve to nothing are dropped fail-closed and warned, never granted.
 - Extension authority is descriptor-exact: the effective grants computed here feed `AuthorityDescriptor.extensions`; realm attachment or selector state alone never authorizes a call, the wildcard `'*'`/privilege/selectors/aliases never imply an extension entry, and the runtime's dispatcher branch (unbound until P3) authorizes only exact membership.
+- Extension connections are session-only and operator-initiated: live sessions, discovered catalogs, and arbitration state live in-memory (`#extensionConnections` plus the reactive `extensionConnections` projection), are never persisted (not in install records, not in realm records, not in the snapshot), are dropped at hydration/reset/destroy, and are only ever created by an explicit `connectExtension`/`reconnectExtension` call — never at load, hydration, or launch.
+- Extension connection approval boundary: when an install record carries an explicit `approvedUrl`, it must parse as an absolute URL and be URL-equal (`href`) to the transport URL; a stale or inconsistent approval is refused with `ERR_STORE_EXTENSION_INVALID_ENDPOINT` before the plaintext gate, any vault read, and any network activity, and a connection only ever dials `transportHint.url`.
+- Extension connection credential gate: a `credentialId` on a non-`https:` endpoint is refused with `ERR_STORE_EXTENSION_PLAINTEXT_CREDENTIAL` before any vault read or network activity, a bound credential the vault cannot resolve fails closed with `ERR_STORE_EXTENSION_CREDENTIAL_UNRESOLVED` before any network activity, plaintext local servers with no `credentialId` connect unauthenticated, and connection projections/audits/errors carry no credential material.
+- Extension catalog arbitration: live catalogs arbitrate only by explicit connection-completion sequence (never map insertion order), the earlier `active` extension keeps every contested call name, each later conflicting extension is `conflict` and not activated until a re-arbitration clears it, re-arbitration runs on every connect/disconnect/reconnect and audits conflict transitions, and realm attachment statuses follow the live state (`connected` → `active`, `conflict` → `conflict`, disconnected/`error` → `unavailable`) through the existing safe-state reauthorization sweep.
 
 ## Decisions
 
@@ -195,6 +199,50 @@ export interface EventQueryOptions {
 // @public
 export interface ExtensionAttachOptions {
     readonly toolSelection?: 'all' | readonly string[];
+}
+
+// @public
+export interface ExtensionConnectionCatalogEntry {
+    readonly description?: string;
+    readonly extensionId: string;
+    readonly inputSchema?: unknown;
+    readonly serverToolName: string;
+}
+
+// @public
+export interface ExtensionConnectionError {
+    readonly code: string;
+    readonly details?: Readonly<Record<string, unknown>>;
+}
+
+// @public
+export interface ExtensionConnectionProjection {
+    readonly catalog: Readonly<Record<string, ExtensionConnectionCatalogEntry>> | null;
+    // Warning: (ae-forgotten-export) The symbol "ExtensionCatalogConflict" needs to be exported by the entry point index.svelte.d.ts
+    readonly conflicts: readonly ExtensionCatalogConflict[];
+    readonly connectedAt: number | null;
+    readonly digest: string | null;
+    readonly discoveredAt: number | null;
+    // Warning: (ae-forgotten-export) The symbol "ExtensionCatalogDiff" needs to be exported by the entry point index.svelte.d.ts
+    readonly drift: ExtensionCatalogDiff | null;
+    readonly error: ExtensionConnectionError | null;
+    readonly extensionId: string;
+    readonly protocolVersion: string | null;
+    // Warning: (ae-forgotten-export) The symbol "McpClientServerInfo" needs to be exported by the entry point index.svelte.d.ts
+    readonly serverInfo: McpClientServerInfo | null;
+    readonly shadows: readonly {
+        readonly callName: string;
+        readonly serverToolName: string;
+    }[];
+    readonly status: ExtensionConnectionStatus;
+}
+
+// @public
+export type ExtensionConnectionStatus = 'connecting' | 'connected' | 'conflict' | 'error';
+
+// @public
+export interface ExtensionConnectOptions {
+    readonly requestTimeoutMs?: number;
 }
 
 // @public
@@ -481,6 +529,12 @@ export const SANDBOX_STORE_ERROR_CODES: {
     readonly ERR_STORE_EXTENSION_NOT_INSTALLED: 'ERR_STORE_EXTENSION_NOT_INSTALLED';
     readonly ERR_STORE_EXTENSION_ALREADY_ATTACHED: 'ERR_STORE_EXTENSION_ALREADY_ATTACHED';
     readonly ERR_STORE_EXTENSION_ATTACHED: 'ERR_STORE_EXTENSION_ATTACHED';
+    readonly ERR_STORE_EXTENSION_NOT_CONNECTABLE: 'ERR_STORE_EXTENSION_NOT_CONNECTABLE';
+    readonly ERR_STORE_EXTENSION_TRANSPORT_UNSUPPORTED: 'ERR_STORE_EXTENSION_TRANSPORT_UNSUPPORTED';
+    readonly ERR_STORE_EXTENSION_INVALID_ENDPOINT: 'ERR_STORE_EXTENSION_INVALID_ENDPOINT';
+    readonly ERR_STORE_EXTENSION_PLAINTEXT_CREDENTIAL: 'ERR_STORE_EXTENSION_PLAINTEXT_CREDENTIAL';
+    readonly ERR_STORE_EXTENSION_CREDENTIAL_UNRESOLVED: 'ERR_STORE_EXTENSION_CREDENTIAL_UNRESOLVED';
+    readonly ERR_STORE_EXTENSION_CONNECT_FAILED: 'ERR_STORE_EXTENSION_CONNECT_FAILED';
 };
 
 // @public
@@ -515,6 +569,7 @@ export class SandboxStore {
     clearPendingInstancePayload(templateId: string): boolean;
     clearTemplateAuthorityTrust(templateId: string): boolean;
     clockSnapshot: Record<string, AgentClockState>;
+    connectExtension(extensionId: string, options?: ExtensionConnectOptions): Promise<ExtensionConnectionProjection>;
     // Warning: (ae-forgotten-export) The symbol "VfsCopyOptions" needs to be exported by the entry point index.svelte.d.ts
     // Warning: (ae-forgotten-export) The symbol "CopyReceipt" needs to be exported by the entry point index.svelte.d.ts
     copyFile(srcPath: string, destPath: string, options?: VfsCopyOptions & {
@@ -532,6 +587,7 @@ export class SandboxStore {
     demoStep: string;
     destroy(): void;
     detachExtension(realmId: string, extensionId: string): RealmRecord;
+    disconnectExtension(extensionId: string): Promise<boolean>;
     dismissHydrationNotice(): void;
     downloadAllWorkspacesArchive(): Promise<ArchiveDownloadReceipt>;
     downloadAllWorkspacesFilesSeparately(onProgress?: ProgressCallback | null): Promise<SeparateDownloadReceipt>;
@@ -547,6 +603,7 @@ export class SandboxStore {
     ensureDirector(): Promise<AgentStateSnapshot>;
     error: string | null;
     exportRealmTemplate(templateId: string): string;
+    extensionConnections: readonly ExtensionConnectionProjection[];
     factoryReset(): void;
     // Warning: (ae-forgotten-export) The symbol "FileRecord" needs to be exported by the entry point index.svelte.d.ts
     fsSnapshot: Record<string, Record<string, FileRecord>>;
@@ -559,6 +616,7 @@ export class SandboxStore {
     // Warning: (ae-forgotten-export) The symbol "CredentialVault" needs to be exported by the entry point index.svelte.d.ts
     getCredentialVault(): CredentialVault;
     getExtension(extensionId: string): ExtensionInstallRecord | null;
+    getExtensionConnection(extensionId: string): ExtensionConnectionProjection | null;
     // Warning: (ae-forgotten-export) The symbol "ExtensionRegistry" needs to be exported by the entry point index.svelte.d.ts
     getExtensionRegistry(): ExtensionRegistry;
     getPendingInstancePayload(templateId: string): PendingInstancePayload | null;
@@ -597,6 +655,7 @@ export class SandboxStore {
     // Warning: (ae-forgotten-export) The symbol "InboxListOptions" needs to be exported by the entry point index.svelte.d.ts
     // Warning: (ae-forgotten-export) The symbol "InboxHeader" needs to be exported by the entry point index.svelte.d.ts
     listAgentInbox(agentId?: string | null, options?: InboxListOptions): ReadonlyArray<InboxHeader>;
+    listExtensionConnections(): readonly ExtensionConnectionProjection[];
     // Warning: (ae-forgotten-export) The symbol "ExtensionInstallRecord" needs to be exported by the entry point index.svelte.d.ts
     listExtensions(): readonly ExtensionInstallRecord[];
     listMetaAuthorityGrants(): {
@@ -623,6 +682,7 @@ export class SandboxStore {
     readAgentMessage(agentId: string, messageId: string, markAsRead?: boolean): ReadMessageResult;
     realms: RealmRecord[];
     rebindProviderCredentials(providerId: string, credentialId?: string | null): number;
+    reconnectExtension(extensionId: string, options?: ExtensionConnectOptions): Promise<ExtensionConnectionProjection>;
     recycleBin: RecycledAgentStateSnapshot[];
     get recycleBinCount(): number;
     redoAgentTurn(agentId?: string | null): RedoTurnResult | null;
@@ -630,6 +690,10 @@ export class SandboxStore {
     reset(): void;
     resetAgentClock(agentId?: string | null): ClockResetReceipt;
     resetAgentEvents(agentId?: string | null): NarrativeResetReceipt;
+    resolveExtensionCallName(callName: string): {
+        extensionId: string;
+        serverToolName: string;
+    } | null;
     restoreAgent(agentId: string): AgentStateSnapshot;
     retryAgentTurn(agentId?: string | null): Promise<TurnResult | null>;
     revokeHydrationAuthority(agentId: string, scope?: AgentIdentityScope): Promise<AuthorityDescriptor | null>;
@@ -1100,6 +1164,57 @@ Options accepted by `SandboxStore.attachExtension()`: the realm-level tool selec
 
 - **`toolSelection`** — Realm-level tool selection: `'all'` or explicit sanitized call names.
 
+### `ExtensionConnectionCatalogEntry` — interface
+
+One catalog entry of a connected extension, keyed by the sanitized model-facing call name: the owning extension id plus the wire tool name and the server-supplied description/input schema.
+
+#### Members
+
+- **`description`** — Optional server-supplied description.
+- **`extensionId`** — Owning extension id.
+- **`inputSchema`** — Raw (deep-frozen) JSON Schema of the tool input, when supplied.
+- **`serverToolName`** — Wire tool name exactly as the server advertised it.
+
+### `ExtensionConnectionError` — interface
+
+Secret-free error projection of a failed connection attempt: a classified `ERR_MCP_*` code (with the client's safe details) when the failure came from the MCP client, the typed `ERR_EXTENSION_*` code of a discovery-time catalog failure, otherwise the store's `ERR_STORE_EXTENSION_CONNECT_FAILED`. Never carries credential material or server-controlled message text.
+
+#### Members
+
+- **`code`** — Programmatic failure code.
+- **`details`** — Optional safe machine-readable context supplied by the failure classification.
+
+### `ExtensionConnectionProjection` — interface
+
+Frozen, secret-free live projection of one extension connection, consumed by the UI and by tests. Catalogs are session state: the projection is rebuilt on every connection-state change and is never persisted.
+
+#### Members
+
+- **`catalog`** — Call name → catalog entry, or `null` when no catalog was discovered.
+- **`conflicts`** — Extension↔extension conflicts from the last arbitration; empty when active.
+- **`connectedAt`** — Epoch ms the catalog completed (session connected), or `null`.
+- **`digest`** — Catalog digest, or `null` when no catalog was discovered.
+- **`discoveredAt`** — Epoch ms the catalog was discovered, or `null`.
+- **`drift`** — Drift disclosure of the last reconnect, or `null` when none was computed.
+- **`error`** — Secret-free failure projection, or `null` when the last attempt succeeded.
+- **`extensionId`** — Host-unique extension id.
+- **`protocolVersion`** — Negotiated protocol revision, or `null` before/without a session.
+- **`serverInfo`** — Server identity from the handshake, or `null` before/without a session.
+- **`shadows`** — Intra-server shadowed tools, in server order.
+- **`status`** — Current connection lifecycle status.
+
+### `ExtensionConnectionStatus` — type alias
+
+Lifecycle status of one live extension connection. `connecting` is a session in flight, `connected` an arbitration-active catalog, `conflict` a catalog that lost a call-name race (not activated), and `error` a failed or dropped session.
+
+### `ExtensionConnectOptions` — interface
+
+Options accepted by `SandboxStore.connectExtension()` / `SandboxStore.reconnectExtension()`.
+
+#### Members
+
+- **`requestTimeoutMs`** — Per-connection and per-request timeout budget in milliseconds; must be a positive finite number when present. Omitted → the `mcpClient` default.
+
 ### `ExtensionInstallInput` — interface
 
 Draft accepted by `SandboxStore.installExtension()`: the operator-supplied extension identity and non-secret metadata. The store stamps `createdAt` and defaults `status` to `'installed'` and `installSource` to `'operator'`.
@@ -1544,7 +1659,7 @@ if (redoResult?.success) {
 
 Standardized error code dictionary for the sandbox store module contract. Provides frozen programmatic error constants to eliminate brittle string matching in error handlers.
 
-Codes: - `ERR_STORE_AGENT_NOT_FOUND`: Target agent ID does not exist in active registry or recycle bin. - `ERR_STORE_NO_AGENT_SELECTED`: Conversational action invoked when `selectedAgentId === null`. - `ERR_STORE_TURN_FAILED`: LLM inference stream, provider gateway, or tool execution threw an uncaught error. - `ERR_STORE_INVALID_PARAMS`: Invalid arguments passed to store methods (e.g. a missing agent config `id`, a non-positive timer duration, or an unresolvable timer target agent). - `ERR_STORE_VFS_FAILED`: VirtualFS operation failed due to quota limit, path permission, or missing source file. - `ERR_STORE_REALM_NOT_EMPTY`: `deleteRealm` was called on a Realm that still has active or recycled members (Wave R; use the recursive override). - `ERR_STORE_REALM_PROTECTED`: `deleteRealm` targeted the seeded Generic default Realm, which can never be deleted. - `ERR_STORE_REALM_DELETE_FAILED`: a recursive Realm deletion could not purge every member, so the record was left in place (fail-closed; the error carries a report). - `ERR_TEMPLATE_PROVIDERS_UNSUPPORTED`: retired providers-gate code; `launchRealmFromTemplate` no longer emits it (provider-bearing templates resolve against installed and attached extensions and launch with missing-extension disclosure). - `ERR_TEMPLATE_AUTHORITY_UNSUPPORTED`: `launchRealmFromTemplate` targeted a template declaring a publishing authority id unknown to this host; launch is blocked fail-closed while import/validation/review accept the declaration (providers precedent). - `ERR_STORE_TEMPLATE_TOO_LARGE`: `importRealmTemplate` exceeded the per-bundle or total imported-template byte budget. - `ERR_STORE_TEMPLATE_PERSIST_FAILED`: the registry mutation could not be persisted (storage quota/unavailable), so it was rolled back — an import/delete is never silently in-memory-only. - `ERR_STORE_EXTENSION_ALREADY_INSTALLED`: `installExtension` targeted an id that already has a global install record. - `ERR_STORE_EXTENSION_NOT_INSTALLED`: `attachExtension` named an extension with no global install record. - `ERR_STORE_EXTENSION_ALREADY_ATTACHED`: `attachExtension` targeted a Realm that already attaches the extension. - `ERR_STORE_EXTENSION_ATTACHED`: `removeExtension` targeted an extension still attached to at least one Realm; detach it first.
+Codes: - `ERR_STORE_AGENT_NOT_FOUND`: Target agent ID does not exist in active registry or recycle bin. - `ERR_STORE_NO_AGENT_SELECTED`: Conversational action invoked when `selectedAgentId === null`. - `ERR_STORE_TURN_FAILED`: LLM inference stream, provider gateway, or tool execution threw an uncaught error. - `ERR_STORE_INVALID_PARAMS`: Invalid arguments passed to store methods (e.g. a missing agent config `id`, a non-positive timer duration, or an unresolvable timer target agent). - `ERR_STORE_VFS_FAILED`: VirtualFS operation failed due to quota limit, path permission, or missing source file. - `ERR_STORE_REALM_NOT_EMPTY`: `deleteRealm` was called on a Realm that still has active or recycled members (Wave R; use the recursive override). - `ERR_STORE_REALM_PROTECTED`: `deleteRealm` targeted the seeded Generic default Realm, which can never be deleted. - `ERR_STORE_REALM_DELETE_FAILED`: a recursive Realm deletion could not purge every member, so the record was left in place (fail-closed; the error carries a report). - `ERR_TEMPLATE_PROVIDERS_UNSUPPORTED`: retired providers-gate code; `launchRealmFromTemplate` no longer emits it (provider-bearing templates resolve against installed and attached extensions and launch with missing-extension disclosure). - `ERR_TEMPLATE_AUTHORITY_UNSUPPORTED`: `launchRealmFromTemplate` targeted a template declaring a publishing authority id unknown to this host; launch is blocked fail-closed while import/validation/review accept the declaration (providers precedent). - `ERR_STORE_TEMPLATE_TOO_LARGE`: `importRealmTemplate` exceeded the per-bundle or total imported-template byte budget. - `ERR_STORE_TEMPLATE_PERSIST_FAILED`: the registry mutation could not be persisted (storage quota/unavailable), so it was rolled back — an import/delete is never silently in-memory-only. - `ERR_STORE_EXTENSION_ALREADY_INSTALLED`: `installExtension` targeted an id that already has a global install record. - `ERR_STORE_EXTENSION_NOT_INSTALLED`: `attachExtension`/`connectExtension`/`disconnectExtension`/`reconnectExtension` named an extension with no global install record. - `ERR_STORE_EXTENSION_ALREADY_ATTACHED`: `attachExtension` targeted a Realm that already attaches the extension. - `ERR_STORE_EXTENSION_ATTACHED`: `removeExtension` targeted an extension still attached to at least one Realm; detach it first. - `ERR_STORE_EXTENSION_NOT_CONNECTABLE`: `connectExtension` targeted a `pack` extension, which has no connectable transport. - `ERR_STORE_EXTENSION_TRANSPORT_UNSUPPORTED`: `connectExtension` targeted an MCP record carrying the host-only `stdio` transport hint. - `ERR_STORE_EXTENSION_INVALID_ENDPOINT`: `connectExtension` targeted a record whose transport URL is not an absolute URL, or whose explicitly approved URL (`approvedUrl`) is not an absolute URL or does not match the transport URL after URL normalization — a stale or inconsistent approval never dials. - `ERR_STORE_EXTENSION_PLAINTEXT_CREDENTIAL`: `connectExtension` targeted a `credentialId`-bearing record on a non-`https:` endpoint — refused before any vault read or network activity. - `ERR_STORE_EXTENSION_CREDENTIAL_UNRESOLVED`: `connectExtension` targeted a `credentialId` the vault cannot resolve (deleted/unknown id) — fail closed, no network activity. - `ERR_STORE_EXTENSION_CONNECT_FAILED`: the error code of an unclassified operational connection failure (a classified MCP client failure keeps its own `ERR_MCP_*` code); never thrown by the pre-connection gates.
 
 #### Examples
 
@@ -1625,6 +1740,7 @@ console.log('Agent response:', turn.output);
 - **`clearPendingInstancePayload`** — Clears the pending instance payload for one template id (Wave U ticket 2518510). Session-only surface: nothing was persisted, so clearing cannot leave storage behind.
 - **`clearTemplateAuthorityTrust`** — Clears the "trust this template" override for one template id (Wave U ticket 2518510). Clearing removes the persisted trust record, so future launches of the template no longer auto-approve its exact previously approved set — every declared authority re-prompts. Already-applied grants are ordinary registry grants and stay revocable through the grant methods; clearing trust never revokes them implicitly.
 - **`clockSnapshot`** — Reactive dictionary of narrative clock states across agent partitions and global. Structured as `Record<partitionId, AgentClockState>`.
+- **`connectExtension`** — Connects one installed MCP extension over the HTTP transport and discovers its tool catalog — the explicit operator connection act (nothing auto-connects at load, hydration, or launch). Pre-connection gates run first and fail closed: an unknown id rejects with `ERR_STORE_EXTENSION_NOT_INSTALLED`, a `pack` record with `ERR_STORE_EXTENSION_NOT_CONNECTABLE`, a `stdio` transport hint with `ERR_STORE_EXTENSION_TRANSPORT_UNSUPPORTED`, and an unparseable transport URL — or a present `approvedUrl` that is unparseable or not URL-equal to the transport URL — with `ERR_STORE_EXTENSION_INVALID_ENDPOINT`. A `credentialId` on a non-`https:` endpoint is refused with `ERR_STORE_EXTENSION_PLAINTEXT_CREDENTIAL` **before any vault read or network activity** (plaintext local servers connect unauthenticated when no `credentialId` is bound); a bound credential the vault cannot resolve fails closed with `ERR_STORE_EXTENSION_CREDENTIAL_UNRESOLVED` before any network activity. The session is single-flight: a concurrent call while the same extension is `connecting` returns the in-flight promise, and a call on an already `connected`/`conflict` extension resolves the current projection without a second session. A successful discovery indexes the catalog, assigns the connection-completion sequence, re-arbitrates every live catalog, syncs the affected realm attachment statuses through the safe-state sweep, and emits `extension_connected` (plus `extension_conflict` when the new catalog lost a call-name race). An operational failure (unreachable endpoint, protocol, timeout, cancellation, auth) resolves with status `'error'` and emits `extension_connect_failed`; it never throws after the gates.
 - **`copyFile`** — Copies a file within or between workspaces.
 - **`createRealm`** — Creates a Realm through the owned registry. The store assigns the id (a `realm_*` identifier) when the draft omits one and stamps `createdAt` with the current time; the registry validates the record and rejects a duplicate id. The mutation persists through the snapshot adapter and schedules the debounced autosave.
 - **`deleteAgentMessage`** — Convenience helper deleting a message from the selected agent's history.
@@ -1637,6 +1753,7 @@ console.log('Agent response:', turn.output);
 - **`demoStep`** — Current human-readable milestone step of the running handshake scenario.
 - **`destroy`** — Cleanly tears down store subscriptions, MessagingBus listeners, auto-save timers, and tickers. Essential for component unmount and test suite teardown.
 - **`detachExtension`** — Detaches one extension from a Realm under the operator principal and emits the `extension_detached` audit event. Detaching an extension the Realm does not attach is an idempotent no-op that returns the unchanged record (no event, no persist); the global install record survives.
+- **`disconnectExtension`** — Disconnects one extension: aborts any in-flight connect, closes the live session best-effort, drops the catalog and its call-name claims, re- arbitrates the remaining catalogs (a formerly conflicted extension may activate), syncs the affected realm attachment statuses through the safe-state sweep, and emits `extension_disconnected`. A disconnect of an installed extension that has no live connection is an idempotent `false` no-op (no event); an unknown id fails closed.
 - **`dismissHydrationNotice`** — Dismisses the persisted-state recovery notice (`hydrationNotice`) after the user acknowledges that the previous session could not be loaded (QA-013).
 - **`downloadAllWorkspacesArchive`** — Bundles all workspaces across the sandbox into a single archive download.
 - **`downloadAllWorkspacesFilesSeparately`** — Downloads all files across all workspaces individually with progress tracking.
@@ -1649,6 +1766,7 @@ console.log('Agent response:', turn.output);
 - **`ensureDirector`** — Idempotently verifies and provisions the root Director Meta-Agent if absent.
 - **`error`** — Top-level store error message for UI alert banners and toasts, or `null` if healthy.
 - **`exportRealmTemplate`** — Exports one effective launch template as canonical transport JSON (Wave T, ticket 0df20ae): the exact authored bundle future launches resolve — an import when one shadows the id (its persisted canonical transport payload is re-emitted verbatim), otherwise the shipped revision rendered by `realmCatalog.serializeTemplateBundle` (recursively sorted keys, no insignificant whitespace), so re-importing the output reproduces the same authored content version.
+- **`extensionConnections`** — Reactive extension-connection projection for the UI (extension wave, P3.1): one frozen, secret-free entry per live connection in connection-completion sequence order (in-flight connects last, by extension id). Always `[]` before any operator connect — nothing auto-connects at load, hydration, or launch — and never persisted.
 - **`factoryReset`** — Factory Reset: Clears persisted storage, cancels pending debounced saves, resets VirtualFS and MessagingBus, and restores fresh Director Meta-Agent.
 - **`fsSnapshot`** — Reactive snapshot of all virtual files across all workspaces (`global` and agent-private). Mirrors `VirtualFS.exportSnapshot()` verbatim: `Record<workspaceId, Record<normalizedPath, FileRecord>>`, where each record carries `path`, `workspaceId`, `content`, `size`, `updatedAt`, `readOnly`, and `owner`. Exported through the runtime persistence port, whose VFS members carry the composition-root `InternalPrincipal` binding (MOD-21 W8-D/W8-F); without an authorized route the projection stays empty.
 - **`fsWorkspacePartitions`** — Operator-facing partition listing of the VirtualFS snapshot (ticket 7571ce5): the literal shared `global` workspace, every registered Realm's realm-global partition, every active registration's resolved private workspace, and every remaining literal/pinned/orphaned snapshot key. Each entry carries the internal snapshot key for exact addressing, a realm-qualified display label, the Realm id/name, the partition kind, and the file count read from the resolved key. The agent-facing `allWorkspaces` projection stays separate and realm-opaque; operator surfaces (the Virtual Filesystem explorer) consume this listing instead, so realm-global partitions are reachable and the same bare agent id live in two Realms yields two distinct partitions. Realm-global and empty agent partitions are listed even when the snapshot carries no bytes yet, so they can be selected and uploaded into.
@@ -1658,6 +1776,7 @@ console.log('Agent response:', turn.output);
 - **`getCredentialResolver`** — Retrieves the frozen least-privilege `CredentialResolverPort` handed to the runtime. Intended for provider-construction call sites that need credential lookups/projections. The port exposes no enumeration or listing, but it is not entirely write-free: a lookup miss for a canonical provider id may lazily create and persist that canonical credential (the sole mutating read path, per the `CredentialResolverPort` contract in `credentialVault`).
 - **`getCredentialVault`** — Retrieves the credential vault owned by this store (composition root for MOD-16). Exposes the management contract to UI call sites (`addCredential`, `updateCredential`, `deleteCredential`, `getCredentialsForProvider`, `setActiveCredential`, `exportCredentials`, ...).
 - **`getExtension`** — Resolves one global extension install record.
+- **`getExtensionConnection`** — Returns one frozen, secret-free live connection projection.
 - **`getExtensionRegistry`** — Retrieves the extension registry owned by this store (composition root). Exposes the management contract to UI call sites (`listExtensions`, `getExtension`, `installExtension`, `removeExtension`, `reconcile`, `createAttachment`, `attachExtension`, `detachExtension`, `resolve`). Registry mutations persist through the snapshot adapter and schedule the existing debounced save; realm attachments ride the realm records, so they persist through the realm registry adapter.
 - **`getPendingInstancePayload`** — Resolves one pending instance payload by template id (Wave U ticket 2518510).
 - **`getPresetCatalog`** — Retrieves the MOD-20 preset catalog owned by this store (composition root). Exposes the management contract to UI call sites (`listPresets`, `getPreset`, `savePreset`, `deletePreset`, `setActivePresetId`, `subscribe`, `createPresetSourcePort`). Catalog mutations persist through the snapshot adapter and schedule the existing debounced save; the active pointer and custom entries live in the sandbox snapshot.
@@ -1685,6 +1804,7 @@ console.log('Agent response:', turn.output);
 - **`launchRealmFromTemplate`** — Launches a Realm from a launch template in one call: creates the registry record, materializes the template into resolved launch plans, launches every member under the store's operator principal with the resolved Realm membership, agent ids, tool grants, and model-preset bindings, then applies the template-declared seed when it declares one. Resolution rules: - the template resolves by id against the effective launch catalog (shipped baked/injected bundles with runtime imports layered on top) and an unknown id fails closed before any record or member exists; the stored template is the normalized format-v2 model and the launch materializes it through `materializeTemplate`. A template requesting extensions (`providers`) or carrying extension tool references launches normally: the requested extensions and `<providerId>::<serverToolName>` references resolve against the global install registry plus the extensions this launch attaches, and the unresolved ones ride the receipt's missing-extension disclosure instead of refusing the launch (the retired providers gate); - supplied values arrive either as an attached `payload` (or its legacy alias `package`) or as operator-assembled explicit values (`inputs` shape-tagged, plus the legacy `inputValues` string record). Every supplied value validates through `validatePayload` against the effective template contract: payload inputs are the base and explicit values win per key, a legacy record may only fill `text`-shape inputs, and the payload's pinned template version is compared against the effective authored version — a mismatch fails closed unless `allowVersionMismatch` explicitly confirms it, in which case the warning rides the receipt; - agent ids resolve as literal realm-opaque plain ids from `idPattern` with per-key `idOverrides` winning over the pattern; the realm id is membership metadata and never prefixes an agent id (Wave R ticket ff2202a); - launch-time duplicate detection is realm-local (Wave I, ticket d57cbc1): a resolved id already registered inside the target realm is denied with a clear `AGENT_ALREADY_EXISTS` cause and is never auto-suffixed, while the same literal id in another realm launches its own registration — agent identity is the composite `(realmId, agentId)`, so realms are independent id namespaces; - each member's resolved internal grant list travels as `allowedTools` (the aggregate `subagent_management` sentinel preserved; extension-bound derived call names are excluded because they belong to the extension grant channel), the declared preset name as inert `toolPreset` metadata, and the effective preset id — a per-key `presetBindings` override winning over the spec's `modelPresetId` — as `presetId` resolved through the owned preset catalog (no model literals); - `privileged`, `role`, `name`, and the composed `systemPrompt` are forwarded from the plan, and the plan's `initialPrompt` triggers the member's first turn when declared; - `seed: false` skips the resolved placements and directives entirely. - Wave U publishing authorities (ticket 2518510): a template declaring an authority id unknown to this host fails the launch closed with `ERR_TEMPLATE_AUTHORITY_UNSUPPORTED` before any side effect; every other declaration stays inert unless `authorityApprovals` approves that exact `(agentKey, authority)` pair (an unknown pair rejects the call with `ERR_STORE_INVALID_PARAMS`; absent = declined), and a persisted `templateAuthorityTrust` record auto-approves only exact declared matches. Approved grants are applied to the launched agents under the operator principal and recorded in the grant registry; when `trustAuthorities` is true the effective approved declared set is persisted after a fully successful launch (an empty set clears the record). Launch plan application: when `seed` is not `false`, the resolved placement writes are grouped by target in first-appearance order and written through `seedRealm` — one operator-context call per target, so every resolved path passes the same reserved-root/traversal/duplicate validation as an operator seed (`'realm'` writes to `realm:<realmId>:global`, `{ agent: key }` to the launched member's realm-exact private workspace). Directives are then delivered independently, in declared order, as operator-attributed `source: 'realm_seed'` mailbox messages addressed realm-exactly (the same addressing path `seedRealm` uses); member targets resolve through the template agent key to the launched member id. Declared history is seeded through the runtime's trusted `history` launch option without a model call (`[system, ...declared]`, launch-generated ids). Provenance: a successful launch records the frozen RealmInstanceProvenance on the Realm record (`templateId`, authored `templateVersion`, canonical `packageDigest` when a payload was attached, per-input hashes over the canonical tagged values, placement destination paths actually written, `launchedAt`, `resolvedTools` mapping each resolved sanitized call name to its extension id, and `missingExtensions` listing the requested extension ids that did not resolve) — hashes, paths, and ids only, never raw input values or secrets — and the receipt carries the updated record. Extensions attached by this launch are written on the same record as `extensions`. Nothing connects: the effective extension grants are forwarded into each member's frozen descriptor through the trusted unified-options channel, while third-party tool execution remains P3 work. Partial-failure policy: when materialization, any member launch, a placement write, or a directive delivery fails, every active member of the freshly created Realm is permanently purged, the placement files already written are best-effort evicted, and the record is removed, then a coded `ERR_STORE_REALM_LAUNCH_FAILED` error is thrown carrying `realmId`, `templateId`, `failedAgentId`, `rolledBack`, `terminatedMembers`, `evictedSeedFiles`, `rollbackFailures`, and the original failure as `cause`. A failed call never leaves a half-realm; a member-bearing rollback without the operator principal reports its failures instead of silently stranding the record. Member private workspaces are evicted by the purge; a realm-global partition is a VFS-reserved key, so its seeded files are deleted individually and an empty container key can remain.
 - **`legacyWorkspaceRemapReport`** — Observable report of the last hydration-time legacy private-workspace remap (Wave I, ticket d57cbc1): every legacy bare-keyed private workspace that was rekeyed onto its canonical storage key, with the duplicate paths the canonical copy already owned. `null` when the last hydration found no legacy private workspaces; a remap that could not run reports `failed: true`. Conflict detail is the only signal — hydration never console-logs remap noise.
 - **`listAgentInbox`** — Non-destructively peeks at message headers in an agent's inbox.
+- **`listExtensionConnections`** — Lists every frozen live connection projection in connection-completion sequence order; an in-flight (`connecting`) entry has no sequence yet and sorts last by extension id.
 - **`listExtensions`** — Lists the global extension install records in registry order.
 - **`listMetaAuthorityGrants`** — Lists the active agents currently holding the Wave U publishing-authority grants (Wave U ticket 2518510), as canonical `(realmId, agentId)` identity keys per authority. The listing is registry state, not authority: the UI uses it to render the operator authority toggles, and the store uses it to persist grants. Keys are internal-only and never reach an agent-facing surface.
 - **`listPendingInstancePayloads`** — Lists the session-only pending instance payloads (Wave U candidates, ticket 2518510) in submission order. Candidates are produced by `submit_hydration_package` after validation against the effective catalog template; they are never persisted, and the existing launch attach path (`{ package }`) stays the only attach mechanism. Each entry is frozen.
@@ -1703,6 +1823,7 @@ console.log('Agent response:', turn.output);
 - **`readAgentMessage`** — Consumes a message by ID from an agent's inbox, dequeuing it to historical archives if marked read.
 - **`realms`** — Reactive projection of the store-owned realm registry, in registry order. Read-only to consumers; mutated exclusively through registry changes (store CRUD methods or direct registry calls). Empty when no Realms exist.
 - **`rebindProviderCredentials`** — Re-binds legacy/unbound agents of a provider to a vault credential (QA-022 compatibility path). Rewrites each matching agent's `modelConfig.keyId` and re-runs provider/model initialization. A falsy `credentialId` clears the pin so provider construction resolves the vault's active credential. Preset-bound agents are skipped by design (MOD-20 OPEN-2): presets carry no pinned credential, and credential rotation materializes at the next turn start through the preset resolver, so the legacy walk must not rewrite their `modelConfig`, `keyId`, or re-initialize their provider mid-life. Safe to call with no matching agents; never throws.
+- **`reconnectExtension`** — Reconnects one extension as an explicit re-discovery: the previous catalog is captured, the live session is closed, a fresh connection discovers the current catalog, and the resulting drift (`added`/`removed`/`changed` call names, shadow changes, order, digest pair) is recorded on the projection and disclosed through an `extension_catalog_drift` audit event when non-empty. Re-arbitration runs on both catalog changes, and realm attachment statuses follow. Grants are never silently mutated here: grant reconciliation still flows through the P2.4 safe-state sweep. Reconnecting an extension with no live connection is a plain connect (no drift). Pre-connection gates are identical to SandboxStore.connectExtension.
 - **`recycleBin`** — Reactive list of soft-killed agents currently residing in the recycle bin. Preserves complete conversational history and redo stacks; private workspaces are evicted from VirtualFS at kill time.
 - **`recycleBinCount`** — Pure derived count of soft-killed agents currently residing in the recycle bin.
 - **`redoAgentTurn`** — Reinstates the last undone turn from the redo stack by re-appending its recorded messages; no new model inference is performed. Automatically clears the agent's draft input when it still matches the reinstated prompt text.
@@ -1710,6 +1831,7 @@ console.log('Agent response:', turn.output);
 - **`reset`** — Synchronously clears all in-memory reactive state and cancels countdown tickers.
 - **`resetAgentClock`** — Resets world clock to 0 seconds and 'Day 1' for an agent partition or global.
 - **`resetAgentEvents`** — Clears all registered narrative events for an agent partition or global.
+- **`resolveExtensionCallName`** — Resolves one arbitration-active call name to its owning extension and wire tool name — the execution seam later phases consume. Call names of conflicted, errored, or disconnected extensions resolve to `null`.
 - **`restoreAgent`** — Restores a soft-killed agent from the recycle bin back into active `agents` in `IDLE` state. Conversational history and the redo stack remain intact; the private workspace evicted at kill time is not recreated. Operator-mediated (MOD-21 W8; Wave I, ticket c02d0b9): the store forwards the runtime's host operator principal, which exists with zero agents.
 - **`retryAgentTurn`** — Retries / resends the last failed or interrupted turn for an agent without retyping.
 - **`revokeHydrationAuthority`** — Revokes the explicit `@hydration:authority` publishing capability from one active agent (operator action, Wave U ticket 2518510).
@@ -2087,10 +2209,10 @@ console.log(`Uploaded ${receipt.count} files:`, receipt.files);
 
 ## Doc coverage
 
-- Top-level exports: 65
-- Declarations (exports + members): 462
-- Documented declarations: 462 / 462 (100%)
+- Top-level exports: 70
+- Declarations (exports + members): 493
+- Documented declarations: 493 / 493 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
-- Referenced but not exported (`ae-forgotten-export`): `Agent`, `AgentConfig`, `AgentConfigUpdate`, `AgentIdentityScope`, `AgentRuntime`, `AgentState`, `ArchiveDownloadReceipt`, `AuthorityDescriptor`, `BatchDownloadFailure`, `BusMessageEnvelope`, `CopyReceipt`, `CredentialResolverPort`, `CredentialStoragePort`, `CredentialVault`, `DownloadReceipt`, `ExtensionInstallRecord`, `ExtensionKind`, `ExtensionRegistry`, `ExtensionTransportHint`, `FileRecord`, `GrepMatch`, `GrepOptions`, `InboxHeader`, `InboxListOptions`, `LaunchHistoryEntry`, `MessageEnvelope`, `MessagingBus`, `NarrativeEvent`, `PendingInstancePayload`, `PresetCatalog`, `PresetModelConfig`, `ReadMessageResult`, `RealmExtensionAttachment`, `RealmInputValues`, `RealmPublishingPort`, `RealmRecord`, `RealmRegistry`, `RealmTemplate`, `RealmUpdatePatch`, `SandboxPersistedState`, `ScheduleReceipt`, `SendMessageReceipt`, `TurnBundle`, `TurnExecutionResult`, `TurnInput`, `VfsCopyOptions`, `VfsWriteOptions`, `VirtualFS`, `WriteReceipt`
+- Referenced but not exported (`ae-forgotten-export`): `Agent`, `AgentConfig`, `AgentConfigUpdate`, `AgentIdentityScope`, `AgentRuntime`, `AgentState`, `ArchiveDownloadReceipt`, `AuthorityDescriptor`, `BatchDownloadFailure`, `BusMessageEnvelope`, `CopyReceipt`, `CredentialResolverPort`, `CredentialStoragePort`, `CredentialVault`, `DownloadReceipt`, `ExtensionCatalogConflict`, `ExtensionCatalogDiff`, `ExtensionInstallRecord`, `ExtensionKind`, `ExtensionRegistry`, `ExtensionTransportHint`, `FileRecord`, `GrepMatch`, `GrepOptions`, `InboxHeader`, `InboxListOptions`, `LaunchHistoryEntry`, `McpClientServerInfo`, `MessageEnvelope`, `MessagingBus`, `NarrativeEvent`, `PendingInstancePayload`, `PresetCatalog`, `PresetModelConfig`, `ReadMessageResult`, `RealmExtensionAttachment`, `RealmInputValues`, `RealmPublishingPort`, `RealmRecord`, `RealmRegistry`, `RealmTemplate`, `RealmUpdatePatch`, `SandboxPersistedState`, `ScheduleReceipt`, `SendMessageReceipt`, `TurnBundle`, `TurnExecutionResult`, `TurnInput`, `VfsCopyOptions`, `VfsWriteOptions`, `VirtualFS`, `WriteReceipt`
 - Unresolved `{@link}` targets (`ae-unresolved-link`): 5 (policy `none`; see `scripts/api_reports.mjs`)

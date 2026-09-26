@@ -239,6 +239,142 @@ export interface ExtensionResolution {
   readonly missingTools: readonly MissingExtensionTool[];
 }
 
+/**
+ * One tool advertised by a discovered MCP server, as catalog indexing receives
+ * it: the wire tool name plus the optional server-supplied description and raw
+ * input/output schemas (surfaced verbatim, never validated against a dialect
+ * here).
+ */
+export interface ExtensionCatalogDiscoveryTool {
+  /** Wire tool name exactly as the server advertised it. */
+  readonly name: string;
+  /** Optional server-supplied human-readable description. */
+  readonly description?: string;
+  /** Raw JSON Schema of the tool input, when the server supplied one. */
+  readonly inputSchema?: unknown;
+  /** Raw JSON Schema of the tool structured output, when the server supplied one. */
+  readonly outputSchema?: unknown;
+}
+
+/**
+ * Input accepted by `indexExtensionCatalog`: the extension identity (used for
+ * validation messages only) plus the discovered tool list in server order.
+ */
+export interface ExtensionCatalogIndexInput {
+  /** Host-unique extension id the discovery belongs to. */
+  readonly extensionId: string;
+  /** Discovered tools in the server's advertised order. */
+  readonly tools: readonly ExtensionCatalogDiscoveryTool[];
+}
+
+/**
+ * One cataloged tool: the sanitized model-facing call name plus the wire facts
+ * behind it. Absent optional facts stay absent (nothing is fabricated).
+ */
+export interface ExtensionCatalogTool {
+  /** Sanitized model-facing call name (`deriveToolCallName(serverToolName)`). */
+  readonly callName: string;
+  /** Wire tool name exactly as the server advertised it. */
+  readonly serverToolName: string;
+  /** Optional server-supplied description. */
+  readonly description?: string;
+  /** Raw JSON Schema of the tool input, deep-frozen, when supplied. */
+  readonly inputSchema?: unknown;
+  /** Raw JSON Schema of the tool structured output, deep-frozen, when supplied. */
+  readonly outputSchema?: unknown;
+}
+
+/**
+ * One intra-server shadowed tool: a later server tool whose derived call name
+ * was already claimed by an earlier tool of the same server. Shadowing is
+ * deterministic (first occurrence in server order wins), recorded here, and
+ * disclosed — never silently dropped and never auto-suffixed.
+ */
+export interface ExtensionCatalogShadow {
+  /** Derived call name the earlier tool claimed. */
+  readonly callName: string;
+  /** Shadowed (later) wire tool name. */
+  readonly serverToolName: string;
+}
+
+/**
+ * Frozen catalog projection of one extension discovery. Catalogs are live
+ * session state: they are never persisted and are rebuilt on every explicit
+ * operator connect/reconnect.
+ */
+export interface ExtensionCatalog {
+  /** Cataloged tools in server order, with intra-server shadows removed. */
+  readonly tools: readonly ExtensionCatalogTool[];
+  /** Intra-server shadowed tools in server order; empty when none collided. */
+  readonly shadowedTools: readonly ExtensionCatalogShadow[];
+  /** Deterministic non-crypto digest over the canonical ordered projection. */
+  readonly digest: string;
+}
+
+/** One live catalog participating in `arbitrateExtensionCatalogs`. */
+export interface ExtensionCatalogArbitrationInput {
+  /** Host-unique extension id. */
+  readonly extensionId: string;
+  /** Connection-completion sequence number; the only arbitration ordering authority. */
+  readonly sequence: number;
+  /** The extension's discovered catalog. */
+  readonly catalog: ExtensionCatalog;
+}
+
+/**
+ * One call-name conflict of an extension against an earlier active extension:
+ * the contested call name and the extension that claimed it first.
+ */
+export interface ExtensionCatalogConflict {
+  /** Contested derived call name. */
+  readonly callName: string;
+  /** Earlier (sequence-smaller) extension that keeps the call name. */
+  readonly otherExtensionId: string;
+}
+
+/**
+ * Per-extension arbitration outcome. `active` means every cataloged call name
+ * is exclusively claimed; `conflict` means the extension is not activated at
+ * all (its other, non-conflicting call names are not exposed either) until a
+ * later re-arbitration clears the conflicts.
+ */
+export interface ExtensionCatalogArbitration {
+  /** Host-unique extension id. */
+  readonly extensionId: string;
+  /** Arbitration status: `active` when conflict-free, `conflict` otherwise. */
+  readonly status: 'active' | 'conflict';
+  /** Contested call names in catalog order; empty for `active`. */
+  readonly conflicts: readonly ExtensionCatalogConflict[];
+}
+
+/**
+ * Reconnect drift disclosure between two catalogs of one extension: call-name
+ * sets (in catalog order) plus the digest pair, so an operator reconnect can
+ * disclose exactly what changed. Never mutates grants by itself; grant
+ * reconciliation stays with the safe-state reauthorization sweep.
+ */
+export interface ExtensionCatalogDiff {
+  /** Call names present in the new catalog only, in new-catalog order. */
+  readonly added: readonly string[];
+  /** Call names present in the previous catalog only, in previous-catalog order. */
+  readonly removed: readonly string[];
+  /** Common call names whose tool facts differ, in new-catalog order. */
+  readonly changed: readonly string[];
+  /** Intra-server shadow call names present only in the new catalog, in new-catalog order. */
+  readonly shadowedAdded: readonly string[];
+  /** Intra-server shadow call names present only in the previous catalog, in previous-catalog order. */
+  readonly shadowedRemoved: readonly string[];
+  /** `true` when the relative order of the common call names changed. */
+  readonly reordered: boolean;
+  /** Digest pair: the previous catalog digest (`null` when there was none) and the new one. */
+  readonly digests: {
+    /** Digest of the previous catalog, or `null` when no previous catalog existed. */
+    readonly previous: string | null;
+    /** Digest of the new catalog. */
+    readonly next: string;
+  };
+}
+
 /** Persistence seam supplied by the composition root. */
 export interface ExtensionRegistryStorageAdapter {
   /** Returns the persisted install records; unknown or invalid values are dropped. */

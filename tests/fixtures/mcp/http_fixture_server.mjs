@@ -17,6 +17,14 @@
  * (`createMcpFixtureServer`) and standalone-startable
  * (`node tests/fixtures/mcp/http_fixture_server.mjs`).
  *
+ * Additive options for the connect/discovery suite: `options.tools` overrides
+ * the advertised tool set (and `fixture.setTools(tools)` swaps it mid-flight
+ * for reconnect-drift tests), `options.initializeDelayMs` defers the handshake
+ * response so an in-flight session can be torn down observably, inbound TCP
+ * connections are counted (`fixture.connections`), aborted requests are
+ * counted (`fixture.abortedRequests`), and `DELETE` termination requests are
+ * recorded in `fixture.requests`.
+ *
  * No secrets are handled anywhere in this file: only method names and tool
  * names are recorded, never request bodies, headers, or credentials.
  */
@@ -230,11 +238,31 @@ function handleToolCall(res, message, state) {
 }
 
 /**
+ * Normalizes one tool-set override entry into the advertised tool shape.
+ *
+ * @param {object} tool Tool definition (`name` required; `description`/`inputSchema` optional).
+ * @param {number} index Position in the override list (for error messages).
+ * @returns {{ name: string, description?: string, inputSchema: object }} Normalized tool.
+ */
+function normalizeFixtureTool(tool, index) {
+  if (tool === null || typeof tool !== 'object' || typeof tool.name !== 'string' || tool.name.length === 0) {
+    throw new TypeError(`createMcpFixtureServer options.tools[${index}] requires a non-empty string name`);
+  }
+  return {
+    name: tool.name,
+    ...(typeof tool.description === 'string' ? { description: tool.description } : {}),
+    inputSchema: tool.inputSchema !== undefined && tool.inputSchema !== null && typeof tool.inputSchema === 'object'
+      ? tool.inputSchema
+      : { type: 'object', properties: {} }
+  };
+}
+
+/**
  * Handles one parsed JSON-RPC message.
  *
  * @param {import('node:http').ServerResponse} res Response to write.
  * @param {object} message Parsed JSON-RPC message.
- * @param {{ pendingTimers: Set<ReturnType<typeof setTimeout>>, requests: object[] }} state Fixture state.
+ * @param {{ pendingTimers: Set<ReturnType<typeof setTimeout>>, requests: object[], tools: object[] }} state Fixture state.
  */
 function handleMessage(res, message, state) {
   if (message === null || typeof message !== 'object' || typeof message.method !== 'string') {
@@ -244,7 +272,7 @@ function handleMessage(res, message, state) {
 
   if (message.method === 'initialize') {
     state.requests.push({ method: 'initialize' });
-    sendJson(
+    const respond = () => sendJson(
       res,
       200,
       {
@@ -258,6 +286,18 @@ function handleMessage(res, message, state) {
       },
       { 'Mcp-Session-Id': MCP_FIXTURE_SESSION_ID }
     );
+    const delayMs = typeof state.initializeDelayMs === 'number' && state.initializeDelayMs > 0
+      ? state.initializeDelayMs
+      : 0;
+    if (delayMs > 0) {
+      const timer = setTimeout(() => {
+        state.pendingTimers.delete(timer);
+        respond();
+      }, delayMs);
+      state.pendingTimers.add(timer);
+      return;
+    }
+    respond();
     return;
   }
 
@@ -275,7 +315,7 @@ function handleMessage(res, message, state) {
     sendJson(res, 200, {
       jsonrpc: '2.0',
       id: message.id,
-      result: { tools: TOOL_DEFINITIONS.map(tool => ({ ...tool })) }
+      result: { tools: state.tools.map(tool => ({ ...tool })) }
     });
     return;
   }
@@ -294,16 +334,33 @@ function handleMessage(res, message, state) {
  * @param {object} [options] Fixture options.
  * @param {number} [options.port] Listen port (`0` selects an ephemeral port).
  * @param {string} [options.host] Listen host.
- * @returns {Promise<{ url: string, port: number, requests: object[], close: () => Promise<void> }>}
+ * @param {object[]} [options.tools] Advertised tool-set override entries.
+ * @param {number} [options.initializeDelayMs] Delay before the handshake response.
+ * @returns {Promise<{ url: string, port: number, requests: object[], connections: { total: number, open: number }, abortedRequests: { count: number }, setTools: (tools: object[]) => void, close: () => Promise<void> }>}
  *   Fixture handle; `requests` records `{ method, toolName? }` entries only.
  */
 export async function createMcpFixtureServer(options = {}) {
   const port = Number.isInteger(options.port) ? options.port : 0;
   const host = typeof options.host === 'string' && options.host ? options.host : '127.0.0.1';
-  const state = { pendingTimers: new Set(), requests: [] };
+  const toolSet = Array.isArray(options.tools)
+    ? options.tools.map((tool, index) => normalizeFixtureTool(tool, index))
+    : TOOL_DEFINITIONS.map(tool => ({ ...tool }));
+  const state = {
+    pendingTimers: new Set(),
+    requests: [],
+    tools: toolSet,
+    connections: { total: 0, open: 0 },
+    abortedRequests: { count: 0 },
+    initializeDelayMs: Number.isFinite(options.initializeDelayMs) ? Math.max(0, options.initializeDelayMs) : 0
+  };
 
   const server = http.createServer((req, res) => {
     applyCors(res);
+    // A response that closes before it was fully written means the client
+    // aborted the request (teardown observation).
+    res.on('close', () => {
+      if (!res.writableEnded) state.abortedRequests.count += 1;
+    });
 
     if (req.method === 'OPTIONS') {
       res.writeHead(204);
@@ -318,6 +375,7 @@ export async function createMcpFixtureServer(options = {}) {
       return;
     }
     if (req.method === 'DELETE') {
+      state.requests.push({ method: 'DELETE' });
       if (!res.writableEnded && !res.destroyed) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end('{}');
@@ -362,6 +420,14 @@ export async function createMcpFixtureServer(options = {}) {
     });
   });
 
+  server.on('connection', socket => {
+    state.connections.total += 1;
+    state.connections.open += 1;
+    socket.on('close', () => {
+      state.connections.open -= 1;
+    });
+  });
+
   const address = server.address();
   const boundPort = typeof address === 'object' && address !== null ? address.port : port;
 
@@ -369,6 +435,23 @@ export async function createMcpFixtureServer(options = {}) {
     url: `http://${host}:${boundPort}/mcp`,
     port: boundPort,
     requests: state.requests,
+    /** Inbound TCP connection counters (`total`/`open`), for zero-network proofs. */
+    connections: state.connections,
+    /** Client-aborted request counter, for teardown observations. */
+    abortedRequests: state.abortedRequests,
+    /**
+     * Swaps the advertised tool set (reconnect-drift tests): normalized once,
+     * the next `tools/list` returns the new set.
+     *
+     * @param {object[]} tools Tool-set override entries.
+     * @returns {void}
+     */
+    setTools(tools) {
+      if (!Array.isArray(tools)) {
+        throw new TypeError('setTools requires an array of tool definitions');
+      }
+      state.tools = tools.map((tool, index) => normalizeFixtureTool(tool, index));
+    },
     /**
      * Stops the server, clears pending slow-tool timers, and severs open
      * connections.

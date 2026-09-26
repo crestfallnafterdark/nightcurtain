@@ -53,6 +53,7 @@ import { VirtualFS } from '../../src/lib/sandbox/virtualFs/index.ts';
 import { MessagingBus } from '../../src/lib/sandbox/messagingBus/index.ts';
 import { WorldClock } from '../../src/lib/sandbox/worldClock/index.ts';
 import { CredentialVault } from '../../src/lib/sandbox/credentialVault/index.ts';
+import { createMcpFixtureServer } from '../fixtures/mcp/http_fixture_server.mjs';
 
 const CONTRACT_PATH = new URL('../../src/lib/sandbox/sandboxStore/index.svelte.ts', import.meta.url);
 
@@ -221,7 +222,13 @@ test('1. Strict Export Whitelist & Constant Types', () => {
       'ERR_STORE_EXTENSION_ALREADY_ATTACHED',
       'ERR_STORE_EXTENSION_ALREADY_INSTALLED',
       'ERR_STORE_EXTENSION_ATTACHED',
+      'ERR_STORE_EXTENSION_CONNECT_FAILED',
+      'ERR_STORE_EXTENSION_CREDENTIAL_UNRESOLVED',
+      'ERR_STORE_EXTENSION_INVALID_ENDPOINT',
+      'ERR_STORE_EXTENSION_NOT_CONNECTABLE',
       'ERR_STORE_EXTENSION_NOT_INSTALLED',
+      'ERR_STORE_EXTENSION_PLAINTEXT_CREDENTIAL',
+      'ERR_STORE_EXTENSION_TRANSPORT_UNSUPPORTED',
       'ERR_STORE_INVALID_PARAMS',
       'ERR_STORE_NO_AGENT_SELECTED',
       'ERR_STORE_REALM_DELETE_FAILED',
@@ -5747,6 +5754,267 @@ test('72. [P2.4-F2] kill → restore re-applies the extension grants without a m
     );
   } finally {
     store.destroy();
+    sharedLocalStorage.clear();
+  }
+});
+
+// ============================================================================
+// 73-74. Extension connections P3.1: pre-flight gates + session-only state
+// ============================================================================
+
+test('73. [P3.1] connection pre-flight gates are typed, fail closed, and never touch the network', async () => {
+  sharedLocalStorage.clear();
+  const { runtime, store } = createSharedSubstrateStore();
+  const events = [];
+  const unsubscribe = runtime.subscribe((event) => events.push(event));
+  const fixture = await createMcpFixtureServer({ tools: [{ name: 'echo' }] });
+  const GATE_SECRET = 'p31-store-gate-secret-9f2a';
+
+  try {
+    const seeded = store.getCredentialVault().addCredential({
+      label: 'P3.1 gate probe',
+      providerId: 'acme',
+      apiKey: GATE_SECRET
+    });
+
+    // Unknown id: connect, disconnect, and reconnect all fail closed.
+    await assert.rejects(
+      () => store.connectExtension('ghost-ext'),
+      (err) => err.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_NOT_INSTALLED
+    );
+    await assert.rejects(
+      () => store.disconnectExtension('ghost-ext'),
+      (err) => err.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_NOT_INSTALLED
+    );
+    await assert.rejects(
+      () => store.reconnectExtension('ghost-ext'),
+      (err) => err.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_NOT_INSTALLED
+    );
+
+    // Pack / stdio / unparseable URL / bad timeout.
+    store.installExtension({ id: 'pack-ext', kind: 'pack', transportHint: { kind: 'pack', source: 'npm:@acme/pack' } });
+    await assert.rejects(
+      () => store.connectExtension('pack-ext'),
+      (err) => err.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_NOT_CONNECTABLE
+    );
+    store.installExtension({ id: 'stdio-ext', kind: 'mcp', transportHint: { kind: 'stdio', command: 'npx', args: ['-y', 'acme'] } });
+    await assert.rejects(
+      () => store.connectExtension('stdio-ext'),
+      (err) => err.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_TRANSPORT_UNSUPPORTED
+    );
+    store.installExtension({ id: 'bad-url-ext', kind: 'mcp', transportHint: { kind: 'http', url: 'not-a-url' } });
+    await assert.rejects(
+      () => store.connectExtension('bad-url-ext'),
+      (err) => err.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_INVALID_ENDPOINT
+    );
+
+    // Plaintext credential gate: a real vault secret bound to a real http
+    // fixture is refused before any vault read or network activity. The
+    // refused error and every projection/audit/snapshot carry no secret.
+    store.installExtension({
+      id: 'plain-ext',
+      kind: 'mcp',
+      transportHint: { kind: 'http', url: fixture.url },
+      credentialId: seeded.id
+    });
+    await assert.rejects(
+      () => store.connectExtension('plain-ext'),
+      (err) => (
+        err.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_PLAINTEXT_CREDENTIAL
+        && !String(err.message).includes(GATE_SECRET)
+      )
+    );
+
+    // Missing credential on an https endpoint: fail closed before any network.
+    store.installExtension({
+      id: 'missing-cred-ext',
+      kind: 'mcp',
+      transportHint: { kind: 'http', url: `https://127.0.0.1:${fixture.port}/mcp` },
+      credentialId: 'ghost-cred'
+    });
+    await assert.rejects(
+      () => store.connectExtension('missing-cred-ext'),
+      (err) => err.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_CREDENTIAL_UNRESOLVED
+    );
+
+    // Options validation happens before any network (an honest http record
+    // still refuses a non-positive timeout).
+    store.installExtension({ id: 'timeout-ext', kind: 'mcp', transportHint: { kind: 'http', url: fixture.url } });
+    await assert.rejects(
+      () => store.connectExtension('timeout-ext', { requestTimeoutMs: 0 }),
+      (err) => err.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_INVALID_PARAMS
+    );
+
+    // A disconnect of an installed-but-not-connected extension is a no-op.
+    assert.strictEqual(await store.disconnectExtension('plain-ext'), false);
+
+    // Zero network, zero connection state, zero audit events for every gate.
+    assert.strictEqual(fixture.connections.total, 0, 'no refused gate may open a socket');
+    assert.deepStrictEqual(fixture.requests, []);
+    assert.deepStrictEqual(store.listExtensionConnections(), []);
+    assert.strictEqual(store.getExtensionConnection('plain-ext'), null);
+    assert.strictEqual(store.resolveExtensionCallName('echo'), null);
+    assert.ok(Object.isFrozen(store.extensionConnections));
+
+    const serialized = JSON.stringify(store.serialize());
+    const auditText = JSON.stringify(events);
+    assert.ok(!serialized.includes(GATE_SECRET), 'the snapshot never carries the secret');
+    assert.ok(!auditText.includes(GATE_SECRET), 'audit payloads never carry the secret');
+    assert.ok(
+      !events.some((event) => String(event.type).startsWith('extension_connect')),
+      'a refused gate emits no connection audit event'
+    );
+  } finally {
+    unsubscribe();
+    store.destroy();
+    await fixture.close();
+    sharedLocalStorage.clear();
+  }
+});
+
+test('74. [P3.1] connection state is session-only: no auto-connect at launch or hydration, nothing persisted', async () => {
+  sharedLocalStorage.clear();
+  const fixture = await createMcpFixtureServer({ tools: [{ name: 'echo' }] });
+  const { runtime, store } = createSharedSubstrateStore();
+  let hydrated = null;
+
+  try {
+    store.importRealmTemplate({
+      formatVersion: 1,
+      template: {
+        formatVersion: 1,
+        id: 'unit-p31-connect',
+        name: 'P3.1 Connect Fixture',
+        description: 'One extension-backed member over a real fixture endpoint.',
+        agents: [{
+          key: 'observer',
+          idPattern: 'p31-observer',
+          name: 'Observer',
+          role: 'observer',
+          prompt: [{ kind: 'text', text: 'Observe.' }],
+          toolProfile: { tools: ['p31-ext::echo'] },
+          privileged: false
+        }],
+        providers: [{ kind: 'mcp', id: 'p31-ext', transport: { kind: 'http', url: fixture.url } }]
+      },
+      files: {}
+    });
+    store.installExtension({
+      id: 'p31-ext',
+      kind: 'mcp',
+      transportHint: { kind: 'http', url: fixture.url }
+    });
+
+    const receipt = await store.launchRealmFromTemplate('unit-p31-connect', {
+      extensionApprovals: [{ extensionId: 'p31-ext' }]
+    });
+    assert.deepStrictEqual(receipt.realm.instance.resolvedTools, { echo: 'p31-ext' });
+    assert.deepStrictEqual(receipt.realm.extensions.map((entry) => [entry.extensionId, entry.status]), [['p31-ext', 'active']]);
+
+    // Launch must never connect: no live state and zero fixture sockets.
+    assert.deepStrictEqual(store.listExtensionConnections(), []);
+    assert.strictEqual(store.getExtensionConnection('p31-ext'), null);
+    assert.strictEqual(fixture.connections.total, 0, 'launch must never dial an endpoint');
+
+    assert.strictEqual(store.saveToStorage(), true);
+
+    // Hydration degrades to not-connected and still never dials.
+    const reloadedRuntime = new AgentRuntime({ autoBootstrapDirector: false });
+    hydrated = new SandboxStore({
+      runtime: reloadedRuntime,
+      autoBootstrapDirector: false,
+      autoHydrate: true
+    });
+    assert.deepStrictEqual(hydrated.listExtensionConnections(), []);
+    assert.strictEqual(hydrated.getExtensionConnection('p31-ext'), null);
+    assert.strictEqual(hydrated.resolveExtensionCallName('echo'), null);
+    assert.strictEqual(fixture.connections.total, 0, 'hydration must never dial an endpoint');
+
+    // The persisted snapshot carries installs and attachments only — no
+    // connection, catalog, or digest field anywhere.
+    const raw = JSON.parse(sharedLocalStorage.getItem('ai_storyteller_sandbox_state_v1'));
+    assert.deepStrictEqual(raw.extensions.map((entry) => entry.id), ['p31-ext']);
+    assert.ok(!('extensionConnections' in raw), 'no live connection field persists');
+    assert.ok(!('connections' in raw), 'no connection field persists');
+    assert.ok(!JSON.stringify(raw).includes('extcat1:'), 'no catalog digest persists');
+  } finally {
+    if (hydrated) hydrated.destroy();
+    store.destroy();
+    await fixture.close();
+    sharedLocalStorage.clear();
+  }
+});
+
+test('75. [P3.1] an explicit approvedUrl must parse and match the transport URL before any vault read or network', async () => {
+  sharedLocalStorage.clear();
+  const { store } = createSharedSubstrateStore();
+  const transportFixture = await createMcpFixtureServer({ tools: [{ name: 'echo' }] });
+  const approvedFixture = await createMcpFixtureServer({ tools: [{ name: 'echo' }] });
+  const BOUND_SECRET = 'p31-approved-bound-secret-7b3e';
+
+  try {
+    const seeded = store.getCredentialVault().addCredential({
+      label: 'P3.1 approval probe',
+      providerId: 'acme',
+      apiKey: BOUND_SECRET
+    });
+
+    // Mismatch with a bound credential: the approval boundary runs before the
+    // plaintext gate and any vault read, so the refusal is the endpoint code
+    // (never the plaintext code) and neither fixture is dialled. Both URLs are
+    // named; the secret never appears.
+    store.installExtension({
+      id: 'mismatch-ext',
+      kind: 'mcp',
+      transportHint: { kind: 'http', url: transportFixture.url },
+      approvedUrl: approvedFixture.url,
+      credentialId: seeded.id
+    });
+    await assert.rejects(
+      () => store.connectExtension('mismatch-ext'),
+      (err) => (
+        err.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_INVALID_ENDPOINT
+        && err.message.includes(transportFixture.url)
+        && err.message.includes(approvedFixture.url)
+        && !err.message.includes(BOUND_SECRET)
+      ),
+      'an inconsistent approval is refused with both URLs named'
+    );
+
+    // An unparseable approved URL refuses with the same typed code.
+    store.installExtension({
+      id: 'bad-approved-ext',
+      kind: 'mcp',
+      transportHint: { kind: 'http', url: transportFixture.url },
+      approvedUrl: 'not-a-url'
+    });
+    await assert.rejects(
+      () => store.connectExtension('bad-approved-ext'),
+      (err) => err.code === SANDBOX_STORE_ERROR_CODES.ERR_STORE_EXTENSION_INVALID_ENDPOINT
+    );
+
+    assert.strictEqual(transportFixture.connections.total, 0, 'a refused approval never dials the transport URL');
+    assert.strictEqual(approvedFixture.connections.total, 0, 'a refused approval never dials the approved URL');
+    assert.deepStrictEqual(store.listExtensionConnections(), []);
+
+    // An equal approved URL (the install-dialog prefill shape) passes the
+    // consistency gate and connects normally.
+    store.installExtension({
+      id: 'equal-approved-ext',
+      kind: 'mcp',
+      transportHint: { kind: 'http', url: transportFixture.url },
+      approvedUrl: transportFixture.url
+    });
+    const connected = await store.connectExtension('equal-approved-ext');
+    assert.strictEqual(connected.status, 'connected');
+    assert.deepStrictEqual(Object.keys(connected.catalog), ['echo']);
+    assert.ok(transportFixture.connections.total > 0, 'the equal approval dials the transport URL');
+    assert.ok(transportFixture.requests.some((entry) => entry.method === 'initialize'));
+    assert.strictEqual(approvedFixture.connections.total, 0);
+  } finally {
+    store.destroy();
+    await transportFixture.close();
+    await approvedFixture.close();
     sharedLocalStorage.clear();
   }
 });

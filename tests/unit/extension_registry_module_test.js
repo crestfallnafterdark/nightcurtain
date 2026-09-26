@@ -45,10 +45,14 @@ import path from 'node:path';
 
 import * as ExtensionRegistryModule from '../../src/lib/sandbox/extensionRegistry/index.ts';
 import {
+  EXTENSION_CATALOG_DIGEST_PREFIX,
   EXTENSION_KINDS,
   EXTENSION_REGISTRY_ERROR_CODES,
   ExtensionRegistryError,
+  arbitrateExtensionCatalogs,
   createExtensionRegistry,
+  diffExtensionCatalogs,
+  indexExtensionCatalog,
   isRealmExtensionAttachment,
   normalizeExtensionInstallRecord,
   normalizeRealmExtensionAttachment,
@@ -134,10 +138,14 @@ test('1. runtime surface exports the sanctioned factories/classes/constants', ()
   assert.deepStrictEqual(
     Object.keys(ExtensionRegistryModule).sort(),
     [
+      'EXTENSION_CATALOG_DIGEST_PREFIX',
       'EXTENSION_KINDS',
       'EXTENSION_REGISTRY_ERROR_CODES',
       'ExtensionRegistryError',
+      'arbitrateExtensionCatalogs',
       'createExtensionRegistry',
+      'diffExtensionCatalogs',
+      'indexExtensionCatalog',
       'isRealmExtensionAttachment',
       'normalizeExtensionInstallRecord',
       'normalizeRealmExtensionAttachment',
@@ -148,6 +156,19 @@ test('1. runtime surface exports the sanctioned factories/classes/constants', ()
   assert.deepStrictEqual(EXTENSION_KINDS, { MCP: 'mcp', PACK: 'pack' });
   assert.ok(Object.isFrozen(EXTENSION_KINDS), 'the kind vocabulary must be frozen');
   assert.ok(Object.isFrozen(EXTENSION_REGISTRY_ERROR_CODES), 'the error-code dictionary must be frozen');
+  assert.deepStrictEqual(
+    Object.keys(EXTENSION_REGISTRY_ERROR_CODES).sort(),
+    [
+      'ERR_EXTENSION_DUPLICATE_ID',
+      'ERR_EXTENSION_INVALID_ARBITRATION',
+      'ERR_EXTENSION_INVALID_ATTACHMENT',
+      'ERR_EXTENSION_INVALID_CATALOG',
+      'ERR_EXTENSION_INVALID_RECORD',
+      'ERR_EXTENSION_INVALID_RESOLUTION'
+    ],
+    'the error-code dictionary must expose exactly the typed codes'
+  );
+  assert.strictEqual(ExtensionRegistryModule.EXTENSION_CATALOG_DIGEST_PREFIX, 'extcat1:');
 
   const { registry } = createHarness();
   assert.deepStrictEqual(
@@ -679,4 +700,355 @@ test('14. module sources are pure: own-file plus sanctioned normalizer imports a
     .replace(/export\s+(?:type\s+)?\{[\s\S]*?\}\s*from\s*['"][^'"]+['"]\s*;/g, '')
     .trim();
   assert.strictEqual(remainder, '', `index.ts must only re-export, found: ${remainder}`);
+});
+
+// ============================================================================
+// 15. Catalog indexing: derivation, server order, shadows, deep freeze
+// ============================================================================
+
+/**
+ * Builds the canonical indexing test vector catalog.
+ *
+ * @returns {object} Frozen catalog projection
+ */
+function vectorCatalog() {
+  return indexExtensionCatalog({
+    extensionId: 'acme-scoring',
+    tools: [
+      {
+        name: 'text.similarity',
+        description: 'Score two texts.',
+        inputSchema: {
+          type: 'object',
+          properties: { b: { type: 'string' }, a: { type: 'string' } },
+          required: ['a', 'b']
+        }
+      },
+      { name: 'text_similarity', description: 'Shadowed duplicate.' },
+      { name: 'echo', inputSchema: { type: 'object' } }
+    ]
+  });
+}
+
+test('15. indexExtensionCatalog projects server order through the canonical derivation with a stable digest', () => {
+  const catalog = vectorCatalog();
+
+  // Derivation is exactly the canonical per-character normalizer.
+  assert.deepStrictEqual(catalog.tools.map((tool) => tool.callName), ['text_similarity', 'echo']);
+  assert.deepStrictEqual(catalog.tools.map((tool) => tool.serverToolName), ['text.similarity', 'echo']);
+  assert.strictEqual(catalog.tools[0].description, 'Score two texts.');
+  assert.strictEqual(catalog.tools[1].description, undefined, 'absent facts stay absent (nothing fabricated)');
+  assert.deepStrictEqual(
+    catalog.shadowedTools,
+    [{ callName: 'text_similarity', serverToolName: 'text_similarity' }],
+    'the later intra-server tool is recorded as a shadow'
+  );
+
+  // Deep freeze: catalog, tools, shadows, and every embedded schema level.
+  assert.ok(Object.isFrozen(catalog));
+  assert.ok(Object.isFrozen(catalog.tools));
+  assert.ok(Object.isFrozen(catalog.tools[0]));
+  assert.ok(Object.isFrozen(catalog.tools[0].inputSchema));
+  assert.ok(Object.isFrozen(catalog.tools[0].inputSchema.properties));
+  assert.ok(Object.isFrozen(catalog.tools[0].inputSchema.properties.a));
+  assert.ok(Object.isFrozen(catalog.shadowedTools));
+  assert.ok(Object.isFrozen(catalog.shadowedTools[0]));
+
+  // Pinned test vector: digest over the canonical ordered projection.
+  assert.ok(catalog.digest.startsWith(EXTENSION_CATALOG_DIGEST_PREFIX));
+  assert.strictEqual(catalog.digest, 'extcat1:6b3cdbde', 'the digest test vector must not drift silently');
+});
+
+test('16. the digest is stable across key order and extension id and changes on any catalog mutation', () => {
+  const base = indexExtensionCatalog({
+    extensionId: 'ext-a',
+    tools: [{
+      name: 'text.similarity',
+      description: 'd',
+      inputSchema: { type: 'object', properties: { a: { type: 'string' }, b: { type: 'string' } } }
+    }]
+  });
+  const reorderedKeys = indexExtensionCatalog({
+    extensionId: 'ext-b',
+    tools: [{
+      name: 'text.similarity',
+      description: 'd',
+      inputSchema: { properties: { b: { type: 'string' }, a: { type: 'string' } }, type: 'object' }
+    }]
+  });
+  assert.strictEqual(base.tools[0].callName, reorderedKeys.tools[0].callName);
+  assert.strictEqual(base.digest, reorderedKeys.digest, 'key order and extension id do not affect the digest');
+
+  const changedDescription = indexExtensionCatalog({
+    extensionId: 'ext-a',
+    tools: [{
+      name: 'text.similarity',
+      description: 'd2',
+      inputSchema: { type: 'object', properties: { a: { type: 'string' }, b: { type: 'string' } } }
+    }]
+  });
+  const changedSchema = indexExtensionCatalog({
+    extensionId: 'ext-a',
+    tools: [{
+      name: 'text.similarity',
+      description: 'd',
+      inputSchema: { type: 'object', properties: { a: { type: 'string' }, b: { type: 'string' } }, additionalProperties: false }
+    }]
+  });
+  const changedWireName = indexExtensionCatalog({
+    extensionId: 'ext-a',
+    tools: [{
+      name: 'text-similarity',
+      description: 'd',
+      inputSchema: { type: 'object', properties: { a: { type: 'string' }, b: { type: 'string' } } }
+    }]
+  });
+  const addedTool = indexExtensionCatalog({
+    extensionId: 'ext-a',
+    tools: [
+      {
+        name: 'text.similarity',
+        description: 'd',
+        inputSchema: { type: 'object', properties: { a: { type: 'string' }, b: { type: 'string' } } }
+      },
+      { name: 'echo' }
+    ]
+  });
+  const addedShadow = indexExtensionCatalog({
+    extensionId: 'ext-a',
+    tools: [
+      {
+        name: 'text.similarity',
+        description: 'd',
+        inputSchema: { type: 'object', properties: { a: { type: 'string' }, b: { type: 'string' } } }
+      },
+      { name: 'text-similarity' }
+    ]
+  });
+
+  for (const [label, mutated] of [
+    ['description', changedDescription],
+    ['schema', changedSchema],
+    ['wire name (same call name)', changedWireName],
+    ['added tool', addedTool],
+    ['added shadow', addedShadow]
+  ]) {
+    assert.notStrictEqual(base.digest, mutated.digest, `a ${label} change must change the digest`);
+  }
+});
+
+// ============================================================================
+// 17. Reserved names fail the whole catalog closed with disclosure
+// ============================================================================
+
+test('17. reserved derived call names fail the whole catalog closed, naming tool and call name', () => {
+  const cases = [
+    ['read_file', 'read_file', 'canonical baked tool'],
+    ['read.file', 'read_file', 'derived-to-canonical spelling'],
+    ['import.realm.template', 'import_realm_template', 'publishing tool'],
+    ['subagent_management', 'subagent_management', 'aggregate selector'],
+    ['__proto__', '__proto__', 'prototype-chain name'],
+    ['constructor', 'constructor', 'prototype-chain name']
+  ];
+  for (const [toolName, callName, label] of cases) {
+    assert.throws(
+      () => indexExtensionCatalog({ extensionId: 'ext-x', tools: [{ name: toolName }] }),
+      (error) => (
+        error instanceof ExtensionRegistryError
+        && error.code === EXTENSION_REGISTRY_ERROR_CODES.ERR_EXTENSION_INVALID_CATALOG
+        && error.message.includes(`tool '${toolName}'`)
+        && error.message.includes(`'${callName}'`)
+      ),
+      `${label} '${toolName}' must fail the catalog closed with both names disclosed`
+    );
+  }
+
+  // Every offender is disclosed in one refusal; a cataloged tool before the
+  // offender does not leak through.
+  assert.throws(
+    () => indexExtensionCatalog({
+      extensionId: 'ext-x',
+      tools: [{ name: 'harmless' }, { name: 'import.realm.template' }, { name: 'read_file' }]
+    }),
+    (error) => (
+      error.code === EXTENSION_REGISTRY_ERROR_CODES.ERR_EXTENSION_INVALID_CATALOG
+      && error.message.includes("tool 'import.realm.template'")
+      && error.message.includes("tool 'read_file'")
+    ),
+    'all offending server tools are disclosed together'
+  );
+
+  // Malformed inputs fail closed with the catalog code too.
+  for (const input of [
+    null,
+    { extensionId: '', tools: [] },
+    { extensionId: 'ext-x', tools: 'nope' },
+    { extensionId: 'ext-x', tools: [null] },
+    { extensionId: 'ext-x', tools: [{ name: '' }] },
+    { extensionId: 'ext-x', tools: [{ name: 'ok', description: 7 }] },
+    { extensionId: 'ext-x', tools: [{ name: 'ok', inputSchema: { bad: Number.NaN } }] },
+    { extensionId: 'ext-x', tools: [{ name: 'ok', inputSchema: { fn: () => {} } }] }
+  ]) {
+    assert.throws(
+      () => indexExtensionCatalog(input),
+      (error) => error.code === EXTENSION_REGISTRY_ERROR_CODES.ERR_EXTENSION_INVALID_CATALOG,
+      `malformed catalog input must fail closed: ${JSON.stringify(input)}`
+    );
+  }
+});
+
+// ============================================================================
+// 18. Arbitration: sequence order, whole-extension conflict, determinism
+// ============================================================================
+
+test('18. arbitration is deterministic by connection-completion sequence and withholds conflicted extensions entirely', () => {
+  const catalogA = indexExtensionCatalog({
+    extensionId: 'ext-a',
+    tools: [{ name: 'shared_tool', description: 'A' }, { name: 'alpha_only' }]
+  });
+  const catalogB = indexExtensionCatalog({
+    extensionId: 'ext-b',
+    tools: [{ name: 'shared_tool', description: 'B' }, { name: 'beta_only' }]
+  });
+
+  // Input order is irrelevant: sequence 1 (ext-a) always wins.
+  const outcomes = arbitrateExtensionCatalogs([
+    { extensionId: 'ext-b', sequence: 2, catalog: catalogB },
+    { extensionId: 'ext-a', sequence: 1, catalog: catalogA }
+  ]);
+  assert.deepStrictEqual(
+    outcomes.map((outcome) => [outcome.extensionId, outcome.status]),
+    [['ext-a', 'active'], ['ext-b', 'conflict']],
+    'outcomes are returned in sequence order'
+  );
+  assert.deepStrictEqual(outcomes[0].conflicts, []);
+  assert.deepStrictEqual(
+    outcomes[1].conflicts,
+    [{ callName: 'shared_tool', otherExtensionId: 'ext-a' }],
+    'the conflicted extension names the claim it lost'
+  );
+  assert.ok(Object.isFrozen(outcomes) && Object.isFrozen(outcomes[1].conflicts));
+
+  // With the earlier extension gone, the previously conflicted catalog is
+  // fully active again (all its names claimable).
+  const solo = arbitrateExtensionCatalogs([{ extensionId: 'ext-b', sequence: 5, catalog: catalogB }]);
+  assert.deepStrictEqual(solo, [{ extensionId: 'ext-b', status: 'active', conflicts: [] }]);
+
+  // Sequence ties break deterministically by extension id (code units).
+  const tied = arbitrateExtensionCatalogs([
+    { extensionId: 'ext-b', sequence: 7, catalog: catalogB },
+    { extensionId: 'ext-a', sequence: 7, catalog: catalogA }
+  ]);
+  assert.deepStrictEqual(
+    tied.map((outcome) => [outcome.extensionId, outcome.status]),
+    [['ext-a', 'active'], ['ext-b', 'conflict']]
+  );
+
+  // No conflict at all; empty input stays an empty frozen array.
+  assert.deepStrictEqual(
+    arbitrateExtensionCatalogs([
+      { extensionId: 'ext-a', sequence: 1, catalog: indexExtensionCatalog({ extensionId: 'ext-a', tools: [{ name: 'a_only' }] }) },
+      { extensionId: 'ext-b', sequence: 2, catalog: indexExtensionCatalog({ extensionId: 'ext-b', tools: [{ name: 'b_only' }] }) }
+    ]).map((outcome) => outcome.status),
+    ['active', 'active']
+  );
+  assert.deepStrictEqual(arbitrateExtensionCatalogs([]), []);
+
+  // Intra-server shadows never surface as global conflicts.
+  const shadowed = indexExtensionCatalog({
+    extensionId: 'ext-c',
+    tools: [{ name: 'dup.tool' }, { name: 'dup_tool' }]
+  });
+  const shadowOutcomes = arbitrateExtensionCatalogs([
+    { extensionId: 'ext-c', sequence: 1, catalog: shadowed },
+    { extensionId: 'ext-d', sequence: 2, catalog: indexExtensionCatalog({ extensionId: 'ext-d', tools: [{ name: 'other' }] }) }
+  ]);
+  assert.deepStrictEqual(shadowOutcomes.map((outcome) => outcome.status), ['active', 'active']);
+
+  // Failure matrix: duplicate ids, bad sequences, malformed/duplicated catalogs.
+  const badInputs = [
+    'nope',
+    [null],
+    [{ extensionId: '', sequence: 1, catalog: catalogA }],
+    [{ extensionId: 'ext-a', sequence: Number.NaN, catalog: catalogA }],
+    [
+      { extensionId: 'ext-a', sequence: 1, catalog: catalogA },
+      { extensionId: 'ext-a', sequence: 2, catalog: catalogA }
+    ],
+    [{ extensionId: 'ext-a', sequence: 1, catalog: { tools: 'nope' } }],
+    [{ extensionId: 'ext-a', sequence: 1, catalog: { tools: [{ callName: 'x' }, { callName: 'x' }] } }]
+  ];
+  for (const input of badInputs) {
+    assert.throws(
+      () => arbitrateExtensionCatalogs(input),
+      (error) => error.code === EXTENSION_REGISTRY_ERROR_CODES.ERR_EXTENSION_INVALID_ARBITRATION,
+      `malformed arbitration input must fail closed: ${JSON.stringify(input)}`
+    );
+  }
+});
+
+// ============================================================================
+// 19. Reconnect drift diff
+// ============================================================================
+
+test('19. diffExtensionCatalogs discloses added/removed/changed/shadows/order with the digest pair', () => {
+  const previous = indexExtensionCatalog({
+    extensionId: 'ext-a',
+    tools: [
+      { name: 'echo', description: 'old echo' },
+      { name: 'alpha', description: 'alpha' }
+    ]
+  });
+  const next = indexExtensionCatalog({
+    extensionId: 'ext-a',
+    tools: [
+      { name: 'alpha', description: 'alpha changed' },
+      { name: 'beta', description: 'new' }
+    ]
+  });
+  const diff = diffExtensionCatalogs(previous, next);
+  assert.deepStrictEqual(diff.added, ['beta']);
+  assert.deepStrictEqual(diff.removed, ['echo']);
+  assert.deepStrictEqual(diff.changed, ['alpha']);
+  assert.deepStrictEqual(diff.shadowedAdded, []);
+  assert.deepStrictEqual(diff.shadowedRemoved, []);
+  assert.strictEqual(diff.reordered, false);
+  assert.deepStrictEqual(diff.digests, { previous: previous.digest, next: next.digest });
+  assert.ok(Object.isFrozen(diff) && Object.isFrozen(diff.added) && Object.isFrozen(diff.digests));
+
+  // No previous catalog: everything is an addition, no digest pair member.
+  const fresh = diffExtensionCatalogs(null, next);
+  assert.deepStrictEqual(fresh.added, ['alpha', 'beta']);
+  assert.deepStrictEqual(fresh.removed, []);
+  assert.deepStrictEqual(fresh.changed, []);
+  assert.strictEqual(fresh.digests.previous, null);
+  assert.strictEqual(fresh.digests.next, next.digest);
+
+  // Order-only change: no set changes, `reordered` carries the disclosure.
+  const orderedAB = indexExtensionCatalog({ extensionId: 'ext-a', tools: [{ name: 'alpha' }, { name: 'beta' }] });
+  const orderedBA = indexExtensionCatalog({ extensionId: 'ext-a', tools: [{ name: 'beta' }, { name: 'alpha' }] });
+  const reorderDiff = diffExtensionCatalogs(orderedAB, orderedBA);
+  assert.deepStrictEqual(reorderDiff.added, []);
+  assert.deepStrictEqual(reorderDiff.removed, []);
+  assert.deepStrictEqual(reorderDiff.changed, []);
+  assert.strictEqual(reorderDiff.reordered, true);
+
+  // Shadow-set change: a new intra-server duplicate is disclosed.
+  const noShadow = indexExtensionCatalog({ extensionId: 'ext-a', tools: [{ name: 'dup.tool' }] });
+  const withShadow = indexExtensionCatalog({ extensionId: 'ext-a', tools: [{ name: 'dup.tool' }, { name: 'dup_tool' }] });
+  const shadowDiff = diffExtensionCatalogs(noShadow, withShadow);
+  assert.deepStrictEqual(shadowDiff.shadowedAdded, ['dup_tool']);
+  assert.deepStrictEqual(shadowDiff.shadowedRemoved, []);
+  assert.deepStrictEqual(shadowDiff.changed, [], 'the shadow changes the digest, not the tool set');
+  assert.notStrictEqual(shadowDiff.digests.previous, shadowDiff.digests.next);
+
+  // Malformed inputs fail closed.
+  assert.throws(
+    () => diffExtensionCatalogs(previous, { tools: 'nope', digest: 'x' }),
+    (error) => error.code === EXTENSION_REGISTRY_ERROR_CODES.ERR_EXTENSION_INVALID_CATALOG
+  );
+  assert.throws(
+    () => diffExtensionCatalogs(previous, { tools: [], digest: 42 }),
+    (error) => error.code === EXTENSION_REGISTRY_ERROR_CODES.ERR_EXTENSION_INVALID_CATALOG
+  );
 });
