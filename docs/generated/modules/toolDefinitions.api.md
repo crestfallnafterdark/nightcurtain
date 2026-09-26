@@ -122,7 +122,7 @@ export interface InnateToolsList extends ReadonlyArray<SandboxToolName> {
 
 // @public
 export interface JsonSchemaDraft07 {
-    readonly additionalProperties: false;
+    readonly additionalProperties: boolean;
     readonly properties: Record<string, {
         readonly type: string | readonly string[];
         readonly description: string;
@@ -261,6 +261,7 @@ export const TOOL_SYSTEM_ERROR_CODES: {
     readonly SERVICE_UNAVAILABLE: 'SERVICE_UNAVAILABLE';
     readonly PRECALL_FORBIDDEN: 'PRECALL_FORBIDDEN';
     readonly EXECUTION_FAILED: 'EXECUTION_FAILED';
+    readonly AGENT_ALREADY_EXISTS: 'AGENT_ALREADY_EXISTS';
 };
 
 // @public
@@ -513,7 +514,7 @@ const schema: JsonSchemaDraft07 = {
 
 #### Members
 
-- **`additionalProperties`** — Strict schema adherence: prevents undocumented parameter hallucinations.
+- **`additionalProperties`** — Extra-parameter policy keyword. `false` for the closed baked/publishing descriptors; `true` for descriptors whose handler accepts the key set on the wire and ignores undocumented keys with an explicit warning (the `spawn_agent` accept-and-warn boundary) — the emitted keyword always matches the runtime behavior.
 - **`properties`** — Parameter definitions key-value map.
 - **`required`** — List of required parameter names.
 - **`type`** — Must always be 'object'.

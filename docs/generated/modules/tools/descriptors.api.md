@@ -2099,7 +2099,7 @@ export const killAgentDescriptor: Readonly<{
 // @public
 export const lifecycleToolDescriptors: readonly (Readonly<{
     name: "spawn_agent";
-    description: "Spawn a new agent instance in the sandbox runtime.";
+    description: string;
     schema: Readonly<{
         type: "object";
         properties: {
@@ -2123,9 +2123,25 @@ export const lifecycleToolDescriptors: readonly (Readonly<{
                 type: string;
                 description: string;
             };
+            toolPreset: {
+                type: string;
+                enum: string[];
+                description: string;
+            };
+            allowedTools: {
+                type: string;
+                items: {
+                    type: string;
+                };
+                description: string;
+            };
+            await_completion: {
+                type: string;
+                description: string;
+            };
         };
         required: string[];
-        additionalProperties: false;
+        additionalProperties: true;
     }>;
     paramAliasMap: Readonly<{
         id: "id";
@@ -2140,9 +2156,16 @@ export const lifecycleToolDescriptors: readonly (Readonly<{
         prompt: "initial_prompt";
         initial_prompt: "initial_prompt";
         initialPrompt: "initial_prompt";
+        toolPreset: "toolPreset";
+        tool_preset: "toolPreset";
+        allowedTools: "allowedTools";
+        allowed_tools: "allowedTools";
+        tools: "allowedTools";
+        await_completion: "await_completion";
+        awaitCompletion: "await_completion";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_3, context: ExecutionContext) => Promise<Record<string, unknown>>;
+    handler: (params: ToolParams_3, context: ExecutionContext) => Promise<ToolParams_3>;
 }> | Readonly<{
     name: "kill_agent";
     description: "Terminate an active agent in the runtime and transition it to recycled/terminated state.";
@@ -2187,7 +2210,7 @@ export const lifecycleToolDescriptors: readonly (Readonly<{
     }>;
 }> | Readonly<{
     name: "list_agents";
-    description: "List active agents in the sandbox runtime visible to the calling agent, with optional status and role filtering.";
+    description: "List active agents in the sandbox runtime visible to the calling agent, with optional status and role filtering. Each entry carries the effective tool policy the agent can invoke.";
     schema: Readonly<{
         type: "object";
         properties: {
@@ -2257,7 +2280,7 @@ export const lifecycleToolDescriptors: readonly (Readonly<{
 // @public
 export const list_agents: Readonly<{
     name: "list_agents";
-    description: "List active agents in the sandbox runtime visible to the calling agent, with optional status and role filtering.";
+    description: "List active agents in the sandbox runtime visible to the calling agent, with optional status and role filtering. Each entry carries the effective tool policy the agent can invoke.";
     schema: Readonly<{
         type: "object";
         properties: {
@@ -2369,7 +2392,7 @@ export const list_schedules: Readonly<{
 // @public
 export const listAgents: Readonly<{
     name: "list_agents";
-    description: "List active agents in the sandbox runtime visible to the calling agent, with optional status and role filtering.";
+    description: "List active agents in the sandbox runtime visible to the calling agent, with optional status and role filtering. Each entry carries the effective tool policy the agent can invoke.";
     schema: Readonly<{
         type: "object";
         properties: {
@@ -2399,7 +2422,7 @@ export const listAgents: Readonly<{
 // @public
 export const listAgentsDescriptor: Readonly<{
     name: "list_agents";
-    description: "List active agents in the sandbox runtime visible to the calling agent, with optional status and role filtering.";
+    description: "List active agents in the sandbox runtime visible to the calling agent, with optional status and role filtering. Each entry carries the effective tool policy the agent can invoke.";
     schema: Readonly<{
         type: "object";
         properties: {
@@ -3999,7 +4022,7 @@ export const setPermissionsDescriptor: Readonly<{
 // @public
 export const spawn_agent: Readonly<{
     name: "spawn_agent";
-    description: "Spawn a new agent instance in the sandbox runtime.";
+    description: string;
     schema: Readonly<{
         type: "object";
         properties: {
@@ -4023,9 +4046,25 @@ export const spawn_agent: Readonly<{
                 type: string;
                 description: string;
             };
+            toolPreset: {
+                type: string;
+                enum: string[];
+                description: string;
+            };
+            allowedTools: {
+                type: string;
+                items: {
+                    type: string;
+                };
+                description: string;
+            };
+            await_completion: {
+                type: string;
+                description: string;
+            };
         };
         required: string[];
-        additionalProperties: false;
+        additionalProperties: true;
     }>;
     paramAliasMap: Readonly<{
         id: "id";
@@ -4040,15 +4079,22 @@ export const spawn_agent: Readonly<{
         prompt: "initial_prompt";
         initial_prompt: "initial_prompt";
         initialPrompt: "initial_prompt";
+        toolPreset: "toolPreset";
+        tool_preset: "toolPreset";
+        allowedTools: "allowedTools";
+        allowed_tools: "allowedTools";
+        tools: "allowedTools";
+        await_completion: "await_completion";
+        awaitCompletion: "await_completion";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_3, context: ExecutionContext) => Promise<Record<string, unknown>>;
+    handler: (params: ToolParams_3, context: ExecutionContext) => Promise<ToolParams_3>;
 }>;
 
 // @public
 export const spawnAgent: Readonly<{
     name: "spawn_agent";
-    description: "Spawn a new agent instance in the sandbox runtime.";
+    description: string;
     schema: Readonly<{
         type: "object";
         properties: {
@@ -4072,9 +4118,25 @@ export const spawnAgent: Readonly<{
                 type: string;
                 description: string;
             };
+            toolPreset: {
+                type: string;
+                enum: string[];
+                description: string;
+            };
+            allowedTools: {
+                type: string;
+                items: {
+                    type: string;
+                };
+                description: string;
+            };
+            await_completion: {
+                type: string;
+                description: string;
+            };
         };
         required: string[];
-        additionalProperties: false;
+        additionalProperties: true;
     }>;
     paramAliasMap: Readonly<{
         id: "id";
@@ -4089,15 +4151,22 @@ export const spawnAgent: Readonly<{
         prompt: "initial_prompt";
         initial_prompt: "initial_prompt";
         initialPrompt: "initial_prompt";
+        toolPreset: "toolPreset";
+        tool_preset: "toolPreset";
+        allowedTools: "allowedTools";
+        allowed_tools: "allowedTools";
+        tools: "allowedTools";
+        await_completion: "await_completion";
+        awaitCompletion: "await_completion";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_3, context: ExecutionContext) => Promise<Record<string, unknown>>;
+    handler: (params: ToolParams_3, context: ExecutionContext) => Promise<ToolParams_3>;
 }>;
 
 // @public
 export const spawnAgentDescriptor: Readonly<{
     name: "spawn_agent";
-    description: "Spawn a new agent instance in the sandbox runtime.";
+    description: string;
     schema: Readonly<{
         type: "object";
         properties: {
@@ -4121,9 +4190,25 @@ export const spawnAgentDescriptor: Readonly<{
                 type: string;
                 description: string;
             };
+            toolPreset: {
+                type: string;
+                enum: string[];
+                description: string;
+            };
+            allowedTools: {
+                type: string;
+                items: {
+                    type: string;
+                };
+                description: string;
+            };
+            await_completion: {
+                type: string;
+                description: string;
+            };
         };
         required: string[];
-        additionalProperties: false;
+        additionalProperties: true;
     }>;
     paramAliasMap: Readonly<{
         id: "id";
@@ -4138,9 +4223,16 @@ export const spawnAgentDescriptor: Readonly<{
         prompt: "initial_prompt";
         initial_prompt: "initial_prompt";
         initialPrompt: "initial_prompt";
+        toolPreset: "toolPreset";
+        tool_preset: "toolPreset";
+        allowedTools: "allowedTools";
+        allowed_tools: "allowedTools";
+        tools: "allowedTools";
+        await_completion: "await_completion";
+        awaitCompletion: "await_completion";
     }>;
     sanitize: (rawArgs?: unknown) => Record<string, unknown>;
-    handler: (params: ToolParams_3, context: ExecutionContext) => Promise<Record<string, unknown>>;
+    handler: (params: ToolParams_3, context: ExecutionContext) => Promise<ToolParams_3>;
 }>;
 
 // @public
@@ -5792,9 +5884,9 @@ export const writeJsonDescriptor: Readonly<{
 //
 // <declarations>/tools/descriptors/clockTools.d.ts:446:5 - (ae-forgotten-export) The symbol "ToolParams_6" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/invocationTools.d.ts:323:5 - (ae-forgotten-export) The symbol "ToolParams_4" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/lifecycleTools.d.ts:330:5 - (ae-forgotten-export) The symbol "ToolParams_3" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/lifecycleTools.d.ts:732:5 - (ae-forgotten-export) The symbol "PublicAgentDescriptor" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/lifecycleTools.d.ts:766:5 - (ae-forgotten-export) The symbol "UndoTurnPortResult" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/lifecycleTools.d.ts:448:5 - (ae-forgotten-export) The symbol "ToolParams_3" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/lifecycleTools.d.ts:881:5 - (ae-forgotten-export) The symbol "PublicAgentDescriptor" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/lifecycleTools.d.ts:915:5 - (ae-forgotten-export) The symbol "UndoTurnPortResult" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/messagingTools.d.ts:821:5 - (ae-forgotten-export) The symbol "ToolParams_2" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/precallTools.d.ts:136:5 - (ae-forgotten-export) The symbol "ToolParams_7" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/precallTools.d.ts:136:5 - (ae-forgotten-export) The symbol "ExecutionContext" needs to be exported by the entry point index.d.ts
@@ -6091,7 +6183,7 @@ camelCase alias of `listAgentsDescriptor`.
 
 `list_agents` descriptor — list the agents visible to the bound caller.
 
-Args: optional `state` and `role` filters applied as post-filters on the projected descriptors. Visibility and identity are resolved server-side: the handler calls `context.lifecyclePort.listAgentDescriptors()` with the bound execution-context subject only (never caller-supplied claims), so anonymous callers receive `[]`, registry sudoers receive every descriptor, and ordinary callers receive same-scope self and registry children (the director's reserved system scope stays outside every realm scope). Results are reduced to the public descriptor shape (`id`, `name`, `state`, `role`, `triggerPolicy`, `unreadCount`, realm-opaque `workspace`, which is omitted when the raw key must be withheld); live `Agent` entities and their internals are never returned, and an entry whose id carries internal realm vocabulary is withheld from the listing (ticket eab4e51, folded into d57cbc1).
+Args: optional `state` and `role` filters applied as post-filters on the projected descriptors. Visibility and identity are resolved server-side: the handler calls `context.lifecyclePort.listAgentDescriptors()` with the bound execution-context subject only (never caller-supplied claims), so anonymous callers receive `[]`, registry sudoers receive every descriptor, and ordinary callers receive same-scope self and registry children (the director's reserved system scope stays outside every realm scope). Results are reduced to the public descriptor shape (`id`, `name`, `state`, `role`, `triggerPolicy`, `unreadCount`, effective `allowedTools`, realm-opaque `workspace`, which is omitted when the raw key must be withheld); live `Agent` entities and their internals are never returned, and an entry whose id carries internal realm vocabulary is withheld from the listing (ticket eab4e51, folded into d57cbc1). The effective tool policy is exposed per agent so a parent can verify what a spawned child can actually do (ticket f541390).
 
 Fail closed: a host-supplied legacy port without the scoped `listAgentDescriptors` projector raises a clear error instead of falling back to the unscoped `listAgents` listing; the dispatcher's universal error shield normalizes it to an `EXECUTION_FAILED` receipt (ticket 9133495).
 
@@ -6281,13 +6373,31 @@ camelCase alias of `spawnAgentDescriptor`.
 
 ### `spawnAgentDescriptor` — variable
 
-`spawn_agent` descriptor — launch a new agent instance in the sandbox runtime.
+`spawn_agent` descriptor — launch a new agent instance in the sandbox runtime (ratified contract: decision ticket `f41f838` comments #2-#3).
 
-Args: `id` (required), optional `name`, `role`, `system_prompt`, `initial_prompt`. Forwards the identity-only caller scope to `context.lifecyclePort.launchAgent()` and throws when that service is missing. The successful receipt is projected to the bounded public shape (`success`, `id`, `name`, `state`, `role`, realm-opaque `workspace`); the live `Agent` entity returned by the port is never spread, and explicit failure receipts keep their shape so denial semantics are preserved (ticket 550486c).
+## Capability contract
 
-Realm-exact caller resolution (Wave I, ticket d57cbc1; I2-V F1): the scope is resolved from the trusted bound execution context only — the dispatcher-pinned canonical `callerKey`, else the bound realm scope, else the legacy unique-match rule (resolveCallerScope). A realm-bound same-id caller therefore spawns under its own realm's principal instead of degrading to an anonymous host launch, so realm inheritance, the spawn workspace-confinement gate, and the SEC-2 tool clamp all apply. A bound caller that is a realm-ambiguous bare id with no trusted identity channel fails closed with the uniform `PERMISSION_DENIED` shape rather than reaching that host path. A per-call `callerKey`/`caller_key` argument is stripped from the launch config — the trusted execution context is the only caller-key channel.
+The child's tools come only from `toolPreset` (a preset id) or `allowedTools` (an explicit tool-name list) — both documented, both honored end-to-end. `role` is a pure display label and never selects capability. A spawning agent can never produce a child with more tool access than itself: the lifecycle clamps the requested set to the spawner's own effective set (the SEC-2 clamp as documented contract; `'*'` spawner → `'*'` child is equivalent access). With neither capability parameter the child defaults to `readonly_collaborator ∩ spawner tools`, or the spawner's own effective set when that intersection is empty — never a zero-tool child when the spawner has tools. Host/operator/engine launches (no resolved agent principal) keep their existing full-pinning semantics.
 
-Realm opacity (ticket eab4e51, folded into d57cbc1): an `id` claim carrying internal realm vocabulary (`realm:`/`system:` shapes, the seeded Generic realm id) is refused before delegation with the uniform `PERMISSION_DENIED` shape and is never echoed; a downstream failure message that repeats a caller-supplied realm-vocabulary claim is sanitized to the same uniform phrase with its failure code preserved; and a per-call `callerKey`/`caller_key` argument is stripped from the launch config — the trusted execution context is the only caller-key channel.
+## Parameter surface (accept-and-warn)
+
+Every accepted key is listed by SPAWN_ACCEPTED_PARAM_KEYS; unknown keys are dropped at this boundary, never forwarded to the lifecycle, and reported in the model-visible `warnings` list on the receipt (naming the caller's exact spelling). Identity/authority vocabulary (realm membership, `callerKey`/`callerContext`/`principal`, engine-composed authority grants) is silently stripped so realm opacity holds. Authority-adjacent acting keys are deliberately not model inputs and are stripped with a warning: `privileged` (lifecycle-authority gated), `workspace`/`workspaceId` (workspace confinement belongs to explicit host/operator launches), and the model/turn tuning keys (`temperature`, `settings`, `maxTurns`, `modelConfig`, `presetId`, …). `additionalProperties` is emitted as `true` because the provider adapters do not run strict tool-schema validation, so the keyword tells the truth: extra keys are accepted by the wire format and ignored with a warning.
+
+## Prompt policy
+
+`initial_prompt` is queued and the spawn returns immediately by default (non-blocking). `await_completion: true` opts into blocking: the tool awaits the child's completed first turn and surfaces a bounded outcome (the turn error as a failure receipt). A failed child turn — default or blocking — never unwinds the registered child; the failure stays observable on the child (`lastError`/state detail). Destructive rollback covers registration- time failures only.
+
+## Receipts
+
+The successful receipt is the bounded public projection (`success`, `id`, `name`, `state`, `role`, effective `allowedTools`, realm-opaque `workspace`, plus `warnings` when keys were ignored); `id` is the handle a parent uses with `send_message`/`invoke_agent`. The live `Agent` entity returned by the port is never spread, a malformed port record without a valid string id fails the receipt instead of fabricating `'unknown'` identity, and explicit failure receipts keep their shape so denial semantics are preserved (ticket 550486c, f541390).
+
+## Errors
+
+Tool-boundary validation is tool-scoped: a missing/non-string `id` fails with `INVALID_ARGUMENTS` and text naming `spawn_agent` (never the internal `launchAgent`), and a duplicate id keeps its dedicated `AGENT_ALREADY_EXISTS` code. Denials name the requirement without inventing an oracle.
+
+Realm-exact caller resolution (Wave I, ticket d57cbc1; I2-V F1): the scope is resolved from the trusted bound execution context only — the dispatcher-pinned canonical `callerKey`, else the bound realm scope, else the legacy unique-match rule (resolveCallerScope). A realm-bound same-id caller therefore spawns under its own realm's principal instead of degrading to an anonymous host launch, so realm inheritance, the spawn workspace-confinement gate, and the SEC-2 tool clamp all apply. A bound caller that is a realm-ambiguous bare id with no trusted identity channel fails closed with the uniform `PERMISSION_DENIED` shape rather than reaching that host path.
+
+Realm opacity (ticket eab4e51, folded into d57cbc1): an `id` claim carrying internal realm vocabulary (`realm:`/`system:` shapes, the seeded Generic realm id) is refused before delegation with the uniform `PERMISSION_DENIED` shape and is never echoed; a downstream failure message that repeats a caller-supplied realm-vocabulary claim is sanitized to the same uniform phrase with its failure code preserved.
 
 ### `submit_hydration_package` — variable
 
@@ -6417,4 +6527,4 @@ Args: `file_path` (required), exactly one of inline `data` or file-sourced `data
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): `ExecutionContext`, `JsonSchemaDraft07`, `PublicAgentDescriptor`, `PublishingFailure`, `ToolDescriptor`, `ToolParams`, `ToolParams_2`, `ToolParams_3`, `ToolParams_4`, `ToolParams_5`, `ToolParams_6`, `ToolParams_7`, `ToolParams_8`, `UndoTurnPortResult`
-- Unresolved `{@link}` targets (`ae-unresolved-link`): 5 (policy `none`; see `scripts/api_reports.mjs`)
+- Unresolved `{@link}` targets (`ae-unresolved-link`): 6 (policy `none`; see `scripts/api_reports.mjs`)
