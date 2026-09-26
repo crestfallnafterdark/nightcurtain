@@ -15,6 +15,7 @@ import {
   PUBLISHING_TOOLS,
   REALM_ADMIN_TOOLS,
   EXTENSIONS_ADMIN_TOOLS,
+  REALM_KNOWLEDGE_TOOLS,
   TOOL_SYSTEM_ERROR_CODES,
   resolveToolPreset
 } from '../../src/lib/sandbox/tools/constants/index.ts';
@@ -388,13 +389,14 @@ function normalizeAliasKey(key) {
 test('8. TOOL_ALIAS_MAP normalized keys are unique and never span canonical families', () => {
   const canonicalNames = new Set(Object.values(SANDBOX_TOOLS));
   const selectorTargets = new Set(['subagent_management']);
-  // Wave U publishing meta tools and the M3/M4 realm- and extension-admin
-  // tools are explicit-grant-only and outside the canonical taxonomy, but they
-  // resolve through the same alias map.
+  // Wave U publishing meta tools and the M3/M4/M5b realm-admin,
+  // extension-admin, and realm-knowledge tools are explicit-grant-only and
+  // outside the canonical taxonomy, but they resolve through the same alias map.
   const authorityTargets = new Set([
     ...Object.values(PUBLISHING_TOOLS),
     ...Object.values(REALM_ADMIN_TOOLS),
-    ...Object.values(EXTENSIONS_ADMIN_TOOLS)
+    ...Object.values(EXTENSIONS_ADMIN_TOOLS),
+    ...Object.values(REALM_KNOWLEDGE_TOOLS)
   ]);
 
   // (a) A normalized key may appear many times only when every occurrence maps
