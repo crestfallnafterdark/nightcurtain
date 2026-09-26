@@ -495,6 +495,63 @@ const REALM_ADMIN_ALLOWED_PATCH_KEYS: ReadonlySet<string> = new Set<string>(
   Object.keys(REALM_ADMIN_PATCH_FIELD_TOKENS)
 );
 
+/** Accepted nested key set of the `attach` patch container (closed at depth). @internal */
+const REALM_ADMIN_ATTACH_KEYS: ReadonlySet<string> = new Set<string>(['extensionId', 'toolSelection']);
+
+/** Accepted nested key set of the `toolSelection` patch container (closed at depth). @internal */
+const REALM_ADMIN_TOOL_SELECTION_KEYS: ReadonlySet<string> = new Set<string>(['extensionId', 'selection']);
+
+/**
+ * Scans the `attach` / `toolSelection` patch containers for operator-only or
+ * unknown nested keys (closed patch at depth, spec AC-M3-04/§1.4): denied-key
+ * presence fails the whole call with the uniform permission denial, an unknown
+ * key is malformed — never silently dropped. Malformed container shapes are
+ * left to the store's value validation.
+ *
+ * @param patch - Sanitized patch record.
+ * @returns The refusal receipt, or `null` when every nested key is accepted.
+ * @internal
+ */
+function findRealmAdminNestedPatchFailure(
+  patch: Record<string, unknown>
+): { success: false; error: string; code: string } | null {
+  const containers: Array<{ value: unknown; allowed: ReadonlySet<string> }> = [];
+  if (patch.attach !== undefined) {
+    containers[containers.length] = { value: patch.attach, allowed: REALM_ADMIN_ATTACH_KEYS };
+  }
+  if (patch.toolSelection !== undefined) {
+    containers[containers.length] = { value: patch.toolSelection, allowed: REALM_ADMIN_TOOL_SELECTION_KEYS };
+  }
+  // Denied presence across both containers first, exactly like the top-level
+  // scan: the uniform permission denial wins over unknown-key reporting.
+  for (let i = 0; i < containers.length; i++) {
+    const value = containers[i].value;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+    const nestedKeys = Object.keys(value as Record<string, unknown>);
+    for (let j = 0; j < nestedKeys.length; j++) {
+      if (isDeniedRealmAdminPatchKey(nestedKeys[j])) {
+        return {
+          success: false,
+          error: 'update_realm does not permit operator-only fields.',
+          code: TOOL_SYSTEM_ERROR_CODES.PERMISSION_DENIED
+        };
+      }
+    }
+  }
+  for (let i = 0; i < containers.length; i++) {
+    const value = containers[i].value;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+    const nestedKeys = Object.keys(value as Record<string, unknown>);
+    for (let j = 0; j < nestedKeys.length; j++) {
+      if (!containers[i].allowed.has(nestedKeys[j])) {
+        // Static message: an unknown nested key never echoes its key.
+        return invalidArguments('update_realm does not accept unknown fields.');
+      }
+    }
+  }
+  return null;
+}
+
 /** `inspect_realm` parameter alias map (realm label addressing only). @internal */
 const realmInspectParamAliasMap: Readonly<Record<string, string>> = Object.freeze({
   realm: 'realm',
@@ -790,7 +847,9 @@ export const updateRealmDescriptor = Object.freeze({
       return invalidArguments('update_realm requires a patch object with at least one editable field.');
     }
     // Denied-key presence fails the whole call first (even `false`/`null`);
-    // unknown keys are malformed params. Nothing is silently dropped.
+    // unknown keys are malformed params. Nothing is silently dropped. The same
+    // closed-patch scan covers the `attach` / `toolSelection` containers, so a
+    // nested denied/unknown key also fails the whole call before the port.
     for (let i = 0; i < patchKeys.length; i++) {
       if (isDeniedRealmAdminPatchKey(patchKeys[i])) {
         return {
@@ -805,6 +864,8 @@ export const updateRealmDescriptor = Object.freeze({
         return invalidArguments('update_realm does not accept unknown fields.');
       }
     }
+    const nestedFailure = findRealmAdminNestedPatchFailure(rawPatch as Record<string, unknown>);
+    if (nestedFailure) return nestedFailure;
     const realmLabel = normalizeRealmLabel(sanitized.realm);
     return port.updateRealm({
       actorRef: resolveRealmAdminActorRef(context),

@@ -2626,12 +2626,13 @@ const AUTHORITY_ID_SET: ReadonlySet<string> = new Set(AUTHORITY_IDS);
 /**
  * Realm-partition masking patterns mirrored from the M2 descriptor mask
  * (`tools/descriptors/lifecycleTools.ts`): `realm:<id>:global` renders as
- * `global`, any other `realm:`-bearing key is withheld, and `system:`/seeded
- * realm vocabulary is never surfaced. Mirrored rather than imported so the
- * composition root keeps its narrow surface imports.
+ * `global` and every other key carrying internal realm/system vocabulary
+ * (`realm:`, the `system:` prefix, the seeded `realm_generic` id) is withheld,
+ * so an operator-pinned internal-shaped workspace key is never surfaced.
+ * Mirrored rather than imported so the composition root keeps its narrow
+ * surface imports.
  */
 const REALM_GLOBAL_WORKSPACE_PATTERN = /^realm:.+:global$/;
-const REALM_WORKSPACE_VOCABULARY_PATTERN = /realm:/;
 const INTERNAL_ID_VOCABULARY_PATTERN = /realm:|^system:/;
 const SEEDED_GENERIC_REALM_ID = 'realm_generic';
 
@@ -2639,7 +2640,7 @@ const SEEDED_GENERIC_REALM_ID = 'realm_generic';
 function toAgentVisibleWorkspaceKey(value: string | null): string | null {
   if (!value) return null;
   if (REALM_GLOBAL_WORKSPACE_PATTERN.test(value)) return 'global';
-  if (REALM_WORKSPACE_VOCABULARY_PATTERN.test(value)) return null;
+  if (carriesInternalRealmVocabulary(value)) return null;
   return value;
 }
 
@@ -2695,6 +2696,54 @@ function realmAdminCodedError(message: string, code: string): Error & { code?: s
 function isDeniedRealmAdminPatchKey(key: string): boolean {
   if (REALM_ADMIN_DENIED_PATCH_KEYS.includes(key)) return true;
   return AUTHORITY_ID_SET.has(key);
+}
+
+/** Accepted nested key set of the `attach` patch container (closed at depth). */
+const REALM_ADMIN_ATTACH_KEYS: ReadonlySet<string> = new Set<string>(['extensionId', 'toolSelection']);
+
+/** Accepted nested key set of the `toolSelection` patch container (closed at depth). */
+const REALM_ADMIN_TOOL_SELECTION_KEYS: ReadonlySet<string> = new Set<string>(['extensionId', 'selection']);
+
+/**
+ * Re-validates the `attach` / `toolSelection` patch containers at depth
+ * (tool-boundary parity, spec AC-M3-04/§1.4): an operator-only nested key
+ * throws the uniform bound denial, an unknown nested key throws
+ * `INVALID_ARGUMENTS` — never silently dropped by the known-key reads below.
+ * Malformed container shapes are left to the value validation that follows.
+ *
+ * @param patch - Caller-supplied patch record.
+ * @throws `Error` - Code `'PERMISSION_DENIED'` or `'INVALID_ARGUMENTS'`.
+ */
+function assertRealmAdminNestedPatchKeys(patch: Record<string, unknown>): void {
+  const containers: Array<{ value: unknown; allowed: ReadonlySet<string> }> = [];
+  if (patch.attach !== undefined) {
+    containers[containers.length] = { value: patch.attach, allowed: REALM_ADMIN_ATTACH_KEYS };
+  }
+  if (patch.toolSelection !== undefined) {
+    containers[containers.length] = { value: patch.toolSelection, allowed: REALM_ADMIN_TOOL_SELECTION_KEYS };
+  }
+  // Denied presence across both containers first, exactly like the top-level
+  // scan: the uniform bound denial wins over unknown-key reporting.
+  for (let i = 0; i < containers.length; i++) {
+    const value = containers[i].value;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+    const nestedKeys = Object.keys(value as Record<string, unknown>);
+    for (let j = 0; j < nestedKeys.length; j++) {
+      if (isDeniedRealmAdminPatchKey(nestedKeys[j])) {
+        throw realmAdminCodedError(REALM_ADMIN_EDIT_BOUND_DENIED_MESSAGE, 'PERMISSION_DENIED');
+      }
+    }
+  }
+  for (let i = 0; i < containers.length; i++) {
+    const value = containers[i].value;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+    const nestedKeys = Object.keys(value as Record<string, unknown>);
+    for (let j = 0; j < nestedKeys.length; j++) {
+      if (!containers[i].allowed.has(nestedKeys[j])) {
+        throw realmAdminCodedError('update_realm does not accept unknown fields.', 'INVALID_ARGUMENTS');
+      }
+    }
+  }
 }
 
 /**
@@ -12304,10 +12353,10 @@ export class SandboxStore {
 
   /**
    * Reads and validates one realm-admin update patch (port-side re-validation;
-   * the tool boundary already scanned keys): denied keys throw the uniform
-   * bound denial, unknown keys or malformed values throw
-   * `INVALID_ARGUMENTS`, and the requested field tokens are returned in patch
-   * declaration order.
+   * the tool boundary already scanned top-level and nested keys): denied keys
+   * throw the uniform bound denial, unknown top-level or nested keys or
+   * malformed values throw `INVALID_ARGUMENTS`, and the requested field tokens
+   * are returned in patch declaration order.
    *
    * @param patch - Caller-supplied patch.
    * @returns The frozen patch snapshot with its requested field tokens.
@@ -12338,6 +12387,7 @@ export class SandboxStore {
       }
       fields[fields.length] = token;
     }
+    assertRealmAdminNestedPatchKeys(snapshot);
     const update: Record<string, unknown> = {};
     if (snapshot.name !== undefined) {
       if (typeof snapshot.name !== 'string' || !snapshot.name.trim()) {
