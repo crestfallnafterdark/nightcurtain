@@ -19,7 +19,7 @@ graph TD
     end
 
     subgraph L2["Tier 2: Zero-Mock Subsystem Integration (node --test)"]
-        INT["53 Integration Suites (tests/integration/)<br/>• Real VirtualFS, MessagingBus, WorldClock, AgentRuntime<br/>• Preset Binding & Credential Vault Workflows<br/>• Precall Pipeline & Tool Security Gating Verification<br/>• Concurrency & State Persistence Fault Injection"]
+        INT["54 Integration Suites (tests/integration/)<br/>• Real VirtualFS, MessagingBus, WorldClock, AgentRuntime<br/>• Preset Binding & Credential Vault Workflows<br/>• Precall Pipeline & Tool Security Gating Verification<br/>• Concurrency & State Persistence Fault Injection"]
     end
 
     subgraph L1["Tier 1: Atomic Unit & Contract Testing (node --test)"]
@@ -101,7 +101,7 @@ The master runner executes all Unit and Integration suites in strict sub-process
 // Sample output format from tests/runner.js:
 // ======================================================================
 //   AGENTIC SANDBOX STUDIO MASTER TEST SUITE RUNNER
-//   Total Suites: 109 (56 Unit, 53 Integration)
+//   Total Suites: 110 (56 Unit, 54 Integration)
 // ======================================================================
 //   [Unit       ] deepseek_provider_test.js                  ✔ PASS (42ms)
 //   [Unit       ] deepseek_reasoning_hygiene_test.js         ✔ PASS (18ms)
@@ -109,7 +109,7 @@ The master runner executes all Unit and Integration suites in strict sub-process
 //   [Integration] tool_contract_security_gating_test.js      ✔ PASS (115ms)
 //   [Integration] mail_injection_precall_pipeline_test.js    ✔ PASS (188ms)
 // ======================================================================
-//   Suites:       109 passed, 109 total
+//   Suites:       110 passed, 110 total
 //   Failed:       0 failed
 //   Duration:     3.42s
 // ======================================================================
@@ -126,7 +126,7 @@ All Node-based test suites import [`tests/test_env.js`](../../tests/test_env.js)
 
 ## 4. Test Suite Inventory & Classification
 
-The project includes **109 native test suites** (56 unit, 53 integration) and **10 browser E2E specs**:
+The project includes **110 native test suites** (56 unit, 54 integration) and **10 browser E2E specs**:
 
 > **Canonical inventory.** This chapter is the single source of truth for test-suite counts and per-file listings; [`unit_and_integration.md`](unit_and_integration.md) cross-links here instead of duplicating it.
 
@@ -210,6 +210,7 @@ The project includes **109 native test suites** (56 unit, 53 integration) and **
 | [`messaging_bus_test.js`](../../tests/integration/messaging_bus_test.js) | `MessagingBus` | FIFO mailbox: dequeue on read, clean drain, peek, archive fidelity. |
 | [`messaging_invocations_test.js`](../../tests/integration/messaging_invocations_test.js) | `MessagingBus` + `InvocationEngine` + `AgentRuntime` | Event-driven multi-agent flows, history purity, cascade execution. |
 | [`meta_agent_parental_test.js`](../../tests/integration/meta_agent_parental_test.js) | `ToolDispatcher` + `AgentRuntime` + `SandboxStore` + `sandboxPersistence` | parental meta tier: `inspect_agent`/`update_agent` authorization matrix (own spawns / scoped `@agent:*` / uniform denials), resulting-state ≤-editor bound, runtime safe-state queue (bounded, latest-wins, flushed at `turn_complete`), F3 scoped-grant snapshot round-trip, audit + realm-opacity receipts (ticket c8a748f). |
+| [`meta_realm_admin_test.js`](../../tests/integration/meta_realm_admin_test.js) | `ToolDispatcher` + `AgentRuntime` + `SandboxStore` + `realmCatalog` + `node:http` fixture | realm admin meta tools: pinned `RealmAdminPort`; exact `@realm:inspect`/`@realm:edit` gating; roster/attachments/ceiling/provenance/live-state; closed nested patches with zero partial apply; operator-only keys refused; actor-attributed audits; safe-state sweep (ticket 094de1b). |
 | [`operator_realm_injection_test.js`](../../tests/integration/operator_realm_injection_test.js) | `SandboxStore` + `TurnExecutionEngine` + `MessagingBus` | Operator-attributed injection and manual sends into realm-bound targets; agent cross-realm denial; no-director fail-closed. |
 | [`modern_settings_workflow_test.js`](../../tests/integration/modern_settings_workflow_test.js) | `PresetCatalog` + `CredentialVault` + provider adapters | Modern settings workflow, progressive disclosure, live balance separation. |
 | [`persistence_purge_test.js`](../../tests/integration/persistence_purge_test.js) | `sandboxPersistence` + `SandboxStore` | Recycle-bin serialization, zero-zombie hydration, hard purge governance. |
@@ -281,8 +282,8 @@ sequenceDiagram
     G1-->>Dev: Gate 1 Passed (0 lint / sync errors)
 
     Dev->>G2: npm test (tests/runner.js)
-    Note over G2: Executes 109 suites (56 Unit, 53 Integration) under 120s timeout
-    G2-->>Dev: Gate 2 Passed (109/109 passed, 0 failures)
+    Note over G2: Executes 110 suites (56 Unit, 54 Integration) under 120s timeout
+    G2-->>Dev: Gate 2 Passed (110/110 passed, 0 failures)
 
     Dev->>G3: npm run build (vite build)
     Note over G3: Compiles Svelte 5 runes, WASM modules, top-level awaits

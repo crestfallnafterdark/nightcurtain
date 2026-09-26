@@ -1,7 +1,7 @@
 # End-to-End & Responsive Visual Testing Architecture
 
 **Status:** CANONICAL
-**Last verified: 2026-09-22**
+**Last verified: 2026-09-27**
 
 > **Authoritative Technical Standard for Playwright Browser Automation & Multimodal Visual Verification**  
 > *Target Systems: Sandbox Studio, Chat Chronicle, Agent Inspector, VirtualFS Explorer, Settings Modal, Responsive Visual Matrix*
@@ -25,7 +25,7 @@ flowchart TD
         MockSSE["setupMockLLM() (Deterministic SSE Stream Routing)"]
     end
 
-    subgraph Specs["User Journey Test Specifications (01 - 08)"]
+    subgraph Specs["User Journey Test Specifications (01 - 10)"]
         S1["01: Navigation & Initial State"]
         S2["02: Agent Provisioning & Editing"]
         S3["03: Multi-Agent Switching & Drafts"]
@@ -34,6 +34,8 @@ flowchart TD
         S6["06: Inspector, VirtualFS & Demo"]
         S7["07: Settings Modal Parity"]
         S8["08: Responsive Visual Capture Matrix"]
+        S9["09: Realm Hydration Flow"]
+        S10["10: MCP Extension Connect & CORS"]
     end
 
     subgraph VisualArtifacts["Visual Artifacts Directory (tests/e2e/screenshots/)"]
@@ -122,7 +124,7 @@ sequenceDiagram
 
 ## 3. End-to-End Specification Breakdown
 
-The E2E suite consists of **8 core specifications** located in [`tests/e2e/`](../../tests/e2e):
+The E2E suite consists of **10 core specifications** located in [`tests/e2e/`](../../tests/e2e):
 
 ### 3.1 Spec 01: Navigation & Initial State
 - **File**: [`tests/e2e/01-navigation-initial-state.spec.js`](../../tests/e2e/01-navigation-initial-state.spec.js)
@@ -207,6 +209,28 @@ The E2E suite consists of **8 core specifications** located in [`tests/e2e/`](..
 - **File**: [`tests/e2e/08-responsive-visual-capture.spec.js`](../../tests/e2e/08-responsive-visual-capture.spec.js)
 - **Target Surfaces**: Multimodal responsive visual rendering across Desktop, Tablet, and Mobile viewports.
 - **Key Assertions**: Captures 15 high-resolution full-page screenshot artifacts into `tests/e2e/screenshots/`.
+
+---
+
+### 3.9 Spec 09: Realm Hydration Flow
+- **File**: [`tests/e2e/09-realm-hydration-flow.spec.js`](../../tests/e2e/09-realm-hydration-flow.spec.js)
+- **Target Surfaces**: Realm launcher hydration workspace (declared inputs, filesets, placement mapping), review-time template pin + payload digest, session saved-payload library, Realm Manager rehydrate/replace modal, member roster.
+- **Key Assertions**:
+  - Renders v2 input requirements (shape badges, required markers, hydration briefs), per-file attachment destinations routed through the real file-chooser flow, and the per-input usage map (prompt + placement sites).
+  - Saves the assembled payload into the session library (`sha256:` digest notice), attaches it to the launch, and asserts the review-time pin card.
+  - Clearing a required input that the payload covers inline-reports the typed failure and disables launch.
+  - Launches the hydrated shipped `session_zero` Realm (no model turn), reopens it from the Realm Manager, and replaces its content from the saved payload (2 files written) while the active member roster survives — no relaunch.
+
+---
+
+### 3.10 Spec 10: MCP Extension Connect & CORS
+- **File**: [`tests/e2e/10-mcp-extension-cors.spec.js`](../../tests/e2e/10-mcp-extension-cors.spec.js)
+- **Target Surfaces**: Settings modal Extensions tab (install dialog, connection panel, catalog/fidelity badges, reconnect drift), Realm Manager extension attachment with the live ceiling editor.
+- **Key Assertions**:
+  - Self-contained CORS-enabled `node:http` MCP fixture (spawned and killed by the spec); real browser `fetch` connect over unauthenticated loopback renders server identity, negotiated protocol (`2025-06-18`), catalog count, and fidelity badge.
+  - Reconnect after swapping the advertised catalog discloses drift (`+1 added` / `-5 removed`).
+  - Attaches the extension to the seeded Generic Realm through the live ceiling editor and asserts the live "Connected" attachment state.
+  - Wire-level assertions: no `Authorization` header on any fixture request and zero app console/page errors (the fixture's documented `405` SSE-probe negotiation response is excluded).
 
 ---
 

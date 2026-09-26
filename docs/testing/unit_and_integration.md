@@ -1,7 +1,7 @@
 # Unit & Integration Testing Architecture
 
 **Status:** CANONICAL
-**Last verified: 2026-09-22**
+**Last verified: 2026-09-27**
 
 > **Comprehensive Technical Guide to Zero-Mock Subsystem Verification**  
 > *Target Modules: Node Native Test Runner, AgentRuntime, VirtualFS, MessagingBus, WorldClock, ToolDispatcher, preset catalog & credential vault*
@@ -10,7 +10,7 @@
 
 ## 1. Overview & Execution Architecture
 
-The Agentic Sandbox Studio unit and integration test suites run under the native Node.js test runner (`node --test`) using strict assertions (`node:assert/strict`). The test suite comprises **109 native test suites (56 unit, 53 integration)**, executing with zero mocks for core application classes.
+The Agentic Sandbox Studio unit and integration test suites run under the native Node.js test runner (`node --test`) using strict assertions (`node:assert/strict`). The test suite comprises **110 native test suites (56 unit, 54 integration)**, executing with zero mocks for core application classes.
 
 > **Canonical inventory.** The per-file suite inventory is maintained in [Testing Strategy — §4 Test Suite Inventory](testing_strategy.md#4-test-suite-inventory--classification); this document covers architecture and verification semantics.
 
