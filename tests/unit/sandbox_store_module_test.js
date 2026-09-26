@@ -5684,3 +5684,69 @@ test('70. [P2.4] a legacy snapshot without an extension selector hydrates defaul
     sharedLocalStorage.clear();
   }
 });
+
+test('71. [P2.4-F1] a tampered non-list extension selector heals fail-closed (never `all`)', async () => {
+  for (const tampered of [null, 'everything', 42, {}]) {
+    sharedLocalStorage.clear();
+    const { store } = createSharedSubstrateStore();
+    let hydrated = null;
+    try {
+      await launchP24Fixture(store);
+      assert.strictEqual(store.saveToStorage(), true);
+      const persistedKey = 'ai_storyteller_sandbox_state_v1';
+      const raw = JSON.parse(sharedLocalStorage.getItem(persistedKey));
+      const probe = raw.agents.find((entry) => entry.id === 'p24-restricted');
+      probe.config.extensionTools = tampered;
+      sharedLocalStorage.setItem(persistedKey, JSON.stringify(raw));
+
+      const probeRuntime = new AgentRuntime({ autoBootstrapDirector: false });
+      hydrated = new SandboxStore({
+        runtime: probeRuntime,
+        autoBootstrapDirector: false,
+        autoHydrate: true
+      });
+      const realmRecord = hydrated.realms.find((realm) => realm.templateId === 'unit-p24-grants');
+      assert.deepStrictEqual(
+        [...probeRuntime.createAgentIdentityPort().getAgentIdentity('p24-restricted', { realmId: realmRecord.id }).authority.extensions],
+        [],
+        `tampered selector ${JSON.stringify(tampered)} must heal fail-closed, never to \`all\``
+      );
+    } finally {
+      if (hydrated) hydrated.destroy();
+      store.destroy();
+      sharedLocalStorage.clear();
+    }
+  }
+});
+
+test('72. [P2.4-F2] kill → restore re-applies the extension grants without a manual nudge', async () => {
+  sharedLocalStorage.clear();
+  const { runtime, store } = createSharedSubstrateStore();
+  try {
+    const receipt = await launchP24Fixture(store);
+    const realmId = receipt.realm.id;
+    const identityPort = runtime.createAgentIdentityPort();
+    const memberKey = createAgentIdentityKey(realmId, 'p24-restricted');
+    assert.deepStrictEqual(
+      [...identityPort.getAgentIdentity('p24-restricted', { realmId }).authority.extensions],
+      ['similarity'],
+      'the launch grants the resolved extension tool'
+    );
+
+    store.killAgent(memberKey, 'P2.4-F2 restore probe');
+    assert.strictEqual(
+      identityPort.getAgentIdentity('p24-restricted', { realmId }),
+      null,
+      'the killed member is not active'
+    );
+    store.restoreAgent(memberKey);
+    assert.deepStrictEqual(
+      [...identityPort.getAgentIdentity('p24-restricted', { realmId }).authority.extensions],
+      ['similarity'],
+      'restore re-derives the extension grants from the live Realm universe + selector'
+    );
+  } finally {
+    store.destroy();
+    sharedLocalStorage.clear();
+  }
+});

@@ -784,3 +784,17 @@ test('29. the branch stays inert when no provider registry is bound (P2 producti
   assert.equal(receipt.success, false);
   assert.equal(receipt.code, TOOL_SYSTEM_ERROR_CODES.TOOL_NOT_FOUND, 'without a bound registry the name is simply unknown');
 });
+
+test('30. [P2.4-O1] a throwing identity port yields a typed denial instead of an unshielded throw', async () => {
+  const throwingIdentity = createSandboxToolDispatcher({
+    agentId: GATE_AGENT,
+    identityPort: {
+      getAgentIdentity() {
+        throw new Error('identity port exploded');
+      }
+    }
+  });
+  const receipt = await throwingIdentity.executeTool('read_file', { file_path: '/gate.txt' });
+  assert.equal(receipt.success, false, 'the dispatcher must shield the identity-port throw');
+  assert.equal(receipt.code, TOOL_SYSTEM_ERROR_CODES.PERMISSION_DENIED, 'identity-resolution failure fails closed');
+});

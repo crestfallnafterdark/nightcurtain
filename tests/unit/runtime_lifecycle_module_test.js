@@ -2697,3 +2697,24 @@ test('17. [P2.4] extensionTools is a separate exact axis: trusted launch options
   );
   assert.strictEqual(hydrated.authority.extensions.size, 0, 'the hydrated entity descriptor is default-deny on the extension axis');
 });
+
+test('18. [P2.4-O2] the entity descriptor axis sanitizes explicit extension selectors (junk never lands)', async () => {
+  const lifecycle = new AgentLifecycleManager({ emit: { emit: () => {} }, internalPrincipal: TEST_PRINCIPAL });
+  const agent = await lifecycle.launchAgent({
+    config: {
+      id: 'ext_entity_hygiene',
+      extensionTools: ['good_name', '*', '@template:authority', 'bad-name!', '', 'good_name', 'with space']
+    },
+    principal: TEST_PRINCIPAL
+  });
+  assert.deepStrictEqual(
+    [...agent.authority.extensions],
+    ['good_name'],
+    'only sanitized call names may land on the entity descriptor axis'
+  );
+  assert.deepStrictEqual(
+    [...lifecycle.getAuthorityDescriptor('ext_entity_hygiene').extensions],
+    [],
+    'the trusted channel (absent here) still decides the registry axis; a config selector never grants'
+  );
+});
