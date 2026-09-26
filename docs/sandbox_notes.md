@@ -1,6 +1,6 @@
 # Sandbox Durable Notes — Quirks & Accepted Exceptions
 
-**Status:** ACTIVE · **Last verified:** 2026-09-24.
+**Status:** ACTIVE · **Last verified:** 2026-09-26.
 
 Durable engine notes: intentional quirks and accepted exceptions for the sandbox substrate. The per-module contract record is the generated ICD set ([`generated/modules/INDEX.md`](generated/modules/INDEX.md)).
 
@@ -59,7 +59,7 @@ Durable rules for template transport and the runtime registry (the format contra
 - **Instance provenance** (`realmRegistry`): `RealmRecord.instance` stores `templateId`, effective `templateVersion`, optional `packageDigest`, per-input `inputHashes`, written `seedPaths`, and `launchedAt` — hashes/paths only, never raw input values; `resolvedTools` is reserved for future provider support.
 - **Baked history** (`agentLifecycle`): `LaunchAgentOptions.history` seeds `[system, ...declared]` with launch-generated message ids (INV-7) and `metadata.source='template'`; no model call, no turn trigger, snapshot-stable.
 - **Seed resolution** (`sandboxStore`): `seedRealm` resolves named targets realm-scoped (`(realmId, agentId)`) and trim-consistent with the registry; a same-id member of another realm is never selected ; reserved `global`/`public` seed path roots are rejected, never re-rooted.
-- **Deferred**: provider resolution + derived call-name collision enforcement (`a.b` vs `a_b`) are not yet implemented; the review surface must pass `currentVersion` to hydration validation and disclose `initialPrompt`/`triggerPolicy` in previews.
+- **Deferred**: provider resolution (MCP/packs) is not yet implemented — templates declaring non-empty `toolContract`/`providers` still fail closed at launch; the review surface must pass `currentVersion` to hydration validation and disclose `initialPrompt`/`triggerPolicy` in previews. Derived call-name collision enforcement is no longer deferred (landed in `05b9d14`: requirement ids derive their model-facing call names; derived duplicates and derived-vs-canonical collisions fail closed at validation and materialization).
 
 ## Publishing meta-capabilities & generators
 
