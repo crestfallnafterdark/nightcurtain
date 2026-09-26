@@ -12,7 +12,7 @@
  * @mayImport ../tools/normalizers/index.ts
  * @mayImport ../tools/descriptors/index.ts
  * @mayImport type-only ../runtime/index.ts
- * @invariant Strict minimal cross-boundary surface: exactly six public symbols (`createSandboxToolDispatcher`, `getSandboxToolsSchema`, `SANDBOX_TOOLS`, `INNATE_TOOLS`, `TOOL_PRESETS`, `resolveToolPreset`) plus the frozen `TOOL_SYSTEM_ERROR_CODES` dictionary.
+ * @invariant Strict minimal cross-boundary surface: exactly six public value symbols (`createSandboxToolDispatcher`, `getSandboxToolsSchema`, `SANDBOX_TOOLS`, `INNATE_TOOLS`, `TOOL_PRESETS`, `resolveToolPreset`) plus the frozen `TOOL_SYSTEM_ERROR_CODES` dictionary; the exported type-only seams (execution/receipt types and the additive extension provider-port declarations) carry no runtime value.
  * @invariant Table-driven descriptor delegation: each descriptor freezes its own parameter alias map and sanitizer, and its handler delegates to the injected substrate capability (`context.<subsystem>`) or narrow capability port (the dispatcher's `isAuthorized` gate is the single capability-authorization authority; `batch_precall` additionally applies the fixed precall policy allowlist as defense in depth). Handlers are thin but not mechanically 1-line: they guard required capabilities, may branch on sanitized parameters (action dispatch, legacy fallbacks), assemble identity-only caller-scope/option objects for the delegated call — never caller-asserted privilege flags or authority-bearing role aliases — and shape result receipts.
  * @invariant O(1) dispatcher on a frozen registry: routing is a direct property lookup on the frozen `TOOL_REGISTRY`, built once from the frozen descriptor catalog — zero `switch` statements and no registration or mutation path.
  * @invariant Zero LLM schema pollution: schemas exposed to LLMs carry only `name`, `description`, and `descriptor.schema` fields; infrastructure configuration and execution-context fields (`model`, `temperature`, `maxTurns`, `privileged`, `toolPreset`, `allowedTools`, `depth`, `sinceTimestamp`, raw byte limits) never appear in them.
@@ -25,6 +25,7 @@
  * @decision Per-call `callerContext` is caller data, never authority: the dispatcher strips its `isAdmin`/`isPrivileged`/`privileged` flags, authority-bearing `callerRole`/`role` aliases, `principal`/`authority` objects, and `allowedTools`, deriving privilege and capability only from trusted bound construction options and the injected identity port
  * @decision Descriptor-authoritative capability: when the projection's frozen `AuthorityDescriptor` is present, capability derives from the descriptor alone — a wildcard/explicit/selector grant authorizes, any other outcome denies — and the deprecated legacy channels above apply only to descriptor-less callers
  * @decision Publishing meta tools (`import_realm_template`/`submit_hydration_package`) are explicit-grant-only: they resolve through the separate `PUBLISHING_TOOL_REGISTRY` (never members of `TOOL_REGISTRY` or `ALL_TOOL_DESCRIPTORS`, never emitted by `getSandboxToolsSchema`), and authorization is the exact `@template:authority`/`@hydration:authority` entry on the caller's frozen descriptor — the wildcard `'*'`, `privileged`, and every legacy channel are deliberately insufficient, an engine-internal descriptor stays authorized, and descriptor-less callers deny (INV-9 refinement)
+ * @decision Extension tools are exact-membership-only on the separate frozen `AuthorityDescriptor.extensions` axis: the dispatcher's extension branch is gated on an optional provider-registry port (unbound until P3, so the branch is inert in P2), authorize iff `authority.extensions.has(callName)`, with no wildcard/`privileged`/selector/alias/legacy fallback, engine-internal and anonymous/descriptor-less callers denying, and descriptor-probe throws failing closed; the axis is never populated from `allow` and an extension call never falls through to a baked handler or schema
  * @decision Realm/workspace/tenant scope is never caller-supplied: the scope vocabulary (`workspaceId`/`workspace_id`, `realmId`/`realm_id`, `tenantId`/`tenant_id`, `scope`) is pinned at dispatcher construction and stripped from per-call `callerContext`; a scope claim may only ride trusted bound construction (and, once Realm lands, the trusted identity projection), never a tool call
  * @decision Realm-exact caller resolution and canonical key binding: a construction-bound `realmId` resolves the caller projection for exactly that `(realmId, agentId)` registration and binds its canonical identity `key` as the execution context's `callerKey` (a pinned key — per-call `callerKey`/`caller_key` claims are stripped), so substrate contexts disambiguate the same literal id across Realms; an omitted Realm keeps the unique-match resolution and the bare-id channel
  * @decision The identity subject is pinned to construction: `callerAgentId`/`agentId`/nested `callerContext` on a per-call context never select whose `AgentIdentityProjection`/`AuthorityDescriptor` is consulted. The bound `agentId`/`callerAgentId` is the only subject source, and an anonymous dispatcher has no subject and fails closed
@@ -241,6 +242,52 @@ export interface RealmPublishingPort {
 }
 
 /**
+ * One resolved provider-tool binding returned by
+ * {@link ExtensionToolProviderPort.resolveTool}.
+ *
+ * P2 scope: the binding is deliberately minimal — the sanitized model-facing
+ * call name and the extension id that provides it — because catalogs stay
+ * `null` and no descriptor synthesis or execution exists before P3. The
+ * dispatcher only needs the binding to route a call into the extension
+ * authorization branch; a P2-authorized call fails closed with
+ * `EXECUTION_FAILED` (no execution channel is bound), never a silent success.
+ */
+export interface ExtensionToolBinding {
+  /** Sanitized model-facing call name; equals the requested canonical name. */
+  readonly callName: string;
+  /** Extension id that provides the tool (secret-free). */
+  readonly extensionId: string;
+}
+
+/**
+ * Optional provider-registry port consumed by the dispatcher's extension
+ * authorization branch (extension wave; P2 lands the branch inert).
+ *
+ * The port is the sanctioned DI seam for the live provider registry: the
+ * composition root supplies it once connections/catalogs exist (P3), and P2
+ * production wires none — so an extension call name is simply unknown and
+ * fails `TOOL_NOT_FOUND` exactly as before. When present, a name the port
+ * resolves is authorized **only** by exact membership on the caller's frozen
+ * `AuthorityDescriptor.extensions` set: the wildcard `'*'`, `privileged`,
+ * subagent-management selectors, alias-written entries, and the legacy
+ * allowlist channels never authorize an extension call, anonymous and
+ * descriptor-less callers deny, engine-internal principals deny, and any
+ * throw while probing the descriptor fails closed.
+ *
+ * The port is pinned construction input: a per-call value is stripped.
+ */
+export interface ExtensionToolProviderPort {
+  /**
+   * Resolves one sanitized call name against the live provider registry.
+   *
+   * @param callName - Canonical sanitized model-facing call name.
+   * @returns The frozen provider binding, or `null` when the name is not an
+   *   extension tool (fail closed: `null` never authorizes).
+   */
+  resolveTool(callName: string): ExtensionToolBinding | null;
+}
+
+/**
  * Caller Execution & Security Context injected into tool dispatchers and descriptor handlers.
  * Encapsulates the calling agent's identity, role, privilege tier, workspace isolation boundary,
  * tool capability allowlist, and injected Layer 0 substrate engine instances.
@@ -414,6 +461,17 @@ export interface ExecutionContext {
    * a per-call value is stripped and can never substitute the host port.
    */
   readonly realmPublishingPort?: RealmPublishingPort;
+
+  /**
+   * Optional extension provider-registry port (extension wave): when a live
+   * provider registry is bound (P3), a call name it resolves routes through
+   * the extension authorization branch — exact membership on the caller's
+   * frozen `AuthorityDescriptor.extensions` set, no wildcard/privileged/
+   * selector/alias/legacy fallback. In P2 no production composition supplies
+   * it, so the branch is inert. Trust boundary: pinned from bound construction;
+   * a per-call value is stripped and can never substitute the host port.
+   */
+  readonly extensionToolProvider?: ExtensionToolProviderPort;
 
   /**
    * Narrow lifecycle capability port consumed by scheduler,
@@ -882,6 +940,11 @@ const PINNED_CONTEXT_KEYS: ReadonlySet<string> = new Set([
   'depth',
   'executeTool', 'toolRegistry',
   'realmPublishingPort',
+  // Extension authorization plumbing (extension wave): the provider-registry
+  // port and any extension selector are pinned construction/registry state; a
+  // per-call value is dropped so it can neither route a call into the branch
+  // nor present itself as an extension grant.
+  'extensionToolProvider', 'extensionTools',
   'lifecyclePort', 'identityPort',
   'invocationEngine', 'triggerDispatcher', 'lifecycleManager', 'historyManager',
   'turnExecutionEngine', 'runtime'
@@ -1074,7 +1137,34 @@ export function createSandboxToolDispatcher(options: SandboxDispatcherOptions = 
     const canonicalDescriptor = canonName ? TOOL_REGISTRY_VIEW[canonName] ?? null : null;
     const publishingDescriptor = canonName ? PUBLISHING_TOOL_REGISTRY_VIEW[canonName] ?? null : null;
     const descriptor: ToolDescriptor | PublishingToolDescriptor | null = canonicalDescriptor ?? publishingDescriptor;
-    if (!canonName || !descriptor) {
+
+    // Extension identification (extension wave; P2 lands the branch inert
+    // because no production composition binds the provider-registry port): a
+    // call name that resolves through neither baked registry may be a live
+    // extension tool when the optional provider port is present. Extension
+    // call names are sanitized model-facing names outside the canonical alias
+    // map by construction (P1 reserves the baked/publishing universe against
+    // them), so the trimmed raw name is the candidate. Resolution is
+    // fail-closed — a throwing port, a malformed binding, or a call-name
+    // mismatch resolves nothing, so the call stays `TOOL_NOT_FOUND`.
+    const extensionNameCandidate = canonName
+      ? null
+      : (typeof rawName === 'string' && rawName.trim().length > 0 ? rawName.trim() : null);
+    const extensionBinding = !descriptor && extensionNameCandidate
+      ? resolveExtensionToolBinding(boundOptions.extensionToolProvider, extensionNameCandidate)
+      : null;
+
+    if (!descriptor && !extensionBinding) {
+      return {
+        success: false,
+        error: `Tool '${rawName}' is not recognized in the tool registry.`,
+        code: TOOL_SYSTEM_ERROR_CODES.TOOL_NOT_FOUND
+      };
+    }
+    // The effective authorization name: the canonical name for baked tools,
+    // the exact extension call name for provider tools.
+    const authorizationName = extensionBinding ? extensionNameCandidate : canonName;
+    if (!authorizationName) {
       return {
         success: false,
         error: `Tool '${rawName}' is not recognized in the tool registry.`,
@@ -1182,10 +1272,47 @@ export function createSandboxToolDispatcher(options: SandboxDispatcherOptions = 
     };
 
     // 2. Capability / Security Gating Check
-    if (!isAuthorized(canonName, executionContext, agentIdentity, publishingDescriptor ? publishingDescriptor.authority : null)) {
+    //
+    // Extension tools (extension wave): a resolved provider binding never
+    // reaches the canonical `isAuthorized` path. Authorization is exact
+    // membership on the caller's frozen `AuthorityDescriptor.extensions` axis —
+    // the wildcard `'*'`, `privileged`, subagent-management selectors,
+    // alias-written descriptor entries, and every legacy allowlist channel are
+    // deliberately insufficient; anonymous/descriptor-less callers deny and an
+    // engine-internal principal denies. Identity resolution above is trusted
+    // construction; any throw while probing the descriptor fails closed. P2 has
+    // no execution channel, so an authorized call fails `EXECUTION_FAILED` —
+    // never a silent success and never a fallthrough to a baked handler.
+    if (extensionBinding) {
+      if (!isExtensionToolAuthorized(authorizationName, agentIdentity)) {
+        return {
+          success: false,
+          error: `Agent '${agentId || 'anonymous'}' is not authorized to invoke extension tool '${authorizationName}'.`,
+          code: TOOL_SYSTEM_ERROR_CODES.PERMISSION_DENIED
+        };
+      }
       return {
         success: false,
-        error: `Agent '${agentId || 'anonymous'}' is not authorized to invoke tool '${canonName}'.`,
+        error: `Extension tool '${authorizationName}' is authorized but extension execution is not available in this build.`,
+        code: TOOL_SYSTEM_ERROR_CODES.EXECUTION_FAILED
+      };
+    }
+
+    // Unreachable by construction (the identification guard above returns when
+    // neither a baked descriptor nor an extension binding resolved); this
+    // guard keeps the narrowing explicit for the executor/handler reads below.
+    if (!descriptor) {
+      return {
+        success: false,
+        error: `Tool '${rawName}' is not recognized in the tool registry.`,
+        code: TOOL_SYSTEM_ERROR_CODES.TOOL_NOT_FOUND
+      };
+    }
+
+    if (!isAuthorized(authorizationName, executionContext, agentIdentity, publishingDescriptor ? publishingDescriptor.authority : null)) {
+      return {
+        success: false,
+        error: `Agent '${agentId || 'anonymous'}' is not authorized to invoke tool '${authorizationName}'.`,
         code: TOOL_SYSTEM_ERROR_CODES.PERMISSION_DENIED
       };
     }
@@ -1475,4 +1602,70 @@ function isAuthorized(
   }
 
   return false;
+}
+
+/**
+ * Resolves one call name against the optional extension provider-registry
+ * port (extension wave). Fail-closed resolution: a missing/throwing port, a
+ * non-object binding, a call-name mismatch, or an empty extension id resolves
+ * `null`, so the call can never route into the extension branch on malformed
+ * provider state.
+ *
+ * @param provider - Bound provider-registry port (`undefined` in P2 production).
+ * @param callName - Canonical sanitized call name.
+ * @returns A frozen binding, or `null` when the name is not a live extension tool.
+ * @internal
+ */
+function resolveExtensionToolBinding(
+  provider: unknown,
+  callName: string
+): ExtensionToolBinding | null {
+  if (!provider || typeof provider !== 'object') return null;
+  const resolve = (provider as { resolveTool?: unknown }).resolveTool;
+  if (typeof resolve !== 'function') return null;
+  try {
+    const binding = (resolve as (this: unknown, name: string) => unknown).call(provider, callName);
+    if (!binding || typeof binding !== 'object') return null;
+    const record = binding as { callName?: unknown; extensionId?: unknown };
+    if (record.callName !== callName) return null;
+    if (typeof record.extensionId !== 'string' || !record.extensionId) return null;
+    return Object.freeze({ callName, extensionId: record.extensionId });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Extension authorization gate (extension wave; INV-9 refinement).
+ *
+ * A resolved extension call is authorized iff the caller's frozen
+ * `AuthorityDescriptor.extensions` set holds the exact call name. This axis is
+ * separate from `allow` on purpose: the wildcard `'*'`, `privileged`,
+ * subagent-management selectors, alias-written entries, and every legacy
+ * allowlist/privilege channel are deliberately insufficient, and canonical
+ * alias normalization never applies (matching is exact string membership).
+ * Anonymous callers, descriptor-less callers, engine-internal principals, and
+ * hand-built descriptors without a readable extensions set all deny. Any throw
+ * from the descriptor read or the membership probe is a deny (fail closed),
+ * never an unshielded exception out of `dispatch()`.
+ *
+ * @param toolName - Canonical sanitized call name resolved by the provider port.
+ * @param agentIdentity - Identity projection for the bound subject, or `null`.
+ * @returns `true` only on exact membership in the caller's extensions axis.
+ * @internal
+ */
+function isExtensionToolAuthorized(
+  toolName: string,
+  agentIdentity: AgentIdentityProjection | null
+): boolean {
+  try {
+    const authority = agentIdentity?.authority;
+    if (!authority || authority.kind !== 'agent') return false;
+    const extensions = authority.extensions;
+    if (!extensions || typeof extensions.has !== 'function') return false;
+    return extensions.has(toolName) === true;
+  } catch {
+    // Fail closed: a throwing descriptor accessor or membership probe denies.
+    return false;
+  }
 }

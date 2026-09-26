@@ -21,7 +21,7 @@
  * @invariant MOD-20 preset composition root: the store owns the single `presetCatalog` instance over a snapshot-backed `{ load, save }` adapter, mirrors the active pointer and custom preset entries as snapshot state, persists catalog mutations through the existing debounced save, and hands the owned runtime only the frozen `ModelPresetSourcePort`.
  * @invariant Realm composition root: the store owns the single `realmRegistry` instance over a snapshot-backed `{ load, save }` adapter, mirrors the realm records into the reactive `realms` projection and the snapshot `realms` field, and persists registry mutations through the existing debounced save. Every store seeds the protected Generic default (`realm_generic`, display "Generic", renamable, non-deletable) at init and hands the registry its protected-id set, so removal is refused on every public surface; reconciliation keeps the seeded default in place — first — and a reset restores its pristine metadata, so the registry is never empty and every non-director launch has a Realm.
  * @invariant Realm launch atomicity: `launchRealmFromTemplate` creates the Realm record first and, when materialization, any member launch, a placement write, or a directive delivery fails, rolls the whole operation back (launched members purged, record removed, placement files already written best-effort evicted) before throwing a coded failure — a failed call never leaves a half-realm, and template lookup, preset binding, payload/input validation, and placement validation are all fail-closed.
- * @invariant H1 reload capability heal: on hydration completion the store runs an operator-context heal pass that restores only the persisted tool grants (`allowedTools`/`tools`/`toolPreset`) onto the restored agents; `privileged`, parentage (`spawnedBy`/`creatorId`), and realm membership are never restored from a snapshot — privilege and parentage stay default-deny/unbound (template-backed privilege is re-derived from trusted template specs) while membership hydrates through the runtime's scope-constraint path. The pass is idempotent (a second run reports `unchanged` and mutates nothing) and observable through the reactive `capabilityHealReport`.
+ * @invariant H1 reload capability heal: on hydration completion the store runs an operator-context heal pass that restores only the persisted tool grants (`allowedTools`/`tools`/`toolPreset`) plus the per-agent extension selector (`extensionTools`) onto the restored agents; `privileged`, parentage (`spawnedBy`/`creatorId`), and realm membership are never restored from a snapshot — privilege and parentage stay default-deny/unbound (template-backed privilege is re-derived from trusted template specs) while membership hydrates through the runtime's scope-constraint path. The pass is idempotent (a second run reports `unchanged` and mutates nothing) and observable through the reactive `capabilityHealReport`. A legacy snapshot without the extension selector heals to the fail-closed empty selector — never the `'all'` default.
  * @invariant Hydration is storage-read-only: the whole `hydrateFromStorage` flow (catalog reconciliation, fingerprint heal, capability heal, runtime restore, resyncs, legacy-workspace remap) runs under an internal suppression guard so no catalog-adapter or pointer write can schedule the debounced autosave — a failed restore leaves the raw persisted bytes byte-identical and a successful one never rewrites them.
  * @invariant Realm-local store identity: agent-facing projections (`agents`, `recycleBin`, receipts, listings) always carry bare realm-local ids — canonical `(realmId, agentId)` keys and Realm vocabulary never surface; internal mailbox and clock-partition lookups resolve the canonical key through the runtime identity port realm-exactly, and an id registered in more than one Realm fails closed (zero unread, no wrong-Realm pick) instead of silently using the first registration. The store's late-bound identity bridge forwards the full `(agentId, scope)` resolution and enumeration so store-constructed substrates can resolve multi-Realm identities and fire the ambiguity guard.
  * @decision Downloads consume public VirtualFS APIs (`getFileRecord` for single files, `listFilesWithContent` for archives) instead of reaching into private VFS internals
@@ -37,7 +37,7 @@
  * @decision Realm deletion counts memberships with the same trim semantics as the realm grouping/resolution (`resolveMemberRealmId`): a hydrated `'  realm_x  '` member blocks the default deletion of `realm_x` and is purged by the recursive override, so a padded membership can never be orphaned by a removed record
  * @decision Generic protection is enforced at the registry boundary: the store constructs the registry with `protectedIds: [realm_generic]`, so `removeRealm(realm_generic)` is a `false` no-op on every public surface including the raw `getRealmRegistry()` API, while renames and every other management operation stay available and reconciliation can never prune the seeded default
  * @decision The H1 heal reads only the persisted capability selectors as data and applies them through the runtime's gated config-update path with the store's operator principal (the runtime's host principal), while the snapshot privilege/parentage claims are ignored entirely — capability is restored, authority is never re-derived from the snapshot
- * @decision Template launch resolves baked templates by id and fails closed for unknown ids; member launch forwards the materialized resolved internal grant list as `allowedTools` — extension-bound derived call names are excluded because they belong to the extension grant channel — the declared preset name as inert `toolPreset` metadata, and the per-key preset binding (winning over the spec `modelPresetId`) as `presetId` resolved through the owned preset catalog — no model literals
+ * @decision Template launch resolves baked templates by id and fails closed for unknown ids; member launch partitions the materialized plan grants — internal canonical/alias/wildcard names travel as `allowedTools`, resolved extension-derived call names travel as the member's effective `extensionTools` grant set (the whole Realm universe for an unrestricted member, exactly the referenced names for a restricted one), and unresolved references only ride the missing-tool disclosure — the declared preset name as inert `toolPreset` metadata, and the per-key preset binding (winning over the spec `modelPresetId`) as `presetId` resolved through the owned preset catalog — no model literals
  * @decision A failed template launch rolls back by purging every active member of the freshly created Realm under the operator principal and then removing the record through the recursive `deleteRealm` override (so a leftover member from a failed purge is retried by the same route); the thrown `ERR_STORE_REALM_LAUNCH_FAILED` error carries the original failure as `cause` plus the rollback report (`realmId`, `templateId`, `failedAgentId`, `rolledBack`, `terminatedMembers`, `evictedSeedFiles`, `rollbackFailures`), so a half-realm is never left un-described
  * @decision `launchRealmFromTemplate` applies a template's resolved launch plan inside the same atomic try: placement writes group by target in first-appearance order (one `seedRealm` call per target, reusing its fail-closed path/target validation and per-target write record), then every directive is delivered independently as an operator-attributed `source: 'realm_seed'` mailbox message addressed realm-exactly, `seed: false` skips placements and directives entirely, and a failure in either phase rolls back exactly like a member failure — including best-effort eviction of the files already written, reported as `evictedSeedFiles` (member private workspaces are evicted by the member purge; a realm-global partition is a VFS-reserved key, so its seeded files are deleted individually and an empty container key can remain)
  * @decision The launch catalog exposes the normalized format-v2 template (`normalizeTemplate` of the authored bundle template) through `listRealmTemplates`/`getRealmTemplateBundle`, so the launcher/review surfaces see declared inputs, placements, and directives; the authored form stays the identity source — imports persist and export re-emit their authored transport payload verbatim, shipped bundles re-serialize their authored template + files, and the effective template version is the authored-form pin (the import's parsed version, else `templateBundleVersion`), never a hash of the normalized model
@@ -57,7 +57,9 @@
  * @invariant Extension surface: the store is the extension composition root — global install records live in one injected registry persisted additively as `extensions`, realm attachments ride the realm records, install/remove/attach/detach validate and emit `extension_installed`/`extension_removed`/`extension_attached`/`extension_detached` audit events on the runtime stream, `removeExtension` refuses an extension any Realm still attaches, an `active` attachment for an unknown extension degrades to `unavailable` and returns to `active` once the extension is installed again while a `conflict` attachment is never rewritten by the heal, and nothing ever connects or grants runtime authorization from these records.
  * @decision Instance provenance is hashes, paths, and resolved tool ids only: a successful template launch records `RealmRecord.instance` with the authored `templateVersion`, the canonical payload digest (`payloadDigest` over the attached payload, when one was attached), per-input hashes over each supplied value's canonical tagged JSON, the placement paths the launch actually wrote, `launchedAt`, the resolved extension tools (`resolvedTools`: sanitized call name → extension id) and the unresolved requested extension ids (`missingExtensions`); raw input values, package content, and credentials never reach the record
  * @decision The store is the extension composition root: it builds one install registry over a `{ load, save }` adapter backed by the sandbox snapshot (`extensions`), seeds it from the persisted field before construction, reconciles hydration through the registry's validated `reconcile` path, and exposes install/remove (global) plus attach/detach (realm) methods that validate against installed records and schedule the existing debounced save; realm attachments are realm-local `RealmRecord.extensions` entries, so realm deletion, rollback, and persistence carry them without a parallel store map
- * @decision `launchRealmFromTemplate` extension approvals mirror the Wave U authority approvals: `extensionApprovals` entries must match a declared template request exactly, absent approval is a decline, only installed-and-approved requests attach (an approval of an uninstalled request attaches nothing and stays disclosed), attachments are written only on a fully successful launch with the operator approval stamp and the realm-level `'all'` selection, and no extension grant is passed to the runtime from this wave
+ * @decision `launchRealmFromTemplate` extension approvals mirror the Wave U authority approvals: `extensionApprovals` entries must match a declared template request exactly, absent approval is a decline, only installed-and-approved requests attach (an approval of an uninstalled request attaches nothing and stays disclosed), attachments are written only on a fully successful launch with the operator approval stamp and the realm-level `'all'` selection, and the effective extension grants are forwarded into the launched members' descriptors through the trusted unified-options channel (resolved names only — nothing connects and no third-party execution exists before P3)
+ * @invariant Safe-state extension reauthorization (extension wave, P2.4): the store owns the queue — attach/detach and per-agent `extensionTools` selector edits recompute each affected member's effective grant set and apply it through the operator-gated `reauthorizeAgent` at the next safe point: an idle member synchronously at the mutation point, a busy member queued and applied on its next `turn_complete` (never mid-turn). A queued member that terminates is dropped. Selector names that resolve to nothing are dropped fail-closed and warned, never granted.
+ * @invariant Extension authority is descriptor-exact: the effective grants computed here feed `AuthorityDescriptor.extensions`; realm attachment or selector state alone never authorizes a call, the wildcard `'*'`/privilege/selectors/aliases never imply an extension entry, and the runtime's dispatcher branch (unbound until P3) authorizes only exact membership.
  * 
  * @example
  * ```typescript
@@ -1796,6 +1798,150 @@ export const GENERIC_REALM_ID = 'realm_generic';
 const GENERIC_REALM_NAME = 'Generic';
 
 /**
+ * Per-agent extension grant helpers (extension wave, P2.4). The store is the
+ * trusted computer of the effective extension grant set; these pure functions
+ * own the P2 semantics so launch, the safe-state sweep, and the UI helper
+ * cannot disagree:
+ *
+ * - the **realm universe** is the Realm record's `resolvedTools` keys (the
+ *   declared extension references resolved at launch), filtered to extensions
+ *   the Realm still attaches with an `active` status — P2 has no catalogs, so
+ *   nothing expands beyond declared liveness; attaching a new extension adds
+ *   nothing until it resolves tools (P3), while detaching removes its tools;
+ * - the **selector** is the per-agent `config.extensionTools` value: `'all'`
+ *   (the default) selects the whole universe, an explicit list intersects it;
+ * - unknown selector entries are dropped, never granted (fail closed), and
+ *   reported to the caller so the store can warn.
+ *
+ * Authority is never derived here: the produced list feeds the trusted
+ * `reauthorizeAgent`/`LaunchAgentOptions.extensionTools` channel, and the
+ * descriptor's exact-membership gate remains the only capability source.
+ */
+
+/**
+ * Normalizes a per-agent extension selector: `'all'` (the default for absent
+ * or invalid input), or a frozen, duplicate-free list of non-empty names.
+ *
+ * @param value - Candidate selector.
+ * @returns The normalized selector.
+ */
+function normalizeExtensionSelector(value: unknown): 'all' | readonly string[] {
+  if (value === 'all') return 'all';
+  if (!Array.isArray(value)) return 'all';
+  const names: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== 'string' || !entry) continue;
+    if (!names.includes(entry)) names.push(entry);
+  }
+  return Object.freeze(names);
+}
+
+/**
+ * Resolves the extension ids a Realm currently attaches with `active` status.
+ *
+ * @param realm - Realm record (null-safe).
+ * @returns The active attachment extension ids.
+ */
+function resolveActiveExtensionIds(realm: RealmRecord | null): Set<string> {
+  const ids = new Set<string>();
+  const attachments = realm && Array.isArray(realm.extensions) ? realm.extensions : [];
+  for (const attachment of attachments) {
+    if (
+      attachment
+      && attachment.status === 'active'
+      && typeof attachment.extensionId === 'string'
+      && attachment.extensionId
+    ) {
+      ids.add(attachment.extensionId);
+    }
+  }
+  return ids;
+}
+
+/**
+ * Computes a Realm's extension tool universe: the sanitized `resolvedTools` keys
+ * whose extension the Realm still attaches as `active`, in declared record
+ * order. A detached (or non-active) extension contributes no tool; a record
+ * without provenance contributes none.
+ *
+ * @param realm - Realm record (null-safe).
+ * @returns The resolved-and-attached call names.
+ */
+function resolveRealmExtensionToolUniverse(realm: RealmRecord | null): string[] {
+  const resolved = realm && realm.instance ? realm.instance.resolvedTools : undefined;
+  if (!resolved || typeof resolved !== 'object') return [];
+  const activeIds = resolveActiveExtensionIds(realm);
+  const names: string[] = [];
+  for (const callName of Object.keys(resolved)) {
+    const extensionId = resolved[callName];
+    if (typeof extensionId !== 'string' || !activeIds.has(extensionId)) continue;
+    if (!names.includes(callName)) names.push(callName);
+  }
+  return names;
+}
+
+/**
+ * Intersects a per-agent selector with the Realm's extension tool universe.
+ *
+ * @param universe - Resolved-and-attached call names.
+ * @param selector - Normalized per-agent selector.
+ * @returns The effective grants (universe order) plus the selector names that
+ *   matched nothing (dropped fail-closed, never granted).
+ */
+function computeEffectiveExtensionGrants(
+  universe: readonly string[],
+  selector: 'all' | readonly string[]
+): { grants: readonly string[]; dropped: readonly string[] } {
+  if (selector === 'all') {
+    return { grants: Object.freeze([...universe]), dropped: Object.freeze([]) };
+  }
+  const universeSet = new Set(universe);
+  const grants: string[] = [];
+  const dropped: string[] = [];
+  const seen = new Set<string>();
+  for (const name of selector) {
+    if (seen.has(name)) continue;
+    seen.add(name);
+    if (universeSet.has(name)) grants.push(name);
+    else dropped.push(name);
+  }
+  return { grants: Object.freeze(grants), dropped: Object.freeze(dropped) };
+}
+
+/**
+ * Compares two effective extension grant sets for the heal idempotence check
+ * (order-insensitive; both are normalized unique name lists).
+ *
+ * @param current - Current descriptor grant names.
+ * @param next - Candidate effective grant names.
+ * @returns True when both carry exactly the same names.
+ */
+function extensionGrantsEqual(current: readonly string[], next: readonly string[]): boolean {
+  if (current.length !== next.length) return false;
+  const expected = new Set(next);
+  for (const name of current) {
+    if (!expected.has(name)) return false;
+  }
+  return true;
+}
+
+/**
+ * Compares two normalized per-agent extension selectors (order-insensitive for
+ * explicit lists).
+ *
+ * @param a - One normalized selector.
+ * @param b - The other normalized selector.
+ * @returns True when both select the same names (or both are `'all'`).
+ */
+function extensionSelectorsEqual(
+  a: 'all' | readonly string[],
+  b: 'all' | readonly string[]
+): boolean {
+  if (a === 'all' || b === 'all') return a === b;
+  return extensionGrantsEqual(a, b);
+}
+
+/**
  * Redacts credential-shaped substrings from diagnostic error text and caps its
  * length so UI surfaces never render secrets or raw provider payloads.
  * Mirrored by the persistence-layer redactor in `sandboxPersistence`; keep
@@ -3311,9 +3457,36 @@ export class SandboxStore {
    * Capability grants captured from the persisted snapshot at hydration start
    * (`allowedTools`/`tools`/`toolPreset` resolved through the sandbox preset
    * resolver). The H1 heal pass reconciles these onto the restored agents;
-   * privilege and parentage are never captured.
+   * privilege and parentage are never captured. The per-agent extension
+   * selector rides along as `extensionSelector`: the persisted value when the
+   * snapshot carries one, otherwise the fail-closed empty selector (a legacy
+   * snapshot granted nothing before the extension wave). The selector is
+   * state; the effective grant set is recomputed from the live Realm universe
+   * by the extension sweep after the attachment heal.
    */
-  #capabilityHealGrants: ReadonlyArray<{ agentId: string; allowedTools: readonly string[] }> = [];
+  #capabilityHealGrants: ReadonlyArray<{
+    agentId: string;
+    allowedTools: readonly string[];
+    extensionSelector: 'all' | readonly string[];
+  }> = [];
+
+  /**
+   * Safe-state extension reauthorize queue (extension wave, P2.4): identity
+   * keys of members whose effective extension grant set changed while they
+   * were busy. A queued member is reauthorized on its next `turn_complete`
+   * (the pinned safe state) — never mid-turn; idle members are reauthorized
+   * synchronously at the mutation point.
+   */
+  #pendingExtensionReauthorize: Set<string> = new Set();
+
+  /**
+   * Fail-closed guard for the extension sweep (extension wave, P2.4):
+   * identity keys whose captured selector could not be re-applied during the
+   * capability heal. A blocked member is never swept (its descriptor stays
+   * default-deny) until an operator selector edit succeeds, so a failed heal
+   * can never silently resolve the default `'all'` against the Realm universe.
+   */
+  #extensionSweepBlocked: Set<string> = new Set();
 
   /**
    * Session-only pending instance payloads (Wave U candidates, ticket
@@ -4042,6 +4215,7 @@ export class SandboxStore {
    * @param config - Complete launch configuration defining agent id, name, role, system prompt, and model hyper-parameters.
    * @param initialPrompt - Optional initial prompt message to execute immediately upon launch; a pre-instantiated model instance is accepted here for legacy positional compatibility.
    * @param history - Optional trusted baked-history entries (Wave T, ticket 0df20ae) seeded at launch through the runtime's unified `history` option: `[system, ...declared]` with launch-generated ids and no model call. Read from the unified launch path only; the legacy positional path ignores it.
+   * @param extensionGrants - Trusted effective extension grant set (extension wave, P2.4) precomputed by an internal caller that already holds the resolution (the template-launch loop); `null`/omitted computes it from the member's Realm universe × `config.extensionTools`. Never read from caller claims.
    * @returns Promise resolving to the normalized `AgentStateSnapshot` of the launched agent.
    * @throws {@link SANDBOX_STORE_ERROR_CODES.ERR_STORE_INVALID_PARAMS} If configuration is missing required fields.
    * @throws Error with code `'PERMISSION_DENIED'` when a privileged spawn lacks operator lifecycle authority.
@@ -4061,7 +4235,8 @@ export class SandboxStore {
   async launchAgent(
     config: AgentConfig,
     initialPrompt: string | object | null = null,
-    history: readonly LaunchHistoryEntry[] | null = null
+    history: readonly LaunchHistoryEntry[] | null = null,
+    extensionGrants: readonly string[] | null = null
   ): Promise<AgentStateSnapshot> {
     if (!config || typeof config !== 'object' || !config.id) {
       const err: CodedError = new Error(SANDBOX_STORE_ERROR_CODES.ERR_STORE_INVALID_PARAMS);
@@ -4087,6 +4262,21 @@ export class SandboxStore {
       // `grantRealmBypass` operator action can mint it) and drops an explicit
       // `realmId: null` so composition falls through to the Generic default.
       const launchConfig = sanitizeLaunchConfig(config);
+      // Extension wave (P2.4): the effective extension grant set is computed
+      // store-side from the member's Realm universe and its selector, then
+      // forwarded through the runtime's trusted unified-options channel. The
+      // template-launch loop passes the set it already resolved (the realm
+      // record's provenance is not written until that launch completes).
+      const effectiveExtensionGrants: readonly string[] = extensionGrants !== null
+        ? Object.freeze([...extensionGrants])
+        : computeEffectiveExtensionGrants(
+            resolveRealmExtensionToolUniverse(this.#realmRegistry.getRealm(
+              typeof launchConfig.realmId === 'string' && launchConfig.realmId.trim()
+                ? launchConfig.realmId.trim()
+                : GENERIC_REALM_ID
+            )),
+            normalizeExtensionSelector(launchConfig.extensionTools)
+          ).grants;
       const injectedModel: ModelInterface | null = configWithRuntimeBindings.model
         || (modelFromSecondArg ? initialPrompt as ModelInterface : null);
       const prompt = typeof initialPrompt === 'string' ? initialPrompt : null;
@@ -4097,6 +4287,8 @@ export class SandboxStore {
             provider: configWithRuntimeBindings.provider || injectedModel?.provider || null,
             initialPrompt: prompt,
             ...(history !== null && history.length > 0 ? { history } : {}),
+            // Trusted store-computed effective grants (extension wave).
+            extensionTools: effectiveExtensionGrants,
             ...operatorContext
           })
         : await this.#runtime.launchAgent(launchConfig, initialPrompt);
@@ -4105,6 +4297,12 @@ export class SandboxStore {
       this.#syncFsSnapshot();
       this.#syncClockSnapshot();
       const launchedSnapshot = this.#requireAgentSnapshot(agent.id, agent.config?.realmId ?? null);
+      // A fresh launch re-derives the extension grants through the trusted
+      // launch channel, so any stale safe-state queue entry or failed-heal
+      // block for this registration is dropped (a relaunch of a recycled id
+      // must not inherit an earlier session's guard).
+      this.#dropPendingExtensionReauthorize(launchedSnapshot.identityKey);
+      this.#extensionSweepBlocked.delete(launchedSnapshot.identityKey);
       this.selectAgent(launchedSnapshot.identityKey);
       this.#scheduleAutoSave();
       return launchedSnapshot;
@@ -4347,6 +4545,21 @@ export class SandboxStore {
     // before any mutation; they are never applied silently through an
     // anonymous update.
     const updated = this.#runtime.updateAgentConfig(targetRef, updatedConfig, this.#operatorContext());
+    // Safe-state extension sweep (extension wave, P2.4): a per-agent extension
+    // selector edit recomputes the effective grant set. The selector state was
+    // applied by the runtime update above; the descriptor axis follows at the
+    // next safe state — immediately for an idle member, on the next
+    // `turn_complete` for a busy one — never mid-turn.
+    if (
+      updatedConfig
+      && typeof updatedConfig === 'object'
+      && (updatedConfig as { extensionTools?: unknown }).extensionTools !== undefined
+    ) {
+      // A successful operator selector edit clears a failed-heal block: the
+      // live selector is now the operator's explicit intent.
+      this.#extensionSweepBlocked.delete(targetRef);
+      this.#queueExtensionReauthorize(targetRef);
+    }
     this.#syncAgents();
     this.#scheduleAutoSave();
     return this.#requireAgentSnapshot(updated.id, updated.config?.realmId ?? null);
@@ -6710,6 +6923,10 @@ export class SandboxStore {
     }
     const updated = this.#realmRegistry.updateRealm(realmId, { extensions: next });
     this.#emitExtensionAuditEvent('extension_attached', { realmId, extensionId, source: 'operator' });
+    // Safe-state extension sweep (extension wave, P2.4): re-attaching an
+    // extension can re-activate resolved tools that were dropped while it was
+    // detached; members recompute at idle or on their next turn completion.
+    this.#sweepRealmExtensionAuthorizations(realmId);
     return updated;
   }
 
@@ -6744,7 +6961,151 @@ export class SandboxStore {
     const next = this.#extensionRegistry.detachExtension(existing, extensionId);
     const updated = this.#realmRegistry.updateRealm(realmId, { extensions: next });
     this.#emitExtensionAuditEvent('extension_detached', { realmId, extensionId });
+    // Safe-state extension sweep (extension wave, P2.4): detaching an
+    // extension removes its tools from the Realm universe, so every active
+    // member's effective grant set is recomputed; idle members are
+    // reauthorized immediately, busy members queue until their next turn
+    // completion.
+    this.#sweepRealmExtensionAuthorizations(realmId);
     return updated;
+  }
+
+  // ==========================================================================
+  // Extension Authorization Sweep (extension wave, P2.4)
+  // ==========================================================================
+
+  /**
+   * Recomputes one agent's effective extension grant set from live store state:
+   * the Realm's resolved-and-attached tool universe (the Realm record's
+   * `resolvedTools` keys whose extension still carries an `active` attachment)
+   * intersected with the agent's normalized `config.extensionTools` selector.
+   *
+   * The realm scope of a member resolves through the same trim semantics as
+   * realm grouping; an explicit `realmIdOverride` is used for the launch-time
+   * computation when the member's realm is still being composed.
+   *
+   * @param agentRef - Active agent reference (identity key or bare id).
+   * @param realmIdOverride - Trusted realm id override, or `null` to read the member's own membership.
+   * @returns Effective grants, dropped selector names, and the normalized selector; `null` for an unknown agent.
+   */
+  #effectiveExtensionGrantsFor(
+    agentRef: string,
+    realmIdOverride: string | null = null
+  ): {
+    grants: readonly string[];
+    dropped: readonly string[];
+    selector: 'all' | readonly string[];
+  } | null {
+    const live = this.#runtime.getAgent(agentRef);
+    if (!live) return null;
+    const realmId = realmIdOverride ?? resolveMemberRealmId(live) ?? GENERIC_REALM_ID;
+    const realm = this.#realmRegistry.getRealm(realmId);
+    const universe = resolveRealmExtensionToolUniverse(realm);
+    // Selector resolution (fail closed): a *launched* agent carries the
+    // selector as an own config property (`'all'` when no explicit list was
+    // composed). A hydrated agent whose selector was withheld and could not be
+    // healed by store state has no such property — the sweep then treats it as
+    // an empty selector (nothing granted, never the `'all'` default).
+    const hasSelector = live.config
+      ? Object.prototype.hasOwnProperty.call(live.config, 'extensionTools')
+      : false;
+    const selector = hasSelector
+      ? normalizeExtensionSelector(live.config.extensionTools)
+      : Object.freeze([] as string[]);
+    const { grants, dropped } = computeEffectiveExtensionGrants(universe, selector);
+    return { grants, dropped, selector };
+  }
+
+  /**
+   * Applies one member's effective extension grant set through the runtime's
+   * operator-gated `reauthorizeAgent` and clears its queue entry. Unknown or
+   * recycled members are dropped silently; a rejected reauthorize leaves the
+   * previous descriptor in place (fail closed) and only warns.
+   *
+   * @param agentRef - Active agent reference (identity key or bare id).
+   */
+  #applyExtensionReauthorize(agentRef: string): void {
+    const resolved = this.#effectiveExtensionGrantsFor(agentRef);
+    this.#pendingExtensionReauthorize.delete(agentRef);
+    if (!resolved) return;
+    const live = this.#runtime.getAgent(agentRef);
+    if (resolved.dropped.length > 0) {
+      // Fail closed is not silent: selector names that resolved to nothing are
+      // dropped, never granted, and surfaced here.
+      console.warn(
+        `[SandboxStore] extension selector names not granted for agent '${live ? live.id : 'unknown'}': `
+        + resolved.dropped.join(', ')
+      );
+    }
+    try {
+      this.#runtime.reauthorizeAgent(
+        agentRef,
+        { extensionTools: resolved.grants },
+        this.#operatorContext()
+      );
+    } catch (err) {
+      console.warn(
+        '[SandboxStore] extension reauthorize failed:',
+        sanitizeDiagnosticError(err) || 'update-rejected'
+      );
+    }
+  }
+
+  /**
+   * Safe-state extension reauthorize for one member (extension wave, P2.4):
+   * an idle member is reauthorized synchronously at the mutation point; a busy
+   * member (in-flight turn or waiting/canceling state) queues, and its sweep
+   * applies on the next `turn_complete` — never mid-turn.
+   *
+   * @param agentRef - Active agent reference (identity key or bare id).
+   */
+  #queueExtensionReauthorize(agentRef: string): void {
+    if (this.#extensionSweepBlocked.has(agentRef)) return;
+    if (!this.#runtime.getAgent(agentRef)) {
+      this.#pendingExtensionReauthorize.delete(agentRef);
+      return;
+    }
+    if (this.#runtime.isAgentBusy(agentRef)) {
+      this.#pendingExtensionReauthorize.add(agentRef);
+      return;
+    }
+    this.#applyExtensionReauthorize(agentRef);
+  }
+
+  /**
+   * Recomputes and reauthorizes every active member of one Realm (attach/
+   * detach sweep). Deferred members stay queued for their next turn boundary.
+   *
+   * @param realmId - Registered Realm id.
+   */
+  #sweepRealmExtensionAuthorizations(realmId: string): void {
+    for (const member of this.#runtime.listAgents()) {
+      const memberRealmId = resolveMemberRealmId(member);
+      if (memberRealmId !== realmId) continue;
+      this.#queueExtensionReauthorize(createAgentIdentityKey(memberRealmId, member.id));
+    }
+  }
+
+  /**
+   * Recomputes and reauthorizes every active member across all Realms
+   * (hydration sweep: the attachment heal may have changed a Realm's universe
+   * after the capability heal ran). Reads the live registry, so it does not
+   * depend on the reactive projection timing.
+   */
+  #sweepAllExtensionAuthorizations(): void {
+    for (const member of this.#runtime.listAgents()) {
+      this.#queueExtensionReauthorize(createAgentIdentityKey(resolveMemberRealmId(member), member.id));
+    }
+  }
+
+  /**
+   * Drops one member's queued safe-state sweep (kill/purge/recycle): a
+   * terminated registration is never reauthorized later.
+   *
+   * @param agentRef - Agent reference that left the active registry.
+   */
+  #dropPendingExtensionReauthorize(agentRef: string): void {
+    this.#pendingExtensionReauthorize.delete(agentRef);
   }
 
   // ==========================================================================
@@ -7180,8 +7541,10 @@ export class SandboxStore {
    * listing the requested extension ids that did not resolve) — hashes, paths,
    * and ids only, never raw input values or secrets — and the receipt carries
    * the updated record. Extensions attached by this launch are written on the
-   * same record as `extensions`. Nothing connects and no extension grant is
-   * passed to the runtime from this wave.
+   * same record as `extensions`. Nothing connects: the effective extension
+   * grants are forwarded into each member's frozen descriptor through the
+   * trusted unified-options channel, while third-party tool execution remains
+   * P3 work.
    *
    * Partial-failure policy: when materialization, any member launch, a
    * placement write, or a directive delivery fails, every active member of the
@@ -7268,14 +7631,21 @@ export class SandboxStore {
       failure.cause = error;
       throw failure;
     }
-    // Extension-bound derived call names stay out of the runtime allowlist in
-    // this wave: the runtime grant channel is wired separately, so an
-    // unresolved or resolved extension tool never masquerades as an internal
-    // tool grant.
-    const extensionBoundCallNames = new Set<string>([
-      ...Object.keys(extensionResolution.resolvedTools),
-      ...extensionResolution.missingTools.map((tool) => tool.callName)
-    ]);
+    // Extension grant partition (extension wave, P2.4): extension-derived
+    // call names are separated from the internal allowlist — internal
+    // canonical/alias/wildcard names stay `allowedTools`, resolved extension
+    // names become the member's `extensionTools` (the effective grant set),
+    // and unresolved references only ride the existing missing-tool
+    // disclosure (never granted, never masquerading as an internal tool).
+    const extensionResolvedCallNames = new Set<string>(Object.keys(extensionResolution.resolvedTools));
+    const extensionUnresolvedCallNames = new Set<string>(
+      extensionResolution.missingTools.map((tool) => tool.callName)
+    );
+    // The realm universe for this launch: every resolved tool is granted to a
+    // member without its own extension references (the operator default);
+    // resolved names are all attached by this launch, so no detach filter is
+    // needed here.
+    const realmExtensionUniverse = Object.freeze([...extensionResolvedCallNames]);
     // Wave U publishing-authority gate (ticket 2518510): a template declaring
     // an authority id this host cannot enforce fails the launch closed before
     // any side effect (providers precedent), while import/validation/review
@@ -7435,12 +7805,24 @@ export class SandboxStore {
           throw duplicateRealmMemberIdError(agentPlan.agentId);
         }
         const presetId = presetIdByKey[agentPlan.key];
-        // Extension-bound derived call names are excluded from the internal
-        // allowlist (they belong to the extension grant channel, wired
-        // separately): every remaining entry is an internal canonical name,
-        // alias, legacy requirement-id derivation, or the wildcard sentinel.
+        // Extension grant partition (extension wave, P2.4): extension-bound
+        // call names (resolved or not) are excluded from the internal
+        // allowlist and split into the member's extension scope. A member that
+        // declared at least one extension reference is *restricted* — its
+        // scope is exactly its resolved references (empty when none resolved,
+        // fail closed; unresolved names only ride the missing disclosure). A
+        // member without references gets the whole Realm universe (the
+        // operator default) with the `'all'` selector.
+        const memberExtensionDeclared = agentPlan.toolProfile.tools
+          .filter((tool) => extensionResolvedCallNames.has(tool) || extensionUnresolvedCallNames.has(tool));
+        const memberExtensionGrants = agentPlan.toolProfile.tools
+          .filter((tool) => extensionResolvedCallNames.has(tool));
         const internalAllowedTools = agentPlan.toolProfile.tools
-          .filter((tool) => !extensionBoundCallNames.has(tool));
+          .filter((tool) => !extensionResolvedCallNames.has(tool) && !extensionUnresolvedCallNames.has(tool));
+        const memberRestricted = memberExtensionDeclared.length > 0;
+        const effectiveMemberExtensionGrants: readonly string[] = memberRestricted
+          ? Object.freeze([...memberExtensionGrants])
+          : realmExtensionUniverse;
         const config: AgentConfig = {
           id: agentPlan.agentId,
           name: agentPlan.name,
@@ -7454,6 +7836,14 @@ export class SandboxStore {
           // config consults `allowedTools` first) for consumers that display
           // the declared selector.
           allowedTools: [...internalAllowedTools],
+          // Per-agent extension selector state: the member's resolved
+          // references when restricted, else the `'all'` default. The
+          // effective grant set travels through the trusted launch option
+          // below; this selector is persisted state consumed by the heal and
+          // the tuning UI.
+          extensionTools: memberRestricted
+            ? Object.freeze([...memberExtensionGrants])
+            : 'all',
           ...(agentPlan.toolProfile.preset !== null ? { toolPreset: agentPlan.toolProfile.preset } : {}),
           ...(presetId !== undefined ? { presetId } : {}),
           ...(agentPlan.triggerPolicy !== undefined ? { triggerPolicy: agentPlan.triggerPolicy } : {})
@@ -7464,7 +7854,7 @@ export class SandboxStore {
         const history: readonly LaunchHistoryEntry[] | null = agentPlan.history.length > 0
           ? agentPlan.history
           : null;
-        const snapshot = await this.launchAgent(config, agentPlan.initialPrompt ?? null, history);
+        const snapshot = await this.launchAgent(config, agentPlan.initialPrompt ?? null, history, effectiveMemberExtensionGrants);
         launched.push(snapshot);
       }
 
@@ -8171,7 +8561,14 @@ export class SandboxStore {
    * ```
    */
   healRestoredCapabilities(): CapabilityHealReport | null {
-    return this.#runCapabilityHeal();
+    const report = this.#runCapabilityHeal();
+    // Extension wave (P2.4): after the selector/allowedTools reconcile,
+    // recompute the effective extension grant set for every active member
+    // (idle members apply immediately; busy members queue). This is the safe
+    // retry point that also recovers a member blocked by an earlier failed
+    // selector heal.
+    this.#sweepAllExtensionAuthorizations();
+    return report;
   }
 
   /**
@@ -8365,6 +8762,10 @@ export class SandboxStore {
     // failed restore cannot overwrite them and a successful one cannot rewrite
     // them (healing is in-memory only).
     this.#hydrating = true;
+    // Extension wave (P2.4): a hydration pass rebuilds the active registry, so
+    // the safe-state sweep queue and the fail-closed guard start clean.
+    this.#pendingExtensionReauthorize.clear();
+    this.#extensionSweepBlocked.clear();
     try {
       const persistedState = loadSandboxState({
         onRecovery: (info) => {
@@ -8379,6 +8780,8 @@ export class SandboxStore {
         this.#capabilityHealGrants = [];
         this.capabilityHealReport = null;
         this.legacyWorkspaceRemapReport = null;
+        this.#pendingExtensionReauthorize.clear();
+        this.#extensionSweepBlocked.clear();
         this.#syncAgents();
         this.#syncRecycleBin();
         this.#syncMessages();
@@ -8431,6 +8834,14 @@ export class SandboxStore {
       // pass is in-memory only: the suppression guard keeps autosave inert, so
       // persisted bytes are never rewritten here.
       this.#healRealmExtensionAttachments();
+      // Extension wave (P2.4): after the attachment heal settles which
+      // extensions are genuinely active, recompute every member's effective
+      // extension grant set from the live Realm universe × its healed
+      // selector. Restored members are idle, so the sweep applies immediately
+      // through the operator-gated reauthorize path; a member whose selector
+      // heal failed stays blocked (default-deny) rather than silently
+      // resolving the default `'all'`.
+      this.#sweepAllExtensionAuthorizations();
       // Wave I (ticket d57cbc1): recover legacy bare-keyed private workspace
       // bytes onto each record's canonical realm-qualified key. Runs after the
       // runtime restore (so the identity port resolves the restored records)
@@ -8598,6 +9009,10 @@ export class SandboxStore {
     // H1: a reset drops the captured hydration grants and the last heal report.
     this.#capabilityHealGrants = [];
     this.capabilityHealReport = null;
+    // Extension wave: a reset drops the safe-state sweep queue and the
+    // fail-closed sweep guard (no agent survives a runtime reset).
+    this.#pendingExtensionReauthorize.clear();
+    this.#extensionSweepBlocked.clear();
     // Wave I: a reset drops the last legacy-workspace remap report too.
     this.legacyWorkspaceRemapReport = null;
     this.#runtime.reset();
@@ -10099,7 +10514,11 @@ export class SandboxStore {
    * @param persisted - Snapshot the heal pass reconciles from (read-only).
    */
   #captureCapabilityHealGrants(persisted: SandboxPersistedState): void {
-    const grants: Array<{ agentId: string; allowedTools: readonly string[] }> = [];
+    const grants: Array<{
+      agentId: string;
+      allowedTools: readonly string[];
+      extensionSelector: 'all' | readonly string[];
+    }> = [];
     const entries = Array.isArray(persisted.agents) ? persisted.agents : [];
     for (const entry of entries) {
       if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
@@ -10108,15 +10527,33 @@ export class SandboxStore {
       const config = (entry as { config?: unknown }).config;
       if (!config || typeof config !== 'object' || Array.isArray(config)) continue;
       const record = config as Record<string, unknown>;
+      const hasAllowedField = record.allowedTools !== undefined
+        || record.tools !== undefined
+        || record.toolPreset !== undefined
+        || record.tool_preset !== undefined;
       const raw = record.allowedTools !== undefined
         ? record.allowedTools
         : (record.tools !== undefined
           ? record.tools
           : (record.toolPreset !== undefined ? record.toolPreset : record.tool_preset));
-      if (typeof raw !== 'string' && !Array.isArray(raw)) continue;
-      const resolved = resolveToolPreset(raw as string | readonly string[]);
-      if (resolved.length === 0) continue;
-      grants.push({ agentId, allowedTools: Object.freeze(resolved) });
+      const resolved = (typeof raw === 'string' || Array.isArray(raw))
+        ? resolveToolPreset(raw as string | readonly string[])
+        : [];
+      // Extension wave (P2.4): the per-agent selector is capability data too,
+      // captured from the persisted snapshot. A legacy snapshot without the
+      // field captures an empty selector — fail closed (nothing was granted
+      // before the extension wave), never the `'all'` default. An agent with
+      // no capability selector of any kind contributes no entry (its sweep
+      // selector stays fail-closed-empty on the absent config property).
+      const hasExtensionField = Object.prototype.hasOwnProperty.call(record, 'extensionTools');
+      if (!hasAllowedField && !hasExtensionField) continue;
+      grants.push({
+        agentId,
+        allowedTools: Object.freeze(resolved),
+        extensionSelector: hasExtensionField
+          ? normalizeExtensionSelector(record.extensionTools)
+          : Object.freeze([])
+      });
     }
     this.#capabilityHealGrants = grants;
   }
@@ -10298,6 +10735,31 @@ export class SandboxStore {
           reason: 'agent-not-restored'
         });
         continue;
+      }
+
+      // Extension wave (P2.4): re-apply the captured per-agent selector state
+      // before the descriptor sweep. Snapshot hydration withholds it, so this
+      // is the only path that restores a template-restricted member's scope;
+      // a failed apply blocks the sweep for this member (fail closed — the
+      // default `'all'` must never silently resolve on a failed heal).
+      const memberKey = createAgentIdentityKey(resolveMemberRealmId(live), live.id);
+      const hasSelector = live.config
+        ? Object.prototype.hasOwnProperty.call(live.config, 'extensionTools')
+        : false;
+      const currentSelector = normalizeExtensionSelector(live.config?.extensionTools);
+      if (!hasSelector || !extensionSelectorsEqual(currentSelector, grant.extensionSelector)) {
+        try {
+          this.#runtime.updateAgentConfig(grant.agentId, { extensionTools: grant.extensionSelector }, operator);
+          this.#extensionSweepBlocked.delete(memberKey);
+        } catch (err) {
+          this.#extensionSweepBlocked.add(memberKey);
+          console.warn(
+            '[SandboxStore] extension selector heal failed:',
+            sanitizeDiagnosticError(err) || 'update-rejected'
+          );
+        }
+      } else {
+        this.#extensionSweepBlocked.delete(memberKey);
       }
 
       const current = Array.isArray(live.config?.allowedTools)
@@ -10801,6 +11263,23 @@ export class SandboxStore {
     if (event && event.type === 'stream' && event.agentId) {
       this.#mirrorAgentLiveFields(event.agentId);
       return;
+    }
+    // Safe-state extension sweep (extension wave, P2.4): a member whose
+    // effective grant set changed while it was busy applies at its next turn
+    // boundary — immediately after `turn_complete`, never mid-turn.
+    if (event && event.type === 'turn_complete' && event.agentId) {
+      const memberKey = this.#canonicalRef(event.agentId) || event.agentId;
+      if (this.#pendingExtensionReauthorize.has(memberKey)) {
+        this.#applyExtensionReauthorize(memberKey);
+      }
+    }
+    // A registration that leaves the active set is never reauthorized later.
+    if (
+      event
+      && (event.type === 'agent_killed' || event.type === 'agent_purged' || event.type === 'agent_recycled')
+      && event.agentId
+    ) {
+      this.#dropPendingExtensionReauthorize(this.#canonicalRef(event.agentId) || event.agentId);
     }
     this.#syncAgents();
     this.#syncRecycleBin();

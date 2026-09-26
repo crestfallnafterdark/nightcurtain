@@ -23,7 +23,7 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 
 ## Invariants
 
-- Strict minimal cross-boundary surface: exactly six public symbols (`createSandboxToolDispatcher`, `getSandboxToolsSchema`, `SANDBOX_TOOLS`, `INNATE_TOOLS`, `TOOL_PRESETS`, `resolveToolPreset`) plus the frozen `TOOL_SYSTEM_ERROR_CODES` dictionary.
+- Strict minimal cross-boundary surface: exactly six public value symbols (`createSandboxToolDispatcher`, `getSandboxToolsSchema`, `SANDBOX_TOOLS`, `INNATE_TOOLS`, `TOOL_PRESETS`, `resolveToolPreset`) plus the frozen `TOOL_SYSTEM_ERROR_CODES` dictionary; the exported type-only seams (execution/receipt types and the additive extension provider-port declarations) carry no runtime value.
 - Table-driven descriptor delegation: each descriptor freezes its own parameter alias map and sanitizer, and its handler delegates to the injected substrate capability (`context.<subsystem>`) or narrow capability port (the dispatcher's `isAuthorized` gate is the single capability-authorization authority; `batch_precall` additionally applies the fixed precall policy allowlist as defense in depth). Handlers are thin but not mechanically 1-line: they guard required capabilities, may branch on sanitized parameters (action dispatch, legacy fallbacks), assemble identity-only caller-scope/option objects for the delegated call — never caller-asserted privilege flags or authority-bearing role aliases — and shape result receipts.
 - O(1) dispatcher on a frozen registry: routing is a direct property lookup on the frozen `TOOL_REGISTRY`, built once from the frozen descriptor catalog — zero `switch` statements and no registration or mutation path.
 - Zero LLM schema pollution: schemas exposed to LLMs carry only `name`, `description`, and `descriptor.schema` fields; infrastructure configuration and execution-context fields (`model`, `temperature`, `maxTurns`, `privileged`, `toolPreset`, `allowedTools`, `depth`, `sinceTimestamp`, raw byte limits) never appear in them.
@@ -39,6 +39,7 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 - Per-call `callerContext` is caller data, never authority: the dispatcher strips its `isAdmin`/`isPrivileged`/`privileged` flags, authority-bearing `callerRole`/`role` aliases, `principal`/`authority` objects, and `allowedTools`, deriving privilege and capability only from trusted bound construction options and the injected identity port
 - Descriptor-authoritative capability: when the projection's frozen `AuthorityDescriptor` is present, capability derives from the descriptor alone — a wildcard/explicit/selector grant authorizes, any other outcome denies — and the deprecated legacy channels above apply only to descriptor-less callers
 - Publishing meta tools (`import_realm_template`/`submit_hydration_package`) are explicit-grant-only: they resolve through the separate `PUBLISHING_TOOL_REGISTRY` (never members of `TOOL_REGISTRY` or `ALL_TOOL_DESCRIPTORS`, never emitted by `getSandboxToolsSchema`), and authorization is the exact `@template:authority`/`@hydration:authority` entry on the caller's frozen descriptor — the wildcard `'*'`, `privileged`, and every legacy channel are deliberately insufficient, an engine-internal descriptor stays authorized, and descriptor-less callers deny (INV-9 refinement)
+- Extension tools are exact-membership-only on the separate frozen `AuthorityDescriptor.extensions` axis: the dispatcher's extension branch is gated on an optional provider-registry port (unbound until P3, so the branch is inert in P2), authorize iff `authority.extensions.has(callName)`, with no wildcard/`privileged`/selector/alias/legacy fallback, engine-internal and anonymous/descriptor-less callers denying, and descriptor-probe throws failing closed; the axis is never populated from `allow` and an extension call never falls through to a baked handler or schema
 - Realm/workspace/tenant scope is never caller-supplied: the scope vocabulary (`workspaceId`/`workspace_id`, `realmId`/`realm_id`, `tenantId`/`tenant_id`, `scope`) is pinned at dispatcher construction and stripped from per-call `callerContext`; a scope claim may only ride trusted bound construction (and, once Realm lands, the trusted identity projection), never a tool call
 - Realm-exact caller resolution and canonical key binding: a construction-bound `realmId` resolves the caller projection for exactly that `(realmId, agentId)` registration and binds its canonical identity `key` as the execution context's `callerKey` (a pinned key — per-call `callerKey`/`caller_key` claims are stripped), so substrate contexts disambiguate the same literal id across Realms; an omitted Realm keeps the unique-match resolution and the bare-id channel
 - The identity subject is pinned to construction: `callerAgentId`/`agentId`/nested `callerContext` on a per-call context never select whose `AgentIdentityProjection`/`AuthorityDescriptor` is consulted. The bound `agentId`/`callerAgentId` is the only subject source, and an anonymous dispatcher has no subject and fails closed
@@ -65,6 +66,7 @@ export interface ExecutionContext {
     readonly callerRole?: string;
     readonly currentDepth?: number;
     readonly executeTool?: (name: string, args: Record<string, unknown>, callerContext?: ExecutionContext) => Promise<unknown>;
+    readonly extensionToolProvider?: ExtensionToolProviderPort;
     readonly historyManager?: unknown;
     // Warning: (ae-forgotten-export) The symbol "AgentIdentityPort" needs to be exported by the entry point index.d.ts
     readonly identityPort?: AgentIdentityPort;
@@ -88,6 +90,17 @@ export interface ExecutionContext {
     readonly virtualFs?: unknown;
     readonly workspaceId?: string;
     readonly worldClock?: unknown;
+}
+
+// @public
+export interface ExtensionToolBinding {
+    readonly callName: string;
+    readonly extensionId: string;
+}
+
+// @public
+export interface ExtensionToolProviderPort {
+    resolveTool(callName: string): ExtensionToolBinding | null;
 }
 
 // @public
@@ -376,6 +389,7 @@ const context: ExecutionContext = {
 - **`callerRole`** — Caller role classification (e.g. 'admin', 'director', 'collaborator', 'critic').
 - **`currentDepth`** — Trusted bound turn-recursion depth capability, seeded by the turn execution engine from the invocation options at dispatcher construction and consumed by `invoke_agent` to feed the invocation engine's recursion guard. Trust boundary: pinned from bound construction. A per-call `depth` (or `currentDepth`) value is stripped before dispatch and never reaches a handler (MOD-21 A2, ticket 63026f5).
 - **`executeTool`** — Trusted executor seeded into every descriptor context by the dispatcher factory: the construction-bound `executeTool` when one was injected, otherwise the dispatcher's own re-entrant closure. A per-call `executeTool` value is stripped and never consumed.
+- **`extensionToolProvider`** — Optional extension provider-registry port (extension wave): when a live provider registry is bound (P3), a call name it resolves routes through the extension authorization branch — exact membership on the caller's frozen `AuthorityDescriptor.extensions` set, no wildcard/privileged/ selector/alias/legacy fallback. In P2 no production composition supplies it, so the branch is inert. Trust boundary: pinned from bound construction; a per-call value is stripped and can never substitute the host port.
 - **`historyManager`** — Injected Layer 0 History & Turn Rollback Manager instance. Opaque to this contract: descriptor handlers narrow the capability they are configured to consume.
 - **`identityPort`** — Narrow agent identity resolver seeded into descriptor contexts and consumed by the dispatcher's privilege gate through its `getAgentIdentity` member. Replaces full `Agent` instance handoffs.
 - **`invocationEngine`** — Injected Layer 0 Synchronous Invocation Engine instance. Opaque to this contract: descriptor handlers narrow the capability they are configured to consume.
@@ -393,6 +407,29 @@ const context: ExecutionContext = {
 - **`virtualFs`** — Injected Layer 0 Virtual Filesystem instance. Opaque to this contract: descriptor handlers narrow the capability they are configured to consume.
 - **`workspaceId`** — Active workspace isolation boundary (defaults to `agentId` or 'global'). Trust boundary: pinned from bound construction. A per-call `workspaceId`/`workspace_id` (or the reserved Realm/tenant scope keys) is stripped before dispatch and can never select the workspace a handler or substrate operation resolves (ticket c7a3049).
 - **`worldClock`** — Injected Layer 0 World Clock & Timeline Events instance. Opaque to this contract: descriptor handlers narrow the capability they are configured to consume.
+
+### `ExtensionToolBinding` — interface
+
+One resolved provider-tool binding returned by ExtensionToolProviderPort.resolveTool.
+
+P2 scope: the binding is deliberately minimal — the sanitized model-facing call name and the extension id that provides it — because catalogs stay `null` and no descriptor synthesis or execution exists before P3. The dispatcher only needs the binding to route a call into the extension authorization branch; a P2-authorized call fails closed with `EXECUTION_FAILED` (no execution channel is bound), never a silent success.
+
+#### Members
+
+- **`callName`** — Sanitized model-facing call name; equals the requested canonical name.
+- **`extensionId`** — Extension id that provides the tool (secret-free).
+
+### `ExtensionToolProviderPort` — interface
+
+Optional provider-registry port consumed by the dispatcher's extension authorization branch (extension wave; P2 lands the branch inert).
+
+The port is the sanctioned DI seam for the live provider registry: the composition root supplies it once connections/catalogs exist (P3), and P2 production wires none — so an extension call name is simply unknown and fails `TOOL_NOT_FOUND` exactly as before. When present, a name the port resolves is authorized **only** by exact membership on the caller's frozen `AuthorityDescriptor.extensions` set: the wildcard `'*'`, `privileged`, subagent-management selectors, alias-written entries, and the legacy allowlist channels never authorize an extension call, anonymous and descriptor-less callers deny, engine-internal principals deny, and any throw while probing the descriptor fails closed.
+
+The port is pinned construction input: a per-call value is stripped.
+
+#### Members
+
+- **`resolveTool`** — Resolves one sanitized call name against the live provider registry.
 
 ### `getSandboxToolsSchema` — function
 
@@ -863,9 +900,9 @@ function handleToolError(code: ToolSystemErrorCode, message: string) {
 
 ## Doc coverage
 
-- Top-level exports: 29
-- Declarations (exports + members): 101
-- Documented declarations: 101 / 101 (100%)
+- Top-level exports: 31
+- Declarations (exports + members): 107
+- Documented declarations: 107 / 107 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): `AgentIdentityPort`, `AgentIdentityProjection`, `AgentIdentityScope`, `AgentRuntime`, `BundleFiles`, `LifecyclePort`, `PendingInstancePayload`, `RealmTemplate`

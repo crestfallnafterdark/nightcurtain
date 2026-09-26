@@ -187,6 +187,7 @@ export interface AgentConfig {
     creatorId?: string | null;
     customTools?: Record<string, unknown> | null;
     customToolSchemas?: Record<string, unknown> | null;
+    extensionTools?: 'all' | readonly string[];
     readonly id: string;
     identityHeader?: boolean;
     initial_prompt?: string | null;
@@ -290,6 +291,7 @@ export class AgentLifecycleManager {
     reauthorizeAgent(agentId: string, input?: {
         privileged?: boolean;
         allowedTools?: string[] | '*' | null;
+        extensionTools?: readonly string[] | null;
         realmBypass?: boolean;
         templateAuthority?: boolean;
         hydrationAuthority?: boolean;
@@ -366,6 +368,7 @@ export type AgentState = typeof AGENT_STATES[keyof typeof AGENT_STATES];
 // @public
 export interface AuthorityInputRecord {
     readonly allowedTools: readonly string[] | null;
+    readonly extensionTools: readonly string[] | null;
     readonly hydrationAuthority: boolean;
     readonly privileged: boolean;
     readonly realmBypass: boolean;
@@ -376,6 +379,7 @@ export interface AuthorityInputRecord {
 export interface LaunchAgentOptions {
     readonly callerContext?: AgentSecurityContext | null;
     readonly config: AgentConfig;
+    readonly extensionTools?: readonly string[] | null;
     readonly history?: readonly LaunchHistoryEntry[];
     readonly initialPrompt?: string | null;
     readonly model?: ModelInterface | null;
@@ -391,7 +395,7 @@ export interface LaunchHistoryEntry {
 
 // Warnings were encountered during analysis:
 //
-// <declarations>/runtime/agentLifecycle/index.d.ts:528:9 - (ae-forgotten-export) The symbol "InternalPrincipal" needs to be exported by the entry point index.d.ts
+// <declarations>/runtime/agentLifecycle/index.d.ts:540:9 - (ae-forgotten-export) The symbol "InternalPrincipal" needs to be exported by the entry point index.d.ts
 ```
 
 ## API docs
@@ -518,6 +522,7 @@ const config: AgentConfig = {
 - **`creatorId`** — Alias for `spawnedBy`. When omitted, the lifecycle manager falls back to `spawnedBy`; both are `null` only when no creator was supplied either way.
 - **`customTools`** — Host-registered custom tool handler registry keyed by tool name (a direct handler function or a `{ handler }` wrapper). Host-only contract (A0-5, ticket 0443865): custom tools are operator/host-registered, never model-registered — provider function/JSON input cannot add entries (the spawn sanitizer renames agent-supplied `custom_tools` to an inert alias that launch composition never reads), and Realms never register custom tools; the registry is operator-global. Handlers receive raw substrate handles and execute before the dispatcher capability gate, so the turn execution engine authorizes every invocation against the caller's frozen `AuthorityDescriptor` (wildcard `'*'` or `'@lifecycle:authority'`, or an engine-internal principal); an `allowedTools` entry that merely matches the handler name does not authorize execution, and anonymous callers are denied.
 - **`customToolSchemas`** — Custom tool JSON-schema definitions exposed to the model alongside AgentConfig.customTools for this agent. Host-only contract (A0-5, ticket 0443865): definitions are operator/host-registered and never model-supplied. The turn execution engine exposes them only to callers whose frozen `AuthorityDescriptor` grants custom execution; ungranted and anonymous callers receive no custom schemas.
+- **`extensionTools`** — Per-agent extension tool selector: `'all'` (the default when absent) means every tool resolved for the agent's Realm, while an explicit list narrows it to those sanitized extension call names. Authority-bearing (extension wave): extension tools reach third-party MCP servers, so they are exact-grant-only — the wildcard `'*'`, `privileged`, and every legacy capability channel never imply one. The value is owner-controlled state (direct assignment is ignored; only the lifecycle authority channel writes it), it is withheld from snapshots on hydration, and the effective descriptor set is recomputed store-side and re-applied by the capability heal. Unknown names fail closed (dropped, never granted). `'all'` is a selector, not a grant: it resolves against the Realm's resolved tool names, which stay empty until extension tools are actually attached and resolved.
 - **`id`** — Unique, non-empty identifier for the agent (immutable identity)
 - **`identityHeader`** — Controls the `[IDENTITY]` preamble injected into the first model message by the turn execution engine. `true` forces the preamble, `false` suppresses it, and when absent the engine enables it heuristically (mailbox autonomy, autonomy tools, or a non-`user`/non-`admin` role).
 - **`initial_prompt`** — Snake_case alias for `initialPrompt`; consulted first, so it wins when both spellings are supplied (`agentLifecycle/index.ts:249-250`)
@@ -657,7 +662,7 @@ console.log(`Launched agent ${agent.id} in state ${agent.state}`);
 - **`listRealmBypassGrants`** — Lists the canonical `(realmId, agentId)` identity keys of the active agents currently holding the `realmBypass` grant (Wave I, ticket d57cbc1; fix lane G2). Canonical keys are the persistence currency: a grant list carrying the same literal id from two Realms round-trips exactly, because `restoreRealmBypassGrants` resolves each key to its own registration. Legacy bare-id snapshots still restore through the unique-match rule (an ambiguous bare id is skipped fail-closed, never escalated to a Realm). The listing itself is registry state, not authority, and the key is internal-only — it never reaches an agent-facing surface.
 - **`listRecycledAgents`** — Lists all soft-killed agents currently residing in the recycle bin.
 - **`purgeAgent`** — Permanently purges an agent from the runtime, recycle bin, messaging bus, and VFS workspace (INV-PURGE). Destructive capability: like kill, purge permanently deletes the target's private VirtualFS workspace in addition to the registry/bus teardown. It is sudoer-only and authorizes before any teardown; the eviction key is the target's resolved workspace (`config.workspaceId || config.workspace || agent id`), never the raw lookup id when the two differ — an agent launched into an explicit workspace evicts exactly that workspace (ticket 4e9e0c8). Operational Flow: 1. Authorizes sudoer-only authority before any teardown; anonymous and non-sudoer callers receive `PERMISSION_DENIED` while the target and its scheduler timers remain untouched. An invalid or absent id stays a `false` receipt without requiring authority (f6be691). 2. Aborts in-flight execution if active and clears `pendingPrecalls`/`lastSummary`. 3. Deletes agent from both active registry and `recycleBin`. 4. Unsubscribes mailbox listeners. 5. Calls `MessagingBus.purgeAgent(agentId)` to wipe inboxes, archives, and policies (falls back to `unregisterAgent` when the bus does not implement `purgeAgent`). 6. Evicts the private VirtualFS workspace resolved as `config.workspaceId || config.workspace || agent id` through the engine-bound principal, skipping the eviction while another registered record (active or recycled) resolves to the same key — last-claimant cleanup (26c3913). 7. Emits `'agent_purged'` event. Scheduled-timer teardown is not performed here: `AgentRuntime.purgeAgent` runs `RuntimeScheduler.teardownForAgent(agentId, 'Purged permanently', true)` only after this purge succeeds.
-- **`reauthorizeAgent`** — Re-registers the frozen authority descriptor for an agent from trusted engine input (MOD-21 W7). Hydration never restores authority, so a composition root can re-assert a trusted descriptor here. This is a capability re-assertion path only: any input carrying the `realmBypass` key — `false` included — is rejected fail-closed with `PERMISSION_DENIED` before any mutation, for every caller (the exact injected `InternalPrincipal` and wildcard/authority descriptors included), because the scope grant is applied solely through the engine bootstrap or `grantRealmBypass`/`revokeRealmBypass`. An omitted key preserves the current grant state (Wave I, ticket c02d0b9; I1-F). Authority gate: the caller must resolve to lifecycle authority — the exact injected `InternalPrincipal` reference or a registry `AuthorityDescriptor` holding `'*'`/`'@lifecycle:authority'`; everything else is denied with `PERMISSION_DENIED` before any mutation. The agent config is not touched.
+- **`reauthorizeAgent`** — Re-registers the frozen authority descriptor for an agent from trusted engine input (MOD-21 W7). Hydration never restores authority, so a composition root can re-assert a trusted descriptor here. This is a capability re-assertion path only: any input carrying the `realmBypass` key — `false` included — is rejected fail-closed with `PERMISSION_DENIED` before any mutation, for every caller (the exact injected `InternalPrincipal` and wildcard/authority descriptors included), because the scope grant is applied solely through the engine bootstrap or `grantRealmBypass`/`revokeRealmBypass`. Present-key replacement semantics apply to the capability axis (extension wave): each supplied key replaces its axis, every omitted key preserves its current value — so the store's extension sweep can reauthorize the `extensions` axis alone without clearing `privileged` or `allowedTools`. Authority gate: the caller must resolve to lifecycle authority — the exact injected `InternalPrincipal` reference or a registry `AuthorityDescriptor` holding `'*'`/`'@lifecycle:authority'`; everything else is denied with `PERMISSION_DENIED` before any mutation. The agent config is not touched.
 - **`registerHydratedAgent`** — Registers the re-derived frozen authority descriptor for a hydrated agent during snapshot restore. A snapshot contributes no grant — the persisted `allowedTools` whitelist and `spawnedBy`/`creatorId` parentage round-trip as config data only — so the descriptor is default-deny until a trusted operator grant lands (MOD-21 W5/W7/W10). The entity's authority-write channel is bound here (first bind wins) so later gated operator grants can reach the hydrated entity.
 - **`resolveAgentIdentityKey`** — Resolves the canonical `(realmId, agentId)` identity key of the record a lifecycle mutation addresses (Wave I, ticket d57cbc1). Keyed-mutation surface consumed by the runtime facade: kill/purge must hand the scheduler and invocation substrates the exact registration key (the same resolution the mutation itself uses — realm-scoped for a realm-bound caller, unique-match otherwise, canonical key direct), so same-id registrations in two Realms tear down their own timers and invocations only. An absent or ambiguous target resolves `null`.
 - **`restoreAgent`** — Restores a soft-killed agent from the recycle bin back to active status in `IDLE` state (INV-RESTORE). Operational Flow: 1. Validates agent exists in `recycleBin`. 2. Authorizes the restore: a resolved principal is mandatory; a live-construction record whose descriptor would regain authority (`privileged` or wildcard/lifecycle capability tool selectors) requires lifecycle authority, otherwise sudoer, parent creator, or the agent itself may restore. Snapshot-provenance records re-enter default-deny and never require a sudoer (f6be691). 3. Migrates agent from `recycleBin` to active registry. 4. Clears `recycledAt` and `recycleReason`, transitioning state to `AGENT_STATES.IDLE`. 5. Re-registers agent on `MessagingBus` (`unmarkAgentTerminated`, `registerAgent`). 6. Re-wires reactive mail subscription routing into `TriggerQueue`. 7. Emits `'state_change'` and `'agent_restored'` events.
@@ -739,6 +744,7 @@ Frozen registry-owned authority input record (MOD-21 W10, 5b585b7): the trusted 
 #### Members
 
 - **`allowedTools`** — Normalized capability selector (`null` when none was supplied)
+- **`extensionTools`** — Trusted effective extension grant set (sanitized call names) the descriptor's `extensions` axis was built from (`null` when none was supplied). Computed by the composition root from the operator's Realm attachments and the per-agent selector; never derived from `privileged`, `allow`, or any legacy channel.
 - **`hydrationAuthority`** — Whether the explicit `@hydration:authority` publishing grant is active (Wave U, ticket 2518510). Recorded only through the operator grant/revoke API (or the engine bootstrap for the root system director) and rebuilt into the descriptor's allow set.
 - **`privileged`** — Trusted privilege flag the descriptor was built from
 - **`realmBypass`** — Whether the `realmBypass` grant is active (Wave I, ticket c02d0b9). Composed only on the engine bootstrap path or through the operator grant/revoke API; never from a launch/spawn/update caller value.
@@ -773,6 +779,7 @@ const launchOptions: LaunchAgentOptions = {
 
 - **`callerContext`** — Security context of the invoking agent. The authority-bearing fields on it are the deprecated compatibility channel; the caller principal resolved from the frozen `AuthorityDescriptor` replaces them.
 - **`config`** — Complete agent configuration
+- **`extensionTools`** — Trusted store-computed effective extension grant set (extension wave): sanitized model-facing extension call names forwarded one-way into the frozen registry descriptor's `extensions` axis. This is not a caller capability selector: the value must be computed by the composition root from the Realm's operator attachments and the agent's `config.extensionTools` selector. It is read from this unified options object only (legacy positional launches never carry it), the entity config selector never grants an entry by itself, and `'*'`, `privileged`, aliases, and every legacy channel never imply an entry.
 - **`history`** — Trusted baked prologue seeded at launch, composed as `[system message (when a system prompt exists), ...declared entries]` in declared order with launch-generated message ids (INV-7) and **no model call**. Entries are validated fail-closed (roles `user`/`assistant` only, non-empty string content, unknown fields rejected) and are only read from the unified options object — legacy positional launches never carry them.
 - **`initialPrompt`** — Optional initial prompt to trigger immediate turn execution upon launch
 - **`model`** — Optional pre-instantiated concrete ModelInterface instance
@@ -803,8 +810,8 @@ const opener: LaunchHistoryEntry = {
 ## Doc coverage
 
 - Top-level exports: 12
-- Declarations (exports + members): 177
-- Documented declarations: 177 / 177 (100%)
+- Declarations (exports + members): 180
+- Documented declarations: 180 / 180 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): `AgentAuthorityPatch`, `AgentModelConfig`, `AgentTelemetry`, `AuthorityDescriptor`, `AuthorityDowngradeRecord`, `CredentialResolverPort`, `HistoryMessage`, `InternalPrincipal`, `InterruptedTurn`, `InvocationEngine`, `MessagingBus`, `ModelInterface`, `ModelPresetSourcePort`, `ProviderInterface`, `SerializedAgent`, `SubsystemEmitPort`, `TriggerDispatcher`, `TriggerPolicy`, `TurnBundle`, `VirtualFS`

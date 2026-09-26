@@ -55,6 +55,8 @@ import {
   safeRealmColor
 } from '../../src/lib/components/sandbox/realmGroups.ts';
 import {
+  applyAgentExtensionToolToggle,
+  buildAgentExtensionTuningProjection,
   buildMissingExtensionFlowViews,
   buildRealmExtensionRequestViews,
   describeExtensionRemovalError
@@ -88,10 +90,11 @@ import {
   resolveRealmReviewLaunchPayload
 } from '../../src/lib/components/sandbox/realmReviewHelpers.ts';
 import {
+  SandboxStore,
   createSandboxStore,
   REALM_TEMPLATE_IMPORT_MAX_BUNDLE_BYTES
 } from '../../src/lib/sandbox/sandboxStore/index.svelte.ts';
-import { createAgentIdentityKey } from '../../src/lib/sandbox/runtime/index.ts';
+import { AgentRuntime, createAgentIdentityKey } from '../../src/lib/sandbox/runtime/index.ts';
 import {
   DEMO_TEMPLATE,
   serializeTemplateBundle,
@@ -1491,6 +1494,122 @@ test('21. provenance rows and the realm badge surface the recorded extension res
       ['acme-scoring', 'acme/text-tools']
     );
     assert.strictEqual(describeRealmExtensionIndicator(store.getRealm(receipt.realm.id)).count, 2);
+  } finally {
+    store.destroy();
+    sharedLocalStorage.clear();
+  }
+});
+
+// ============================================================================
+// 22. Per-agent extension tuning (P2.4)
+// ============================================================================
+
+test('22. the per-agent extension tuning projection mirrors the store universe and toggles collapse to `all`', async () => {
+  // (1) Pure projection: resolution + attachment filtering + selector state.
+  const resolvedTools = { similarity: 'acme-scoring', docs_search: 'acme-docs' };
+  const attachments = [
+    { extensionId: 'acme-scoring', toolSelection: 'all', status: 'active', approvedAt: 'x', approvedBy: 'operator' },
+    { extensionId: 'acme-docs', toolSelection: 'all', status: 'unavailable', approvedAt: 'x', approvedBy: 'operator' }
+  ];
+  const all = buildAgentExtensionTuningProjection({
+    resolvedTools,
+    attachments,
+    selector: undefined,
+    extensionLabels: { 'acme-scoring': 'Acme Scoring', 'acme-docs': 'Acme Docs' }
+  });
+  assert.deepStrictEqual(
+    all.options.map((option) => [option.callName, option.extensionId, option.extensionLabel, option.enabled]),
+    [['similarity', 'acme-scoring', 'Acme Scoring', true]],
+    'only resolved-and-active tools render, enabled under the default selector'
+  );
+  assert.deepStrictEqual(
+    [all.totalCount, all.selectedCount, all.allSelected, all.hasTools, all.label],
+    [1, 1, true, true, 'All resolved extension tools']
+  );
+
+  const subset = buildAgentExtensionTuningProjection({
+    resolvedTools: { similarity: 'acme-scoring', docs_search: 'acme-scoring' },
+    attachments: [attachments[0]],
+    selector: ['docs_search']
+  });
+  assert.deepStrictEqual(
+    subset.options.map((option) => [option.callName, option.enabled]),
+    [['similarity', false], ['docs_search', true]],
+    'an explicit subset enables exactly its names'
+  );
+  assert.strictEqual(subset.label, '1 of 2 tools');
+  assert.deepStrictEqual(subset.selector, ['docs_search']);
+
+  const empty = buildAgentExtensionTuningProjection({ resolvedTools: null, attachments: null, selector: 'all' });
+  assert.deepStrictEqual(
+    [empty.totalCount, empty.hasTools, empty.label],
+    [0, false, 'No extension tools resolved for this Realm.']
+  );
+
+  // (2) Toggles: disabling collapses to an explicit list; re-enabling every
+  // tool collapses back to `'all'`; unknown names and no-ops keep the selector.
+  const disabled = applyAgentExtensionToolToggle('all', 'similarity', false, resolvedTools, [attachments[0]]);
+  assert.deepStrictEqual(disabled, []);
+  const enabledAgain = applyAgentExtensionToolToggle(disabled, 'similarity', true, resolvedTools, [attachments[0]]);
+  assert.strictEqual(enabledAgain, 'all', 'enabling the last tool collapses to the default');
+  assert.deepStrictEqual(
+    applyAgentExtensionToolToggle('all', 'ghost_tool', false, resolvedTools, [attachments[0]]),
+    'all',
+    'an unknown tool name is a no-op'
+  );
+  assert.strictEqual(
+    applyAgentExtensionToolToggle('all', 'similarity', false, resolvedTools, [attachments[1]]),
+    'all',
+    'a detached/unsupported tool is not toggleable'
+  );
+
+  // (3) Store agreement: a real launch feeds the projection, and applying its
+  // toggle through `updateAgentConfig` reauthorizes the descriptor.
+  sharedLocalStorage.clear();
+  const runtime = new AgentRuntime({ autoBootstrapDirector: false });
+  const store = new SandboxStore({
+    runtime,
+    virtualFs: runtime.virtualFs,
+    messagingBus: runtime.messagingBus,
+    autoBootstrapDirector: false,
+    autoHydrate: false
+  });
+  try {
+    store.installExtension({
+      id: 'acme-scoring',
+      kind: 'mcp',
+      displayName: 'Acme Scoring',
+      transportHint: { kind: 'http', url: 'https://mcp.example.com' }
+    });
+    const bundle = uiExtensionBundle();
+    store.importRealmTemplate(bundle);
+    const receipt = await store.launchRealmFromTemplate(bundle.template.id, {
+      name: 'Tuning Realm',
+      extensionApprovals: [{ extensionId: 'acme-scoring' }]
+    });
+    const realm = store.getRealm(receipt.realm.id);
+    const member = store.agents.find((agent) => agent.id === 'u-ext-observer');
+    const tuning = buildAgentExtensionTuningProjection({
+      resolvedTools: realm.instance?.resolvedTools,
+      attachments: realm.extensions,
+      selector: member.config.extensionTools,
+      extensionLabels: { 'acme-scoring': 'Acme Scoring' }
+    });
+    assert.deepStrictEqual(tuning.options.map((option) => [option.callName, option.enabled]), [['similarity', true]]);
+
+    const memberKey = createAgentIdentityKey(realm.id, 'u-ext-observer');
+    const extensionsOf = () => [
+      ...runtime.createAgentIdentityPort().getAgentIdentity('u-ext-observer', { realmId: realm.id }).authority.extensions
+    ];
+    assert.deepStrictEqual(extensionsOf(), ['similarity'], 'the launch grants the resolved tool');
+
+    const next = applyAgentExtensionToolToggle(tuning.selector, 'similarity', false, realm.instance?.resolvedTools, realm.extensions);
+    store.updateAgentConfig(memberKey, { extensionTools: next });
+    assert.deepStrictEqual(store.agents.find((agent) => agent.id === 'u-ext-observer').config.extensionTools, []);
+    assert.deepStrictEqual(extensionsOf(), [], 'the tuning edit reauthorizes the descriptor immediately for the idle member');
+
+    store.updateAgentConfig(memberKey, { extensionTools: 'all' });
+    assert.deepStrictEqual(extensionsOf(), ['similarity'], 'restoring the default re-grants the resolved tool');
   } finally {
     store.destroy();
     sharedLocalStorage.clear();

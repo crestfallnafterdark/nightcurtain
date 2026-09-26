@@ -28,7 +28,8 @@
  * @decision `AgentIdentityPort` is the frozen identity-resolution surface injected as `ToolExecutionPort.getAgentIdentity` for MOD-8/MOD-10; it carries the agent's frozen registry `AuthorityDescriptor`, built once at launch from trusted config, never caller claims, plus the canonical `(realmId, agentId)` identity `key` and the realm-exact/bypass resolution scopes
  * @decision Realm scope rides the same frozen projection: every projection carries `realmId` (owner-controlled `config.realmId`, `null` = the bootstrap-only system scope) and `realmBypass`. `realmBypass` is `true` iff the registry authority inputs carry the `realmBypass` grant — the engine bootstrap's hardcoded composition or an operator grant through the lifecycle grant API — and is never derived from an agent id; the operator/engine branch of the locked bypass rule is the opaque `InternalPrincipal`, which substrates check by exact reference (it has no agent id and never appears here), and agent authority — including the wildcard `'*'` — never bypasses without a grant
  * @invariant Invocation and await Realm gates: the invocation engine receives the identity-port realm resolver and the opaque internal principal, so `invokeAgent` denies cross-scope pairs fail-closed (bypass principals span Realms) and `waitForInvocation` authenticates the facade/port-supplied caller as the invocation's invoker, its target, or a bypass principal; the agent-facing lifecycle port marks every wait as caller-scoped, so an unauthenticated wait fails closed, while `AgentRuntime.waitForInvocation` without a caller context stays the composition-root/host path. The operator/store listing path (`listAgents`/persistence port without a scope) stays unscoped.
- * @decision Authority is the frozen `AuthorityDescriptor` (`subject`/`kind`/`allow`/`visibility`/`realmBypass`) built once at construction from trusted config; there is no `privileged` boolean, admission is default-deny, reserved ids (`admin`/`director`/`system`) are ordinary identifiers, and every denial is uniform `PERMISSION_DENIED`
+ * @decision Authority is the frozen `AuthorityDescriptor` (`subject`/`kind`/`allow`/`extensions`/`visibility`/`realmBypass`) built once at construction from trusted config; there is no `privileged` boolean, admission is default-deny, reserved ids (`admin`/`director`/`system`) are ordinary identifiers, and every denial is uniform `PERMISSION_DENIED`
+ * @decision The `extensions` axis is a separate, exact-membership capability surface: it is built only from trusted store-computed extension call names forwarded through the launch/reauthorize channels (never derived from `privileged`, `allow`, the wildcard `'*'`, aliases, or any legacy channel), an entry authorizes exactly the identically named extension tool, and a descriptor that carries no `extensions` denies every extension call
  * @decision Engine-internal privileged paths use the opaque branded `InternalPrincipal`: a plain object, a privilege-flag bundle, or a reserved id string cannot impersonate it
  * @decision Authority is never persisted: snapshots drop trust fields and restore re-derives descriptors from trusted config, downgrading tampered privilege claims to anonymous and failing closed on schema-invalid input
  * @decision Legacy caller-asserted authority (`isAdmin`/`isPrivileged`/`privileged` flags, authority-bearing `callerRole` values, reserved-id invocation magic) is ignored by the runtime core: lifecycle, invocation, and scheduler gates read only the registry `AuthorityDescriptor` / opaque `InternalPrincipal`, and only a `callerAgentId` identity claim is honored through registry resolution
@@ -389,6 +390,12 @@ export type { SerializedAgent as AgentSnapshot } from './agent/index.ts';
  *   grant/revoke through the lifecycle API); it is orthogonal to the
  *   `privileged`/`allow` capability axis and can never be set through a
  *   launch/spawn/update caller path.
+ * - **Extension tools are exact-membership only.** The `extensions` set holds
+ *   sanitized extension call names computed by the composition root from the
+ *   operator's realm attachments and per-agent tuning; the wildcard `'*'`,
+ *   `privileged`, selector spellings, alias-written entries, and every legacy
+ *   channel never imply an entry, anonymous/descriptor-less callers deny, and
+ *   engine-internal principals deny for provider tools.
  * - **Snapshots re-derive trust.** Authority fields are not persisted; restore
  *   rebuilds descriptors from trusted configuration, downgrades tampered
  *   privilege claims to anonymous, and fails closed on schema-invalid input.
@@ -399,6 +406,7 @@ export type { SerializedAgent as AgentSnapshot } from './agent/index.ts';
  *   subject: 'operator',
  *   kind: 'internal',
  *   allow: new Set(['*']),
+ *   extensions: new Set(),
  *   visibility: 'system',
  *   realmBypass: true
  * });
@@ -411,6 +419,18 @@ export interface AuthorityDescriptor {
   readonly kind: 'agent' | 'internal';
   /** Frozen read-only allow-set facade of canonical tool/op names the principal may invoke; the wildcard `'*'` permits everything. */
   readonly allow: ReadonlySet<string>;
+  /**
+   * Frozen read-only facade of sanitized extension tool call names the
+   * principal may invoke through the dispatcher's extension branch.
+   *
+   * This axis is deliberately separate from `allow`: `'*'`, `privileged`,
+   * subagent-management selectors, alias-written entries, and the legacy
+   * allowlist/identity channels never add an entry, and matching is exact
+   * string membership on the model-facing call name. An empty set (or a
+   * missing/foreign facade on a hand-built projection) denies every extension
+   * call — fail closed.
+   */
+  readonly extensions: ReadonlySet<string>;
   /** Read scope for descriptor and introspection surfaces: `self`, `owned`, `all`, or `system`. */
   readonly visibility: 'self' | 'owned' | 'all' | 'system';
   /**
@@ -2311,6 +2331,44 @@ export class AgentRuntime {
   ): AuthorityDescriptor | null {
     this.#assertNotDestroyed();
     return this.#lifecycleManager.revokeHydrationAuthority(agentId, callerContext);
+  }
+
+  /**
+   * Re-authorizes an active agent's capability axes from trusted engine input
+   * (the extension-authorization plumbing).
+   *
+   * Authority-bearing: the caller must resolve to lifecycle authority — the
+   * exact injected `InternalPrincipal` reference or a registry
+   * `AuthorityDescriptor` holding `'*'`/`'@lifecycle:authority'`; everything
+   * else is denied with `PERMISSION_DENIED` before any mutation. The supplied
+   * `extensionTools` list is the composition-root-computed effective extension
+   * grant set (sanitized call names); it rebuilds the descriptor's `extensions`
+   * axis only when the key is present, and the scope/publishing-authority axes
+   * always ride along unchanged. A `realmBypass` key — `false` included — and
+   * the publishing-authority keys are rejected for every caller (the dedicated
+   * grant/revoke APIs are their only writers).
+   *
+   * Safe-state note: callers must apply this at a turn boundary, never
+   * mid-turn. The store's reauthorize sweep owns that scheduling (idle members
+   * immediately, busy members on their next turn completion).
+   *
+   * @param agentId - Active agent identifier (bare realm-local id or canonical identity key).
+   * @param input - Trusted capability inputs (`privileged`/`allowedTools`/`extensionTools`).
+   * @param callerContext - Trusted caller context carrying `{ principal }` or a registry `callerAgentId` identity.
+   * @returns The rebuilt frozen descriptor, or `null` for an unknown/recycled id.
+   * @throws `Error` - With code `'PERMISSION_DENIED'` when the caller lacks lifecycle authority or supplied an operator-only key.
+   */
+  reauthorizeAgent(
+    agentId: string,
+    input: {
+      privileged?: boolean;
+      allowedTools?: string[] | '*' | null;
+      extensionTools?: readonly string[] | null;
+    } = {},
+    callerContext: (CallerContext & { principal?: InternalPrincipal | AuthorityDescriptor }) | null = null
+  ): AuthorityDescriptor | null {
+    this.#assertNotDestroyed();
+    return this.#lifecycleManager.reauthorizeAgent(agentId, input, callerContext);
   }
 
   /**

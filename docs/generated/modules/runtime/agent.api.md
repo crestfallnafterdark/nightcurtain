@@ -154,6 +154,7 @@ export const AGENT_STATES: {
 export interface AgentAuthorityPatch {
     allowedTools?: string[] | '*' | null;
     creatorId?: string | null;
+    extensionTools?: 'all' | readonly string[] | null;
     privileged?: boolean;
     realmId?: string | null;
     role?: string;
@@ -176,6 +177,7 @@ export interface AgentConfig {
     creatorId?: string | null;
     customTools?: Record<string, unknown> | null;
     customToolSchemas?: Record<string, unknown> | null;
+    extensionTools?: 'all' | readonly string[];
     readonly id: string;
     identityHeader?: boolean;
     initial_prompt?: string | null;
@@ -329,6 +331,7 @@ export interface InterruptedTurn {
 export interface LaunchAgentOptions {
     readonly callerContext?: AgentSecurityContext | null;
     readonly config: AgentConfig;
+    readonly extensionTools?: readonly string[] | null;
     readonly history?: readonly LaunchHistoryEntry[];
     readonly initialPrompt?: string | null;
     readonly model?: ModelInterface | null;
@@ -516,6 +519,7 @@ Owner-controlled authority-bearing config patch accepted by Agent.applyAuthority
 
 - **`allowedTools`** — Capability selector in any accepted alias form (`'*'` or a name list)
 - **`creatorId`** — Registry/entity parentage creator id; `null` clears it
+- **`extensionTools`** — Per-agent extension tool selector (`'all'` or an explicit list of sanitized call names) projected as owner-controlled config state. The descriptor's effective `extensions` set is computed store-side and registered through the lifecycle reauthorize channel, never derived from this selector directly.
 - **`privileged`** — Sudo/wildcard capability flag; `true` grants the wildcard descriptor
 - **`realmId`** — Realm membership; a non-empty realm id binds the agent, `null` ungroups it
 - **`role`** — Role description or archetype (e.g. `'admin'`, `'director'`, `'writer'`)
@@ -553,6 +557,7 @@ const config: AgentConfig = {
 - **`creatorId`** — Alias for `spawnedBy`. When omitted, the lifecycle manager falls back to `spawnedBy`; both are `null` only when no creator was supplied either way.
 - **`customTools`** — Host-registered custom tool handler registry keyed by tool name (a direct handler function or a `{ handler }` wrapper). Host-only contract (A0-5, ticket 0443865): custom tools are operator/host-registered, never model-registered — provider function/JSON input cannot add entries (the spawn sanitizer renames agent-supplied `custom_tools` to an inert alias that launch composition never reads), and Realms never register custom tools; the registry is operator-global. Handlers receive raw substrate handles and execute before the dispatcher capability gate, so the turn execution engine authorizes every invocation against the caller's frozen `AuthorityDescriptor` (wildcard `'*'` or `'@lifecycle:authority'`, or an engine-internal principal); an `allowedTools` entry that merely matches the handler name does not authorize execution, and anonymous callers are denied.
 - **`customToolSchemas`** — Custom tool JSON-schema definitions exposed to the model alongside AgentConfig.customTools for this agent. Host-only contract (A0-5, ticket 0443865): definitions are operator/host-registered and never model-supplied. The turn execution engine exposes them only to callers whose frozen `AuthorityDescriptor` grants custom execution; ungranted and anonymous callers receive no custom schemas.
+- **`extensionTools`** — Per-agent extension tool selector: `'all'` (the default when absent) means every tool resolved for the agent's Realm, while an explicit list narrows it to those sanitized extension call names. Authority-bearing (extension wave): extension tools reach third-party MCP servers, so they are exact-grant-only — the wildcard `'*'`, `privileged`, and every legacy capability channel never imply one. The value is owner-controlled state (direct assignment is ignored; only the lifecycle authority channel writes it), it is withheld from snapshots on hydration, and the effective descriptor set is recomputed store-side and re-applied by the capability heal. Unknown names fail closed (dropped, never granted). `'all'` is a selector, not a grant: it resolves against the Realm's resolved tool names, which stay empty until extension tools are actually attached and resolved.
 - **`id`** — Unique, non-empty identifier for the agent (immutable identity)
 - **`identityHeader`** — Controls the `[IDENTITY]` preamble injected into the first model message by the turn execution engine. `true` forces the preamble, `false` suppresses it, and when absent the engine enables it heuristically (mailbox autonomy, autonomy tools, or a non-`user`/non-`admin` role).
 - **`initial_prompt`** — Snake_case alias for `initialPrompt`; consulted first, so it wins when both spellings are supplied (`agentLifecycle/index.ts:249-250`)
@@ -921,6 +926,7 @@ const launchOptions: LaunchAgentOptions = {
 
 - **`callerContext`** — Security context of the invoking agent. The authority-bearing fields on it are the deprecated compatibility channel; the caller principal resolved from the frozen `AuthorityDescriptor` replaces them.
 - **`config`** — Complete agent configuration
+- **`extensionTools`** — Trusted store-computed effective extension grant set (extension wave): sanitized model-facing extension call names forwarded one-way into the frozen registry descriptor's `extensions` axis. This is not a caller capability selector: the value must be computed by the composition root from the Realm's operator attachments and the agent's `config.extensionTools` selector. It is read from this unified options object only (legacy positional launches never carry it), the entity config selector never grants an entry by itself, and `'*'`, `privileged`, aliases, and every legacy channel never imply an entry.
 - **`history`** — Trusted baked prologue seeded at launch, composed as `[system message (when a system prompt exists), ...declared entries]` in declared order with launch-generated message ids (INV-7) and **no model call**. Entries are validated fail-closed (roles `user`/`assistant` only, non-empty string content, unknown fields rejected) and are only read from the unified options object — legacy positional launches never carry them.
 - **`initialPrompt`** — Optional initial prompt to trigger immediate turn execution upon launch
 - **`model`** — Optional pre-instantiated concrete ModelInterface instance
@@ -1117,8 +1123,8 @@ const result: UndoTurnResult = {
 ## Doc coverage
 
 - Top-level exports: 28
-- Declarations (exports + members): 224
-- Documented declarations: 224 / 224 (100%)
+- Declarations (exports + members): 227
+- Documented declarations: 227 / 227 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): `AuthorityDescriptor`, `CredentialResolverPort`, `ModelInterface`, `ModelPresetSourcePort`, `ProviderInterface`

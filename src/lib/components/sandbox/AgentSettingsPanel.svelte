@@ -8,6 +8,10 @@
     applyMetaAuthorityToggle,
     buildMetaAuthorityToggleState
   } from './realmReviewHelpers.ts';
+  import {
+    applyAgentExtensionToolToggle,
+    buildAgentExtensionTuningProjection
+  } from './extensionUiHelpers.ts';
   import { resolveAgentRealmId } from './realmGroups.ts';
   import {
     buildPresetModelConfig,
@@ -378,6 +382,60 @@
     const count = toolsString.split(',').map(t => t.trim()).filter(Boolean).length;
     return `${count} active`;
   });
+
+  // Extension wave (P2.4): per-agent extension scope over the Realm's
+  // resolved-and-attached tools. The projection mirrors the store sweep's
+  // universe exactly; a toggle persists the selector through the store, which
+  // reauthorizes the descriptor at the next safe state (immediately when idle,
+  // at the next turn completion when busy).
+  let agentRealmRecord = $derived.by(() => {
+    if (!agent) return null;
+    const realmId = resolveAgentRealmId(agent);
+    if (!realmId) return null;
+    return sandboxStore.realms.find((realm) => realm.id === realmId) ?? null;
+  });
+
+  let extensionTuning = $derived.by(() => {
+    const labels = {};
+    for (const record of sandboxStore.listExtensions()) {
+      if (!record || typeof record.id !== 'string') continue;
+      labels[record.id] = typeof record.displayName === 'string' && record.displayName
+        ? record.displayName
+        : record.id;
+    }
+    return buildAgentExtensionTuningProjection({
+      resolvedTools: agentRealmRecord?.instance?.resolvedTools ?? null,
+      attachments: agentRealmRecord?.extensions ?? null,
+      selector: agent?.config?.extensionTools,
+      extensionLabels: labels
+    });
+  });
+
+  /**
+   * Applies one extension tool toggle for the selected agent: the helper
+   * computes the next selector (every tool enabled collapses to `'all'`), and
+   * the store persists it and reauthorizes at the next safe state.
+   *
+   * @param {string} callName - Sanitized extension tool call name.
+   * @param {boolean} enabled - Requested state.
+   */
+  function handleExtensionToolToggle(callName, enabled) {
+    if (!agent || !agentKey) return;
+    const next = applyAgentExtensionToolToggle(
+      extensionTuning.selector,
+      callName,
+      enabled,
+      agentRealmRecord?.instance?.resolvedTools ?? null,
+      agentRealmRecord?.extensions ?? null
+    );
+    applyAgentUpdate('extension-tools', { extensionTools: next }, 'Extension scope saved');
+  }
+
+  /** Resets the selected agent's extension scope to `'all'` (the default). */
+  function handleExtensionScopeReset() {
+    if (!agent || !agentKey) return;
+    applyAgentUpdate('extension-tools', { extensionTools: 'all' }, 'Extension scope saved');
+  }
 
   // Wave U operator publishing authorities (ticket 458e727): the two dedicated
   // grants are explicit-only operator actions (never implied by privilege or
@@ -844,6 +902,71 @@
                   placeholder="e.g. *, readFile, writeFile, sendMessage"
                 />
               </div>
+            </section>
+
+            <!-- 5. Extension Tool Scope Card (extension wave, P2.4) -->
+            <section class="config-card">
+              <div class="card-header">
+                <div class="card-header-title">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h10a2 2 0 0 1 2 2v4M9 3v18m0 0h10a2 2 0 0 0 2-2V9M9 21H5a2 2 0 0 1-2-2V9m0 0h18"/></svg>
+                  Extension Tool Scope
+                </div>
+                <div class="card-header-meta">
+                  {#if fieldFeedback['extension-tools']}
+                    <span
+                      class="field-status"
+                      class:pending={fieldFeedback['extension-tools'].type === 'pending'}
+                      class:error={fieldFeedback['extension-tools'].type === 'error'}
+                    >
+                      {#if fieldFeedback['extension-tools'].type === 'pending'}<span class="spinner-mini"></span>{/if}
+                      {fieldFeedback['extension-tools'].msg}
+                    </span>
+                  {/if}
+                  <span class="tool-count-pill font-mono">{extensionTuning.label}</span>
+                </div>
+              </div>
+
+              <span class="policy-desc">
+                Third-party tools resolved from this Realm's attached extensions. Sudo and the wildcard
+                never imply them — each call is authorized only by exact membership. Changes apply at the
+                agent's next safe state (never mid-turn).
+              </span>
+
+              {#if extensionTuning.hasTools}
+                <div class="tool-presets-list">
+                  {#each extensionTuning.options as option (option.callName)}
+                    <label class="authority-toggle" class:active={option.enabled}>
+                      <input
+                        type="checkbox"
+                        class="checkbox-input authority-checkbox"
+                        checked={option.enabled}
+                        onchange={(event) => handleExtensionToolToggle(option.callName, event.currentTarget.checked)}
+                      />
+                      <div class="policy-details">
+                        <div class="policy-title-row">
+                          <span class="policy-title font-mono">{option.callName}</span>
+                          <span class="authority-id">{option.extensionLabel}</span>
+                        </div>
+                      </div>
+                    </label>
+                  {/each}
+                </div>
+                <div class="form-group">
+                  <button type="button" class="preset-item-card" onclick={handleExtensionScopeReset}>
+                    <div class="preset-item-info">
+                      <div class="preset-name-row">
+                        <span class="preset-item-name">Grant all resolved extension tools</span>
+                      </div>
+                      <span class="preset-item-desc">Reset the per-agent scope to the default (all tools of the Realm's attached extensions).</span>
+                    </div>
+                  </button>
+                </div>
+              {:else}
+                <span class="field-hint">
+                  No extension tools are resolved for this Realm yet. Install and attach extensions from Sandbox
+                  Settings, then launch or rehydrate a template that references them.
+                </span>
+              {/if}
             </section>
           </div>
         </div>

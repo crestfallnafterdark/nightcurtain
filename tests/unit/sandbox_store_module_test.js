@@ -5388,3 +5388,299 @@ test('66. an unavailable attachment heals to active in-session after installExte
     sharedLocalStorage.clear();
   }
 });
+
+// ============================================================================
+// 67-69. Extension wave P2.4: grant partition, safe-state reauthorize sweep,
+//        snapshot withholding + capability-heal re-apply
+// ============================================================================
+
+/**
+ * Installs the P2.4 fixture: one MCP extension plus a two-member template
+ * whose `restricted` member references `acme-scoring::similarity` (plus an
+ * internal `read_file`) and whose `unrestricted` member references only
+ * `read_file`. Launching with the extension approved resolves `similarity`
+ * and attaches the extension.
+ *
+ * @param {object} store - Store under test.
+ * @returns {Promise<object>} The launch receipt.
+ */
+async function launchP24Fixture(store) {
+  store.installExtension({
+    id: 'acme-scoring',
+    kind: 'mcp',
+    displayName: 'Acme Scoring',
+    transportHint: { kind: 'http', url: 'https://mcp.example.com' }
+  });
+  store.importRealmTemplate({
+    formatVersion: 1,
+    template: {
+      formatVersion: 1,
+      id: 'unit-p24-grants',
+      name: 'P2.4 Grant Fixture',
+      description: 'One restricted member and one unrestricted member over one extension.',
+      agents: [
+        {
+          key: 'restricted',
+          idPattern: 'p24-restricted',
+          name: 'Restricted',
+          role: 'observer',
+          prompt: [{ kind: 'text', text: 'Observe.' }],
+          toolProfile: { tools: ['acme-scoring::similarity', 'read_file'] },
+          privileged: false
+        },
+        {
+          key: 'unrestricted',
+          idPattern: 'p24-unrestricted',
+          name: 'Unrestricted',
+          role: 'observer',
+          prompt: [{ kind: 'text', text: 'Observe.' }],
+          toolProfile: { tools: ['read_file'] },
+          privileged: false
+        },
+        {
+          key: 'extension_only',
+          idPattern: 'p24-extension-only',
+          name: 'Extension Only',
+          role: 'observer',
+          prompt: [{ kind: 'text', text: 'Observe.' }],
+          toolProfile: { tools: ['acme-scoring::similarity'] },
+          privileged: false
+        }
+      ],
+      providers: [
+        { kind: 'mcp', id: 'acme-scoring', transport: { kind: 'http', url: 'https://mcp.example.com' } }
+      ]
+    },
+    files: {}
+  });
+  return store.launchRealmFromTemplate('unit-p24-grants', {
+    extensionApprovals: [{ extensionId: 'acme-scoring' }]
+  });
+}
+
+test('67. [P2.4] launch partitions plan grants and populates the exact descriptor extensions axis', async () => {
+  sharedLocalStorage.clear();
+  const { runtime, store } = createSharedSubstrateStore();
+  try {
+    const receipt = await launchP24Fixture(store);
+    assert.deepStrictEqual(
+      receipt.realm.instance.resolvedTools,
+      { similarity: 'acme-scoring' },
+      'the extension reference resolves and is recorded in provenance'
+    );
+
+    const identityPort = runtime.createAgentIdentityPort();
+    const restrictedSnapshot = store.agents.find((agent) => agent.id === 'p24-restricted');
+    const unrestrictedSnapshot = store.agents.find((agent) => agent.id === 'p24-unrestricted');
+    const extensionOnlySnapshot = store.agents.find((agent) => agent.id === 'p24-extension-only');
+
+    // Partition: internal names only in `allowedTools`; extension-derived names
+    // only in `extensionTools`.
+    assert.deepStrictEqual(restrictedSnapshot.config.allowedTools, ['read_file']);
+    assert.deepStrictEqual([...restrictedSnapshot.config.extensionTools], ['similarity']);
+    assert.deepStrictEqual(unrestrictedSnapshot.config.allowedTools, ['read_file']);
+    assert.strictEqual(unrestrictedSnapshot.config.extensionTools, 'all');
+    assert.deepStrictEqual(extensionOnlySnapshot.config.allowedTools, [], 'an extension-only member carries no internal grants');
+    assert.deepStrictEqual([...extensionOnlySnapshot.config.extensionTools], ['similarity']);
+
+    // Descriptor: exact-membership extensions axis on a separate channel.
+    const restricted = identityPort.getAgentIdentity('p24-restricted', { realmId: receipt.realm.id });
+    const unrestricted = identityPort.getAgentIdentity('p24-unrestricted', { realmId: receipt.realm.id });
+    const extensionOnly = identityPort.getAgentIdentity('p24-extension-only', { realmId: receipt.realm.id });
+    assert.deepStrictEqual([...restricted.authority.extensions], ['similarity']);
+    assert.deepStrictEqual([...unrestricted.authority.extensions], ['similarity'], 'the unrestricted member gets the Realm universe');
+    assert.deepStrictEqual([...extensionOnly.authority.extensions], ['similarity'], 'the extension-only member keeps its exact reference');
+    assert.strictEqual(restricted.authority.allow.has('similarity'), false, 'extension grants never land on the allow axis');
+    assert.strictEqual(restricted.authority.allow.has('*'), false, 'extension grants never imply the wildcard');
+    assert.deepStrictEqual([...restricted.authority.allow], ['read_file']);
+
+    // Detach recomputes idle members immediately; re-attach restores.
+    store.detachExtension(receipt.realm.id, 'acme-scoring');
+    assert.deepStrictEqual(
+      [...identityPort.getAgentIdentity('p24-restricted', { realmId: receipt.realm.id }).authority.extensions],
+      [],
+      'a detached extension contributes no grants'
+    );
+    store.attachExtension(receipt.realm.id, 'acme-scoring');
+    assert.deepStrictEqual(
+      [...identityPort.getAgentIdentity('p24-restricted', { realmId: receipt.realm.id }).authority.extensions],
+      ['similarity'],
+      're-attaching restores the resolved grant'
+    );
+
+    // Persistence: the selector is serialized data; the authority axis is not.
+    const serialized = store.serialize();
+    const serializedMember = serialized.agents.find((entry) => entry.id === 'p24-restricted');
+    assert.deepStrictEqual([...serializedMember.config.extensionTools], ['similarity']);
+    assert.strictEqual('extensions' in serializedMember, false, 'the descriptor axis never serializes');
+  } finally {
+    store.destroy();
+    sharedLocalStorage.clear();
+  }
+});
+
+test('68. [P2.4] the safe-state sweep defers busy members to turn_complete and applies idle edits immediately', async () => {
+  sharedLocalStorage.clear();
+  const { runtime, store } = createSharedSubstrateStore();
+  try {
+    const receipt = await launchP24Fixture(store);
+    const realmId = receipt.realm.id;
+    const identityPort = runtime.createAgentIdentityPort();
+    const operator = { principal: runtime.getOperatorPrincipal() };
+    const memberKey = createAgentIdentityKey(realmId, 'p24-restricted');
+    const extensionsOf = (id) => [...identityPort.getAgentIdentity(id, { realmId }).authority.extensions];
+
+    // Busy member: a selector edit must not touch the descriptor mid-turn.
+    runtime.setAgentState(memberKey, 'running', 'p2.4 busy test', operator);
+    assert.strictEqual(runtime.isAgentBusy(memberKey), true);
+    store.updateAgentConfig(memberKey, { extensionTools: [] });
+    assert.deepStrictEqual(
+      [...runtime.getAgent(memberKey).config.extensionTools],
+      [],
+      'the selector state applies synchronously (config data)'
+    );
+    assert.deepStrictEqual(extensionsOf('p24-restricted'), ['similarity'], 'the descriptor is untouched mid-turn');
+
+    // Turn completion is the safe state: the queued sweep applies there.
+    runtime.createSubsystemEmitPort().emit({ type: 'turn_complete', agentId: 'p24-restricted', payload: {} });
+    assert.deepStrictEqual(extensionsOf('p24-restricted'), [], 'the queued reauthorize applies on turn_complete');
+
+    // Idle member: the next edit applies immediately.
+    runtime.setAgentState(memberKey, 'idle', 'p2.4 idle test', operator);
+    store.updateAgentConfig(memberKey, { extensionTools: 'all' });
+    assert.deepStrictEqual(extensionsOf('p24-restricted'), ['similarity'], 'an idle member reauthorizes immediately');
+
+    // The unrestricted member keeps its `'all'` grant through a detach/attach cycle.
+    store.detachExtension(realmId, 'acme-scoring');
+    assert.deepStrictEqual(extensionsOf('p24-unrestricted'), []);
+    store.attachExtension(realmId, 'acme-scoring');
+    assert.deepStrictEqual(extensionsOf('p24-unrestricted'), ['similarity']);
+  } finally {
+    store.destroy();
+    sharedLocalStorage.clear();
+  }
+});
+
+test('69. [P2.4] hydration withholds the extension axis, the heal restores it, and an unknown selector name fails closed', async () => {
+  sharedLocalStorage.clear();
+  const { store } = createSharedSubstrateStore();
+  let hydrated = null;
+  try {
+    await launchP24Fixture(store);
+    assert.strictEqual(store.saveToStorage(), true);
+
+    const reloadedRuntime = new AgentRuntime({ autoBootstrapDirector: false });
+    const reloaded = new SandboxStore({
+      runtime: reloadedRuntime,
+      autoBootstrapDirector: false,
+      autoHydrate: true
+    });
+    hydrated = reloaded;
+    const realmRecord = reloaded.realms.find((realm) => realm.templateId === 'unit-p24-grants');
+    const realmId = realmRecord.id;
+    const identityPort = reloadedRuntime.createAgentIdentityPort();
+
+    assert.deepStrictEqual(
+      [...identityPort.getAgentIdentity('p24-restricted', { realmId }).authority.extensions],
+      ['similarity'],
+      'the capability heal re-applies the effective extension grant after hydration'
+    );
+    assert.deepStrictEqual(
+      [...reloadedRuntime.getAgent('p24-restricted').config.extensionTools],
+      ['similarity'],
+      'the captured selector is restored onto the hydrated config'
+    );
+    assert.deepStrictEqual(
+      [...identityPort.getAgentIdentity('p24-unrestricted', { realmId }).authority.extensions],
+      ['similarity'],
+      "the unrestricted member's default `'all'` heals to the Realm universe"
+    );
+    assert.deepStrictEqual(
+      [...identityPort.getAgentIdentity('p24-extension-only', { realmId }).authority.extensions],
+      ['similarity'],
+      'an extension-only member (empty internal allowlist) still heals its restricted scope'
+    );
+    assert.deepStrictEqual(
+      [...reloadedRuntime.getAgent('p24-extension-only').config.extensionTools],
+      ['similarity'],
+      'the extension-only selector survives the round-trip'
+    );
+  } finally {
+    if (hydrated) hydrated.destroy();
+    store.destroy();
+    sharedLocalStorage.clear();
+  }
+
+  // Tampered snapshot: a selector naming nothing known is dropped fail-closed.
+  sharedLocalStorage.clear();
+  const { store: tamperSource } = createSharedSubstrateStore();
+  let tamperReloaded = null;
+  try {
+    await launchP24Fixture(tamperSource);
+    assert.strictEqual(tamperSource.saveToStorage(), true);
+    const persistedKey = 'ai_storyteller_sandbox_state_v1';
+    const raw = JSON.parse(sharedLocalStorage.getItem(persistedKey));
+    const probe = raw.agents.find((entry) => entry.id === 'p24-restricted');
+    probe.config.extensionTools = ['ghost_tool'];
+    sharedLocalStorage.setItem(persistedKey, JSON.stringify(raw));
+
+    const tamperRuntime = new AgentRuntime({ autoBootstrapDirector: false });
+    tamperReloaded = new SandboxStore({
+      runtime: tamperRuntime,
+      autoBootstrapDirector: false,
+      autoHydrate: true
+    });
+    const realmRecord = tamperReloaded.realms.find((realm) => realm.templateId === 'unit-p24-grants');
+    const identityPort = tamperRuntime.createAgentIdentityPort();
+    assert.deepStrictEqual(
+      [...identityPort.getAgentIdentity('p24-restricted', { realmId: realmRecord.id }).authority.extensions],
+      [],
+      'an unknown selector name is never granted (fail closed)'
+    );
+  } finally {
+    if (tamperReloaded) tamperReloaded.destroy();
+    tamperSource.destroy();
+    sharedLocalStorage.clear();
+  }
+});
+
+test('70. [P2.4] a legacy snapshot without an extension selector hydrates default-deny (never the `all` default)', async () => {
+  sharedLocalStorage.clear();
+  const { store } = createSharedSubstrateStore();
+  let hydrated = null;
+  try {
+    await launchP24Fixture(store);
+    assert.strictEqual(store.saveToStorage(), true);
+
+    // Simulate a pre-P2.4 snapshot: the selector field is absent entirely.
+    const persistedKey = 'ai_storyteller_sandbox_state_v1';
+    const raw = JSON.parse(sharedLocalStorage.getItem(persistedKey));
+    for (const entry of raw.agents) {
+      if (entry && entry.config) delete entry.config.extensionTools;
+    }
+    sharedLocalStorage.setItem(persistedKey, JSON.stringify(raw));
+
+    const legacyRuntime = new AgentRuntime({ autoBootstrapDirector: false });
+    hydrated = new SandboxStore({
+      runtime: legacyRuntime,
+      autoBootstrapDirector: false,
+      autoHydrate: true
+    });
+    const realmRecord = hydrated.realms.find((realm) => realm.templateId === 'unit-p24-grants');
+    const identityPort = legacyRuntime.createAgentIdentityPort();
+    assert.deepStrictEqual(
+      [...identityPort.getAgentIdentity('p24-extension-only', { realmId: realmRecord.id }).authority.extensions],
+      [],
+      'a legacy snapshot contributes no extension grant (nothing was granted before the extension wave)'
+    );
+    assert.deepStrictEqual(
+      [...legacyRuntime.getAgent('p24-extension-only').config.extensionTools],
+      [],
+      'the healed selector is the fail-closed empty list, not the `all` default'
+    );
+  } finally {
+    if (hydrated) hydrated.destroy();
+    store.destroy();
+    sharedLocalStorage.clear();
+  }
+});

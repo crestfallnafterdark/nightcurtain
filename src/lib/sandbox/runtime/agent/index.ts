@@ -314,6 +314,23 @@ export interface AgentConfig {
   /** Alias for `allowedTools` */
   tools?: string[] | '*';
   /**
+   * Per-agent extension tool selector: `'all'` (the default when absent) means
+   * every tool resolved for the agent's Realm, while an explicit list narrows
+   * it to those sanitized extension call names.
+   *
+   * Authority-bearing (extension wave): extension tools reach third-party MCP
+   * servers, so they are exact-grant-only — the wildcard `'*'`, `privileged`,
+   * and every legacy capability channel never imply one. The value is
+   * owner-controlled state (direct assignment is ignored; only the lifecycle
+   * authority channel writes it), it is withheld from snapshots on hydration,
+   * and the effective descriptor set is recomputed store-side and re-applied
+   * by the capability heal. Unknown names fail closed (dropped, never
+   * granted). `'all'` is a selector, not a grant: it resolves against the
+   * Realm's resolved tool names, which stay empty until extension tools are
+   * actually attached and resolved.
+   */
+  extensionTools?: 'all' | readonly string[];
+  /**
    * Tool preset selector consulted when neither `allowedTools` nor `tools` is
    * supplied; resolved by `resolveToolPreset` and validated at launch (an
    * unknown preset throws `INVALID_ARGUMENTS`). Known presets: `'all'`,
@@ -516,6 +533,14 @@ export interface AgentAuthorityPatch {
   allowedTools?: string[] | '*' | null;
   /** Alias for `allowedTools` */
   tools?: string[] | '*' | null;
+  /**
+   * Per-agent extension tool selector (`'all'` or an explicit list of
+   * sanitized call names) projected as owner-controlled config state. The
+   * descriptor's effective `extensions` set is computed store-side and
+   * registered through the lifecycle reauthorize channel, never derived from
+   * this selector directly.
+   */
+  extensionTools?: 'all' | readonly string[] | null;
   /** Role description or archetype (e.g. `'admin'`, `'director'`, `'writer'`) */
   role?: string;
   /** Registry/entity parentage creator id; `null` clears it */
@@ -602,6 +627,19 @@ export interface LaunchAgentOptions {
    * the unified options object — legacy positional launches never carry them.
    */
   readonly history?: readonly LaunchHistoryEntry[];
+  /**
+   * Trusted store-computed effective extension grant set (extension wave):
+   * sanitized model-facing extension call names forwarded one-way into the
+   * frozen registry descriptor's `extensions` axis.
+   *
+   * This is not a caller capability selector: the value must be computed by
+   * the composition root from the Realm's operator attachments and the
+   * agent's `config.extensionTools` selector. It is read from this unified
+   * options object only (legacy positional launches never carry it), the
+   * entity config selector never grants an entry by itself, and `'*'`,
+   * `privileged`, aliases, and every legacy channel never imply an entry.
+   */
+  readonly extensionTools?: readonly string[] | null;
   /**
    * Security context of the invoking agent. The authority-bearing fields on it
    * are the deprecated compatibility channel; the caller principal resolved
@@ -1068,6 +1106,7 @@ interface CodedError extends Error {
 interface AuthorityState {
   privileged: boolean;
   allowedTools: readonly string[];
+  extensionTools: 'all' | readonly string[];
   role: string;
   spawnedBy: string | null;
   creatorId: string | null;
@@ -1097,6 +1136,7 @@ const AUTHORITY_BEARING_UPDATE_FIELDS = Object.freeze([
   'isPrivileged',
   'allowedTools',
   'tools',
+  'extensionTools',
   'toolPreset',
   'tool_preset',
   'role',
@@ -1121,6 +1161,7 @@ const AUTHORITY_CONFIG_PROJECTION_FIELDS = Object.freeze([
   'privileged',
   'allowedTools',
   'tools',
+  'extensionTools',
   'role',
   'spawnedBy',
   'creatorId',
@@ -1214,6 +1255,22 @@ function normalizeAllowedToolNames(rawAllowed: unknown): string[] {
     if (!seen) names[names.length] = name;
   }
   return names;
+}
+
+/**
+ * Normalizes a per-agent extension tool selector into owner-controlled state:
+ * `'all'` (the default for absent/invalid input), or a frozen, duplicate-free
+ * list of non-empty sanitized call names using indexed reads only (the same
+ * in-realm-patchable `Array.prototype` discipline as `normalizeAllowedToolNames`).
+ *
+ * @param rawSelector - Candidate selector (`'all'`, an array, or anything else).
+ * @returns The normalized selector.
+ * @internal
+ */
+function normalizeExtensionToolSelector(rawSelector: unknown): 'all' | readonly string[] {
+  if (rawSelector === 'all') return 'all';
+  if (!Array.isArray(rawSelector)) return 'all';
+  return freezeAuthorityMemberNames(rawSelector);
 }
 
 /**
@@ -1367,6 +1424,12 @@ function createReadonlyAuthorityAllow(names: unknown): Set<string> {
  *   `visibility: 'all'`; every other value is default-deny.
  * - Unprivileged agents get exactly their configured `allowedTools` names and
  *   `visibility: 'owned'` (self plus descendants).
+ * - The separate `extensions` axis holds exactly the explicit
+ *   `config.extensionTools` list when one was constructed; `'all'` (the
+ *   default) and absent values yield an empty set — the wildcard and privilege
+ *   never imply an extension entry, and the effective store-computed grant set
+ *   lives on the registry descriptor built at launch/reauthorize time
+ *   (extension wave).
  * - Authority is never assembled from caller context, snapshot data, or a
  *   reserved id; the id is the descriptor subject only.
  */
@@ -1374,6 +1437,8 @@ function buildAgentAuthority(id: string, config: Record<string, unknown> | null)
   const privileged = config?.privileged === true;
   const rawAllowed = config?.allowedTools !== undefined ? config.allowedTools : config?.tools;
   const names = normalizeAllowedToolNames(rawAllowed);
+  const rawExtensions = config?.extensionTools;
+  const extensions = Array.isArray(rawExtensions) ? normalizeAllowedToolNames(rawExtensions) : [];
   if (privileged) {
     let hasWildcard = false;
     for (let i = 0; i < names.length; i++) {
@@ -1388,6 +1453,7 @@ function buildAgentAuthority(id: string, config: Record<string, unknown> | null)
     subject: id,
     kind: 'agent',
     allow: createReadonlyAuthorityAllow(names),
+    extensions: createReadonlyAuthorityAllow(extensions),
     visibility: privileged ? 'all' : 'owned',
     // The entity-level descriptor never carries the scope grant: `realmBypass`
     // is registry-owned (engine bootstrap / operator grant) and reaches
@@ -1959,6 +2025,7 @@ export class Agent {
     this.#authorityState = {
       privileged: config.privileged === true,
       allowedTools: Object.freeze(normalizeAllowedToolNames(rawConstructionAllowed)),
+      extensionTools: normalizeExtensionToolSelector(config.extensionTools),
       role: typeof config.role === 'string' ? config.role : '',
       spawnedBy: typeof config.spawnedBy === 'string' && config.spawnedBy ? config.spawnedBy : null,
       creatorId: typeof config.creatorId === 'string' && config.creatorId ? config.creatorId : null,
@@ -2366,6 +2433,10 @@ export class Agent {
       presence.allowedTools = true;
       presence.tools = true;
     }
+    if (update.extensionTools !== undefined) {
+      state.extensionTools = normalizeExtensionToolSelector(update.extensionTools);
+      presence.extensionTools = true;
+    }
     if (update.spawnedBy !== undefined) {
       state.spawnedBy = typeof update.spawnedBy === 'string' && update.spawnedBy ? update.spawnedBy : null;
       presence.spawnedBy = true;
@@ -2512,9 +2583,13 @@ export class Agent {
     // hydrated config so no legacy gate (`turnExecutionEngine` ->
     // `createSandboxToolDispatcher`) can grant from snapshot data. Persisted
     // selectors stay serialized data only; the re-derived descriptor is
-    // default-deny until a trusted operator grant supplies new selectors.
+    // default-deny until a trusted operator grant supplies new selectors. The
+    // same withhold applies to the per-agent extension selector (extension
+    // wave): the store captures it at hydration and recomputes/re-applies the
+    // effective grant set through the capability heal.
     delete config.allowedTools;
     delete config.tools;
+    delete config.extensionTools;
 
     // Snapshot parentage is equally untrusted (MOD-21 W10, 0a87141): lifecycle
     // authorization resolves parent authority from these fields, so a tampered

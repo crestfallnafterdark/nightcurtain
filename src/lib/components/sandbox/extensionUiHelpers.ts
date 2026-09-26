@@ -1087,3 +1087,199 @@ function isPermissionDenied(error: unknown, shape: Record<string, unknown>): boo
   if (shape.code === 'PERMISSION_DENIED') return true;
   return /permission denied/i.test(messageOf(error));
 }
+
+// ============================================================================
+// Per-agent extension tuning (extension wave, P2.4)
+// ============================================================================
+
+/**
+ * One selectable extension-tool row for the per-agent tuning editor.
+ */
+export interface AgentExtensionToolOption {
+  /** Sanitized model-facing call name (the descriptor grant identity). */
+  readonly callName: string;
+  /** Extension id that provides the tool. */
+  readonly extensionId: string;
+  /** Display label (installed record display name, else the extension id). */
+  readonly extensionLabel: string;
+  /** Whether the agent's current selector grants this tool. */
+  readonly enabled: boolean;
+}
+
+/**
+ * Complete projection of the per-agent extension tuning editor surface.
+ */
+export interface AgentExtensionTuningProjection {
+  /** Normalized selector the projection was built from (`'all'` default). */
+  readonly selector: 'all' | readonly string[];
+  /** Selectable tools in Realm record order (resolved-and-attached only). */
+  readonly options: readonly AgentExtensionToolOption[];
+  /** Count of resolved tools. */
+  readonly totalCount: number;
+  /** Count of currently enabled tools. */
+  readonly selectedCount: number;
+  /** Whether every resolved tool is enabled. */
+  readonly allSelected: boolean;
+  /** Whether the Realm exposes any resolved extension tools. */
+  readonly hasTools: boolean;
+  /** Compact status label for the toggle header. */
+  readonly label: string;
+}
+
+/**
+ * Normalizes an unknown selector value for the tuning surface: `'all'` for
+ * absent/invalid input, else the distinct non-empty names in declared order.
+ *
+ * @param value - Candidate selector.
+ * @returns Normalized selector.
+ */
+function normalizeTuningSelector(value: unknown): 'all' | readonly string[] {
+  if (value === 'all') return 'all';
+  if (!Array.isArray(value)) return 'all';
+  const names: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== 'string' || !entry) continue;
+    if (!names.includes(entry)) names.push(entry);
+  }
+  return Object.freeze(names);
+}
+
+/**
+ * Computes the Realm's resolved-and-attached extension tool names in record
+ * order (the P2 universe the descriptor sweep uses): a `resolvedTools` entry
+ * counts only while its extension still carries an `active` attachment.
+ *
+ * @param resolvedTools - Realm provenance `resolvedTools` record (null-safe).
+ * @param attachments - Realm attachment list (null-safe).
+ * @returns Resolved-and-attached call names.
+ */
+function tuningUniverse(
+  resolvedTools: Readonly<Record<string, string>> | null | undefined,
+  attachments: readonly RealmExtensionAttachment[] | null | undefined
+): string[] {
+  if (!resolvedTools || typeof resolvedTools !== 'object') return [];
+  const activeIds = new Set<string>();
+  for (const attachment of Array.isArray(attachments) ? attachments : []) {
+    if (
+      attachment
+      && attachment.status === 'active'
+      && typeof attachment.extensionId === 'string'
+      && attachment.extensionId
+    ) {
+      activeIds.add(attachment.extensionId);
+    }
+  }
+  const names: string[] = [];
+  for (const callName of Object.keys(resolvedTools)) {
+    const extensionId = resolvedTools[callName];
+    if (typeof extensionId !== 'string' || !activeIds.has(extensionId)) continue;
+    if (!names.includes(callName)) names.push(callName);
+  }
+  return names;
+}
+
+/**
+ * Builds the per-agent extension tuning projection: the Realm's
+ * resolved-and-attached tools with their enabled state under the agent's
+ * selector, plus the compact label and counts the settings panel renders.
+ *
+ * @param options - Realm resolution inputs, the agent selector, and optional extension display labels.
+ * @returns Frozen tuning projection (empty when the Realm exposes no tools).
+ *
+ * @example
+ * ```typescript
+ * const tuning = buildAgentExtensionTuningProjection({
+ *   resolvedTools: realm.instance?.resolvedTools,
+ *   attachments: realm.extensions,
+ *   selector: agent.config?.extensionTools
+ * });
+ * ```
+ */
+export function buildAgentExtensionTuningProjection(options: {
+  resolvedTools?: Readonly<Record<string, string>> | null;
+  attachments?: readonly RealmExtensionAttachment[] | null;
+  selector?: unknown;
+  extensionLabels?: Readonly<Record<string, string>> | null;
+} = {}): AgentExtensionTuningProjection {
+  const universe = tuningUniverse(options.resolvedTools, options.attachments);
+  const selector = normalizeTuningSelector(options.selector);
+  const selectedSet = selector === 'all' ? new Set(universe) : new Set(selector);
+  const labels = options.extensionLabels && typeof options.extensionLabels === 'object'
+    ? options.extensionLabels
+    : {};
+  const optionsView = universe.map((callName) => {
+    const extensionId = options.resolvedTools ? options.resolvedTools[callName] : '';
+    return Object.freeze({
+      callName,
+      extensionId: typeof extensionId === 'string' ? extensionId : '',
+      extensionLabel: typeof labels[extensionId] === 'string' && labels[extensionId]
+        ? labels[extensionId]
+        : (typeof extensionId === 'string' ? extensionId : ''),
+      enabled: selectedSet.has(callName)
+    });
+  });
+  const selectedCount = optionsView.filter((option) => option.enabled).length;
+  const totalCount = optionsView.length;
+  const allSelected = totalCount > 0 && selectedCount === totalCount;
+  const label = totalCount === 0
+    ? 'No extension tools resolved for this Realm.'
+    : (allSelected
+      ? 'All resolved extension tools'
+      : (selectedCount === 0 ? 'No extension tools' : `${selectedCount} of ${totalCount} tools`));
+  return Object.freeze({
+    selector,
+    options: Object.freeze(optionsView),
+    totalCount,
+    selectedCount,
+    allSelected,
+    hasTools: totalCount > 0,
+    label
+  });
+}
+
+/**
+ * Applies one tuning toggle to a selector, returning the next selector value:
+ * enabling every resolved tool collapses to `'all'`, any other state is an
+ * explicit list in Realm record order, and an unknown tool name or a no-op
+ * toggle returns the normalized selector unchanged.
+ *
+ * @param selector - Current selector (unknown values normalize to `'all'`).
+ * @param callName - Tool call name being toggled.
+ * @param enabled - Requested state.
+ * @param resolvedTools - Realm provenance `resolvedTools` record.
+ * @param attachments - Realm attachment list.
+ * @returns The next selector value (`'all'` or a frozen explicit list).
+ *
+ * @example
+ * ```typescript
+ * const next = applyAgentExtensionToolToggle(
+ *   'all', 'similarity', false, realm.instance?.resolvedTools, realm.extensions
+ * );
+ * ```
+ */
+export function applyAgentExtensionToolToggle(
+  selector: unknown,
+  callName: unknown,
+  enabled: unknown,
+  resolvedTools?: Readonly<Record<string, string>> | null,
+  attachments?: readonly RealmExtensionAttachment[] | null
+): 'all' | readonly string[] {
+  const current = normalizeTuningSelector(selector);
+  const universe = tuningUniverse(resolvedTools, attachments);
+  if (typeof callName !== 'string' || !callName || !universe.includes(callName)) {
+    return current;
+  }
+  const selected = current === 'all' ? new Set(universe) : new Set(current);
+  if (enabled === true) selected.add(callName);
+  else selected.delete(callName);
+  if (selected.size === universe.length) {
+    // Every resolved tool enabled (including the empty universe) is the
+    // documented `'all'` default.
+    return 'all';
+  }
+  const next: string[] = [];
+  for (const name of universe) {
+    if (selected.has(name)) next.push(name);
+  }
+  return Object.freeze(next);
+}

@@ -554,3 +554,233 @@ test('21. an engine-internal descriptor remains authorized and a throwing allow 
   assert.equal(denied.success, false);
   assert.equal(denied.code, TOOL_SYSTEM_ERROR_CODES.PERMISSION_DENIED);
 });
+
+// ============================================================================
+// 22-28. Extension wave P2.4: exact-membership extension authorization branch
+//
+// The branch is gated on the optional provider-registry port (unbound in P2
+// production, so it stays inert). These tests bind a real frozen port object
+// (the sanctioned DI seam) and exercise the matrix through the real
+// dispatcher: exact grant allows, wildcard/privileged/selector/alias/legacy
+// deny, anonymous/descriptor-less deny, engine-internal denies, per-call
+// substitution is stripped, and descriptor-probe throws fail closed.
+// ============================================================================
+
+const EXTENSION_TOOL = 'similarity';
+
+/**
+ * Builds a real frozen provider-registry port object (the dispatcher's
+ * extension DI seam). The binding carries the sanitized call name and the
+ * extension id only — P2 has no descriptor synthesis or execution.
+ *
+ * @param {Record<string, string>} [tools] - Call name → extension id map.
+ * @returns {object} Frozen port object.
+ */
+function createExtensionProviderPort(tools = { similarity: 'acme-scoring' }) {
+  return Object.freeze({
+    resolveTool: (callName) => {
+      const extensionId = tools[callName];
+      if (typeof extensionId !== 'string' || !extensionId) return null;
+      return Object.freeze({ callName, extensionId });
+    }
+  });
+}
+
+/**
+ * Builds a frozen registry-shaped `AuthorityDescriptor` carrying the separate
+ * `extensions` axis.
+ *
+ * @param {string[]} extensions - Exact extension call-name grants.
+ * @param {object} [overrides] - `allow`, `kind`, or `extensions` shims.
+ * @returns {object} Frozen descriptor.
+ */
+function createExtensionAuthority(extensions, overrides = {}) {
+  return Object.freeze({
+    subject: GATE_AGENT,
+    kind: overrides.kind || 'agent',
+    allow: Object.freeze(new Set(overrides.allow || [])),
+    extensions: Object.freeze(new Set(extensions)),
+    visibility: 'owned'
+  });
+}
+
+test('22. an exact extensions entry authorizes the extension call (P2: gate passes, execution unavailable)', async () => {
+  const dispatcher = createDispatcher(
+    createIdentity({ authority: createExtensionAuthority([EXTENSION_TOOL]) }),
+    { extensionToolProvider: createExtensionProviderPort() }
+  );
+  const receipt = await dispatcher.executeTool(EXTENSION_TOOL, {});
+  assert.equal(receipt.success, false);
+  assert.equal(
+    receipt.code,
+    TOOL_SYSTEM_ERROR_CODES.EXECUTION_FAILED,
+    'the exact grant passes the authorization gate (P2 has no execution channel)'
+  );
+});
+
+test('23. wildcard, privilege, and the allow axis never imply an extension entry', async () => {
+  const port = createExtensionProviderPort();
+  // (a) Descriptor allow wildcard, empty extensions axis.
+  const wildcardDescriptor = createDispatcher(
+    createIdentity({ authority: createExtensionAuthority([], { allow: ['*'] }) }),
+    { extensionToolProvider: port }
+  );
+  const wildcard = await wildcardDescriptor.executeTool(EXTENSION_TOOL, {});
+  assert.equal(wildcard.code, TOOL_SYSTEM_ERROR_CODES.PERMISSION_DENIED, "descriptor '*' must not imply extension tools");
+
+  // (b) Privileged identity + wildcard legacy allowlist, empty extensions.
+  const privileged = createDispatcher(
+    createIdentity({ privileged: true, allowedTools: ['*'], authority: createExtensionAuthority([]) }),
+    { isAdmin: true, isPrivileged: true, privileged: true, allowedTools: ['*'], extensionToolProvider: port }
+  );
+  const privilegedReceipt = await privileged.executeTool(EXTENSION_TOOL, {});
+  assert.equal(privilegedReceipt.code, TOOL_SYSTEM_ERROR_CODES.PERMISSION_DENIED, 'privilege never implies extension tools');
+
+  // (c) The exact call name present on `allow` but not on `extensions`.
+  const allowOnly = createDispatcher(
+    createIdentity({ authority: createExtensionAuthority([], { allow: [EXTENSION_TOOL] }) }),
+    { extensionToolProvider: port }
+  );
+  const allowOnlyReceipt = await allowOnly.executeTool(EXTENSION_TOOL, {});
+  assert.equal(allowOnlyReceipt.code, TOOL_SYSTEM_ERROR_CODES.PERMISSION_DENIED, 'the allow axis is not an extension grant channel');
+
+  // (d) Exact string membership: a case variant never matches.
+  const caseVariant = createDispatcher(
+    createIdentity({ authority: createExtensionAuthority(['Similarity']) }),
+    { extensionToolProvider: port }
+  );
+  const caseReceipt = await caseVariant.executeTool(EXTENSION_TOOL, {});
+  assert.equal(caseReceipt.code, TOOL_SYSTEM_ERROR_CODES.PERMISSION_DENIED, 'extension membership is exact (no case folding)');
+});
+
+test('24. legacy allowlists, selector spellings, and alias-written identity entries never authorize extensions', async () => {
+  const port = createExtensionProviderPort();
+  // Descriptor-less caller with a matching legacy allowlist entry (bound and
+  // identity channels, plus admin/privilege flags) denies.
+  const legacy = createDispatcher(
+    createIdentity({ allowedTools: [EXTENSION_TOOL], privileged: true }),
+    { isAdmin: true, privileged: true, allowedTools: [EXTENSION_TOOL, '*'], extensionToolProvider: port }
+  );
+  const legacyReceipt = await legacy.executeTool(EXTENSION_TOOL, {});
+  assert.equal(legacyReceipt.code, TOOL_SYSTEM_ERROR_CODES.PERMISSION_DENIED, 'legacy allowlists never authorize extension tools');
+
+  // A descriptor with an alias-canonicalized allow entry still denies when the
+  // exact extension entry is absent.
+  const aliasWritten = createDispatcher(
+    createIdentity({ authority: createExtensionAuthority([], { allow: ['readFile'] }) }),
+    { extensionToolProvider: port }
+  );
+  const aliasReceipt = await aliasWritten.executeTool(EXTENSION_TOOL, {});
+  assert.equal(aliasReceipt.code, TOOL_SYSTEM_ERROR_CODES.PERMISSION_DENIED, 'alias-written entries are not extension grants');
+});
+
+test('25. anonymous and descriptor-less callers deny extension tools', async () => {
+  const port = createExtensionProviderPort();
+  // Anonymous dispatcher: no bound subject, no identity port.
+  const anonymous = createSandboxToolDispatcher({ extensionToolProvider: port });
+  const anonymousReceipt = await anonymous.executeTool(EXTENSION_TOOL, {});
+  assert.equal(anonymousReceipt.code, TOOL_SYSTEM_ERROR_CODES.PERMISSION_DENIED, 'anonymous callers deny');
+
+  // Descriptor-less identity projection (no authority object at all).
+  const descriptorLess = createDispatcher(
+    createIdentity({ allowedTools: ['*'], privileged: true }),
+    { extensionToolProvider: port }
+  );
+  const descriptorLessReceipt = await descriptorLess.executeTool(EXTENSION_TOOL, {});
+  assert.equal(descriptorLessReceipt.code, TOOL_SYSTEM_ERROR_CODES.PERMISSION_DENIED, 'descriptor-less callers deny');
+});
+
+test('26. engine-internal callers deny extension tools even with the call name on the axis', async () => {
+  const internal = createDispatcher(
+    createIdentity({ authority: createExtensionAuthority([EXTENSION_TOOL], { kind: 'internal' }) }),
+    { extensionToolProvider: createExtensionProviderPort() }
+  );
+  const receipt = await internal.executeTool(EXTENSION_TOOL, {});
+  assert.equal(receipt.success, false);
+  assert.equal(receipt.code, TOOL_SYSTEM_ERROR_CODES.PERMISSION_DENIED, 'the engine has no reason to call third-party tools');
+});
+
+test('27. per-call context can neither substitute the provider port nor claim extension grants', async () => {
+  // Bound without a port: a per-call port is stripped, so the name is unknown.
+  const unbound = createDispatcher(createIdentity({}));
+  const substituted = await unbound.executeTool(
+    EXTENSION_TOOL,
+    {},
+    { extensionToolProvider: createExtensionProviderPort(), extensionTools: [EXTENSION_TOOL], allowedTools: ['*'] }
+  );
+  assert.equal(substituted.code, TOOL_SYSTEM_ERROR_CODES.TOOL_NOT_FOUND, 'a per-call provider port is stripped');
+
+  // Bound with a port: a per-call port cannot replace it; the bound identity
+  // descriptor still decides (exact grant here).
+  const bound = createDispatcher(
+    createIdentity({ authority: createExtensionAuthority([EXTENSION_TOOL]) }),
+    { extensionToolProvider: createExtensionProviderPort() }
+  );
+  const boundReceipt = await bound.executeTool(
+    EXTENSION_TOOL,
+    {},
+    { extensionToolProvider: null, extensionTools: [], authority: createExtensionAuthority([]) }
+  );
+  assert.equal(boundReceipt.code, TOOL_SYSTEM_ERROR_CODES.EXECUTION_FAILED, 'the bound grant still decides');
+
+  // A per-call `extensionTools` claim on a descriptor-less caller grants nothing.
+  const claim = await unbound.executeTool(
+    EXTENSION_TOOL,
+    {},
+    { extensionToolProvider: createExtensionProviderPort(), extensionTools: [EXTENSION_TOOL] }
+  );
+  assert.equal(claim.code, TOOL_SYSTEM_ERROR_CODES.TOOL_NOT_FOUND, 'per-call extension claims are stripped with the port');
+});
+
+test('28. the extension branch fails closed on descriptor-probe throws and malformed provider state', async () => {
+  const providerPorts = [
+    Object.freeze({ resolveTool: () => { throw new Error('provider exploded'); } }),
+    Object.freeze({ resolveTool: () => Object.freeze({ callName: 'other_name', extensionId: 'acme-scoring' }) }),
+    Object.freeze({ resolveTool: () => Object.freeze({ callName: EXTENSION_TOOL, extensionId: '' }) }),
+    Object.freeze({ resolveTool: () => 'not-a-binding' })
+  ];
+  for (const extensionToolProvider of providerPorts) {
+    const dispatcher = createDispatcher(createIdentity({ authority: createExtensionAuthority([EXTENSION_TOOL]) }), { extensionToolProvider });
+    const receipt = await dispatcher.executeTool(EXTENSION_TOOL, {});
+    assert.equal(receipt.code, TOOL_SYSTEM_ERROR_CODES.TOOL_NOT_FOUND, 'malformed provider state resolves nothing');
+  }
+
+  // Throwing `extensions` getter and throwing `has` probe deny.
+  const throwingExtensions = {
+    subject: GATE_AGENT,
+    kind: 'agent',
+    allow: Object.freeze(new Set()),
+    get extensions() {
+      throw new Error('extensions accessor exploded');
+    },
+    visibility: 'owned'
+  };
+  const throwingHas = {
+    subject: GATE_AGENT,
+    kind: 'agent',
+    allow: Object.freeze(new Set()),
+    extensions: {
+      has() {
+        throw new Error('has probe exploded');
+      }
+    },
+    visibility: 'owned'
+  };
+  for (const authority of [throwingExtensions, throwingHas]) {
+    const dispatcher = createDispatcher(
+      createIdentity({ authority }),
+      { extensionToolProvider: createExtensionProviderPort() }
+    );
+    const receipt = await dispatcher.executeTool(EXTENSION_TOOL, {});
+    assert.equal(receipt.code, TOOL_SYSTEM_ERROR_CODES.PERMISSION_DENIED, 'a throwing descriptor probe fails closed');
+  }
+});
+
+test('29. the branch stays inert when no provider registry is bound (P2 production)', async () => {
+  const dispatcher = createDispatcher(
+    createIdentity({ authority: createExtensionAuthority([EXTENSION_TOOL]) })
+  );
+  const receipt = await dispatcher.executeTool(EXTENSION_TOOL, {});
+  assert.equal(receipt.success, false);
+  assert.equal(receipt.code, TOOL_SYSTEM_ERROR_CODES.TOOL_NOT_FOUND, 'without a bound registry the name is simply unknown');
+});

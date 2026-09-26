@@ -184,7 +184,7 @@ interface LegacyLaunchArgument {
  * flat legacy config that may carry ad-hoc `model`/`provider`/`principal`.
  * @internal
  */
-interface LaunchConfigInput extends Partial<AgentConfig> {
+interface LaunchConfigInput extends Omit<Partial<AgentConfig>, 'extensionTools'> {
   config?: AgentConfig | null;
   model?: LaunchModel;
   provider?: LaunchProvider;
@@ -198,6 +198,20 @@ interface LaunchConfigInput extends Partial<AgentConfig> {
    * carry them.
    */
   history?: readonly LaunchHistoryEntry[] | null;
+  /**
+   * Trusted store-computed effective extension grant set (extension wave):
+   * sanitized extension call names resolved against the Realm's operator
+   * attachments and the agent's selector. Read from the unified options object
+   * only and forwarded one-way into descriptor construction (the same trusted
+   * channel as `allowedTools`); legacy positional launch forms and
+   * `config.extensionTools` never grant an extension entry.
+   *
+   * The flat legacy config form may also carry the per-agent selector here
+   * (`'all'` or an explicit list) — state only, normalized to the entity's
+   * `'all'` default; the trusted effective grant list always arrives through
+   * the unified options object shape (`{ config, extensionTools }`).
+   */
+  extensionTools?: 'all' | readonly string[] | null;
   /**
    * Engine-path `realmBypass` grant composition (Wave I, ticket c02d0b9).
    * Honored only when the resolved principal is the exact injected
@@ -418,6 +432,14 @@ export interface AuthorityInputRecord {
   /** Normalized capability selector (`null` when none was supplied) */
   readonly allowedTools: readonly string[] | null;
   /**
+   * Trusted effective extension grant set (sanitized call names) the
+   * descriptor's `extensions` axis was built from (`null` when none was
+   * supplied). Computed by the composition root from the operator's Realm
+   * attachments and the per-agent selector; never derived from `privileged`,
+   * `allow`, or any legacy channel.
+   */
+  readonly extensionTools: readonly string[] | null;
+  /**
    * Whether the `realmBypass` grant is active (Wave I, ticket c02d0b9).
    * Composed only on the engine bootstrap path or through the operator
    * grant/revoke API; never from a launch/spawn/update caller value.
@@ -500,6 +522,7 @@ const AUTHORITY_UPDATE_FIELDS: ReadonlyArray<string> = Object.freeze([
   'isPrivileged',
   'allowedTools',
   'tools',
+  'extensionTools',
   'toolPreset',
   'tool_preset',
   'role',
@@ -571,6 +594,31 @@ function normalizeAuthorityInputAllowedTools(allowedTools: unknown): ReadonlyArr
   const filtered: string[] = [];
   for (let i = 0; i < members.length; i++) {
     if (!META_AUTHORITY_IDS.has(members[i])) filtered[filtered.length] = members[i];
+  }
+  return Object.freeze(filtered);
+}
+
+/**
+ * Normalizes trusted authority-input extension grant data for the registry
+ * record (extension wave). Only sanitized model-facing call names pass:
+ * non-strings, empty strings, duplicates, the wildcard `'*'`, `@`-authority
+ * spellings, and any name outside `[A-Za-z0-9_]` are dropped fail-closed, so
+ * no selector spelling, alias, or authority id can ever land on the
+ * exact-membership `extensions` axis.
+ *
+ * @param extensions - Trusted effective extension grant list.
+ * @returns Frozen sanitized member names, or `null` when no list was supplied.
+ * @internal
+ */
+function normalizeAuthorityInputExtensions(extensions: unknown): ReadonlyArray<string> | null {
+  if (!Array.isArray(extensions)) return null;
+  const members = freezeAuthorityMemberNames(extensions);
+  const filtered: string[] = [];
+  for (let i = 0; i < members.length; i++) {
+    const name = members[i];
+    if (name === '*' || name.charAt(0) === '@') continue;
+    if (!/^[A-Za-z0-9_]+$/.test(name)) continue;
+    filtered[filtered.length] = name;
   }
   return Object.freeze(filtered);
 }
@@ -706,7 +754,7 @@ function createReadonlyAllowSet(names: unknown): ReadonlySet<string> {
  * never implies a publishing authority — the tool gate checks the exact id.
  *
  * @param subject - Principal subject (agent id).
- * @param options - Trusted privilege flag, capability selector, bypass grant, and publishing-authority flags.
+ * @param options - Trusted privilege flag, capability selector, extension grant set, bypass grant, and publishing-authority flags.
  * @returns The frozen authority descriptor.
  * @internal
  */
@@ -715,12 +763,14 @@ function createAgentAuthorityDescriptor(
   {
     privileged = false,
     allowedTools = null,
+    extensionTools = null,
     realmBypass = false,
     templateAuthority = false,
     hydrationAuthority = false
   }: {
     privileged?: boolean;
     allowedTools?: string[] | '*' | null;
+    extensionTools?: readonly string[] | null;
     realmBypass?: boolean;
     templateAuthority?: boolean;
     hydrationAuthority?: boolean;
@@ -737,10 +787,17 @@ function createAgentAuthorityDescriptor(
   const authoritativeNames: string[] = [...names];
   if (templateAuthority === true) authoritativeNames[authoritativeNames.length] = AGENT_AUTHORITIES.TEMPLATE;
   if (hydrationAuthority === true) authoritativeNames[authoritativeNames.length] = AGENT_AUTHORITIES.HYDRATION;
+  // Extension grants are their own exact-membership axis (extension wave):
+  // the trusted store-computed call names are frozen onto `extensions` and are
+  // deliberately NOT derived from `privileged`, the wildcard `'*'`, the
+  // selector members, or the publishing authorities — no legacy channel can
+  // widen this axis, and an empty/absent list denies every extension call.
+  const authoritativeExtensions = normalizeAuthorityInputExtensions(extensionTools) ?? [];
   return Object.freeze({
     subject,
     kind: 'agent',
     allow: createReadonlyAllowSet(authoritativeNames),
+    extensions: createReadonlyAllowSet(authoritativeExtensions),
     visibility: (privileged || realmBypass) ? 'all' : 'self',
     realmBypass: realmBypass === true
   });
@@ -1547,12 +1604,14 @@ export class AgentLifecycleManager {
     {
       privileged = false,
       allowedTools = null,
+      extensionTools = null,
       realmBypass = false,
       templateAuthority = false,
       hydrationAuthority = false
     }: {
       privileged?: boolean;
       allowedTools?: string[] | '*' | null;
+      extensionTools?: readonly string[] | null;
       realmBypass?: boolean;
       templateAuthority?: boolean;
       hydrationAuthority?: boolean;
@@ -1561,6 +1620,7 @@ export class AgentLifecycleManager {
     const descriptor = createAgentAuthorityDescriptor(subject, {
       privileged,
       allowedTools,
+      extensionTools,
       realmBypass,
       templateAuthority,
       hydrationAuthority
@@ -1569,6 +1629,7 @@ export class AgentLifecycleManager {
     this.#authorityInputs.set(identityKey, Object.freeze({
       privileged: privileged === true,
       allowedTools: normalizeAuthorityInputAllowedTools(allowedTools),
+      extensionTools: normalizeAuthorityInputExtensions(extensionTools),
       realmBypass: realmBypass === true,
       templateAuthority: templateAuthority === true,
       hydrationAuthority: hydrationAuthority === true
@@ -1588,6 +1649,7 @@ export class AgentLifecycleManager {
   #currentAuthorityInputs(identityKey: string): {
     privileged: boolean;
     allowedTools: string[] | null;
+    extensionTools: string[] | null;
     realmBypass: boolean;
     templateAuthority: boolean;
     hydrationAuthority: boolean;
@@ -1596,6 +1658,7 @@ export class AgentLifecycleManager {
     return {
       privileged: Boolean(inputs && inputs.privileged === true),
       allowedTools: inputs && inputs.allowedTools ? [...inputs.allowedTools] : null,
+      extensionTools: inputs && inputs.extensionTools ? [...inputs.extensionTools] : null,
       realmBypass: Boolean(inputs && inputs.realmBypass === true),
       templateAuthority: Boolean(inputs && inputs.templateAuthority === true),
       hydrationAuthority: Boolean(inputs && inputs.hydrationAuthority === true)
@@ -2009,8 +2072,11 @@ export class AgentLifecycleManager {
    * `PERMISSION_DENIED` before any mutation, for every caller (the exact
    * injected `InternalPrincipal` and wildcard/authority descriptors included),
    * because the scope grant is applied solely through the engine bootstrap or
-   * `grantRealmBypass`/`revokeRealmBypass`. An omitted key preserves the
-   * current grant state (Wave I, ticket c02d0b9; I1-F).
+   * `grantRealmBypass`/`revokeRealmBypass`. Present-key replacement semantics
+   * apply to the capability axis (extension wave): each supplied key replaces
+   * its axis, every omitted key preserves its current value — so the store's
+   * extension sweep can reauthorize the `extensions` axis alone without
+   * clearing `privileged` or `allowedTools`.
    *
    * Authority gate: the caller must resolve to lifecycle authority — the exact
    * injected `InternalPrincipal` reference or a registry `AuthorityDescriptor`
@@ -2018,7 +2084,7 @@ export class AgentLifecycleManager {
    * `PERMISSION_DENIED` before any mutation. The agent config is not touched.
    *
    * @param agentId - Registered active agent identifier
-   * @param input - Trusted capability inputs (`privileged`/`allowedTools`); any `realmBypass` key is rejected
+   * @param input - Trusted capability inputs (`privileged`/`allowedTools`/`extensionTools`); any `realmBypass` key is rejected
    * @param callerContext - Caller context carrying `principal` or a registry `callerAgentId` identity
    * @returns The registered descriptor, or `null` for an unknown id
    * @throws `Error` - With code `'PERMISSION_DENIED'` when the caller lacks lifecycle authority or supplied a `realmBypass` key
@@ -2029,6 +2095,7 @@ export class AgentLifecycleManager {
     input: {
       privileged?: boolean;
       allowedTools?: string[] | '*' | null;
+      extensionTools?: readonly string[] | null;
       realmBypass?: boolean;
       templateAuthority?: boolean;
       hydrationAuthority?: boolean;
@@ -2071,17 +2138,29 @@ export class AgentLifecycleManager {
         { callerAgentId: principal && principal.kind === 'agent' ? principal.subject : null, code: 'PERMISSION_DENIED' }
       );
     }
-    const activeAgent = this.#uniqueByBareId(this.#agents, agentId);
+    // Canonical-capable target resolution (extension wave): an exact
+    // `(realmId, agentId)` identity key addresses its registration, a
+    // realm-bound caller resolves inside its own scope first, and the bare
+    // unique-match rule stays the fail-closed fallback.
+    const activeAgent = this.#resolveMutationTarget(agentId, callerContext).active;
     // Unknown, recycled, or Realm-ambiguous ids never carry a descriptor.
     if (!activeAgent) return null;
     const identityKey = this.#agentIdentityKeyOf(activeAgent);
     // A capability reauthorize never touches the scope or publishing-authority
     // axes: the current grant states ride along unchanged (the dedicated API is
-    // their only writer).
-    return this.#registerAgentAuthority(identityKey, agentId, {
-      ...this.#currentAuthorityInputs(identityKey),
-      privileged: input?.privileged === true,
-      allowedTools: input?.allowedTools ?? null
+    // their only writer). The extension axis is replaced only when the trusted
+    // `extensionTools` key is present; an omitted key preserves the current
+    // effective grant set (extension wave).
+    const currentInputs = this.#currentAuthorityInputs(identityKey);
+    // Present-key replacement semantics: only the keys supplied by the trusted
+    // caller replace their axis; every omitted axis keeps its current value.
+    // The store's extension sweep supplies only `extensionTools`, so it can
+    // never clear the capability selector or privilege as a side effect.
+    return this.#registerAgentAuthority(identityKey, activeAgent.id, {
+      ...currentInputs,
+      ...(input && input.privileged !== undefined ? { privileged: input.privileged === true } : {}),
+      ...(input && input.allowedTools !== undefined ? { allowedTools: input.allowedTools } : {}),
+      ...(input && input.extensionTools !== undefined ? { extensionTools: input.extensionTools } : {})
     });
   }
 
@@ -2256,6 +2335,11 @@ export class AgentLifecycleManager {
     // Declared baked history (Wave T, ticket 7e6edae) is read from the unified
     // options object only; legacy positional forms never carry it.
     let historyInput: unknown = null;
+    // Trusted store-computed extension grant set (extension wave) is likewise
+    // read from the unified options object only: the effective extension axis
+    // is never derived from `config.extensionTools` (a selector), from
+    // `privileged`, or from any legacy channel.
+    let extensionToolsInput: unknown = null;
 
     // Detect if optionsOrConfig is LaunchAgentOptions: { config: {...}, model?, provider?, initialPrompt?, history?, callerContext?, principal? }
     if (options.config && typeof options.config === 'object' && typeof options.config.id === 'string') {
@@ -2266,6 +2350,7 @@ export class AgentLifecycleManager {
       callerContext = options.callerContext || null;
       principal = options.principal || null;
       historyInput = options.history ?? null;
+      extensionToolsInput = options.extensionTools ?? null;
     } else {
       config = { ...options };
 
@@ -2698,6 +2783,13 @@ export class AgentLifecycleManager {
       workspaceId: config.workspaceId || config.workspace || agentId,
       allowedTools,
       tools: allowedTools,
+      // Per-agent extension selector state (extension wave): the effective
+      // descriptor axis is composed separately from the trusted unified-option
+      // `extensionTools` channel, never from this selector. `null`/invalid
+      // input normalizes to the entity's `'all'` default.
+      extensionTools: (config.extensionTools === 'all'
+        ? 'all'
+        : (Array.isArray(config.extensionTools) ? [...config.extensionTools] : undefined)) as AgentConfig['extensionTools'],
       mailboxAutonomy: config.mailboxAutonomy !== undefined ? Boolean(config.mailboxAutonomy) : null,
       customTools: config.customTools || null,
       customToolSchemas: config.customToolSchemas || null,
@@ -2765,10 +2857,13 @@ export class AgentLifecycleManager {
       // trusted composed config (never from caller data). `realmBypass` and
       // the Wave U publishing grants are the engine-composed values only; a
       // caller-supplied value was ignored above for every non-engine
-      // principal.
+      // principal. The extension grant set (extension wave) comes only from
+      // the trusted unified-options channel — the config selector is state,
+      // never a grant.
       this.#registerAgentAuthority(identityKey, agentId, {
         privileged,
         allowedTools: composedConfig.allowedTools,
+        extensionTools: Array.isArray(extensionToolsInput) ? extensionToolsInput : null,
         realmBypass,
         templateAuthority,
         hydrationAuthority
@@ -4291,6 +4386,11 @@ export class AgentLifecycleManager {
         || tool === LIFECYCLE_AUTHORITY_CAPABILITY
         || META_AUTHORITY_IDS.has(tool)
       ));
+    // The per-agent extension tool selector is authority-bearing too
+    // (extension wave): it decides which third-party tools the agent may be
+    // reauthorized for, so it is gated exactly like a capability selector
+    // even though the descriptor axis itself is recomputed store-side.
+    const extensionSelectorClaim = update.extensionTools !== undefined;
     const authorityClaim = update.privileged !== undefined
       || update.isAdmin !== undefined
       || update.isPrivileged !== undefined
@@ -4299,7 +4399,8 @@ export class AgentLifecycleManager {
       || realmClaim
       || realmBypassClaim
       || metaAuthorityClaim
-      || capabilityClaim;
+      || capabilityClaim
+      || extensionSelectorClaim;
 
     if (authorityClaim) {
       // Single resolution (the realm gate above): the authority verdict reads
@@ -4364,6 +4465,15 @@ export class AgentLifecycleManager {
     if (update.privileged !== undefined) authorityPatch.privileged = update.privileged === true;
     if (update.role !== undefined) authorityPatch.role = String(update.role);
     if (rawTools !== undefined) authorityPatch.allowedTools = Array.isArray(resolvedTools) ? resolvedTools : [];
+    if (update.extensionTools !== undefined) {
+      // Selector state only: the descriptor's effective `extensions` axis is
+      // recomputed store-side (realm resolved tools × selector) and lands
+      // through `reauthorizeAgent` at the next safe state; a config edit never
+      // grants an extension entry directly.
+      authorityPatch.extensionTools = Array.isArray(update.extensionTools)
+        ? (update.extensionTools as string[])
+        : 'all';
+    }
     if (update.spawnedBy !== undefined) authorityPatch.spawnedBy = update.spawnedBy === null ? null : String(update.spawnedBy);
     if (update.creatorId !== undefined) authorityPatch.creatorId = update.creatorId === null ? null : String(update.creatorId);
     // `realmId` is never applied: the immutability gate above denies the key

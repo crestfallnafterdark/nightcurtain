@@ -37,7 +37,8 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 - `LifecyclePort` is the frozen facade-delegation port consumed by MOD-8 descriptors, including the `whoami`/`undoAgentTurn` additions
 - `AgentIdentityPort` is the frozen identity-resolution surface injected as `ToolExecutionPort.getAgentIdentity` for MOD-8/MOD-10; it carries the agent's frozen registry `AuthorityDescriptor`, built once at launch from trusted config, never caller claims, plus the canonical `(realmId, agentId)` identity `key` and the realm-exact/bypass resolution scopes
 - Realm scope rides the same frozen projection: every projection carries `realmId` (owner-controlled `config.realmId`, `null` = the bootstrap-only system scope) and `realmBypass`. `realmBypass` is `true` iff the registry authority inputs carry the `realmBypass` grant — the engine bootstrap's hardcoded composition or an operator grant through the lifecycle grant API — and is never derived from an agent id; the operator/engine branch of the locked bypass rule is the opaque `InternalPrincipal`, which substrates check by exact reference (it has no agent id and never appears here), and agent authority — including the wildcard `'*'` — never bypasses without a grant
-- Authority is the frozen `AuthorityDescriptor` (`subject`/`kind`/`allow`/`visibility`/`realmBypass`) built once at construction from trusted config; there is no `privileged` boolean, admission is default-deny, reserved ids (`admin`/`director`/`system`) are ordinary identifiers, and every denial is uniform `PERMISSION_DENIED`
+- Authority is the frozen `AuthorityDescriptor` (`subject`/`kind`/`allow`/`extensions`/`visibility`/`realmBypass`) built once at construction from trusted config; there is no `privileged` boolean, admission is default-deny, reserved ids (`admin`/`director`/`system`) are ordinary identifiers, and every denial is uniform `PERMISSION_DENIED`
+- The `extensions` axis is a separate, exact-membership capability surface: it is built only from trusted store-computed extension call names forwarded through the launch/reauthorize channels (never derived from `privileged`, `allow`, the wildcard `'*'`, aliases, or any legacy channel), an entry authorizes exactly the identically named extension tool, and a descriptor that carries no `extensions` denies every extension call
 - Engine-internal privileged paths use the opaque branded `InternalPrincipal`: a plain object, a privilege-flag bundle, or a reserved id string cannot impersonate it
 - Authority is never persisted: snapshots drop trust fields and restore re-derives descriptors from trusted config, downgrading tampered privilege claims to anonymous and failing closed on schema-invalid input
 - Legacy caller-asserted authority (`isAdmin`/`isPrivileged`/`privileged` flags, authority-bearing `callerRole` values, reserved-id invocation magic) is ignored by the runtime core: lifecycle, invocation, and scheduler gates read only the registry `AuthorityDescriptor` / opaque `InternalPrincipal`, and only a `callerAgentId` identity claim is honored through registry resolution
@@ -68,6 +69,7 @@ export interface AgentConfig {
     creatorId?: string | null;
     customTools?: Record<string, unknown> | null;
     customToolSchemas?: Record<string, unknown> | null;
+    extensionTools?: 'all' | readonly string[];
     readonly id: string;
     identityHeader?: boolean;
     initial_prompt?: string | null;
@@ -233,6 +235,13 @@ export class AgentRuntime {
     purgeAgent(agentId: string, callerContext?: (CallerContext & {
         principal?: InternalPrincipal | AuthorityDescriptor;
     }) | null): boolean;
+    reauthorizeAgent(agentId: string, input?: {
+        privileged?: boolean;
+        allowedTools?: string[] | '*' | null;
+        extensionTools?: readonly string[] | null;
+    }, callerContext?: (CallerContext & {
+        principal?: InternalPrincipal | AuthorityDescriptor;
+    }) | null): AuthorityDescriptor | null;
     redoAgentTurn(agentId: string): RedoResult;
     reset(): void;
     restoreAgent(agentId: string, callerContext?: (CallerContext & {
@@ -355,6 +364,7 @@ export interface AgentTelemetry {
 // @public
 export interface AuthorityDescriptor {
     readonly allow: ReadonlySet<string>;
+    readonly extensions: ReadonlySet<string>;
     readonly kind: 'agent' | 'internal';
     readonly realmBypass: boolean;
     readonly subject: string;
@@ -799,6 +809,7 @@ const config: AgentConfig = {
 - **`creatorId`** — Alias for `spawnedBy`. When omitted, the lifecycle manager falls back to `spawnedBy`; both are `null` only when no creator was supplied either way.
 - **`customTools`** — Host-registered custom tool handler registry keyed by tool name (a direct handler function or a `{ handler }` wrapper). Host-only contract (A0-5, ticket 0443865): custom tools are operator/host-registered, never model-registered — provider function/JSON input cannot add entries (the spawn sanitizer renames agent-supplied `custom_tools` to an inert alias that launch composition never reads), and Realms never register custom tools; the registry is operator-global. Handlers receive raw substrate handles and execute before the dispatcher capability gate, so the turn execution engine authorizes every invocation against the caller's frozen `AuthorityDescriptor` (wildcard `'*'` or `'@lifecycle:authority'`, or an engine-internal principal); an `allowedTools` entry that merely matches the handler name does not authorize execution, and anonymous callers are denied.
 - **`customToolSchemas`** — Custom tool JSON-schema definitions exposed to the model alongside AgentConfig.customTools for this agent. Host-only contract (A0-5, ticket 0443865): definitions are operator/host-registered and never model-supplied. The turn execution engine exposes them only to callers whose frozen `AuthorityDescriptor` grants custom execution; ungranted and anonymous callers receive no custom schemas.
+- **`extensionTools`** — Per-agent extension tool selector: `'all'` (the default when absent) means every tool resolved for the agent's Realm, while an explicit list narrows it to those sanitized extension call names. Authority-bearing (extension wave): extension tools reach third-party MCP servers, so they are exact-grant-only — the wildcard `'*'`, `privileged`, and every legacy capability channel never imply one. The value is owner-controlled state (direct assignment is ignored; only the lifecycle authority channel writes it), it is withheld from snapshots on hydration, and the effective descriptor set is recomputed store-side and re-applied by the capability heal. Unknown names fail closed (dropped, never granted). `'all'` is a selector, not a grant: it resolves against the Realm's resolved tool names, which stay empty until extension tools are actually attached and resolved.
 - **`id`** — Unique, non-empty identifier for the agent (immutable identity)
 - **`identityHeader`** — Controls the `[IDENTITY]` preamble injected into the first model message by the turn execution engine. `true` forces the preamble, `false` suppresses it, and when absent the engine enables it heuristically (mailbox autonomy, autonomy tools, or a non-`user`/non-`admin` role).
 - **`initial_prompt`** — Snake_case alias for `initialPrompt`; consulted first, so it wins when both spellings are supplied (`agentLifecycle/index.ts:249-250`)
@@ -1044,6 +1055,7 @@ const snapshot = runtime.exportSnapshot();
 - **`messagingBus`** — Access to underlying messaging bus substrate.
 - **`on`** — Subscribes to a specific event type, or all events if eventType is '*'.
 - **`purgeAgent`** — Permanently purges an agent from the runtime, recycle bin, messaging bus, and VFS. Authority gate (MOD-21 W8, default-deny): purge is irreversible and sudoer-only; authorization runs before any scheduler teardown, so a denied purge leaves the victim's timers untouched. A missing id returns `false`.
+- **`reauthorizeAgent`** — Re-authorizes an active agent's capability axes from trusted engine input (the extension-authorization plumbing). Authority-bearing: the caller must resolve to lifecycle authority — the exact injected `InternalPrincipal` reference or a registry `AuthorityDescriptor` holding `'*'`/`'@lifecycle:authority'`; everything else is denied with `PERMISSION_DENIED` before any mutation. The supplied `extensionTools` list is the composition-root-computed effective extension grant set (sanitized call names); it rebuilds the descriptor's `extensions` axis only when the key is present, and the scope/publishing-authority axes always ride along unchanged. A `realmBypass` key — `false` included — and the publishing-authority keys are rejected for every caller (the dedicated grant/revoke APIs are their only writers). Safe-state note: callers must apply this at a turn boundary, never mid-turn. The store's reauthorize sweep owns that scheduling (idle members immediately, busy members on their next turn completion).
 - **`redoAgentTurn`** — Redoes the most recently undone turn bundle for an agent from the redo stack.
 - **`reset`** — Flushes active runtime state: cancels in-flight turns, clears agent registries, unbinds bus subscriptions, and resets underlying primitives.
 - **`restoreAgent`** — Restores an agent from the recycle bin back to active idle status. Authority gate (MOD-21 W8, default-deny): a principal is mandatory; a record whose live-construction descriptor would regain authority (`privileged` or wildcard tools) requires lifecycle authority.
@@ -1166,7 +1178,7 @@ console.log(`Total tokens used: ${metrics.totalTokens} across ${metrics.turnCoun
 
 Frozen authority descriptor — the single representation of authority for every sandbox principal, agent or engine-internal.
 
-Ratified model (`MOD-21`, umbrella ticket `90ad905`): - **Trusted construction only.** The descriptor is built once at construction from trusted configuration (agent config, operator grants, composition roots). It is never assembled from caller-supplied data and never mutated; `allow` is a frozen read-only snapshot-closure facade (own reads over a private member-name array; `Set.prototype` retained only for `instanceof`) on a frozen object. - **No `privileged` boolean.** Authority is `subject` identity plus an explicit `allow` set of canonical tool/op names; the wildcard `'*'` permits every operation. The serialized allow-list keeps the name `allowedTools`. - **Default-deny.** A missing, unknown, or unauthenticated principal is anonymous and receives no non-innate capability. - **Uniform denial.** Every authorization failure surfaces as `PERMISSION_DENIED`; no differentiated channel exposes the check. - **Reserved ids grant nothing.** `admin`, `director`, and `system` are ordinary identifier strings: the names carry no authority and no reserved meaning anywhere. - **`realmBypass` is a grant, never id-derived.** The field records whether the principal spans every Realm scope (engine bootstrap or an operator grant/revoke through the lifecycle API); it is orthogonal to the `privileged`/`allow` capability axis and can never be set through a launch/spawn/update caller path. - **Snapshots re-derive trust.** Authority fields are not persisted; restore rebuilds descriptors from trusted configuration, downgrades tampered privilege claims to anonymous, and fails closed on schema-invalid input.
+Ratified model (`MOD-21`, umbrella ticket `90ad905`): - **Trusted construction only.** The descriptor is built once at construction from trusted configuration (agent config, operator grants, composition roots). It is never assembled from caller-supplied data and never mutated; `allow` is a frozen read-only snapshot-closure facade (own reads over a private member-name array; `Set.prototype` retained only for `instanceof`) on a frozen object. - **No `privileged` boolean.** Authority is `subject` identity plus an explicit `allow` set of canonical tool/op names; the wildcard `'*'` permits every operation. The serialized allow-list keeps the name `allowedTools`. - **Default-deny.** A missing, unknown, or unauthenticated principal is anonymous and receives no non-innate capability. - **Uniform denial.** Every authorization failure surfaces as `PERMISSION_DENIED`; no differentiated channel exposes the check. - **Reserved ids grant nothing.** `admin`, `director`, and `system` are ordinary identifier strings: the names carry no authority and no reserved meaning anywhere. - **`realmBypass` is a grant, never id-derived.** The field records whether the principal spans every Realm scope (engine bootstrap or an operator grant/revoke through the lifecycle API); it is orthogonal to the `privileged`/`allow` capability axis and can never be set through a launch/spawn/update caller path. - **Extension tools are exact-membership only.** The `extensions` set holds sanitized extension call names computed by the composition root from the operator's realm attachments and per-agent tuning; the wildcard `'*'`, `privileged`, selector spellings, alias-written entries, and every legacy channel never imply an entry, anonymous/descriptor-less callers deny, and engine-internal principals deny for provider tools. - **Snapshots re-derive trust.** Authority fields are not persisted; restore rebuilds descriptors from trusted configuration, downgrades tampered privilege claims to anonymous, and fails closed on schema-invalid input.
 
 #### Examples
 
@@ -1175,6 +1187,7 @@ const operator: AuthorityDescriptor = Object.freeze({
   subject: 'operator',
   kind: 'internal',
   allow: new Set(['*']),
+  extensions: new Set(),
   visibility: 'system',
   realmBypass: true
 });
@@ -1183,6 +1196,7 @@ const operator: AuthorityDescriptor = Object.freeze({
 #### Members
 
 - **`allow`** — Frozen read-only allow-set facade of canonical tool/op names the principal may invoke; the wildcard `'*'` permits everything.
+- **`extensions`** — Frozen read-only facade of sanitized extension tool call names the principal may invoke through the dispatcher's extension branch. This axis is deliberately separate from `allow`: `'*'`, `privileged`, subagent-management selectors, alias-written entries, and the legacy allowlist/identity channels never add an entry, and matching is exact string membership on the model-facing call name. An empty set (or a missing/foreign facade on a hand-built projection) denies every extension call — fail closed.
 - **`kind`** — Principal class: a registered `agent` or an engine-internal path.
 - **`realmBypass`** — Whether the principal spans every Realm scope (a `realmBypass` grant). Trusted construction output only: the engine bootstrap composes it on the internal-principal launch path, and the lifecycle grant/revoke API (`grantRealmBypass`/`revokeRealmBypass`) rebuilds the descriptor for operator grants. The wildcard capability axis is orthogonal — an agent with `'*'` and no grant stays Realm-bound, and a granted agent keeps its capability set.
 - **`subject`** — Stable principal identifier (`agent.id`, or an engine-owned internal name).
@@ -2030,8 +2044,8 @@ Narrow on `success` to obtain the fully-populated delivery projection; the failu
 ## Doc coverage
 
 - Top-level exports: 54
-- Declarations (exports + members): 419
-- Documented declarations: 419 / 419 (100%)
+- Declarations (exports + members): 422
+- Documented declarations: 422 / 422 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): `Agent`, `AGENT_STATES`, `AgentModelConfig`, `AgentSecurityContext`, `AgentTelemetry_2`, `CancelScheduleSuccessReceipt`, `CredentialResolverPort`, `EngineModel`, `EngineStreamChunk`, `ExecutionErrorCode`, `ExecutionStatus`, `HistoryToolCall`, `InterruptedTurn`, `InvocationEngine`, `InvocationReceipt`, `InvocationSingleResult`, `LaunchAgentOptions`, `MessagingBus`, `ModelPresetSourcePort`, `OrchestratorActionMode`, `RealmPublishingPort`, `ScheduledTaskProjection`, `ScheduleErrorReceipt`, `SchedulerStatus`, `ScheduleSuccessReceipt`, `TimerCondition`, `ToolCallRecord`, `TriggerPolicy`, `TriggerQueue`, `TurnInputObject`, `UndoTurnSelectionFailure`, `VirtualFS`, `WaitForMailFailureResult`, `WaitForMailSuccessResult`, `WorldClock`

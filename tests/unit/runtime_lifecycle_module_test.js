@@ -2607,3 +2607,93 @@ test('16. realmId is owner-controlled, launch-inherited, defaults to Generic, an
   const granted = lifecycle.updateAgentConfig('realm_child', { privileged: true }, { callerAgentId: 'realm_wildcard' });
   assert.strictEqual(granted.config.privileged, true, 'wildcard lifecycle authority still updates non-realm authority fields');
 });
+
+// ============================================================================
+// Extension wave P2.4 — the descriptor `extensions` axis and launch/config
+// plumbing (device: exact-membership, never implied by wildcard/privilege/
+// selector/alias/legacy; snapshot hydration re-derives default-deny)
+// ============================================================================
+
+test('17. [P2.4] extensionTools is a separate exact axis: trusted launch options flow, config selectors never grant, snapshots withhold', async () => {
+  const lifecycle = new AgentLifecycleManager({ emit: { emit: () => {} }, internalPrincipal: TEST_PRINCIPAL });
+
+  // Trusted unified-options channel: only sanitized call names land on the
+  // exact-membership axis (wildcard, authority ids, dashed junk, duplicates
+  // and empties are dropped fail-closed).
+  const agent = await lifecycle.launchAgent({
+    config: { id: 'ext_axis', allowedTools: ['read_file'], extensionTools: ['similarity', 'ghost'] },
+    extensionTools: ['similarity', '*', '@template:authority', 'has-dash', '', 'similarity'],
+    principal: TEST_PRINCIPAL
+  });
+  const descriptor = lifecycle.getAuthorityDescriptor('ext_axis');
+  assert.deepStrictEqual([...descriptor.extensions], ['similarity']);
+  assert.deepStrictEqual([...descriptor.allow], ['read_file'], 'the allow axis is untouched by extension grants');
+  assert.strictEqual(descriptor.allow.has('*'), false);
+  assert.deepStrictEqual([...lifecycle.getAuthorityInputs('ext_axis').extensionTools], ['similarity']);
+
+  // The config selector is state on the entity, never a grant by itself.
+  assert.deepStrictEqual([...agent.config.extensionTools], ['similarity', 'ghost'], 'selector state is projected on the entity config');
+
+  // Privilege/wildcard never implies an extension entry; the trusted list
+  // still applies exactly when supplied.
+  const sudoBare = await lifecycle.launchAgent({ config: { id: 'ext_sudo_bare', privileged: true }, principal: TEST_PRINCIPAL });
+  assert.strictEqual(lifecycle.getAuthorityDescriptor('ext_sudo_bare').allow.has('*'), true);
+  assert.strictEqual(lifecycle.getAuthorityDescriptor('ext_sudo_bare').extensions.size, 0, 'privilege never implies extension entries');
+  assert.strictEqual(sudoBare.authority.extensions.size, 0);
+
+  // A config-only selector (unified options absent) never grants.
+  const selectorOnly = await lifecycle.launchAgent({
+    config: { id: 'ext_selector_only', allowedTools: ['read_file'], extensionTools: ['similarity'] },
+    principal: TEST_PRINCIPAL
+  });
+  assert.strictEqual(lifecycle.getAuthorityDescriptor('ext_selector_only').extensions.size, 0);
+  assert.deepStrictEqual([...selectorOnly.config.extensionTools], ['similarity']);
+
+  // Legacy positional launches never carry the trusted channel either.
+  const legacy = await lifecycle.launchAgent({ id: 'ext_legacy', extensionTools: ['similarity'] });
+  assert.strictEqual(lifecycle.getAuthorityDescriptor('ext_legacy').extensions.size, 0);
+  assert.deepStrictEqual([...legacy.config.extensionTools], ['similarity']);
+
+  // reauthorizeAgent: present-key replacement preserves omitted axes, and the
+  // canonical identity key addresses the exact registration.
+  const canonicalKey = createAgentIdentityKey('realm_generic', 'ext_axis');
+  const replaced = lifecycle.reauthorizeAgent(canonicalKey, { extensionTools: ['other_tool'] }, { principal: TEST_PRINCIPAL });
+  assert.deepStrictEqual([...replaced.extensions], ['other_tool']);
+  assert.deepStrictEqual([...replaced.allow], ['read_file'], 'an omitted capability axis is preserved');
+  const replacedAgain = lifecycle.reauthorizeAgent(canonicalKey, { allowedTools: ['write_file'] }, { principal: TEST_PRINCIPAL });
+  assert.deepStrictEqual([...replacedAgain.allow], ['write_file']);
+  assert.deepStrictEqual([...replacedAgain.extensions], ['other_tool'], 'an omitted extension axis is preserved');
+  assert.throws(
+    () => lifecycle.reauthorizeAgent(canonicalKey, { extensionTools: ['x'] }),
+    (err) => err?.code === 'PERMISSION_DENIED',
+    'anonymous callers cannot reauthorize the capability axis'
+  );
+
+  // updateAgentConfig: the selector is authority-bearing; the descriptor axis
+  // is never mutated directly by a config edit.
+  assert.throws(
+    () => lifecycle.updateAgentConfig(canonicalKey, { extensionTools: 'all' }),
+    (err) => err?.code === 'PERMISSION_DENIED',
+    'anonymous callers cannot change the extension selector'
+  );
+  const updated = lifecycle.updateAgentConfig(canonicalKey, { extensionTools: 'all' }, { principal: TEST_PRINCIPAL });
+  assert.strictEqual(updated.config.extensionTools, 'all');
+  assert.deepStrictEqual(
+    [...lifecycle.getAuthorityDescriptor(canonicalKey).extensions],
+    ['other_tool'],
+    'a config edit never touches the descriptor extensions axis directly'
+  );
+
+  // Snapshot mirror of the `allowedTools` precedent: the selector persists as
+  // data, hydration withholds it, and the re-derived descriptor is
+  // default-deny on the extension axis.
+  const snapshot = updated.toSnapshot();
+  assert.strictEqual(snapshot.config.extensionTools, 'all', 'the selector serializes as data only');
+  const hydrated = Agent.fromSnapshot(snapshot);
+  assert.strictEqual(
+    Object.prototype.hasOwnProperty.call(hydrated.config, 'extensionTools'),
+    false,
+    'hydration withholds the persisted extension selector'
+  );
+  assert.strictEqual(hydrated.authority.extensions.size, 0, 'the hydrated entity descriptor is default-deny on the extension axis');
+});

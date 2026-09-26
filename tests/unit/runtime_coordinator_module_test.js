@@ -1486,3 +1486,38 @@ test('29. Persistence: hydration re-derives authority default-deny for every rec
     source.destroy();
   }
 });
+
+// ============================================================================
+// Extension wave P2.4 — facade reauthorize + launch option forwarding
+// ============================================================================
+
+test('[P2.4] the facade forwards extensionTools into the descriptor and reauthorizes the exact axis', async () => {
+  const runtime = createAgentRuntime({ autoBootstrapDirector: false });
+  try {
+    await runtime.launchAgent({
+      config: { id: 'p24_facade', allowedTools: ['read_file'] },
+      extensionTools: ['similarity'],
+      principal: runtime.getOperatorPrincipal()
+    });
+    const identityPort = runtime.createAgentIdentityPort();
+    const launched = identityPort.getAgentIdentity('p24_facade');
+    assert.deepStrictEqual([...launched.authority.extensions], ['similarity']);
+    assert.deepStrictEqual([...launched.authority.allow], ['read_file']);
+
+    const reauthorized = runtime.reauthorizeAgent(
+      'p24_facade',
+      { extensionTools: ['docs_search'] },
+      { principal: runtime.getOperatorPrincipal() }
+    );
+    assert.deepStrictEqual([...reauthorized.extensions], ['docs_search']);
+    assert.deepStrictEqual([...reauthorized.allow], ['read_file'], 'omitted axes keep their current values');
+
+    assert.throws(
+      () => runtime.reauthorizeAgent('p24_facade', { extensionTools: ['x'] }),
+      (err) => err?.code === 'PERMISSION_DENIED',
+      'anonymous facade callers cannot reauthorize'
+    );
+  } finally {
+    runtime.destroy();
+  }
+});
