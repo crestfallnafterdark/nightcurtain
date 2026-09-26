@@ -53,7 +53,7 @@ import { DEMO_TEMPLATE, materializeTemplate } from '../../src/lib/sandbox/realmC
 import { sharedLocalStorage } from '../test_env.js';
 
 // ============================================================================
-// Classification table (all 35 canonical tools)
+// Classification table (all 36 canonical tools)
 // ============================================================================
 
 /** Category: the tool has a cross-scope target surface; exact-id cross-scope attempts are denied. */
@@ -87,7 +87,7 @@ const VFS_TOOL_NAMES = Object.freeze([
  * the names of any unclassified (or stale) entries.
  */
 const TOOL_CLASSIFICATION = Object.freeze({
-  // --- realm/scope-denied (25) ---
+  // --- realm/scope-denied (26) ---
   // Every VFS tool resolves `/agents/<id>/...` mounts, so cross-scope targets
   // must be denied for the whole family.
   read_file: CATEGORY_SCOPE_DENIED,
@@ -111,6 +111,7 @@ const TOOL_CLASSIFICATION = Object.freeze({
   list_agents: CATEGORY_SCOPE_DENIED,
   invoke_agent: CATEGORY_SCOPE_DENIED,
   wait_for_invocation: CATEGORY_SCOPE_DENIED,
+  wait_for_agent: CATEGORY_SCOPE_DENIED,
   schedule: CATEGORY_SCOPE_DENIED,
   list_schedules: CATEGORY_SCOPE_DENIED,
   cancel_schedule: CATEGORY_SCOPE_DENIED,
@@ -173,6 +174,7 @@ const ORDINARY_TOOLS = Object.freeze([
   'kill_agent',
   'invoke_agent',
   'wait_for_invocation',
+  'wait_for_agent',
   'list_inbox',
   'get_inbox',
   'drain_inbox',
@@ -401,8 +403,8 @@ test('1. every canonical tool is classified exactly once (fails with unclassifie
   }
   assert.deepStrictEqual(
     counts,
-    { [CATEGORY_SCOPE_DENIED]: 25, [CATEGORY_SELF_ONLY]: 9, [CATEGORY_STATIC]: 1 },
-    'the classification table must keep its ratified shape: 25 scope-denied / 9 self-only / 1 static'
+    { [CATEGORY_SCOPE_DENIED]: 26, [CATEGORY_SELF_ONLY]: 9, [CATEGORY_STATIC]: 1 },
+    'the classification table must keep its ratified shape: 26 scope-denied / 9 self-only / 1 static'
   );
 
   // Mechanistic category invariants: a self-only/static tool never declares a
@@ -580,6 +582,17 @@ test('3. cross-scope invoke/await by exact id is denied; same-scope controls wor
     assert.equal(rootWait.success, false, 'a same-realm root that is not invoker/target cannot await it');
     assert.equal(rootWait.code, 'PERMISSION_DENIED');
     matrixCoveredTools.add('wait_for_invocation');
+
+    // wait_for_agent (ticket 17b5c47): the agent-addressed watch is denied
+    // across the realm boundary and stays realm-opaque.
+    const crossRealmWatch = await dispatcherFor(runtime, 'alpha_root').executeTool('wait_for_agent', {
+      agent_id: 'beta_worker',
+      timeout_ms: 50
+    });
+    assert.equal(crossRealmWatch.success, false, 'a realm root cannot watch a foreign-realm agent');
+    assert.equal(crossRealmWatch.code, 'PERMISSION_DENIED');
+    assertRealmOpaque(JSON.stringify(crossRealmWatch), 'the cross-realm wait_for_agent denial');
+    matrixCoveredTools.add('wait_for_agent');
 
     // Bypass/target control: the invocation target may await its own invocation.
     const targetWait = await dispatcherFor(runtime, 'beta_worker').executeTool('wait_for_invocation', {
@@ -1015,6 +1028,7 @@ test('9. every canonical tool receipt is realm-free for two realm scopes', async
         invocation_ids: invoked.invocationId ? [invoked.invocationId] : ['inv_sweep_missing'],
         timeout_ms: 50
       });
+      await call('wait_for_agent', { agent_id: invokeTargetId, timeout_ms: 50 });
 
       await call('send_message', { recipient: mailTargetId, message: 'sweep mail' });
       await call('inline_file_in_message', { file_path: '/sweep.md', recipient: mailTargetId });

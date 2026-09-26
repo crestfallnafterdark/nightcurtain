@@ -134,16 +134,15 @@ const GENERATED_TIER_LITERALS = Object.freeze({
     'write_json', 'query_json', 'json_patch', 'grep', 'set_permissions', 'send_message',
     'wait_for_mail', 'list_inbox', 'read_message', 'get_archive', 'inline_file_in_message',
     'get_inbox', 'spawn_agent', 'kill_agent', 'list_agents', 'whoami', 'undo_turn',
-    'invoke_agent', 'wait_for_invocation', 'schedule', 'list_schedules', 'cancel_schedule',
-    'get_current_time', 'batch_precall', 'describe_tool'
+    'invoke_agent', 'wait_for_invocation', 'wait_for_agent', 'schedule', 'list_schedules',
+    'cancel_schedule', 'get_current_time', 'batch_precall', 'describe_tool'
   ])
 });
 
 /** Ratified deltas applied on top of the parity fixtures (commit C / Wave 2). */
 const RATIFIED_DELTAS = Object.freeze({
   innate: Object.freeze(['describe_tool']),
-  manager: Object.freeze(['list_agents', 'wait_for_invocation']),
-  reserved: Object.freeze(['wait_for_agent'])
+  manager: Object.freeze(['list_agents', 'wait_for_invocation', 'wait_for_agent'])
 });
 
 /**
@@ -289,7 +288,7 @@ test('T6 per-tier schema names match the frozen literals', () => {
   }
   const allNames = getSandboxToolsSchema('all').map((def) => def.function.name);
   assert.deepStrictEqual(allNames, CANONICAL_NAMES);
-  assert.strictEqual(allNames.length, 35);
+  assert.strictEqual(allNames.length, 36);
   const allNoReflection = getSandboxToolsSchema('all', { includeReflection: false }).map((def) => def.function.name);
   assert.deepStrictEqual(allNoReflection, CANONICAL_NAMES.filter((name) => name !== 'describe_tool'));
 });
@@ -378,8 +377,10 @@ test('T10 no tier references an unknown name and preset keys stay byte-identical
   assert.deepStrictEqual(TOOL_PRESETS.all, ['*']);
 });
 
-test('T11 wait_for_agent placement is reserved for the invocation family', () => {
+test('T11 wait_for_agent is baked in the invocation family and manager-only', () => {
   assert.deepStrictEqual([...FAMILY_TIER_PLAN.invocation], ['manager'], 'invocation is a manager-only family');
+  assert.equal(TOOL_FAMILIES.wait_for_agent, 'invocation', 'wait_for_agent belongs to the invocation family');
+  assert.equal(TOOL_TIER_EXPOSURE.wait_for_agent, undefined, 'the family default places it in manager');
   for (const tier of NAMED_TIERS) {
     for (const tool of CANONICAL_NAMES) {
       if (TOOL_FAMILIES[tool] !== 'invocation') continue;
@@ -391,6 +392,11 @@ test('T11 wait_for_agent placement is reserved for the invocation family', () =>
       );
     }
   }
-  assert.ok(!CANONICAL_NAMES.includes('wait_for_agent'), 'wait_for_agent is not baked in Wave 1');
-  assert.strictEqual(TOOL_TIER_EXPOSURE.wait_for_agent, undefined);
+  const manager = GENERATED_TIER_LITERALS.manager;
+  assert.ok(manager.includes('wait_for_agent'), 'the manager literal carries the 36th tool');
+  assert.ok(
+    manager.indexOf('wait_for_agent') === manager.indexOf('wait_for_invocation') + 1,
+    'wait_for_agent appends directly after its id-addressed sibling'
+  );
+  assert.equal(READ_ONLY_TOOLS.includes('wait_for_agent'), true, 'the 36th tool is read-only');
 });

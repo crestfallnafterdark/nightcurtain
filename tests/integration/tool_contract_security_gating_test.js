@@ -14,7 +14,7 @@
  * - [AC-EPIC16-08] Prototype-Safe Normalization (normalizeToolName, resolveToolPreset)
  * - [AC-EPIC16-09] Fail-Closed Preset Resolution & Invalid Preset Spawn Protection
  * - [AC-EPIC16-10] Event List Default Action (query_active default)
- * - [AC-EPIC16-11] 35 Tools Synchronized (Registry, Schemas, Dispatcher, Semantic Docs)
+ * - [AC-EPIC16-11] 36 Tools Synchronized (Registry, Schemas, Dispatcher, Semantic Docs)
  * - [AC-EPIC16-12] Zero-Mock Black-Box QA Suite & Production Build Gate
  * - [AC-EPIC16-13] Lenient JSON Patch Auto-Upsert & Deep Container Auto-Creation (Option A Addendum)
  * - [AC-EPIC16-14] Wave U File Plumbing Gating (concat_files capability gate, typed mutual-exclusion/cap failures)
@@ -128,29 +128,29 @@ async function runEpic16TestSuite() {
   console.log('======================================================================\n');
 
   // ---------------------------------------------------------------------------
-  // AC-EPIC16-11: 35 Tools Synchronized across Registry, Schemas, Dispatcher, Semantic Docs
+  // AC-EPIC16-11: 36 Tools Synchronized across Registry, Schemas, Dispatcher, Semantic Docs
   // ---------------------------------------------------------------------------
-  console.log('--- [AC-EPIC16-11] 35 Tools Registry & Surface Synchronization ---');
+  console.log('--- [AC-EPIC16-11] 36 Tools Registry & Surface Synchronization ---');
 
   await runTestScenario(
     'AC16-11.1',
     'AC-EPIC16-11',
-    'SANDBOX_TOOLS registry contains exactly 35 canonical tool constants',
+    'SANDBOX_TOOLS registry contains exactly 36 canonical tool constants',
     'CON-1 / HYG-1 Canonical Registry Synchronization',
     () => {
       const uniqueCanonicalTools = new Set(Object.values(SANDBOX_TOOLS));
-      assert.equal(uniqueCanonicalTools.size, 35, `Expected 35 unique tools, got ${uniqueCanonicalTools.size}`);
+      assert.equal(uniqueCanonicalTools.size, 36, `Expected 36 unique tools, got ${uniqueCanonicalTools.size}`);
     }
   );
 
   await runTestScenario(
     'AC16-11.2',
     'AC-EPIC16-11',
-    'getSandboxToolsSchema exposes exactly 35 Draft-07 function schemas',
+    'getSandboxToolsSchema exposes exactly 36 Draft-07 function schemas',
     'CON-1 / HYG-1 Schema Surface Parity',
     () => {
       const schemas = getSandboxToolsSchema();
-      assert.equal(schemas.length, 35, `Expected 35 tool schemas, got ${schemas.length}`);
+      assert.equal(schemas.length, 36, `Expected 36 tool schemas, got ${schemas.length}`);
       for (const toolName of Object.values(SANDBOX_TOOLS)) {
         const schema = schemas.find(d => d.function?.name === toolName);
         assert.ok(schema, `Schema must exist for canonical tool: ${toolName}`);
@@ -164,7 +164,7 @@ async function runEpic16TestSuite() {
   await runTestScenario(
     'AC16-11.3',
     'AC-EPIC16-11',
-    'describe_tool returns documentation and schema for all 35 canonical tools',
+    'describe_tool returns documentation and schema for all 36 canonical tools',
     'CON-1 / HYG-1 Semantic Documentation Parity',
     async () => {
       const docDispatcher = createSandboxToolDispatcher({ privileged: true, allowedTools: ['*'] });
@@ -181,12 +181,12 @@ async function runEpic16TestSuite() {
   await runTestScenario(
     'AC16-11.2b',
     'AC-EPIC16-11',
-    'Wave U publishing meta tools stay outside the 35-schema surface (explicit-grant-only)',
+    'Wave U publishing meta tools stay outside the 36-schema surface (explicit-grant-only)',
     'CON-1 / HYG-1 Schema Surface Parity',
     () => {
       const publishingNames = Object.values(PUBLISHING_TOOLS);
       const schemas = getSandboxToolsSchema('all');
-      assert.equal(schemas.length, 35, 'the wildcard schema surface stays exactly 35 canonical tools');
+      assert.equal(schemas.length, 36, 'the wildcard schema surface stays exactly 36 canonical tools');
       for (const name of publishingNames) {
         assert.ok(
           !schemas.some((definition) => definition.function?.name === name),
@@ -344,9 +344,9 @@ async function runEpic16TestSuite() {
     () => {
       assert.deepEqual(resolveToolPreset('all'), ['*']);
       assert.deepEqual(resolveToolPreset('*'), ['*']);
-      // Generated tiers are sentinel-free: manager resolves to its 31
+      // Generated tiers are sentinel-free: manager resolves to its 32
       // concrete tools (the retired selector window is asserted separately).
-      assert.equal(resolveToolPreset('manager').length, 31);
+      assert.equal(resolveToolPreset('manager').length, 32);
       assert.equal(resolveToolPreset('readonly').length, 13);
       assert.equal(resolveToolPreset('collaborator').length, 25);
     }
@@ -1259,7 +1259,7 @@ ${mdTableRows}
 - [x] **[AC-EPIC16-08] Prototype-Safe Normalization (\`CON-4\`, \`CON-8\`):** Verified that \`normalizeToolName\` and \`resolveToolPreset\` safely guard against Object prototype keys (\`toString\`, \`constructor\`, \`valueOf\`, \`__proto__\`, \`hasOwnProperty\`), returning \`null\` / \`[]\` without prototype leakage.
 - [x] **[AC-EPIC16-09] Fail-Closed Preset Resolution (\`CON-4\`):** Verified that unrecognized presets return \`[]\` (fail-closed) and standard presets resolve accurately.
 - [x] **[AC-EPIC16-10] Event List Default Action (\`CON-5\`):** Verified that \`event_list\` with omitted arguments defaults to \`query_active\` as documented.
-- [x] **[AC-EPIC16-11] 35 Tools Synchronized (\`CON-1\`, \`HYG-1\`):** Verified that exactly 35 tools are registered in \`SANDBOX_TOOLS\`, documented in \`TOOL_SEMANTIC_DOCS\`, and dispatched in \`createSandboxToolDispatcher\`.
+- [x] **[AC-EPIC16-11] 36 Tools Synchronized (\`CON-1\`, \`HYG-1\`):** Verified that exactly 36 tools are registered in \`SANDBOX_TOOLS\`, documented in \`TOOL_SEMANTIC_DOCS\`, and dispatched in \`createSandboxToolDispatcher\`.
 - [x] **[AC-EPIC16-12] Zero-Mock Black-Box QA Suite:** Verified that all tests run against authentic production modules with zero dummy stubs, and confirmed clean compilation via \`npm run build\` (exit code 0).
 - [x] **[AC-EPIC16-13] Lenient JSON Patch Auto-Upsert & Container Auto-Creation (Option A Addendum):** Verified that \`op: "replace"\` targeting a missing object property coerces automatically to \`op: "add"\`, intermediate object containers \`{}\` are auto-created along deep paths, and array index replacement semantics are strictly preserved.
 - [x] **[AC-EPIC16-14] Wave U File Plumbing Gating (\`36f2763\`):** Verified that \`concat_files\` is capability-gated like every VFS write (readonly preset denied, wildcard allowed) and that file-plumbing failures are typed and pre-mutation: inline/file mutual exclusion returns \`INVALID_ARGUMENTS\`, oversize sources normalize \`FILE_TOO_LARGE\` to \`EXECUTION_FAILED\`, and rejected writes leave no destination.

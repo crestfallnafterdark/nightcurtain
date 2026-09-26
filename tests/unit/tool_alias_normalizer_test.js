@@ -51,8 +51,8 @@ test('1. SANDBOX_TOOLS Master Enum & Immutability', () => {
     'inline_file_in_message', 'get_inbox', 'drain_inbox',
     // Lifecycle (5)
     'spawn_agent', 'kill_agent', 'list_agents', 'whoami', 'undo_turn',
-    // Invocation (2)
-    'invoke_agent', 'wait_for_invocation',
+    // Invocation (3)
+    'invoke_agent', 'wait_for_invocation', 'wait_for_agent',
     // Scheduler (3)
     'schedule', 'list_schedules', 'cancel_schedule',
     // Clock & Events (3)
@@ -61,7 +61,7 @@ test('1. SANDBOX_TOOLS Master Enum & Immutability', () => {
     'batch_precall', 'describe_tool'
   ];
 
-  assert.strictEqual(expectedCanonicalTools.length, 35, 'Must have exactly 35 canonical tools');
+  assert.strictEqual(expectedCanonicalTools.length, 36, 'Must have exactly 36 canonical tools');
 
   for (const toolName of expectedCanonicalTools) {
     const matchingKey = Object.keys(SANDBOX_TOOLS).find(k => SANDBOX_TOOLS[k] === toolName);
@@ -115,13 +115,13 @@ test('3. TOOL_PRESETS and resolveToolPreset Resolution', () => {
   assert.deepStrictEqual(resolveToolPreset(new Set(['read_file', 'send_message'])), ['read_file', 'send_message']);
 });
 
-test('4. Master TOOL_ALIAS_MAP and getCanonToolName across all 35 tools', () => {
+test('4. Master TOOL_ALIAS_MAP and getCanonToolName across all 36 tools', () => {
   assert.ok(TOOL_ALIAS_MAP, 'TOOL_ALIAS_MAP must be exported');
   assert.ok(Object.isFrozen(TOOL_ALIAS_MAP), 'TOOL_ALIAS_MAP must be frozen');
   assert.strictEqual(normalizeToolName, getCanonToolName, 'normalizeToolName must alias getCanonToolName');
 
-  // Test all 35 canonical names and camelCase variants
-  const all35Tools = [
+  // Test all 36 canonical names and camelCase variants
+  const all36Tools = [
     { canon: 'read_file', camel: 'readFile', aliases: ['virtualFs_readFile', 'fs_readFile', 'fs.readFile', 'virtualFs.readFile', 'fs_read_file', 'vfs_read_file', 'file_read', 'read'] },
     { canon: 'write_file', camel: 'writeFile', aliases: ['virtualFs_writeFile', 'fs_writeFile', 'fs.writeFile', 'virtualFs.writeFile', 'fs_write_file', 'vfs_write_file', 'save_file', 'write'] },
     { canon: 'replace_file_content', camel: 'replaceFileContent', aliases: ['virtualFs_replaceFileContent', 'fs_replaceFileContent', 'fs.replaceFileContent', 'replace_content', 'edit_file'] },
@@ -149,6 +149,7 @@ test('4. Master TOOL_ALIAS_MAP and getCanonToolName across all 35 tools', () => 
     { canon: 'undo_turn', camel: 'undoTurn', aliases: ['runtime_undoTurn', 'runtime.undoTurn', 'runtime_undo_turn', 'undo', 'revert_turn', 'rollback_turn'] },
     { canon: 'invoke_agent', camel: 'invokeAgent', aliases: ['runtime_invokeAgent', 'runtime.invokeAgent', 'call_agent', 'invoke', 'dispatch_agent', 'run_agent'] },
     { canon: 'wait_for_invocation', camel: 'waitForInvocation', aliases: ['runtime_waitForInvocation', 'runtime.waitForInvocation', 'wait_invocation', 'await_invocation'] },
+    { canon: 'wait_for_agent', camel: 'waitForAgent', aliases: ['runtime_waitForAgent', 'runtime.waitForAgent', 'wait_agent', 'await_agent'] },
     { canon: 'schedule', camel: 'schedule', aliases: ['runtime_schedule', 'runtime.schedule', 'schedule_task', 'schedule_timer', 'set_timer', 'create_schedule'] },
     { canon: 'list_schedules', camel: 'listSchedules', aliases: ['runtime_listSchedules', 'runtime.listSchedules', 'get_schedules', 'sched_list', 'list_timers'] },
     { canon: 'cancel_schedule', camel: 'cancelSchedule', aliases: ['runtime_cancelSchedule', 'runtime.cancelSchedule', 'delete_schedule', 'cancel_timer'] },
@@ -159,9 +160,9 @@ test('4. Master TOOL_ALIAS_MAP and getCanonToolName across all 35 tools', () => 
     { canon: 'describe_tool', camel: 'describeTool', aliases: ['system_describeTool', 'system.describeTool', 'tool_info', 'help', 'describe', 'inspect_tool'] }
   ];
 
-  assert.strictEqual(all35Tools.length, 35, 'Must verify all 35 tools');
+  assert.strictEqual(all36Tools.length, 36, 'Must verify all 36 tools');
 
-  for (const item of all35Tools) {
+  for (const item of all36Tools) {
     // Canonical name resolution
     assert.strictEqual(
       getCanonToolName(item.canon),
