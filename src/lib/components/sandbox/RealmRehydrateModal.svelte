@@ -6,7 +6,7 @@
    *
    * Two modes:
    * - **Replace from payload** (template-launched Realms): attach a payload
-   *   from the session saved-payload library or a local `<templateId>.package.json`
+   *   from the persisted saved-payload library or a local `<templateId>.package.json`
    *   file. The payload validates through the real catalog `validatePayload`,
    *   resolves through `materializeTemplate` (the launch resolver), and the
    *   plan shows every placement destination grouped by target plus every
@@ -228,7 +228,7 @@
     }
   }
 
-  /** Attaches one saved payload from the session library. */
+  /** Attaches one saved payload from the saved-payload library. */
   function attachSavedPayload(entry) {
     clearMessages();
     payloadSourceKind = 'saved';

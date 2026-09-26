@@ -66,7 +66,7 @@
    * resolved placement destinations (root joins included), in-place file
    * replacement, the full declared-directive review resolved through the
    * catalog resolver, and a review-time template-pin + canonical payload-digest
-   * card. The payload card additionally exposes the session saved-payload
+   * card. The payload card additionally exposes the persisted saved-payload
    * library (`realmPayloadLibrary`): save the assembled payload under a name,
    * attach a saved payload to the launch, download it, or delete it.
    *
@@ -924,7 +924,7 @@
   }
 
   /**
-   * Saves the currently assembled payload into the session saved-payload
+   * Saves the currently assembled payload into the persisted saved-payload
    * library under the operator-supplied name. The saved bytes are the same
    * canonical envelope the launch validates (`inputProjection.payload`, else
    * the reviewed launch package), and the digest is the catalog's canonical
@@ -955,14 +955,14 @@
       });
       libraryRevision += 1;
       savedPayloadName = '';
-      notice = `Saved payload "${entry.name}" (${entry.digest}) — ${entry.inputSummary}. Session-only: the named library lives until reload.`;
+      notice = `Saved payload "${entry.name}" (${entry.digest}) — ${entry.inputSummary}. The named library persists across reloads.`;
     } catch (err) {
       savedPayloadError = err && err.message ? err.message : 'The payload could not be saved.';
     }
   }
 
   /**
-   * Attaches one saved payload from the session library.
+   * Attaches one saved payload from the saved-payload library.
    *
    * @param {import('./realmPayloadLibrary.ts').RealmSavedPayload} entry - Saved entry.
    */

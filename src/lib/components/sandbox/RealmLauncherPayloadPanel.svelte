@@ -110,9 +110,10 @@
     </div>
     <p class="field-hint">
       The reviewed instance content: declared input values (<code>text</code> or <code>files</code>
-      shape). Attach a submitted session candidate, a named payload from the session library, or a local
+      shape). Attach a submitted session candidate, a named payload from the saved-payload library, or a local
       <code>{buildRealmPayloadFilename(templateId)}</code> file. The package is validated against
-      the effective template version before any launch; candidates and saved payloads are session-only.
+      the effective template version before any launch; submitted candidates are session-only and saved
+      payloads persist across reloads.
       Edited input values win per input over the attached package.
     </p>
     <div class="payload-source-row">

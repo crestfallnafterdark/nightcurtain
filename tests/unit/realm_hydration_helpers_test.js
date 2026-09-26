@@ -6,7 +6,7 @@
  * directive review resolved through the catalog's own `resolveDirectives`, the
  * canonical payload digest/pin projection, the saved-payload name rules, the
  * rehydrate plan (real `validatePayload` + `materializeTemplate`), and the
- * session saved-payload library.
+ * persisted saved-payload library.
  *
  * Every fixture is a real baked bundle (`session_zero`) or a template validated
  * through the real `validateTemplate`; no function under test is stubbed.
