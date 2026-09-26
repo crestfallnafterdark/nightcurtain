@@ -23,7 +23,7 @@ graph TD
     end
 
     subgraph L1["Tier 1: Atomic Unit & Contract Testing (node --test)"]
-        UNIT["54 Unit Suites (tests/unit/)<br/>• Pure Functions & Algorithms<br/>• DeepSeek Reasoning Hygiene (INV-REASONING-STRING)<br/>• JSON Pointers, Parsers, Preset Catalog, LoRA Tags<br/>• Module Contracts & Provider Adapters"]
+        UNIT["55 Unit Suites (tests/unit/)<br/>• Pure Functions & Algorithms<br/>• DeepSeek Reasoning Hygiene (INV-REASONING-STRING)<br/>• JSON Pointers, Parsers, Preset Catalog, LoRA Tags<br/>• Module Contracts & Provider Adapters"]
     end
 
     L1 --> L2
@@ -101,7 +101,7 @@ The master runner executes all Unit and Integration suites in strict sub-process
 // Sample output format from tests/runner.js:
 // ======================================================================
 //   AGENTIC SANDBOX STUDIO MASTER TEST SUITE RUNNER
-//   Total Suites: 102 (54 Unit, 48 Integration)
+//   Total Suites: 103 (55 Unit, 48 Integration)
 // ======================================================================
 //   [Unit       ] deepseek_provider_test.js                  ✔ PASS (42ms)
 //   [Unit       ] deepseek_reasoning_hygiene_test.js         ✔ PASS (18ms)
@@ -109,7 +109,7 @@ The master runner executes all Unit and Integration suites in strict sub-process
 //   [Integration] tool_contract_security_gating_test.js      ✔ PASS (115ms)
 //   [Integration] mail_injection_precall_pipeline_test.js    ✔ PASS (188ms)
 // ======================================================================
-//   Suites:       102 passed, 102 total
+//   Suites:       103 passed, 103 total
 //   Failed:       0 failed
 //   Duration:     3.42s
 // ======================================================================
@@ -126,7 +126,7 @@ All Node-based test suites import [`tests/test_env.js`](../../tests/test_env.js)
 
 ## 4. Test Suite Inventory & Classification
 
-The project includes **102 native test suites** (54 unit, 48 integration) and **8 browser E2E specs**:
+The project includes **103 native test suites** (55 unit, 48 integration) and **8 browser E2E specs**:
 
 > **Canonical inventory.** This chapter is the single source of truth for test-suite counts and per-file listings; [`unit_and_integration.md`](unit_and_integration.md) cross-links here instead of duplicating it.
 
@@ -140,7 +140,8 @@ The project includes **102 native test suites** (54 unit, 48 integration) and **
 | [`deepseek_reasoning_hygiene_test.js`](../../tests/unit/deepseek_reasoning_hygiene_test.js) | `src/lib/sandbox/runtime/messageHygiene/` + `runtime/historyManager/` | Strict `reasoning_content` string invariant (`INV-REASONING-STRING`), reasoning eviction, orphan tool-call pruning. |
 | [`descriptor_authority_hygiene_test.js`](../../tests/unit/descriptor_authority_hygiene_test.js) | `src/lib/sandbox/toolDefinitions/index.ts` + `tools/constants/index.ts` | Descriptor scope: identity-only caller forwarding, no authority-field leakage, `AuthorityDescriptor` allow-set gating. |
 | [`domain_director_module_test.js`](../../tests/unit/domain_director_module_test.js) | `src/lib/sandbox/domain/directorAgent/index.ts` | Director domain contract, strict whitelist, verbatim directive integrity. |
-| [`extension_registry_module_test.js`](../../tests/unit/extension_registry_module_test.js) | `src/lib/sandbox/extensionRegistry/index.ts` | Install-record CRUD/freeze, realm attachment validation, exact resolution (installed + attached + selection), missing extensions/tools, adapter reconcile + malformed-entry dropping, reserved/prototype call-name hygiene; catalog indexing (canonical call-name derivation, reserved-name fail-closed, intra-server first-wins shadows, `extcat1:` digest), sequence arbitration (later extension fully `conflict`), reconnect drift diff. |
+| [`extension_registry_module_test.js`](../../tests/unit/extension_registry_module_test.js) | `src/lib/sandbox/extensionRegistry/index.ts` | Install-record CRUD/freeze, realm attachment validation, exact resolution (installed + attached + selection), missing extensions/tools, adapter reconcile + malformed-entry dropping, reserved/prototype call-name hygiene; catalog indexing (canonical call-name derivation, reserved-name fail-closed, intra-server first-wins shadows, `extcat1:` digest), sequence arbitration (later extension fully `conflict`), reconnect drift diff, own-key schema copies (`__proto__`-named wire members preserved without prototype installation). |
+| [`extension_tools_module_test.js`](../../tests/unit/extension_tools_module_test.js) | `src/lib/sandbox/tools/extensionTools/index.ts` | Extension-tool synthesis: lossy input-schema projection matrix (`$ref`/cycles, nullable/union widening, `allOf` merge, free-form objects, unknown-keyword drops with JSON-Pointer paths, depth/ref budgets, prototype hygiene), descriptor freeze + pinned `extensionExecutionPort`, pass-through sanitizer, result mapper caps/no-base64, fidelity summary thresholds. |
 | [`fs_download_utils_test.js`](../../tests/unit/fs_download_utils_test.js) | `src/lib/sandbox/fsDownloadUtils/index.ts` | VirtualFS folder/file download, upload, copy, Blob/ZIP packaging. |
 | [`gitbug_board_test.js`](../../tests/unit/gitbug_board_test.js) | `scripts/gitbug.mjs` | One-turn triage verbs (`board`/`next`/`brief`/`apply`): projections, filters, v1 JSON schemas + byte determinism, dry-run no-mutation, applied label/comment/status round-trips (isolated fixtures). |
 | [`gitbug_wrapper_test.js`](../../tests/unit/gitbug_wrapper_test.js) | `scripts/gitbug.mjs` | git-bug wrapper safety: ref resolution without silent fallback, label validation, argv builders. |
@@ -177,7 +178,7 @@ The project includes **102 native test suites** (54 unit, 48 integration) and **
 | [`scheduler_realm_scope_test.js`](../../tests/unit/scheduler_realm_scope_test.js) | `src/lib/sandbox/runtime/runtimeScheduler/index.ts` + `triggerQueue/index.ts` | Realm-confined scheduling/cancel and trigger dispatch, bypass/internal paths, legacy parity. |
 | [`sensitive_content_guard_test.js`](../../tests/unit/sensitive_content_guard_test.js) | `scripts/check_sensitive_content.mjs` + `scripts/install_git_hooks.mjs` | Staged-content guard: path deny-list, machine-path detection, credential patterns (value never echoed), oversized/binary blobs, config merge + reasoned allowlist, hook install/idempotence/foreign-refusal/uninstall. |
 | [`settings_modal_presets_test.js`](../../tests/unit/settings_modal_presets_test.js) | `src/lib/components/sandbox/SandboxSettingsModal.svelte` + `presetCatalog`/`credentialVault` | Catalog-driven settings modal, official model catalogs, custom preset persistence, credential-vault separation (no `keyId` writes). |
-| [`tool_alias_normalizer_test.js`](../../tests/unit/tool_alias_normalizer_test.js) | `src/lib/sandbox/tools/normalizers/aliasMap.ts`, `paramSanitizer.ts` + `tools/constants/index.ts` | Master alias map, precall allowlist, prototype-safe normalization, alias-map uniqueness/cross-family invariants, alias-written allowlist semantics. |
+| [`tool_alias_normalizer_test.js`](../../tests/unit/tool_alias_normalizer_test.js) | `src/lib/sandbox/tools/normalizers/aliasMap.ts`, `paramSanitizer.ts` + `tools/constants/index.ts` | Master alias map, precall allowlist, prototype-safe normalization, alias-map uniqueness/cross-family invariants, alias-written allowlist semantics; `createPassThroughSanitizer` verbatim extension semantics. |
 | [`tool_authorization_gate_test.js`](../../tests/unit/tool_authorization_gate_test.js) | `src/lib/sandbox/toolDefinitions/index.ts` | Descriptor-authoritative authorization: a present descriptor decides alone, no widen channels, innate universal, legacy only for descriptor-less callers. |
 | [`tool_preset_resolve_test.js`](../../tests/unit/tool_preset_resolve_test.js) | `src/lib/components/sandbox/toolPresetResolve.ts` | Launcher preset resolution: empty custom whitelist denied (never wildcard), alias canonicalization, named presets. |
 | [`tool_presets_optimization_test.js`](../../tests/unit/tool_presets_optimization_test.js) | `src/lib/sandbox/toolDefinitions/index.ts` + `runtime/index.ts` | Preset expansion (`readonly`, `manager`, `collaborator`), token reduction, AgentRuntime integration. |
@@ -273,8 +274,8 @@ sequenceDiagram
     G1-->>Dev: Gate 1 Passed (0 lint / sync errors)
 
     Dev->>G2: npm test (tests/runner.js)
-    Note over G2: Executes 102 suites (54 Unit, 48 Integration) under 120s timeout
-    G2-->>Dev: Gate 2 Passed (102/102 passed, 0 failures)
+    Note over G2: Executes 103 suites (55 Unit, 48 Integration) under 120s timeout
+    G2-->>Dev: Gate 2 Passed (103/103 passed, 0 failures)
 
     Dev->>G3: npm run build (vite build)
     Note over G3: Compiles Svelte 5 runes, WASM modules, top-level awaits
