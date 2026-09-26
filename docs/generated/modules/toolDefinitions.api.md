@@ -123,6 +123,7 @@ export interface InnateToolsList extends ReadonlyArray<SandboxToolName> {
 // @public
 export interface JsonSchemaDraft07 {
     readonly additionalProperties: boolean;
+    readonly oneOf?: readonly JsonSchemaOneOfAlternative[];
     readonly properties: Record<string, {
         readonly type: string | readonly string[];
         readonly description: string;
@@ -132,6 +133,11 @@ export interface JsonSchemaDraft07 {
     }>;
     readonly required?: readonly string[];
     readonly type: 'object';
+}
+
+// @public
+export interface JsonSchemaOneOfAlternative {
+    readonly required: readonly string[];
 }
 
 // @public
@@ -517,9 +523,18 @@ const schema: JsonSchemaDraft07 = {
 #### Members
 
 - **`additionalProperties`** — Extra-parameter policy keyword. `false` for the closed baked/publishing descriptors; `true` for descriptors whose handler accepts the key set on the wire and ignores undocumented keys with an explicit warning (the `spawn_agent` accept-and-warn boundary) — the emitted keyword always matches the runtime behavior.
+- **`oneOf`** — Optional Draft-07 root-level exactly-one-of constraint over `required` alternatives (for example `write_file`'s inline-content vs `source_file` form, or the publishing tools' `manifest` vs `manifest_file` form). Preserved by every model-facing schema projection so the emitted call schema agrees with `describe_tool` (ticket d872723 F7).
 - **`properties`** — Parameter definitions key-value map.
 - **`required`** — List of required parameter names.
 - **`type`** — Must always be 'object'.
+
+### `JsonSchemaOneOfAlternative` — interface
+
+One root-level `oneOf` alternative of a JsonSchemaDraft07 object schema: the property names this alternative requires.
+
+#### Members
+
+- **`required`** — Property names required by this alternative.
 
 ### `OpenAIFunctionObject` — interface
 
@@ -589,6 +604,8 @@ The composition root (the sandbox store) implements this port over its real Wave
 ### `RealmTemplateImportView` — interface
 
 Structural receipt returned by the host template-import path (Wave T realm template registry): the committed template id and content version, whether the import shadowed a shipped entry, and the effective import budget.
+
+The `import_realm_template` tool receipt additionally carries the handler-derived `seedSlots` summary (slot counts by origin plus distinct targets); that summary is computed from the parsed template in the tool handler, so this port receipt stays unchanged (ticket 922fa34).
 
 #### Members
 
@@ -915,9 +932,9 @@ function handleToolError(code: ToolSystemErrorCode, message: string) {
 
 ## Doc coverage
 
-- Top-level exports: 31
-- Declarations (exports + members): 111
-- Documented declarations: 111 / 111 (100%)
+- Top-level exports: 32
+- Declarations (exports + members): 114
+- Documented declarations: 114 / 114 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): `AgentIdentityPort`, `AgentIdentityProjection`, `AgentIdentityScope`, `AgentRuntime`, `BundleFiles`, `ExtensionExecutionPort`, `ExtensionToolDescriptor`, `LifecyclePort`, `PendingInstancePayload`, `RealmTemplate`
