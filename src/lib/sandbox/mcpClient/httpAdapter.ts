@@ -182,6 +182,71 @@ function mapSdkFailure(
 }
 
 /**
+ * Replacement marker for every exact credential occurrence found in a tool
+ * result.
+ */
+const REDACTED_SECRET = '[redacted]';
+
+/**
+ * Maximum number of result nodes the scrub walk visits per `callTool` call.
+ * A hostile server can return an arbitrarily large or nested result; once the
+ * budget is exhausted the remaining subtree is replaced by the marker instead
+ * of being traversed further, so the scrub always terminates.
+ */
+const MAX_SCRUB_NODES = 10_000;
+
+/**
+ * Maximum container depth the scrub walk descends before replacing the
+ * remaining subtree with the marker (pairs with `MAX_SCRUB_NODES`).
+ */
+const MAX_SCRUB_DEPTH = 64;
+
+/**
+ * Deep-copies a JSON-shaped tool-result value, replacing every exact
+ * occurrence of `secret` in strings (keys included) with `[redacted]`.
+ *
+ * Non-string scalars pass through unchanged, so a result without the secret
+ * serializes byte-for-byte identically. Object keys are copied as own data
+ * properties (`__proto__` included), so a wire-derived key can never alter
+ * the copy's prototype. The walk is bounded by
+ * `MAX_SCRUB_NODES`/`MAX_SCRUB_DEPTH`: over-budget subtrees become the
+ * marker, guaranteeing termination without leaving an unscanned branch that
+ * could still carry the secret.
+ *
+ * @param value - Candidate result value.
+ * @param secret - Non-empty credential secret to redact.
+ * @param depth - Current container depth.
+ * @param budget - Shared remaining-node budget for the call.
+ * @returns Scrubbed copy (or the marker when the budget is exhausted).
+ */
+function scrubSecretValue(value: unknown, secret: string, depth: number, budget: { remaining: number }): unknown {
+  if (budget.remaining <= 0 || depth > MAX_SCRUB_DEPTH) return REDACTED_SECRET;
+  budget.remaining -= 1;
+  if (typeof value === 'string') {
+    return value.includes(secret) ? value.split(secret).join(REDACTED_SECRET) : value;
+  }
+  if (Array.isArray(value)) {
+    return value.map(item => scrubSecretValue(item, secret, depth + 1, budget));
+  }
+  if (value !== null && typeof value === 'object') {
+    const copy: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value)) {
+      const scrubbedKey = key.includes(secret) ? key.split(secret).join(REDACTED_SECRET) : key;
+      // Own data properties only: a wire-derived `__proto__` key must stay a
+      // data key on the copy, never become its prototype (or be dropped).
+      Object.defineProperty(copy, scrubbedKey, {
+        value: scrubSecretValue(entry, secret, depth + 1, budget),
+        enumerable: true,
+        writable: true,
+        configurable: true
+      });
+    }
+    return copy;
+  }
+  return value;
+}
+
+/**
  * Opens a real HTTP MCP session through the dynamically imported official client.
  *
  * The handshake and every request share the supplied timeout budget; the
@@ -328,10 +393,21 @@ export async function openSdkHttpSession(options: NormalizedMcpHttpOptions): Pro
             ...(callSignal !== undefined ? { signal: callSignal } : {})
           }
         );
+        const secret = credential?.secret ?? null;
+        if (secret === null) {
+          return Object.freeze({
+            content: Object.freeze([...result.content]),
+            isError: result.isError === true,
+            ...(result.structuredContent !== undefined ? { structuredContent: result.structuredContent } : {})
+          });
+        }
+        const budget = { remaining: MAX_SCRUB_NODES };
         return Object.freeze({
-          content: Object.freeze([...result.content]),
+          content: Object.freeze(result.content.map(block => scrubSecretValue(block, secret, 0, budget))),
           isError: result.isError === true,
-          ...(result.structuredContent !== undefined ? { structuredContent: result.structuredContent } : {})
+          ...(result.structuredContent !== undefined
+            ? { structuredContent: scrubSecretValue(result.structuredContent, secret, 0, budget) }
+            : {})
         });
       } catch (error) {
         throw mapSdkFailure(error, sdk, callSignal, aborted, requestTimeoutMs);
