@@ -142,14 +142,20 @@ export function createPassThroughSanitizer(): (rawArgs?: unknown) => Record<stri
 
     const result: Record<string, unknown> = {};
 
-    for (const [key, value] of Object.entries(parsedArgs)) {
-      if (value === undefined) {
-        continue;
+    try {
+      for (const [key, value] of Object.entries(parsedArgs)) {
+        if (value === undefined) {
+          continue;
+        }
+        if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+          continue;
+        }
+        result[key] = value;
       }
-      if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
-        continue;
-      }
-      result[key] = value;
+    } catch {
+      // A hostile accessor (or proxy trap) on the argument object must never
+      // escape: the sanitizer stays total and fails closed to an empty object.
+      return {};
     }
 
     return result;

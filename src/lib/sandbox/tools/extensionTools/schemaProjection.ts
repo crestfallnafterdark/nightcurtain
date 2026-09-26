@@ -382,6 +382,25 @@ function setOwnKey(target: Record<string, unknown>, key: string, value: unknown)
 }
 
 /**
+ * Clones one JSON-compatible value into a fresh tree of own-key-defined
+ * objects and arrays, so projected outputs never share (or freeze) a
+ * caller-owned member. The argument is expected to have passed
+ * {@link assertJsonCompatible}; accessor members were already refused.
+ *
+ * @param value - JSON-compatible value to clone.
+ * @returns A fresh deep copy (primitives pass through unchanged).
+ */
+function cloneJsonValue(value: unknown): unknown {
+  if (value === null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map((entry) => cloneJsonValue(entry));
+  const copy: Record<string, unknown> = {};
+  for (const key of Object.keys(value)) {
+    setOwnKey(copy, key, cloneJsonValue((value as Record<string, unknown>)[key]));
+  }
+  return copy;
+}
+
+/**
  * Escapes one JSON Pointer reference token.
  *
  * @param token - Raw key or index text.
@@ -448,11 +467,14 @@ function refuse(code: ExtensionSchemaRefusalCode, path?: string): never {
 /**
  * Validates that one schema value is JSON-compatible and cycle-free using an
  * iterative walk, so deeply nested or hostile documents cannot overflow the
- * stack before the depth budget applies.
+ * stack before the depth budget applies. Own enumerable accessor members are
+ * refused without being executed, so a hostile getter can never break the
+ * projector's never-throw contract.
  *
  * @param root - Candidate schema document.
  * @throws {@link ProjectionRefusal} With `malformed-schema` when the value
- *   contains a cycle, a non-finite number, or a non-JSON member.
+ *   contains a cycle, a non-finite number, a non-JSON member, or an accessor
+ *   member.
  */
 function assertJsonCompatible(root: unknown): void {
   interface WalkFrame {
@@ -491,12 +513,21 @@ function assertJsonCompatible(root: unknown): void {
       frame.expanded = true;
       if (Array.isArray(value)) {
         for (let index = value.length - 1; index >= 0; index -= 1) {
+          const descriptor = Object.getOwnPropertyDescriptor(value, index);
+          if (!descriptor || descriptor.get !== undefined || descriptor.set !== undefined) {
+            refuse(EXTENSION_SCHEMA_REFUSAL_CODES.MALFORMED_SCHEMA, '#');
+          }
           stack.push({ value: value[index], expanded: false });
         }
       } else {
         const keys = Object.keys(value);
         for (let index = keys.length - 1; index >= 0; index -= 1) {
-          stack.push({ value: (value as Record<string, unknown>)[keys[index]], expanded: false });
+          const key = keys[index];
+          const descriptor = Object.getOwnPropertyDescriptor(value, key);
+          if (!descriptor || descriptor.get !== undefined || descriptor.set !== undefined) {
+            refuse(EXTENSION_SCHEMA_REFUSAL_CODES.MALFORMED_SCHEMA, '#');
+          }
+          stack.push({ value: (value as Record<string, unknown>)[key], expanded: false });
         }
       }
       continue;
@@ -615,7 +646,7 @@ function applyScalarKeyword(
   }
   if (key === 'enum') {
     if (Array.isArray(value) && value.length > 0) {
-      node.enum = [...value];
+      node.enum = value.map((entry) => cloneJsonValue(entry));
     } else {
       addWarning(ctx, EXTENSION_SCHEMA_WARNING_CODES.KEYWORD_DROPPED, joinSchemaPath(path, 'enum'));
     }
@@ -1204,7 +1235,7 @@ function freezeWarnings(warnings: ExtensionSchemaWarning[]): readonly ExtensionS
  */
 export function projectExtensionInputSchema(rawSchema: unknown): ExtensionSchemaProjection {
   const ctx: ProjectionContext = {
-    root: isPlainRecord(rawSchema) ? rawSchema : {},
+    root: {},
     warnings: [],
     seenWarnings: new Set(),
     refStack: [],
@@ -1213,6 +1244,7 @@ export function projectExtensionInputSchema(rawSchema: unknown): ExtensionSchema
   };
 
   try {
+    if (isPlainRecord(rawSchema)) ctx.root = rawSchema;
     let schema: ExtensionToolSchema;
     if (rawSchema === undefined || rawSchema === null) {
       addFreeformWarning(ctx, '#');
@@ -1250,6 +1282,14 @@ export function projectExtensionInputSchema(rawSchema: unknown): ExtensionSchema
         warnings: freezeWarnings(ctx.warnings)
       });
     }
-    throw error;
+    // Totality is part of the contract: an unexpected failure raised while
+    // reading hostile schema content (a hostile proxy trap, an exotic
+    // accessor path) still yields the documented per-tool malformed refusal
+    // with every warning recorded so far, never an escaping error.
+    return Object.freeze({
+      status: 'refused' as const,
+      refusal: Object.freeze({ code: EXTENSION_SCHEMA_REFUSAL_CODES.MALFORMED_SCHEMA, path: '#' }),
+      warnings: freezeWarnings(ctx.warnings)
+    });
   }
 }

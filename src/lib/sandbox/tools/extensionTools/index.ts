@@ -240,11 +240,11 @@ function createExtensionToolHandler(extensionId: string, serverToolName: string)
   return async (params, context) => {
     const port = readExtensionExecutionPort(context);
     if (port === null) {
-      return {
+      return Object.freeze({
         success: false,
         error: `Extension tool '${serverToolName}' of extension '${extensionId}' has no bound execution port.`,
         code: TOOL_SYSTEM_ERROR_CODES.EXECUTION_FAILED
-      };
+      });
     }
     const result = await port.execute({ extensionId, serverToolName, args: params });
     return mapMcpToolResult(result);
