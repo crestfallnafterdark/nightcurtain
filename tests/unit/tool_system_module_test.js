@@ -1293,3 +1293,55 @@ test('21. a VFS-shaped call observes the bound workspace, never per-call workspa
     );
   }
 });
+
+// ============================================================================
+// 22. grep caseSensitive alias semantics (b52705d)
+// ============================================================================
+
+test('22. grep maps caseSensitive/case_sensitive onto case_insensitive with the value negated (b52705d)', async () => {
+  const vfs = new VirtualFS();
+  vfs.writeFile('/notes.txt', 'ALPHA beta GAMMA', {});
+  const dispatcher = createSandboxToolDispatcher({ virtualFs: vfs, allowedTools: ['grep'] });
+
+  const sensitive = await dispatcher.executeTool('grep', { pattern: 'alpha', caseSensitive: true });
+  assert.strictEqual(sensitive.success, true);
+  assert.deepStrictEqual(
+    sensitive.result,
+    [],
+    'caseSensitive:true must not match the lowercase pattern against uppercase text'
+  );
+
+  const insensitive = await dispatcher.executeTool('grep', { pattern: 'alpha', caseSensitive: false });
+  assert.strictEqual(insensitive.success, true);
+  assert.strictEqual(insensitive.result.length, 1, 'caseSensitive:false must match case-insensitively');
+
+  const snakeSensitive = await dispatcher.executeTool('grep', { pattern: 'alpha', case_sensitive: true });
+  assert.deepStrictEqual(snakeSensitive.result, [], 'case_sensitive:true must stay case-sensitive');
+  const snakeInsensitive = await dispatcher.executeTool('grep', { pattern: 'alpha', case_sensitive: false });
+  assert.strictEqual(snakeInsensitive.result.length, 1, 'case_sensitive:false must match case-insensitively');
+
+  const canonical = await dispatcher.executeTool('grep', { pattern: 'alpha', case_insensitive: true });
+  assert.strictEqual(canonical.result.length, 1, 'the canonical case_insensitive spelling still works');
+
+  // Strict truthiness: non-boolean values never flip the matching mode (default is case-sensitive).
+  for (const nonBoolean of ['true', 1, {}]) {
+    const strict = await dispatcher.executeTool('grep', { pattern: 'alpha', case_insensitive: nonBoolean });
+    assert.deepStrictEqual(
+      strict.result,
+      [],
+      `case_insensitive:${JSON.stringify(nonBoolean)} must not enable insensitive matching`
+    );
+  }
+
+  // An explicit canonical flag wins over the alias spelling.
+  const explicitWins = await dispatcher.executeTool('grep', {
+    pattern: 'alpha',
+    caseSensitive: true,
+    case_insensitive: true
+  });
+  assert.strictEqual(
+    explicitWins.result.length,
+    1,
+    'an explicit canonical case_insensitive flag must win over the caseSensitive alias'
+  );
+});
