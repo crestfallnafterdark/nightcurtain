@@ -1997,6 +1997,106 @@ export function buildRealmAttachmentCeilingView(
 }
 
 /**
+ * Ceiling-editor state of the extension currently picked in the attach editor.
+ * `no-selection` makes no claim about live catalogs (one may well be
+ * connected); `live-catalog` is a selected extension with a non-empty live
+ * conflict-free catalog (the checkbox editor applies); `empty-live-catalog` is
+ * a selected extension whose connected catalog lists no tools; and
+ * `no-live-catalog` is a selected extension without a live conflict-free
+ * catalog (absent, connecting, errored, or conflicting).
+ */
+export type RealmAttachCeilingState =
+  | 'no-selection'
+  | 'live-catalog'
+  | 'empty-live-catalog'
+  | 'no-live-catalog';
+
+/**
+ * Copy/visibility model of the attach-editor ceiling area: the picked
+ * extension's live conflict-free catalog names, whether the live checkbox
+ * editor applies, and the hint under the fallback (radio) editor per selection
+ * mode.
+ */
+export interface RealmAttachCeilingEditorView {
+  /** Which copy state applies to the current selection. */
+  readonly state: RealmAttachCeilingState;
+  /** Live conflict-free catalog call names in catalog order (`[]` otherwise). */
+  readonly catalogNames: readonly string[];
+  /** Whether the live-catalog checkbox ceiling editor applies (non-empty live catalog). */
+  readonly showLiveCatalog: boolean;
+  /** Hint under the fallback editor in the all-tools mode (`''` when the live editor applies). */
+  readonly allToolsHint: string;
+  /** Hint under the fallback editor in the custom-names mode (`''` when the live editor applies). */
+  readonly customNamesHint: string;
+}
+
+/**
+ * Builds the attach-editor ceiling model for one picked extension: the live
+ * conflict-free catalog names (same first-wins/by-id lookup the other
+ * connection views use) plus the state-accurate copy. The editor must never
+ * claim "No live catalog is connected yet" unless the picked extension really
+ * has no live conflict-free catalog — with nothing picked the connectivity of
+ * the store's other extensions says nothing about this selection.
+ *
+ * @param options - Picked extension id (any shape; non-strings read as none) and live connection projections.
+ * @returns Frozen copy/visibility model.
+ *
+ * @example
+ * ```typescript
+ * describeRealmAttachCeilingEditor({ extensionId: 'acme-scoring', connections }).showLiveCatalog;
+ * ```
+ */
+export function describeRealmAttachCeilingEditor(options: {
+  readonly extensionId?: unknown;
+  readonly connections?: readonly ExtensionConnectionProjection[] | null;
+} = {}): RealmAttachCeilingEditorView {
+  const extensionId = typeof options.extensionId === 'string' ? options.extensionId : '';
+  const connections = Array.isArray(options.connections) ? options.connections : [];
+  const connection = extensionId
+    ? connections.find((entry) => entry && entry.extensionId === extensionId) ?? null
+    : null;
+  const live = connection && connection.status === 'connected' && connection.catalog
+    && (connection.conflicts?.length ?? 0) === 0
+    ? connection
+    : null;
+  const catalogNames: readonly string[] = Object.freeze(live && live.catalog ? Object.keys(live.catalog) : []);
+  if (extensionId.length === 0) {
+    return Object.freeze({
+      state: 'no-selection',
+      catalogNames,
+      showLiveCatalog: false,
+      allToolsHint: 'Choose an extension to set its Realm ceiling.',
+      customNamesHint: 'Sanitized model-facing call names (the derived form), comma-separated. Choose an extension to record its ceiling.'
+    });
+  }
+  if (live && catalogNames.length > 0) {
+    return Object.freeze({
+      state: 'live-catalog',
+      catalogNames,
+      showLiveCatalog: true,
+      allToolsHint: '',
+      customNamesHint: ''
+    });
+  }
+  if (live) {
+    return Object.freeze({
+      state: 'empty-live-catalog',
+      catalogNames,
+      showLiveCatalog: false,
+      allToolsHint: 'A live catalog is connected but currently lists no tools — the ceiling stays "all tools" and applies when tools appear.',
+      customNamesHint: 'Sanitized model-facing call names (the derived form), comma-separated. The connected catalog currently lists no tools, so the names are recorded as the ceiling.'
+    });
+  }
+  return Object.freeze({
+    state: 'no-live-catalog',
+    catalogNames,
+    showLiveCatalog: false,
+    allToolsHint: 'No live catalog is connected yet — the ceiling stays "all tools" until a connect.',
+    customNamesHint: 'Sanitized model-facing call names (the derived form), comma-separated. No live catalog is connected yet, so names are recorded as the ceiling for a later connect.'
+  });
+}
+
+/**
  * One extension↔extension conflict with the winning extension's display label.
  */
 export interface RealmExtensionConflictView {

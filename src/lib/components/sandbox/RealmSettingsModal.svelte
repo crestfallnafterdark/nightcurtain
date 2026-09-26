@@ -31,6 +31,7 @@
     buildRealmExtensionAttachmentViews,
     describeExtensionAttachError,
     describeExtensionConnectionError,
+    describeRealmAttachCeilingEditor,
     describeRealmExtensionState,
     EXTENSION_THIRD_PARTY_LABEL
   } from './extensionUiHelpers.ts';
@@ -129,13 +130,19 @@
     });
   });
 
+  /**
+   * Attach-editor ceiling model (ticket 9472417): the picked extension's live
+   * conflict-free catalog names plus the state-accurate copy/visibility
+   * decision, so the editor never claims a missing live catalog while a
+   * connected catalog exists (or before anything is picked).
+   */
+  let attachCeiling = $derived(describeRealmAttachCeilingEditor({
+    extensionId: attachExtensionId,
+    connections: sandboxStore.extensionConnections
+  }));
+
   /** Live conflict-free catalog names of the extension picked in the attach editor. */
-  let attachCatalogNames = $derived.by(() => {
-    if (!attachExtensionId) return [];
-    const connection = sandboxStore.extensionConnections.find((entry) => entry.extensionId === attachExtensionId) ?? null;
-    if (!connection || connection.status !== 'connected' || !connection.catalog) return [];
-    return Object.keys(connection.catalog);
-  });
+  let attachCatalogNames = $derived(attachCeiling.catalogNames);
 
   let attachableExtensions = $derived(
     installedExtensions.filter(
@@ -777,7 +784,7 @@
               </div>
               <div class="form-group grow">
                 <span class="field-label">Realm-level ceiling (tool selection)</span>
-                {#if attachCatalogNames.length > 0}
+                {#if attachCeiling.showLiveCatalog}
                   <div class="ceiling-tool-list">
                     <label class="ceiling-tool-row">
                       <input
@@ -827,12 +834,11 @@
                       oninput={clearExtensionMessages}
                     />
                     <span class="attach-empty-hint">
-                      Sanitized model-facing call names (the derived form), comma-separated. No live catalog is
-                      connected yet, so names are recorded as the ceiling for a later connect.
+                      {attachCeiling.customNamesHint}
                     </span>
                   {:else}
                     <span class="attach-empty-hint">
-                      No live catalog is connected yet — the ceiling stays "all tools" until a connect.
+                      {attachCeiling.allToolsHint}
                     </span>
                   {/if}
                 {/if}
