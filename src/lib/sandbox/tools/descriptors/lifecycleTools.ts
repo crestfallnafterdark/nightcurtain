@@ -261,9 +261,6 @@ function readPublicString(source: Record<string, unknown> | null, key: string): 
 /** Exact shape of the internal realm-global partition key (`realm:<realmId>:global`). */
 const REALM_GLOBAL_WORKSPACE_PATTERN = /^realm:.+:global$/;
 
-/** Internal realm partition vocabulary that must never reach an agent-visible field. */
-const REALM_WORKSPACE_VOCABULARY_PATTERN = /realm:/;
-
 /**
  * Internal realm/identity vocabulary an agent-supplied identifier must never
  * carry (ticket eab4e51, folded into d57cbc1): `realm:` anywhere (canonical
@@ -309,9 +306,12 @@ function carriesInternalRealmVocabulary(value: unknown): boolean {
 /**
  * Maps an internal workspace key onto its realm-opaque agent-visible label:
  * every `realm:<realmId>:global` partition key is presented as `global`
- * (matching the VirtualFS public labeling); any other key carrying the
- * internal `realm:` vocabulary is withheld (`null`) so a bounded receipt field
- * can never disclose a realm identifier. Plain keys pass through unchanged.
+ * (matching the VirtualFS public labeling); any other key carrying internal
+ * realm/system vocabulary (`realm:`, the `system:` prefix, the seeded
+ * `realm_generic` id — the same `carriesInternalRealmVocabulary` contract as
+ * the M3 store mask) is withheld (`null`) so a bounded receipt field can never
+ * disclose a realm identifier or a reserved system scope. Plain keys pass
+ * through unchanged.
  *
  * Exported for the M2 meta-plane descriptors (`metaTools.ts`), which apply the
  * same realm-opaque masking to their bounded receipts.
@@ -322,7 +322,7 @@ function carriesInternalRealmVocabulary(value: unknown): boolean {
 export function toAgentVisibleWorkspaceKey(value: string | null): string | null {
   if (!value) return null;
   if (REALM_GLOBAL_WORKSPACE_PATTERN.test(value)) return 'global';
-  if (REALM_WORKSPACE_VOCABULARY_PATTERN.test(value)) return null;
+  if (carriesInternalRealmVocabulary(value)) return null;
   return value;
 }
 
@@ -605,11 +605,12 @@ function readPublicToolPolicy(
  * `EXECUTION_FAILED` error) instead of fabricating `'unknown'` identity
  * (ticket f541390). The workspace label is realm-opaque: an internal
  * `realm:<realmId>:global` partition key is presented as `global`, and any
- * other key carrying the internal `realm:` vocabulary is omitted, so no realm
- * identifier or realm field reaches agent-visible tool history/UI (ticket
- * 550486c; WAVE_R §0.2). A record id carrying internal realm vocabulary is
- * withheld entirely (`null`): the receipt must never echo it (ticket eab4e51,
- * folded into d57cbc1).
+ * other key carrying internal realm/system vocabulary (`realm:`, the `system:`
+ * prefix, the seeded `realm_generic` id — ticket 7955fd9) is omitted, so no
+ * realm identifier or realm field reaches agent-visible tool history/UI
+ * (ticket 550486c; WAVE_R §0.2). A record id carrying internal realm
+ * vocabulary is withheld entirely (`null`): the receipt must never echo it
+ * (ticket eab4e51, folded into d57cbc1).
  *
  * @param record - Launched record returned by the lifecycle port.
  * @returns The frozen, wire-safe public receipt (without the `success` flag),
@@ -1016,10 +1017,11 @@ interface PublicAgentDescriptor {
  * never carries a live `Agent` or its enumerable state (ticket 9133495). The
  * workspace label is realm-opaque (ticket 550486c): internal
  * `realm:<realmId>:global` partition keys are presented as `global`, and any
- * other internal `realm:` vocabulary is withheld — the `workspace` field is
- * omitted rather than falling back to the raw id (ticket eab4e51, folded into
- * d57cbc1). An entry whose id carries internal realm vocabulary is withheld
- * entirely (`null`): a listing must never echo it.
+ * other internal realm/system vocabulary (`realm:`, the `system:` prefix, the
+ * seeded `realm_generic` id — ticket 7955fd9) is withheld — the `workspace`
+ * field is omitted rather than falling back to the raw id (ticket eab4e51,
+ * folded into d57cbc1). An entry whose id carries internal realm vocabulary
+ * is withheld entirely (`null`): a listing must never echo it.
  *
  * @param record - Descriptor or legacy agent record returned by the port.
  * @returns The frozen, wire-safe public descriptor, or `null` when the entry
