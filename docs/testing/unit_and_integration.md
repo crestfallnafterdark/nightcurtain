@@ -10,7 +10,7 @@
 
 ## 1. Overview & Execution Architecture
 
-The Agentic Sandbox Studio unit and integration test suites run under the native Node.js test runner (`node --test`) using strict assertions (`node:assert/strict`). The test suite comprises **110 native test suites (56 unit, 54 integration)**, executing with zero mocks for core application classes.
+The Agentic Sandbox Studio unit and integration test suites run under the native Node.js test runner (`node --test`) using strict assertions (`node:assert/strict`). The test suite comprises **113 native test suites (57 unit, 56 integration)**, executing with zero mocks for core application classes.
 
 > **Canonical inventory.** The per-file suite inventory is maintained in [Testing Strategy — §4 Test Suite Inventory](testing_strategy.md#4-test-suite-inventory--classification); this document covers architecture and verification semantics.
 
@@ -24,7 +24,7 @@ flowchart TD
         VFS["VirtualFS (Multi-Tenant Workspaces, JSON Pointers, Paginated Listing)"]
         BUS["MessagingBus (Pub/Sub Inboxes, Deduplicated Envelopes, Archive Store)"]
         CLK["WorldClock (Discrete Time Progression, Scheduled Alarm Triggers)"]
-        DISP["ToolDispatcher (38 Tools Contract, Fail-Closed Security Gating, Type Coercion)"]
+        DISP["ToolDispatcher (41 Tools Contract, Fail-Closed Security Gating, Type Coercion)"]
         RT["AgentRuntime (State Machine, Turn Execution Loop, History Compaction)"]
     end
 
@@ -113,7 +113,7 @@ stateDiagram-v2
 ---
 
 ### 2.4 `ToolDispatcher` & Security Gating
-The [`ToolDispatcher`](../../src/lib/sandbox/toolDefinitions/index.ts) is the fail-closed authorization gateway governing all 38 canonical tools.
+The [`ToolDispatcher`](../../src/lib/sandbox/toolDefinitions/index.ts) is the fail-closed authorization gateway governing all 41 canonical tools.
 
 ```mermaid
 flowchart TD
@@ -133,12 +133,12 @@ flowchart TD
 #### Canonical Tool Presets Matrix:
 | Preset Name | Tool Count | Permitted Capabilities | Restrictions |
 |---|---|---|---|
-| `all` / `*` | 38 | Full unconstrained access to all tools | Reserved for privileged Director / Admin |
-| `manager` | 34 | File read/write/patch, messaging, subagent lifecycle/invocation, scheduling | Restricted from system clock overrides and sudo escalations |
-| `collaborator`| 25 | File read/write, messaging, inbox operations, precalls | Cannot spawn agents or modify global configurations |
-| `readonly_collaborator` | 14 | Read-only VFS + inbox/mail verbs, `send_message`, precalls | No file writes, deletes, patches, or subagent/scheduler capabilities |
-| `readonly` | 13 | `read_file`, `query_json`, `list_files`, `grep`, `whoami`, `time` | **Strictly no file writes, deletes, patches, or messaging** |
-| `null` / `[]` | 4 | Safe innate primitives only (`whoami`, `time`, `describeTool`, `batchPrecall`)| Fail-closed zero-capability baseline |
+| `all` / `*` | 41 | Full unconstrained access to all tools | Reserved for privileged Director / Admin |
+| `manager` | 37 | File read/write/patch, messaging, subagent lifecycle/invocation, scheduling | Restricted from system clock overrides and sudo escalations |
+| `collaborator`| 28 | File read/write, messaging, inbox operations, precalls | Cannot spawn agents or modify global configurations |
+| `readonly_collaborator` | 17 | Read-only VFS + inbox/mail verbs, `send_message`, precalls | No file writes, deletes, patches, or subagent/scheduler capabilities |
+| `readonly` | 16 | `read_file`, `query_json`, `list_files`, `grep`, `whoami`, `time` | **Strictly no file writes, deletes, patches, or messaging** |
+| `null` / `[]` | 7 | Safe innate primitives only (`whoami`, `get_current_time`, `describe_tool`, `batch_precall`, `list_tools`, `list_tool_presets`, `describe_preset`)| Fail-closed zero-capability baseline |
 
 ---
 
