@@ -23,7 +23,7 @@
   import { isRealmNameTaken } from './realmLauncherHelpers.ts';
   import { buildRealmProvenanceView } from './realmTemplateHelpers.ts';
   import { buildRealmProvenanceDetailView } from './realmHydrationHelpers.ts';
-  import { describeRealmDeletion, safeRealmColor } from './realmGroups.ts';
+  import { describeRealmDeletion, safeRealmColor, selectRealmMembers } from './realmGroups.ts';
   import ExtensionInstallDialog from './ExtensionInstallDialog.svelte';
   import {
     buildExtensionLabelMap,
@@ -76,10 +76,10 @@
   // recorded at launch — hashes and paths only, never raw values.
   let provenanceDetail = $derived(buildRealmProvenanceDetailView(selectedRealm));
   let activeMembers = $derived(
-    selectedRealm ? sandboxStore.agents.filter((agent) => agent.config?.realmId === selectedRealm.id) : []
+    selectedRealm ? selectRealmMembers(sandboxStore.agents, selectedRealm.id) : []
   );
   let recycledMembers = $derived(
-    selectedRealm ? sandboxStore.recycleBin.filter((agent) => agent.config?.realmId === selectedRealm.id) : []
+    selectedRealm ? selectRealmMembers(sandboxStore.recycleBin, selectedRealm.id) : []
   );
   let accent = $derived(selectedRealm ? safeRealmColor(selectedRealm.color) : null);
   // Wave R deletion model: default refusal while members exist, explicit
@@ -571,7 +571,7 @@
           >
             <span class="realm-dot" style="background: {safeRealmColor(realm.color) ?? 'var(--text-muted)'}"></span>
             <span>{realm.name}</span>
-            <span class="realm-chip-count font-mono">{sandboxStore.agents.filter((agent) => agent.config?.realmId === realm.id).length}</span>
+            <span class="realm-chip-count font-mono">{selectRealmMembers(sandboxStore.agents, realm.id).length}</span>
           </button>
         {/each}
       </div>
