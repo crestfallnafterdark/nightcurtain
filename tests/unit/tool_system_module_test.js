@@ -1006,14 +1006,19 @@ test('16. Precall & Tool Reflection Descriptor Delegations (2 Tools)', async () 
   assert.strictEqual(batchRes.count, 2);
   assert.strictEqual(batchRes.results[0].result.content, 'precall content');
 
-  // Forbidden mutating tool inside batch_precall triggers PRECALL_FORBIDDEN
+  // Forbidden mutating tool inside batch_precall triggers PRECALL_FORBIDDEN and
+  // an explicit all-denied failure envelope (never a bare success).
   const badBatch = await dispatcher.executeTool('batch_precall', {
     calls: [
       { name: 'write_file', arguments: { file_path: '/lore.txt', content: 'illegal' } }
     ]
   }, { executeTool: dispatcher.executeTool.bind(dispatcher) });
 
-  assert.strictEqual(badBatch.success, true);
+  assert.strictEqual(badBatch.success, false);
+  assert.strictEqual(badBatch.code, TOOL_SYSTEM_ERROR_CODES.PRECALL_FORBIDDEN);
+  assert.strictEqual(badBatch.count, 1);
+  assert.strictEqual(badBatch.executed, 0);
+  assert.strictEqual(badBatch.denied, 1);
   assert.strictEqual(badBatch.results[0].success, false);
   assert.strictEqual(badBatch.results[0].code, TOOL_SYSTEM_ERROR_CODES.PRECALL_FORBIDDEN);
 
@@ -1344,4 +1349,71 @@ test('22. grep maps caseSensitive/case_sensitive onto case_insensitive with the 
     1,
     'an explicit canonical case_insensitive flag must win over the caseSensitive alias'
   );
+});
+
+// ============================================================================
+// 23. batch_precall envelope truth (eba7c76)
+// ============================================================================
+
+test('23. batch_precall rejects missing/non-array calls and reports explicit denied/partial accounting (eba7c76)', async () => {
+  const dispatcher = createSandboxToolDispatcher({
+    allowedTools: 'all',
+    virtualFs: { readFile: async () => ({ success: true, content: 'precall body' }) }
+  });
+
+  // Missing / non-array `calls`: INVALID_ARGUMENTS, never a false-success envelope.
+  for (const [label, args] of [
+    ['missing', {}],
+    ['null', { calls: null }],
+    ['string', { calls: 'nope' }],
+    ['number', { calls: 7 }],
+    ['object', { calls: { name: 'read_file' } }]
+  ]) {
+    const res = await dispatcher.executeTool('batch_precall', args);
+    assert.strictEqual(res.success, false, `${label}: batch must fail closed`);
+    assert.strictEqual(res.code, TOOL_SYSTEM_ERROR_CODES.INVALID_ARGUMENTS, `${label}: argument code`);
+  }
+
+  // An empty array is a valid zero-call batch with explicit accounting.
+  const empty = await dispatcher.executeTool('batch_precall', { calls: [] });
+  assert.strictEqual(empty.success, true);
+  assert.strictEqual(empty.partial, false);
+  assert.strictEqual(empty.count, 0);
+  assert.strictEqual(empty.executed, 0);
+  assert.strictEqual(empty.denied, 0);
+  assert.deepStrictEqual(empty.results, []);
+
+  // Mixed batch: explicit partial accounting, per-item denials stay visible.
+  const mixed = await dispatcher.executeTool('batch_precall', {
+    calls: [
+      { name: 'read_file', arguments: { file_path: '/ok.txt' } },
+      { name: 'write_file', arguments: { file_path: '/x.txt', content: 'nope' } },
+      { name: 'not_a_tool', arguments: {} }
+    ]
+  });
+  assert.strictEqual(mixed.success, true, 'a partly executed batch keeps the success envelope');
+  assert.strictEqual(mixed.partial, true);
+  assert.strictEqual(mixed.count, 3);
+  assert.strictEqual(mixed.executed, 1);
+  assert.strictEqual(mixed.denied, 2);
+  assert.strictEqual(mixed.results[0].result.content, 'precall body');
+  assert.strictEqual(mixed.results[1].code, TOOL_SYSTEM_ERROR_CODES.PRECALL_FORBIDDEN);
+  assert.strictEqual(mixed.results[2].code, TOOL_SYSTEM_ERROR_CODES.PRECALL_FORBIDDEN);
+
+  // All-denied: explicit failure envelope that still carries every per-item receipt.
+  const allDenied = await dispatcher.executeTool('batch_precall', {
+    calls: [
+      { name: 'write_file', arguments: {} },
+      { name: 'totally_unknown_tool', arguments: {} }
+    ]
+  });
+  assert.strictEqual(allDenied.success, false);
+  assert.strictEqual(allDenied.code, TOOL_SYSTEM_ERROR_CODES.PRECALL_FORBIDDEN);
+  assert.strictEqual(allDenied.partial, false);
+  assert.strictEqual(allDenied.count, 2);
+  assert.strictEqual(allDenied.executed, 0);
+  assert.strictEqual(allDenied.denied, 2);
+  assert.strictEqual(allDenied.results.length, 2);
+  assert.strictEqual(allDenied.results[0].success, false);
+  assert.strictEqual(allDenied.results[1].success, false);
 });

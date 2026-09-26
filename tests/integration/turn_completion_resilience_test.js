@@ -304,7 +304,9 @@ await runTestScenario(
       const res = await dispatcher.executeTool('runtime_batchPrecall', {
         calls: [forbidden]
       });
-      assert.equal(res.success, true, `Batch returns a per-call result for '${forbidden.name}'`);
+      assert.equal(res.success, false, `All-denied batch fails explicitly for '${forbidden.name}'`);
+      assert.equal(res.executed, 0);
+      assert.equal(res.denied, 1);
       const item = res.results[0];
       const callResult = item.result || item;
       assert.equal(callResult.success, false, `Tool '${forbidden.name}' must not execute`);

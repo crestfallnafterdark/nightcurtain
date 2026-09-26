@@ -472,7 +472,10 @@ async function runEpic16TestSuite() {
         const res = await gateDispatcher.executeTool('runtime_batchPrecall', {
           calls: [{ name, arguments: {} }]
         });
-        assert.equal(res.success, true, 'Batch envelope itself succeeds');
+        assert.equal(res.success, false, 'An all-denied batch fails explicitly');
+        assert.equal(res.code, 'PRECALL_FORBIDDEN');
+        assert.equal(res.executed, 0);
+        assert.equal(res.denied, 1);
         assert.equal(res.count, 1);
         const item = res.results[0];
         assert.equal(item.success, false, `Precall '${String(name)}' must be rejected`);
