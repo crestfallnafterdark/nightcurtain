@@ -23,6 +23,11 @@
  * - the dispatcher binds the resolved caller's canonical identity key when a
  *   trusted `realmId` scope is bound, so two realms sharing one literal id
  *   resolve their own registrations (real VirtualFS partitions).
+ *
+ * Parity (ticket 7955fd9): the shared M2 mask withholds every internal-shaped
+ * workspace key the M3 store mask withholds (`system:*` prefix, the seeded
+ * `realm_generic` id), not only the `realm:` partition vocabulary, while
+ * `realm:<realmId>:global` still labels as `global`.
  */
 
 import '../test_env.js';
@@ -458,6 +463,104 @@ test('d57cbc1: the dispatcher binds the callerKey so same-id realm callers resol
     const denied = await unknown.executeTool('read_file', { file_path: '/note.md' });
     assert.equal(denied.success, false, 'a realm scope with no matching registration fails closed');
     assert.equal(denied.code, 'PERMISSION_DENIED');
+  } finally {
+    runtime.destroy();
+  }
+});
+
+test('7955fd9: internal-shaped workspace pins are withheld from listings/whoami; realm-global stays global', async () => {
+  const runtime = new AgentRuntime({ autoBootstrapDirector: false });
+  try {
+    await runtime.ensureDirector();
+    const operator = runtime.createAgentIdentityPort().getAgentIdentity('director').authority;
+    await runtime.launchAgent({
+      config: {
+        id: 'root_manager',
+        realmId: REALM_ID,
+        privileged: true,
+        allowedTools: ['spawn_agent', 'list_agents', 'inspect_agent']
+      },
+      principal: operator
+    });
+    const dispatcher = createSandboxToolDispatcher({ runtime, agentId: 'root_manager' });
+
+    // Operator-pinned internal-shaped workspace keys without the realm-partition
+    // shape (`system:*` canonical scope, the seeded `realm_generic` id): the
+    // shared M2 mask must withhold them exactly like the M3 store mask
+    // (`carriesInternalRealmVocabulary`), never falling back to the raw key.
+    for (const [id, pinnedKey] of [
+      ['pinned_system', 'system:boss'],
+      ['pinned_generic', 'realm_generic']
+    ]) {
+      await runtime.launchAgent({
+        config: {
+          id,
+          realmId: REALM_ID,
+          workspace: pinnedKey,
+          spawnedBy: 'root_manager',
+          allowedTools: ['whoami']
+        },
+        principal: operator
+      });
+
+      const listed = await dispatcher.executeTool('list_agents', {});
+      const entry = listed.result.find((child) => child.id === id);
+      assert.ok(entry, `${id} is listed for its authority creator`);
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(entry, 'workspace'),
+        false,
+        `the listing withholds the internal-shaped workspace '${pinnedKey}'`
+      );
+      assert.equal(
+        JSON.stringify(listed.result).includes(pinnedKey),
+        false,
+        `the listing never echoes '${pinnedKey}'`
+      );
+
+      const inspected = await dispatcher.executeTool('inspect_agent', { target: id });
+      assert.equal(inspected.success, true, `inspect_agent must succeed: ${inspected.error}`);
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(inspected, 'workspace'),
+        false,
+        `inspect_agent withholds the internal-shaped workspace '${pinnedKey}'`
+      );
+      assert.equal(
+        JSON.stringify(inspected).includes(pinnedKey),
+        false,
+        `inspect_agent never echoes '${pinnedKey}'`
+      );
+
+      const childDispatcher = createSandboxToolDispatcher({ runtime, agentId: id, realmId: REALM_ID });
+      const who = await childDispatcher.executeTool('whoami', {});
+      assert.equal(who.success, true, `whoami must succeed: ${who.error}`);
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(who, 'workspaceId'),
+        false,
+        `whoami withholds the internal-shaped workspace '${pinnedKey}'`
+      );
+      assert.equal(
+        JSON.stringify(who).includes(pinnedKey),
+        false,
+        `whoami never echoes '${pinnedKey}'`
+      );
+    }
+
+    // The realm-global partition keeps its documented label (unchanged branch).
+    await runtime.launchAgent({
+      config: { id: 'pinned_global', realmId: REALM_ID, workspace: `realm:${REALM_ID}:global`, allowedTools: ['whoami'] },
+      principal: operator
+    });
+    const listedGlobal = await dispatcher.executeTool('list_agents', {});
+    const globalEntry = listedGlobal.result.find((child) => child.id === 'pinned_global');
+    assert.ok(globalEntry, 'the realm-global pinned child is listed');
+    assert.equal(globalEntry.workspace, 'global', 'realm:<realmId>:global still labels as global');
+    assertRealmOpaque(JSON.stringify(listedGlobal.result), 'the listing with a realm-global pin');
+
+    const globalDispatcher = createSandboxToolDispatcher({ runtime, agentId: 'pinned_global', realmId: REALM_ID });
+    const globalWho = await globalDispatcher.executeTool('whoami', {});
+    assert.equal(globalWho.success, true, `whoami must succeed: ${globalWho.error}`);
+    assert.equal(globalWho.workspaceId, 'global', 'whoami labels realm:<realmId>:global as global');
+    assertRealmOpaque(JSON.stringify(globalWho), 'the realm-global whoami receipt');
   } finally {
     runtime.destroy();
   }
