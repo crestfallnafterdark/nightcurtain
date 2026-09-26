@@ -1,7 +1,7 @@
 # Agentic Sandbox Studio — Master Documentation Portal
 
 **Status:** CANONICAL
-**Last verified:** 2026-09-22
+**Last verified:** 2026-09-27
 
 > **Authoritative technical documentation for the multi-agent sandbox substrate: architecture, Svelte 5 studio UI, verification harness, and ratified requirements.**
 
@@ -92,7 +92,7 @@ docs/
 └── testing/                                   # Verification, QA & Test Harnesses
     ├── testing_strategy.md                    # Multi-Tier Testing Pyramid, Zero-Mock Philosophy, CI/CD Gates
     ├── unit_and_integration.md                # Node Native Runner (109 suites: 56 Unit / 53 Integration), Integration Test Contracts
-    ├── e2e_and_visual.md                      # Playwright Browser E2E Specs (8), Responsive Visual Baselines, Test Auditor
+    ├── e2e_and_visual.md                      # Playwright Browser E2E Specs (10), Responsive Visual Baselines, Test Auditor
     ├── exploratory_qa_plan.md                 # Agent-Driven Exploratory QA via Playwright MCP, Charters, Secret Handling
     └── audit_and_repro.md                     # Audit Repro Mechanics, Test-First Fix Waves, Provider Smoke Pre-flight
 ```
@@ -168,7 +168,7 @@ npm run test:integration
 # Type gates: jsconfig tsc (0 total / 0 in src/lib/sandbox) + strict contracts tsc (0) + svelte-check (≤96 ratchet)
 npm run typecheck
 
-# Execute Playwright browser-driven E2E tests (8 specs)
+# Execute Playwright browser-driven E2E tests (10 specs)
 npm run test:e2e
 
 # Responsive visual capture suite

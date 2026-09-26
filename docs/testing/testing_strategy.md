@@ -1,7 +1,7 @@
 # Testing Strategy, Quality Assurance & Verification Architecture
 
 **Status:** CANONICAL
-**Last verified: 2026-09-26**
+**Last verified: 2026-09-27**
 
 > **Authoritative Technical Standard for Agentic Sandbox Studio Test Engineering**  
 > *Target Systems: Multi-Agent Sandbox Studio, AgentRuntime, VirtualFS, MessagingBus, ToolDispatcher, preset catalog & credential vault*
@@ -289,7 +289,7 @@ sequenceDiagram
     G3-->>Dev: Gate 3 Passed (vite build clean; tsc 0 total / 0 sandbox errors)
 
     Dev->>G4: npm run test:e2e (playwright test)
-    Note over G4: Spins up Vite dev server, runs 8 specs across 3 viewports, checks console errors
+    Note over G4: Spins up Vite dev server, runs 10 specs across 3 viewports, checks console errors
     G4-->>Dev: Gate 4 Passed (All user journeys verified, 0 page errors)
 ```
 
