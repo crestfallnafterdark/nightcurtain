@@ -19,11 +19,11 @@ graph TD
     end
 
     subgraph L2["Tier 2: Zero-Mock Subsystem Integration (node --test)"]
-        INT["56 Integration Suites (tests/integration/)<br/>• Real VirtualFS, MessagingBus, WorldClock, AgentRuntime<br/>• Preset Binding & Credential Vault Workflows<br/>• Precall Pipeline & Tool Security Gating Verification<br/>• Concurrency & State Persistence Fault Injection"]
+        INT["57 Integration Suites (tests/integration/)<br/>• Real VirtualFS, MessagingBus, WorldClock, AgentRuntime<br/>• Preset Binding & Credential Vault Workflows<br/>• Precall Pipeline & Tool Security Gating Verification<br/>• Concurrency & State Persistence Fault Injection"]
     end
 
     subgraph L1["Tier 1: Atomic Unit & Contract Testing (node --test)"]
-        UNIT["57 Unit Suites (tests/unit/)<br/>• Pure Functions & Algorithms<br/>• DeepSeek Reasoning Hygiene (INV-REASONING-STRING)<br/>• JSON Pointers, Parsers, Preset Catalog, LoRA Tags<br/>• Module Contracts & Provider Adapters"]
+        UNIT["58 Unit Suites (tests/unit/)<br/>• Pure Functions & Algorithms<br/>• DeepSeek Reasoning Hygiene (INV-REASONING-STRING)<br/>• JSON Pointers, Parsers, Preset Catalog, LoRA Tags<br/>• Module Contracts & Provider Adapters"]
     end
 
     L1 --> L2
@@ -101,7 +101,7 @@ The master runner executes all Unit and Integration suites in strict sub-process
 // Sample output format from tests/runner.js:
 // ======================================================================
 //   AGENTIC SANDBOX STUDIO MASTER TEST SUITE RUNNER
-//   Total Suites: 113 (57 Unit, 56 Integration)
+//   Total Suites: 115 (58 Unit, 57 Integration)
 // ======================================================================
 //   [Unit       ] deepseek_provider_test.js                  ✔ PASS (42ms)
 //   [Unit       ] deepseek_reasoning_hygiene_test.js         ✔ PASS (18ms)
@@ -109,7 +109,7 @@ The master runner executes all Unit and Integration suites in strict sub-process
 //   [Integration] tool_contract_security_gating_test.js      ✔ PASS (115ms)
 //   [Integration] mail_injection_precall_pipeline_test.js    ✔ PASS (188ms)
 // ======================================================================
-//   Suites:       113 passed, 113 total
+//   Suites:       115 passed, 115 total
 //   Failed:       0 failed
 //   Duration:     3.42s
 // ======================================================================
@@ -126,7 +126,7 @@ All Node-based test suites import [`tests/test_env.js`](../../tests/test_env.js)
 
 ## 4. Test Suite Inventory & Classification
 
-The project includes **113 native test suites** (57 unit, 56 integration) and **10 browser E2E specs**:
+The project includes **115 native test suites** (58 unit, 57 integration) and **10 browser E2E specs**:
 
 > **Canonical inventory.** This chapter is the single source of truth for test-suite counts and per-file listings; [`unit_and_integration.md`](unit_and_integration.md) cross-links here instead of duplicating it.
 
@@ -162,6 +162,7 @@ The project includes **113 native test suites** (57 unit, 56 integration) and **
 | [`realm_catalog_module_test.js`](../../tests/unit/realm_catalog_module_test.js) | `src/lib/sandbox/realmCatalog/index.ts` | Canonical surface + legacy documents: demo fixture shape, deterministic/fail-closed materialization, literal ids/overrides, capability summaries, composition and baked history, canonical transport + per-bundle `templateVersion`, `hashText`, reserved-name hardening, per-agent `authorities` declarations, and the format-v1 schema through the read shim. |
 | [`realm_catalog_v2_module_test.js`](../../tests/unit/realm_catalog_v2_module_test.js) | `src/lib/sandbox/realmCatalog/index.ts` | Canonical format (decision `2ba3008`): totality-validated schema (inputs/placements/directives), positioned prompt/history injection with fileset selection, placement and directive resolution, payload validation + canonical digest, authored-form bundle versioning in either format, canonical transport round-trips, materialization, and the v1 read shim (template + legacy package conversion). |
 | [`realm_content_pipeline_test.js`](../../tests/unit/realm_content_pipeline_test.js) | `scripts/embed_realm_content.mjs` → `content.generated.ts` | Embed pipeline: catalog-validated manifests (format v2, legacy v1 through the read shim), v2 bundle references (prompt/history `file` parts, `defaultFile` prefills, placement `file` sources), UTF-8-only 256 KB/file cap, dangling-reference and unsafe-path rejection, `BAKED_TEMPLATE_BUNDLES` shape (demo plus the embedded bundles), `--check` freshness. |
+| [`realm_export_helpers_test.js`](../../tests/unit/realm_export_helpers_test.js) | `src/lib/components/sandbox/realmArchiveHelpers.ts` | Realm-export host helpers: download blob/filename assembly, the headless browser-download wrapper receipt, and operator copy for export results, import receipts, and dropped authority (ticket 3fe5221). |
 | [`realm_hydration_helpers_test.js`](../../tests/unit/realm_hydration_helpers_test.js) | `src/lib/components/sandbox/realmHydrationHelpers.ts` + `realmPayloadLibrary.ts` | Hydration workspace projections (input requirement reviews, attachment views, placement destinations, directive review), pin/digest cards, saved-payload naming/filenames and library lifecycle, Realm Manager rehydrate plans (fail-closed missing members, write groups, directives) and provenance detail views. |
 | [`realm_launcher_helpers_test.js`](../../tests/unit/realm_launcher_helpers_test.js) | `src/lib/components/sandbox/realmLauncherHelpers.ts` + `realmReviewHelpers.ts` | Launcher preview projection, preset binding display, seed row parsing/validation, target options, error descriptors; shape-tagged input drafts/usage map/attachment validation, prompt/history previews and provenance, placement/directive seed views; review completion (authority approvals/trust display, payload attach, files-dialog provenance, edited-slot payload assembly). |
 | [`realm_registry_module_test.js`](../../tests/unit/realm_registry_module_test.js) | `src/lib/sandbox/realmRegistry/index.ts` | Realm record CRUD, frozen records, change events, storage adapter, invalid-entry dropping, instance-provenance freeze/validation/patch, realm extension attachments (`RealmRecord.extensions`). |
@@ -211,11 +212,13 @@ The project includes **113 native test suites** (57 unit, 56 integration) and **
 | [`messaging_bus_test.js`](../../tests/integration/messaging_bus_test.js) | `MessagingBus` | FIFO mailbox: dequeue on read, clean drain, peek, archive fidelity. |
 | [`messaging_invocations_test.js`](../../tests/integration/messaging_invocations_test.js) | `MessagingBus` + `InvocationEngine` + `AgentRuntime` | Event-driven multi-agent flows, history purity, cascade execution. |
 | [`meta_agent_parental_test.js`](../../tests/integration/meta_agent_parental_test.js) | `ToolDispatcher` + `AgentRuntime` + `SandboxStore` + `sandboxPersistence` | parental meta tier: `inspect_agent`/`update_agent` authorization matrix (own spawns / scoped `@agent:*` / uniform denials), resulting-state ≤-editor bound, runtime safe-state queue (bounded, latest-wins, flushed at `turn_complete`), F3 scoped-grant snapshot round-trip, audit + realm-opacity receipts (ticket c8a748f). |
+| [`meta_mcp_attach_test.js`](../../tests/integration/meta_mcp_attach_test.js) | `ToolDispatcher` + `AgentRuntime` + `SandboxStore` + `toolDefinitions` + `tools/descriptors` + `mcpClient` + `node:http` fixture | Privileged MCP meta-attach (`list_extensions`/`attach_extension`, ticket `a02bce7`): exact `@extensions:authority` only (wildcard/privileged/ordinary channels denied, schema exposure filtered), operator-only verb refusal, realm-wide attach + member safe-state sweep, installed+connected gates, idempotence, revocation, ordinary-agent opacity, audits, per-realm grant bounds. |
 | [`meta_realm_admin_test.js`](../../tests/integration/meta_realm_admin_test.js) | `ToolDispatcher` + `AgentRuntime` + `SandboxStore` + `realmCatalog` + `node:http` fixture | realm admin meta tools: pinned `RealmAdminPort`; exact `@realm:inspect`/`@realm:edit` gating; roster/attachments/ceiling/provenance/live-state; closed nested patches with zero partial apply; operator-only keys refused; actor-attributed audits; safe-state sweep (ticket 094de1b). |
 | [`operator_realm_injection_test.js`](../../tests/integration/operator_realm_injection_test.js) | `SandboxStore` + `TurnExecutionEngine` + `MessagingBus` | Operator-attributed injection and manual sends into realm-bound targets; agent cross-realm denial; no-director fail-closed. |
 | [`modern_settings_workflow_test.js`](../../tests/integration/modern_settings_workflow_test.js) | `PresetCatalog` + `CredentialVault` + provider adapters | Modern settings workflow, progressive disclosure, live balance separation. |
 | [`persistence_purge_test.js`](../../tests/integration/persistence_purge_test.js) | `sandboxPersistence` + `SandboxStore` | Recycle-bin serialization, zero-zombie hydration, hard purge governance. |
 | [`preset_binding_runtime_test.js`](../../tests/integration/preset_binding_runtime_test.js) | `presetCatalog` + `AgentRuntime` + `Agent` | Binding-only agents: preset resolution at launch/turn start, credential rotation, hydration healing. |
+| [`realm_export_test.js`](../../tests/integration/realm_export_test.js) | `SandboxStore` + `AgentRuntime` + `VirtualFS` + `MessagingBus` + `WorldClock` + `RealmRegistry` + `ExtensionRegistry` | Full realm export/import: versioned `RealmArchiveEnvelope` v1, 14-row slice completeness, byte-level credential redaction, fresh-realm remap with no authority minting, atomic typed rollback (ticket 3fe5221). |
 | [`realm_identity_projection_test.js`](../../tests/integration/realm_identity_projection_test.js) | `AgentRuntime` + `runtime/agent` + `worldClock` | Realm identity projection (`realmId`/`realmBypass`), launch inheritance, immutable membership (all realm moves denied, operator included), snapshot round-trip, end-to-end clock sync target. |
 | [`realm_identity_matrix_test.js`](../../tests/integration/realm_identity_matrix_test.js) | `AgentRuntime` + `AgentLifecycleManager` + `MessagingBus` + `VirtualFS` + `WorldClock` + `RuntimeScheduler` | Cross-realm identity matrix: canonical `(realmId, agentId)` keys, same-literal-id pairs across realms stay distinct, scope-aware visibility/listings, cross-realm denial across mail/invoke/VFS/schedules/clock. |
 | [`realm_knowledge_tools_test.js`](../../tests/integration/realm_knowledge_tools_test.js) | `ToolDispatcher` + `toolDefinitions` + `tools/descriptors` + `realmCatalog` + `SandboxStore` | Template/hydration knowledge reads under exact `@template:authority`/`@hydration:authority`: bounded list/get, realm-opaque receipts, read-only (tickets abec3a9, fb7d270). |
@@ -284,8 +287,8 @@ sequenceDiagram
     G1-->>Dev: Gate 1 Passed (0 lint / sync errors)
 
     Dev->>G2: npm test (tests/runner.js)
-    Note over G2: Executes 113 suites (57 Unit, 56 Integration) under 120s timeout
-    G2-->>Dev: Gate 2 Passed (113/113 passed, 0 failures)
+    Note over G2: Executes 115 suites (58 Unit, 57 Integration) under 120s timeout
+    G2-->>Dev: Gate 2 Passed (115/115 passed, 0 failures)
 
     Dev->>G3: npm run build (vite build)
     Note over G3: Compiles Svelte 5 runes, WASM modules, top-level awaits
@@ -337,10 +340,13 @@ RUNWARE_TEST_API_KEY=...
 | `DEEPSEEK_TEST_API_KEY` | String | `.env.local` | Live DeepSeek API key for DeepSeek Native provider tests. |
 | `NANO_TEST_API_KEY` | String | `.env.local` | Live NanoGPT API key for NanoGPT routing & creative-writing model tests. |
 | `PREM_TEST_API_KEY` | String | `.env.local` | Live Prem AI API key for Prem AI Reticle WASM & KEK enclave tests. |
+| `PREM_LIVE_TESTS` | Boolean | unset (off) | Opt-in gate for the Prem live network subtests; when unset they are TAP-skipped and only the offline mocked contracts run. |
 | `RUNWARE_TEST_API_KEY` | String | `.env.local` | Live Runware API key for cloud visual scene synthesis tests. |
 | `NODE_ENV` | String | `'test'` | Signals testing environment; suppresses non-critical logging. |
 | `CI` | Boolean | `undefined` | Disables interactive prompts and dev-server reuse in Playwright. |
 | `PLAYWRIGHT_BASE_URL` | String | `'http://localhost:5173'` | Target URL for Playwright browser automation. |
+
+> **Prem live subtests (decision A30).** The Prem provider suite's live network subtests (completion, streaming, model listing) run only when `PREM_LIVE_TESTS=1` is set — default skipped, so the battery never turns red on an upstream Prem incident — while the offline mocked contract subtests always run. Live run: `PREM_LIVE_TESTS=1 timeout 180 node tests/unit/prem_provider_test.js` (requires a Prem key).
 
 > [!IMPORTANT]
 > **MANDATE FOR LLM-DEPENDENT TESTS**: Real E2E and LLM integration testing requires full API keys. All subagents and automated test suites performing live model inference must load these credentials via `tests/test_env.js` (Node.js). Playwright browser secrets are seeded into the MCP profile per [`exploratory_qa_plan.md`](exploratory_qa_plan.md).
