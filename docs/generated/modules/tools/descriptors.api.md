@@ -7841,9 +7841,9 @@ export const writeJsonDescriptor: Readonly<{
 // <declarations>/tools/descriptors/catalogTools.d.ts:302:5 - (ae-forgotten-export) The symbol "ToolParams_9" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/clockTools.d.ts:439:5 - (ae-forgotten-export) The symbol "ToolParams_7" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/invocationTools.d.ts:465:5 - (ae-forgotten-export) The symbol "ToolParams_5" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/lifecycleTools.d.ts:481:5 - (ae-forgotten-export) The symbol "ToolParams_3" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/lifecycleTools.d.ts:921:5 - (ae-forgotten-export) The symbol "PublicAgentDescriptor" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/lifecycleTools.d.ts:955:5 - (ae-forgotten-export) The symbol "UndoTurnPortResult" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/lifecycleTools.d.ts:484:5 - (ae-forgotten-export) The symbol "ToolParams_3" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/lifecycleTools.d.ts:924:5 - (ae-forgotten-export) The symbol "PublicAgentDescriptor" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/lifecycleTools.d.ts:958:5 - (ae-forgotten-export) The symbol "UndoTurnPortResult" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/messagingTools.d.ts:823:5 - (ae-forgotten-export) The symbol "ToolParams_2" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/metaTools.d.ts:432:5 - (ae-forgotten-export) The symbol "sanitizeMetaUpdateParams" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/metaTools.d.ts:450:9 - (ae-forgotten-export) The symbol "AgentUpdateReceipt" needs to be exported by the entry point index.d.ts
