@@ -225,6 +225,7 @@ async function launchMember(store, id, realmId, options = {}) {
     realmId,
     allowedTools: options.tools || ['readonly'],
     ...(options.extensionTools ? { extensionTools: options.extensionTools } : {}),
+    ...(options.workspaceId ? { workspaceId: options.workspaceId } : {}),
     ...(options.privileged ? { privileged: true } : {}),
     model: options.model || createMockModel(async () => ({ content: 'ok' }))
   });
@@ -904,6 +905,176 @@ test('11. [AC-M3-01] the turn engine exposes schemas and describe to exact holde
     assert.equal(e2eReceipt.success, true, JSON.stringify(e2eReceipt));
     assert.equal(e2eReceipt.realm.label, 'Alpha');
     assert.ok(inspectAgent);
+  } finally {
+    unsubscribe();
+    store.destroy();
+    runtime.destroy();
+    sharedLocalStorage.clear();
+  }
+});
+
+// ============================================================================
+// AC-M3-04 — closed patch at depth (verifier F1)
+// ============================================================================
+
+test('12. [AC-M3-04] nested unknown/operator-only patch keys fail the whole call', async () => {
+  const fixture = await createMcpFixtureServer({ tools: FIXTURE_TOOLS });
+  const { runtime, store, events, unsubscribe } = createHarness();
+  try {
+    store.createRealm({ id: ALPHA, name: 'Alpha' });
+    await launchMember(store, 'm3-nested', ALPHA);
+    grant(runtime, 'm3-nested', REALM_EDIT);
+    const dispatcher = dispatcherFor(store, runtime, 'm3-nested');
+    store.installExtension({
+      id: 'm3-ext',
+      kind: 'mcp',
+      transportHint: { kind: 'http', url: fixture.url }
+    });
+    await store.connectExtension('m3-ext');
+
+    // Unknown nested key inside `attach` → INVALID_ARGUMENTS, zero mutation.
+    const unknownAttach = await dispatcher.executeTool(UPDATE_REALM, {
+      patch: { attach: { extensionId: 'm3-ext', toolSelection: ['echo'], bogus: true } }
+    });
+    assert.equal(unknownAttach.success, false, JSON.stringify(unknownAttach));
+    assert.equal(unknownAttach.code, 'INVALID_ARGUMENTS', 'a nested unknown key is malformed');
+    assert.equal(store.getRealm(ALPHA).extensions, undefined, 'no attach from a refused nested patch');
+
+    // Operator-only nested key (a value the store would ignore) → uniform denial.
+    const deniedAttach = await dispatcher.executeTool(UPDATE_REALM, {
+      patch: { attach: { extensionId: 'm3-ext', toolSelection: ['echo'], realmId: ALPHA } }
+    });
+    assert.equal(deniedAttach.success, false, JSON.stringify(deniedAttach));
+    assert.equal(deniedAttach.code, 'PERMISSION_DENIED', 'a nested operator-only key is denied');
+    assert.equal(String(deniedAttach.error).includes(ALPHA), false, 'the denial never echoes realm state');
+    assert.equal(store.getRealm(ALPHA).extensions, undefined, 'no attach from a denied nested patch');
+
+    const snakeDenied = await dispatcher.executeTool(UPDATE_REALM, {
+      patch: { attach: { extensionId: 'm3-ext', approved_by: 'operator' } }
+    });
+    assert.equal(snakeDenied.code, 'PERMISSION_DENIED', 'snake_case nested deny spellings are reserved');
+    assert.equal(store.getRealm(ALPHA).extensions, undefined);
+    assert.equal(events.some((event) => event.type === 'extension_attached'), false, 'no attach audit');
+
+    // Whole-call atomicity: valid metadata beside a bad nested key never applies.
+    const atomic = await dispatcher.executeTool(UPDATE_REALM, {
+      patch: { name: 'Nested Fail', attach: { extensionId: 'm3-ext', bogus: true } }
+    });
+    assert.equal(atomic.code, 'INVALID_ARGUMENTS');
+    assert.equal(store.getRealm(ALPHA).name, 'Alpha', 'no partial metadata apply');
+
+    // A legitimate attach succeeds, then the ceiling container is scanned too.
+    const attached = await dispatcher.executeTool(UPDATE_REALM, {
+      patch: { attach: { extensionId: 'm3-ext', toolSelection: ['echo'] } }
+    });
+    assert.equal(attached.success, true, JSON.stringify(attached));
+    const unknownCeiling = await dispatcher.executeTool(UPDATE_REALM, {
+      patch: { toolSelection: { extensionId: 'm3-ext', selection: ['sse'], bogus: true } }
+    });
+    assert.equal(unknownCeiling.code, 'INVALID_ARGUMENTS');
+    assert.deepEqual(store.getRealm(ALPHA).extensions[0].toolSelection, ['echo'], 'ceiling unchanged');
+    const deniedCeiling = await dispatcher.executeTool(UPDATE_REALM, {
+      patch: { toolSelection: { extensionId: 'm3-ext', selection: ['sse'], members: ['x'] } }
+    });
+    assert.equal(deniedCeiling.code, 'PERMISSION_DENIED');
+    assert.deepEqual(store.getRealm(ALPHA).extensions[0].toolSelection, ['echo'], 'ceiling unchanged');
+
+    // Port-side re-validation (defense in depth): a direct port call with a
+    // nested key never reaches the store internals.
+    assert.throws(
+      () => store.getRealmAdminPort().updateRealm({
+        actorRef: 'm3-nested',
+        realmLabel: 'Alpha',
+        patch: { toolSelection: { extensionId: 'm3-ext', selection: ['sse'], bogus: true } }
+      }),
+      (error) => error?.code === 'INVALID_ARGUMENTS',
+      'the port re-validates nested unknown keys'
+    );
+    assert.throws(
+      () => store.getRealmAdminPort().updateRealm({
+        actorRef: 'm3-nested',
+        realmLabel: 'Alpha',
+        patch: { attach: { extensionId: 'm3-ext', realm_id: ALPHA } }
+      }),
+      (error) => error?.code === 'PERMISSION_DENIED',
+      'the port re-validates nested operator-only keys'
+    );
+    assert.deepEqual(store.getRealm(ALPHA).extensions[0].toolSelection, ['echo'], 'still unchanged');
+  } finally {
+    unsubscribe();
+    store.destroy();
+    runtime.destroy();
+    await fixture.close();
+    sharedLocalStorage.clear();
+  }
+});
+
+// ============================================================================
+// AC-M3-02 — explicit empty `targets` (verifier F4)
+// ============================================================================
+
+test('13. [AC-M3-02] an explicit empty targets selector denies with zero mutation', async () => {
+  const { runtime, store, events, unsubscribe } = createHarness();
+  try {
+    store.createRealm({ id: ALPHA, name: 'Alpha' });
+    await launchMember(store, 'm3-empty-inspect', ALPHA);
+    await launchMember(store, 'm3-empty-edit', ALPHA);
+    grant(runtime, 'm3-empty-inspect', REALM_INSPECT, { targets: [] });
+    grant(runtime, 'm3-empty-edit', REALM_EDIT, { targets: [] });
+    const before = JSON.stringify(store.getRealm(ALPHA));
+
+    const inspect = await dispatcherFor(store, runtime, 'm3-empty-inspect').executeTool(INSPECT_REALM, {});
+    assert.equal(inspect.success, false, JSON.stringify(inspect));
+    assert.equal(inspect.code, 'PERMISSION_DENIED', 'an empty targets list reaches no realm');
+    const edit = await dispatcherFor(store, runtime, 'm3-empty-edit').executeTool(UPDATE_REALM, {
+      patch: { name: 'Empty Should Not Apply' }
+    });
+    assert.equal(edit.success, false, JSON.stringify(edit));
+    assert.equal(edit.code, 'PERMISSION_DENIED', 'an empty targets list reaches no realm to edit');
+    assert.equal(JSON.stringify(store.getRealm(ALPHA)), before, 'zero mutation');
+    assert.equal(events.some((event) => event.type === 'realm_updated'), false, 'no edit audit');
+    assert.throws(
+      () => store.getRealmAdminPort().updateRealm({
+        actorRef: 'm3-empty-edit',
+        realmLabel: null,
+        patch: { name: 'X' }
+      }),
+      (error) => error?.code === 'PERMISSION_DENIED',
+      'the port denies an explicitly-empty scope'
+    );
+  } finally {
+    unsubscribe();
+    store.destroy();
+    runtime.destroy();
+    sharedLocalStorage.clear();
+  }
+});
+
+// ============================================================================
+// AC-M3-03 — member workspace masking (verifier F2)
+// ============================================================================
+
+test('14. [AC-M3-03] member workspace masks withhold internal workspace vocabulary', async () => {
+  const { runtime, store, unsubscribe } = createHarness();
+  try {
+    store.createRealm({ id: ALPHA, name: 'Alpha' });
+    await launchMember(store, 'm3-plain-ws', ALPHA, { workspaceId: 'team-room' });
+    await launchMember(store, 'm3-system-ws', ALPHA, { workspaceId: 'system:boss' });
+    await launchMember(store, 'm3-generic-ws', ALPHA, { workspaceId: 'realm_generic' });
+    await launchMember(store, 'm3-realm-ws', ALPHA, { workspaceId: 'realm:other:global' });
+    await launchMember(store, 'm3-mask-inspector', ALPHA);
+    grant(runtime, 'm3-mask-inspector', REALM_INSPECT);
+    const receipt = await dispatcherFor(store, runtime, 'm3-mask-inspector').executeTool(INSPECT_REALM, {});
+    assert.equal(receipt.success, true, JSON.stringify(receipt));
+    const byId = new Map(receipt.members.map((member) => [member.id, member]));
+    assert.equal(byId.get('m3-plain-ws').workspace, 'team-room', 'plain workspace labels pass through');
+    assert.equal(byId.get('m3-system-ws').workspace, undefined, 'system: workspace keys are withheld');
+    assert.equal(byId.get('m3-generic-ws').workspace, undefined, 'the seeded Generic realm id is withheld');
+    assert.equal(byId.get('m3-realm-ws').workspace, 'global', 'realm-global partitions mask to global');
+    const serialized = JSON.stringify(receipt);
+    for (const forbidden of ['system:', 'realm:', 'realm_generic']) {
+      assert.equal(serialized.includes(forbidden), false, `the projection never carries '${forbidden}'`);
+    }
   } finally {
     unsubscribe();
     store.destroy();

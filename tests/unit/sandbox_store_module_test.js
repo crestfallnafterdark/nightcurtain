@@ -6686,3 +6686,44 @@ test('89. [M3] the realm-admin port is pinned and the store exposes a frozen han
     sharedLocalStorage.clear();
   }
 });
+
+test('90. [M3] the realm-admin port re-validates the patch closure at nested depth', async () => {
+  const runtime = new AgentRuntime({ autoBootstrapDirector: false });
+  const store = new SandboxStore({ runtime, autoHydrate: false, autoBootstrapDirector: false });
+  try {
+    store.createRealm({ id: 'realm_m3_nested', name: 'M3 Nested' });
+    await store.launchAgent({
+      id: 'm3-nested-actor',
+      name: 'Nested Actor',
+      realmId: 'realm_m3_nested',
+      allowedTools: ['readonly'],
+      model: createMockModel()
+    });
+    await store.grantAuthority('m3-nested-actor', AGENT_AUTHORITIES.REALM_EDIT);
+    const port = store.getRealmAdminPort();
+
+    assert.throws(
+      () => port.updateRealm({
+        actorRef: 'm3-nested-actor',
+        realmLabel: null,
+        patch: { name: 'Temp', attach: { extensionId: 'ghost-ext', bogus: true } }
+      }),
+      (error) => error?.code === 'INVALID_ARGUMENTS' && /unknown fields/i.test(String(error?.message)),
+      'a nested unknown key fails closed before any precondition'
+    );
+    assert.throws(
+      () => port.updateRealm({
+        actorRef: 'm3-nested-actor',
+        realmLabel: null,
+        patch: { toolSelection: { extensionId: 'ghost-ext', selection: 'all', members: [] } }
+      }),
+      (error) => error?.code === 'PERMISSION_DENIED',
+      'a nested operator-only key fails the whole call uniformly'
+    );
+    assert.equal(store.getRealm('realm_m3_nested').name, 'M3 Nested', 'nothing was applied');
+  } finally {
+    store.destroy();
+    runtime.destroy();
+    sharedLocalStorage.clear();
+  }
+});
