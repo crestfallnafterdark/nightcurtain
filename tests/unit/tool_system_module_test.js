@@ -1432,3 +1432,47 @@ test('23. batch_precall rejects missing/non-array calls and reports explicit den
   assert.strictEqual(allDenied.results[0].success, false);
   assert.strictEqual(allDenied.results[1].success, false);
 });
+
+// ============================================================================
+// 24. Decorative action params match the runtime contract (d872723 F8)
+// ============================================================================
+
+test('24. clock/event action defaults and schedule action removal match the runtime contract (d872723 F8)', async () => {
+  const byName = new Map(ALL_TOOL_DESCRIPTORS.map((descriptor) => [descriptor.name, descriptor]));
+  const worldClock = byName.get('world_clock');
+  const eventList = byName.get('event_list');
+  const schedule = byName.get('schedule');
+
+  // world_clock/event_list honor `action` but default it to `query`; a schema
+  // that marks it required lies about the call contract.
+  for (const [name, descriptor] of [['world_clock', worldClock], ['event_list', eventList]]) {
+    assert.ok(descriptor.schema.properties.action, `'${name}' still declares action`);
+    assert.ok(
+      !(descriptor.schema.required ?? []).includes('action'),
+      `'${name}' action has a working default and must not be schema-required`
+    );
+  }
+
+  // schedule's `action` is read by nothing; it must not be advertised at all.
+  assert.ok(
+    !Object.prototype.hasOwnProperty.call(schedule.schema.properties, 'action'),
+    "schedule's decorative action must not be part of the advertised schema"
+  );
+  assert.ok(
+    !(schedule.schema.required ?? []).includes('action'),
+    'schedule must not require the decorative action'
+  );
+
+  // The defaulted calls keep working through the dispatcher.
+  const clockMock = {
+    getTime: () => ({ hour: 1, minute: 2, second: 3, formatted: '01:02:03' }),
+    queryEvents: () => ({ events: [], count: 0 })
+  };
+  const dispatcher = createSandboxToolDispatcher({ worldClock: clockMock, allowedTools: 'all' });
+  const queryTime = await dispatcher.executeTool('world_clock', {});
+  assert.strictEqual(queryTime.success, true, 'world_clock {} must default to a query');
+  assert.strictEqual(queryTime.formatted, '01:02:03');
+  const queryEvents = await dispatcher.executeTool('event_list', {});
+  assert.strictEqual(queryEvents.success, true, 'event_list {} must default to a query');
+  assert.deepStrictEqual(queryEvents.events, []);
+});
