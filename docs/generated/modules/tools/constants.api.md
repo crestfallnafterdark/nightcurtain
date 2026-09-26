@@ -30,6 +30,7 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 - Preset values are allowlist strings only: no execution-context or infrastructure configuration (model, provider, temperature, privilege/whitelist flags) is represented in the preset definitions.
 - Mutation-capability vocabulary: `MUTATING_TOOLS` and `READ_ONLY_TOOLS` partition every canonical `SANDBOX_TOOLS` entry exactly once (disjoint, union = the 38-name canonical set) as frozen arrays in canonical declaration order, and `isMutatingTool` is a pure membership probe over that vocabulary. The clock/event tools (`world_clock`, `event_list`) classify as mutating because they step simulation time and mutate VFS-backed event registries.
 - Publishing-tool vocabulary: `PUBLISHING_TOOLS` freezes the two publishing tool names (`import_realm_template`, `submit_hydration_package`) outside the canonical taxonomy — they are explicit-grant-only meta tools, never wildcard-implied capabilities.
+- Realm-admin tool vocabulary (M3): `REALM_ADMIN_TOOLS` freezes the two realm meta-tool names (`inspect_realm`, `update_realm`) outside the canonical taxonomy — explicit-grant-only (`@realm:inspect`/`@realm:edit`), never wildcard-, privileged-, or preset-implied, and exposed only through the exact-authority schema filter.
 - `resolveToolPreset` is a pure resolver: `null`/`undefined`/empty input returns `[]`, the wildcard string returns exactly `['*']`, named presets resolve case-insensitively to fresh copies (never the frozen stored arrays), comma-separated strings are split and trimmed, Sets/arrays are copied without mutation, and every entry whose canonical form is a retired selector expands in place to that selector's frozen tool list (fixed legacy order, no de-duplication).
 
 ## Decisions
@@ -67,6 +68,12 @@ export const PUBLISHING_TOOLS: {
 
 // @public
 export const READ_ONLY_TOOLS: readonly SandboxToolName[];
+
+// @public
+export const REALM_ADMIN_TOOLS: {
+    readonly INSPECT_REALM: 'inspect_realm';
+    readonly UPDATE_REALM: 'update_realm';
+};
 
 // @public
 export function resolveToolPreset(input?: string | readonly string[] | ReadonlySet<string> | null): string[];
@@ -292,6 +299,20 @@ import { READ_ONLY_TOOLS } from './constants/index.ts';
 const canPreviewSafely = READ_ONLY_TOOLS.includes('grep');
 ```
 
+### `REALM_ADMIN_TOOLS` — variable
+
+Frozen vocabulary of the M3 realm-admin meta-tool names.
+
+These two tools are **not** part of the canonical `SANDBOX_TOOLS` taxonomy: they are explicit-grant-only authority tools (`@realm:inspect` / `@realm:edit`), never implied by the wildcard capability, `privileged`, or any preset, and their schemas are exposed only to a caller whose frozen authority descriptor carries the matching exact id. The names ship here so the vocabulary is frozen ahead of the descriptors and handlers.
+
+#### Examples
+
+```typescript
+import { REALM_ADMIN_TOOLS } from './constants/index.ts';
+
+const inspectName = REALM_ADMIN_TOOLS.INSPECT_REALM; // 'inspect_realm'
+```
+
 ### `resolveToolPreset` — function
 
 Resolves a tool preset identifier, tool array, Set, or comma-separated string into a canonical array of permitted tool names or wildcard patterns.
@@ -476,9 +497,9 @@ function handleToolError(code: ToolSystemErrorCode, message: string) {
 
 ## Doc coverage
 
-- Top-level exports: 20
-- Declarations (exports + members): 21
-- Documented declarations: 21 / 21 (100%)
+- Top-level exports: 21
+- Declarations (exports + members): 22
+- Documented declarations: 22 / 22 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): none

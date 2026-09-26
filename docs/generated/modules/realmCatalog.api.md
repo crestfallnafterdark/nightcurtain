@@ -196,6 +196,12 @@ export type PromptPart = {
 };
 
 // @public
+export const REALM_ADMIN_DENIED_PATCH_KEYS: readonly string[];
+
+// @public
+export const REALM_ADMIN_PATCH_FIELD_TOKENS: Readonly<Record<string, string>>;
+
+// @public
 export const REALM_CATALOG_ERROR_CODES: Readonly<{
     readonly ERR_TEMPLATE_INVALID: 'ERR_TEMPLATE_INVALID';
     readonly ERR_BUNDLE_FORMAT: 'ERR_BUNDLE_FORMAT';
@@ -908,6 +914,16 @@ One system-prompt part declared by a template agent spec.
 
 A part is one of three primitives: a bundle prompt file (`file`), a template-declared input (`input`), or inline text (`text`). Composition inserts parts in declared order; an empty input contributes nothing. The optional `path` file selector is the format-v2 extension: a reference to a `files`-shape input must name exactly one file of the fileset (`path` required), and a reference to a `text`-shape input must not carry one (format-v1 validation rejects the field entirely).
 
+### `REALM_ADMIN_DENIED_PATCH_KEYS` — variable
+
+Operator-only / escalation-adjacent realm patch keys (M3; spec §4.3): membership, realm/template identity, provenance, creation/deletion, detach/removal, raw attachment arrays, and approval stamps are host-only decisions, so their presence fails the whole call with the uniform permission denial for every caller (even `false`/`null` values). Both camelCase and snake_case spellings are reserved; authority ids are handled data-driven from `AUTHORITY_IDS` by the consumers.
+
+### `REALM_ADMIN_PATCH_FIELD_TOKENS` — variable
+
+Realm-admin edit field tokens (M3; spec §4.3): the accepted patch key maps to the ratified `@realm:edit` scope token the caller's grant must carry. A key absent from this table is never editable; a key present here but absent from the grant's effective field set fails the whole call with the uniform bound denial.
+
+The `attachments` token covers both a new attachment (`attach`) and an attachment ceiling change (`toolSelection`) — both mutate the realm's attachment set.
+
 ### `REALM_CATALOG_ERROR_CODES` — variable
 
 Frozen dictionary of catalog error codes.
@@ -1553,9 +1569,9 @@ The validated template reference
 
 ## Doc coverage
 
-- Top-level exports: 71
-- Declarations (exports + members): 224
-- Documented declarations: 224 / 224 (100%)
+- Top-level exports: 73
+- Declarations (exports + members): 226
+- Documented declarations: 226 / 226 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): `ToolPresetName`, `TriggerPolicy`

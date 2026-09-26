@@ -138,6 +138,8 @@ export interface TurnExecutionEngineOptions {
     mailboxAutonomy?: boolean | null;
     // Warning: (ae-forgotten-export) The symbol "EngineMessagingBus" needs to be exported by the entry point index.d.ts
     messagingBus?: EngineMessagingBus | null;
+    // Warning: (ae-forgotten-export) The symbol "RealmAdminPort" needs to be exported by the entry point index.d.ts
+    realmAdminPort?: RealmAdminPort | null;
     // Warning: (ae-forgotten-export) The symbol "RealmPublishingPort" needs to be exported by the entry point index.d.ts
     realmPublishingPort?: RealmPublishingPort | null;
     // Warning: (ae-forgotten-export) The symbol "EngineRuntimePort" needs to be exported by the entry point index.d.ts
@@ -441,6 +443,7 @@ const engine = new TurnExecutionEngine({
 - **`historyManager`** — History manager instance retained from injection. The engine currently performs history hygiene through `formatMessagesWithToolHygiene` and message-ID generation through the imported `generateMessageId`, so this instance is stored but not read.
 - **`mailboxAutonomy`** — Global mailbox autonomy flag controlling identity header injection.
 - **`messagingBus`** — Shared MessagingBus instance for mail intake and inter-agent communication.
+- **`realmAdminPort`** — Optional M3 realm-admin host port seeded into every tool dispatcher context. The store composition root implements it over the realm registry, extension live state, and runtime rosters; when absent the realm-admin meta tools fail closed with a missing-service error. Trusted bound construction; never replaceable from per-call context.
 - **`realmPublishingPort`** — Optional Wave U host publishing port (ticket 2518510) seeded into every tool dispatcher context. The store composition root implements it over the real Wave T template registry and the session candidate surface; when absent the publishing meta tools fail closed.
 - **`runtime`** — Reference to parent AgentRuntime coordinator.
 - **`telemetryTracker`** — Telemetry tracker instance for recording turn token usage and metrics.
@@ -589,9 +592,9 @@ const inputEnvelope: TurnInputObject = {
 ## Doc coverage
 
 - Top-level exports: 14
-- Declarations (exports + members): 73
-- Documented declarations: 73 / 73 (100%)
+- Declarations (exports + members): 74
+- Documented declarations: 74 / 74 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
-- Referenced but not exported (`ae-forgotten-export`): `EngineAgent`, `EngineMessagingBus`, `EngineModel`, `EngineRuntimePort`, `EngineStreamChunk`, `EngineTelemetryPort`, `EngineTriggerQueue`, `ExtensionExecutionPort`, `ExtensionToolProviderPort`, `HistoryManager`, `RealmPublishingPort`, `SubsystemEmitPort`
+- Referenced but not exported (`ae-forgotten-export`): `EngineAgent`, `EngineMessagingBus`, `EngineModel`, `EngineRuntimePort`, `EngineStreamChunk`, `EngineTelemetryPort`, `EngineTriggerQueue`, `ExtensionExecutionPort`, `ExtensionToolProviderPort`, `HistoryManager`, `RealmAdminPort`, `RealmPublishingPort`, `SubsystemEmitPort`
 - Unresolved `{@link}` targets (`ae-unresolved-link`): 0 (policy `none`; see `scripts/api_reports.mjs`)

@@ -21,7 +21,7 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 ## Invariants
 
 - Frozen catalog: every descriptor, schema, alias map, and descriptor array is `Object.freeze`d; `TOOL_REGISTRY` is built once from `ALL_TOOL_DESCRIPTORS` as a null-prototype lookup table and frozen, with no registration or mutation path.
-- Authority meta tools: `AUTHORITY_TOOL_REGISTRY` carries every explicit-grant-only authority tool (the Wave U publishing pair today; the meta-plane phases append theirs), each declaring the exact authority id (`@template:authority`/`@hydration:authority`/…) its invocation requires; they are not members of `ALL_TOOL_DESCRIPTORS`/`TOOL_REGISTRY`, their schemas are exposed only through `getAuthorityToolSchemas()` for callers holding the matching exact id (with `getAuthorityToolDescriptors()` as the describe-merge source), and the wildcard `'*'`/`privileged` never satisfy them. The M2 `inspect_agent`/`update_agent` surfaces are the deliberate exception: they are **canonical** ordinary tools (manager preset) whose parental tier is inherent and whose meta tier is enforced registry-side by the lifecycle manager, so no `requiredAuthority` gate applies.
+- Authority meta tools: `AUTHORITY_TOOL_REGISTRY` carries every explicit-grant-only authority tool (the Wave U publishing pair and the M3 realm-admin pair `inspect_realm`/`update_realm`; the remaining meta-plane phases append theirs), each declaring the exact authority id (`@template:authority`/`@hydration:authority`/`@realm:inspect`/`@realm:edit`/…) its invocation requires; they are not members of `ALL_TOOL_DESCRIPTORS`/`TOOL_REGISTRY`, their schemas are exposed only through `getAuthorityToolSchemas()` for callers holding the matching exact id (with `getAuthorityToolDescriptors()` as the describe-merge source), and the wildcard `'*'`/`privileged` never satisfy them. The M2 `inspect_agent`/`update_agent` surfaces are the deliberate exception: they are **canonical** ordinary tools (manager preset) whose parental tier is inherent and whose meta tier is enforced registry-side by the lifecycle manager, so no `requiredAuthority` gate applies.
 - Fail-closed precalls: `batch_precall` denies any call whose name does not canonically resolve to a `PRECALL_ALLOWLIST` member, so unresolved or non-allowlisted names never reach the executor.
 
 ## Decisions
@@ -1702,6 +1702,31 @@ export const inspect_agent: Readonly<{
 }>;
 
 // @public
+export const inspect_realm: Readonly<{
+    name: "inspect_realm";
+    authority: "@realm:inspect";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {
+            realm: {
+                type: string;
+                description: string;
+            };
+        };
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: (rawArgs?: unknown) => ToolParams_4;
+    handler: (params: ToolParams_4, context: ExecutionContext) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | RealmInspectReceipt>;
+}>;
+
+// @public
 export const inspectAgent: Readonly<{
     name: "inspect_agent";
     description: string;
@@ -1739,6 +1764,56 @@ export const inspectAgentDescriptor: Readonly<{
     paramAliasMap: Readonly<Record<string, string>>;
     sanitize: (rawArgs?: unknown) => ToolParams_4;
     handler: (params: ToolParams_4, context: ExecutionContext) => Promise<unknown>;
+}>;
+
+// @public
+export const inspectRealm: Readonly<{
+    name: "inspect_realm";
+    authority: "@realm:inspect";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {
+            realm: {
+                type: string;
+                description: string;
+            };
+        };
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: (rawArgs?: unknown) => ToolParams_4;
+    handler: (params: ToolParams_4, context: ExecutionContext) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | RealmInspectReceipt>;
+}>;
+
+// @public
+export const inspectRealmDescriptor: Readonly<{
+    name: "inspect_realm";
+    authority: "@realm:inspect";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {
+            realm: {
+                type: string;
+                description: string;
+            };
+        };
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: (rawArgs?: unknown) => ToolParams_4;
+    handler: (params: ToolParams_4, context: ExecutionContext) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | RealmInspectReceipt>;
 }>;
 
 // @public
@@ -3688,6 +3763,111 @@ export const REALM_PUBLISHING_MAX_FILE_BYTES: number;
 export const REALM_PUBLISHING_MAX_PACKAGE_BYTES: number;
 
 // @public
+export const realmAdminToolDescriptors: readonly (Readonly<{
+    name: "inspect_realm";
+    authority: "@realm:inspect";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {
+            realm: {
+                type: string;
+                description: string;
+            };
+        };
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: (rawArgs?: unknown) => ToolParams_4;
+    handler: (params: ToolParams_4, context: ExecutionContext) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | RealmInspectReceipt>;
+}> | Readonly<{
+    name: "update_realm";
+    authority: "@realm:edit";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {
+            realm: {
+                type: string;
+                description: string;
+            };
+            patch: {
+                type: string;
+                properties: {
+                    name: {
+                        type: string;
+                        description: string;
+                    };
+                    description: {
+                        type: string[];
+                        description: string;
+                    };
+                    color: {
+                        type: string[];
+                        description: string;
+                    };
+                    attach: {
+                        type: string;
+                        properties: {
+                            extensionId: {
+                                type: string;
+                                description: string;
+                            };
+                            toolSelection: {
+                                type: string[];
+                                items: {
+                                    type: string;
+                                };
+                                description: string;
+                            };
+                        };
+                        required: string[];
+                        additionalProperties: boolean;
+                    };
+                    toolSelection: {
+                        type: string;
+                        properties: {
+                            extensionId: {
+                                type: string;
+                                description: string;
+                            };
+                            selection: {
+                                type: string[];
+                                items: {
+                                    type: string;
+                                };
+                                description: string;
+                            };
+                        };
+                        required: string[];
+                        additionalProperties: boolean;
+                    };
+                };
+                additionalProperties: boolean;
+            };
+        };
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: typeof sanitizeRealmAdminUpdateParams;
+    handler: (params: ToolParams_4, context: ExecutionContext) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | RealmUpdateReceipt | {
+        success: boolean;
+        error: string;
+        code: "PERMISSION_DENIED";
+    }>;
+}>)[];
+
+// @public
 export const replace_file_content: Readonly<{
     name: "replace_file_content";
     description: "Surgically replace target string content within a virtual filesystem file. Provide exactly one of replacement_content or replacement_source_file (a caller-visible source path whose bytes fill the replacement server-side, never through context). \"/\" is your private workspace, \"/global/...\" is the shared workspace visible to every agent in your scope, and \"/agents/<agentId>/...\" mounts another agent's private workspace (authority required).";
@@ -4906,6 +5086,89 @@ export const update_agent: Readonly<{
 }>;
 
 // @public
+export const update_realm: Readonly<{
+    name: "update_realm";
+    authority: "@realm:edit";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {
+            realm: {
+                type: string;
+                description: string;
+            };
+            patch: {
+                type: string;
+                properties: {
+                    name: {
+                        type: string;
+                        description: string;
+                    };
+                    description: {
+                        type: string[];
+                        description: string;
+                    };
+                    color: {
+                        type: string[];
+                        description: string;
+                    };
+                    attach: {
+                        type: string;
+                        properties: {
+                            extensionId: {
+                                type: string;
+                                description: string;
+                            };
+                            toolSelection: {
+                                type: string[];
+                                items: {
+                                    type: string;
+                                };
+                                description: string;
+                            };
+                        };
+                        required: string[];
+                        additionalProperties: boolean;
+                    };
+                    toolSelection: {
+                        type: string;
+                        properties: {
+                            extensionId: {
+                                type: string;
+                                description: string;
+                            };
+                            selection: {
+                                type: string[];
+                                items: {
+                                    type: string;
+                                };
+                                description: string;
+                            };
+                        };
+                        required: string[];
+                        additionalProperties: boolean;
+                    };
+                };
+                additionalProperties: boolean;
+            };
+        };
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: typeof sanitizeRealmAdminUpdateParams;
+    handler: (params: ToolParams_4, context: ExecutionContext) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | RealmUpdateReceipt | {
+        success: boolean;
+        error: string;
+        code: "PERMISSION_DENIED";
+    }>;
+}>;
+
+// @public
 export const updateAgent: Readonly<{
     name: "update_agent";
     description: string;
@@ -5060,6 +5323,172 @@ export const updateAgentDescriptor: Readonly<{
         result: AgentUpdateReceipt & any[];
         error?: undefined;
         code?: undefined;
+    }>;
+}>;
+
+// @public
+export const updateRealm: Readonly<{
+    name: "update_realm";
+    authority: "@realm:edit";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {
+            realm: {
+                type: string;
+                description: string;
+            };
+            patch: {
+                type: string;
+                properties: {
+                    name: {
+                        type: string;
+                        description: string;
+                    };
+                    description: {
+                        type: string[];
+                        description: string;
+                    };
+                    color: {
+                        type: string[];
+                        description: string;
+                    };
+                    attach: {
+                        type: string;
+                        properties: {
+                            extensionId: {
+                                type: string;
+                                description: string;
+                            };
+                            toolSelection: {
+                                type: string[];
+                                items: {
+                                    type: string;
+                                };
+                                description: string;
+                            };
+                        };
+                        required: string[];
+                        additionalProperties: boolean;
+                    };
+                    toolSelection: {
+                        type: string;
+                        properties: {
+                            extensionId: {
+                                type: string;
+                                description: string;
+                            };
+                            selection: {
+                                type: string[];
+                                items: {
+                                    type: string;
+                                };
+                                description: string;
+                            };
+                        };
+                        required: string[];
+                        additionalProperties: boolean;
+                    };
+                };
+                additionalProperties: boolean;
+            };
+        };
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: typeof sanitizeRealmAdminUpdateParams;
+    handler: (params: ToolParams_4, context: ExecutionContext) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | RealmUpdateReceipt | {
+        success: boolean;
+        error: string;
+        code: "PERMISSION_DENIED";
+    }>;
+}>;
+
+// @public
+export const updateRealmDescriptor: Readonly<{
+    name: "update_realm";
+    authority: "@realm:edit";
+    description: string;
+    schema: Readonly<{
+        type: "object";
+        properties: {
+            realm: {
+                type: string;
+                description: string;
+            };
+            patch: {
+                type: string;
+                properties: {
+                    name: {
+                        type: string;
+                        description: string;
+                    };
+                    description: {
+                        type: string[];
+                        description: string;
+                    };
+                    color: {
+                        type: string[];
+                        description: string;
+                    };
+                    attach: {
+                        type: string;
+                        properties: {
+                            extensionId: {
+                                type: string;
+                                description: string;
+                            };
+                            toolSelection: {
+                                type: string[];
+                                items: {
+                                    type: string;
+                                };
+                                description: string;
+                            };
+                        };
+                        required: string[];
+                        additionalProperties: boolean;
+                    };
+                    toolSelection: {
+                        type: string;
+                        properties: {
+                            extensionId: {
+                                type: string;
+                                description: string;
+                            };
+                            selection: {
+                                type: string[];
+                                items: {
+                                    type: string;
+                                };
+                                description: string;
+                            };
+                        };
+                        required: string[];
+                        additionalProperties: boolean;
+                    };
+                };
+                additionalProperties: boolean;
+            };
+        };
+        required: string[];
+        additionalProperties: false;
+    }>;
+    paramAliasMap: Readonly<Record<string, string>>;
+    sanitize: typeof sanitizeRealmAdminUpdateParams;
+    handler: (params: ToolParams_4, context: ExecutionContext) => Promise<{
+        success: false;
+        error: string;
+        code: string;
+    } | RealmUpdateReceipt | {
+        success: boolean;
+        error: string;
+        code: "PERMISSION_DENIED";
     }>;
 }>;
 
@@ -6543,9 +6972,12 @@ export const writeJsonDescriptor: Readonly<{
 // <declarations>/tools/descriptors/lifecycleTools.d.ts:921:5 - (ae-forgotten-export) The symbol "PublicAgentDescriptor" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/lifecycleTools.d.ts:955:5 - (ae-forgotten-export) The symbol "UndoTurnPortResult" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/messagingTools.d.ts:823:5 - (ae-forgotten-export) The symbol "ToolParams_2" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/metaTools.d.ts:95:5 - (ae-forgotten-export) The symbol "ToolParams_4" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/metaTools.d.ts:415:5 - (ae-forgotten-export) The symbol "sanitizeMetaUpdateParams" needs to be exported by the entry point index.d.ts
-// <declarations>/tools/descriptors/metaTools.d.ts:433:9 - (ae-forgotten-export) The symbol "AgentUpdateReceipt" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/metaTools.d.ts:104:5 - (ae-forgotten-export) The symbol "ToolParams_4" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/metaTools.d.ts:424:5 - (ae-forgotten-export) The symbol "sanitizeMetaUpdateParams" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/metaTools.d.ts:442:9 - (ae-forgotten-export) The symbol "AgentUpdateReceipt" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/metaTools.d.ts:531:5 - (ae-forgotten-export) The symbol "RealmInspectReceipt" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/metaTools.d.ts:889:5 - (ae-forgotten-export) The symbol "sanitizeRealmAdminUpdateParams" needs to be exported by the entry point index.d.ts
+// <declarations>/tools/descriptors/metaTools.d.ts:890:5 - (ae-forgotten-export) The symbol "RealmUpdateReceipt" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/precallTools.d.ts:187:5 - (ae-forgotten-export) The symbol "ToolParams_8" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/realmTools.d.ts:290:5 - (ae-forgotten-export) The symbol "PublishingFailure" needs to be exported by the entry point index.d.ts
 // <declarations>/tools/descriptors/schedulerTools.d.ts:220:5 - (ae-forgotten-export) The symbol "ToolParams_6" needs to be exported by the entry point index.d.ts
@@ -6582,7 +7014,7 @@ The `authority` member is the single capability declaration the dispatcher consu
 
 ### `authorityToolDescriptors` — variable
 
-Every authority meta-tool descriptor (M1): the Wave U publishing pair is the complete set today; the meta-plane phases (M2–M5b) append their descriptors here (`metaTools.ts` or the same file), and every filter below derives its membership from this one array plus each descriptor's `authority` id.
+Every authority meta-tool descriptor (M1): the Wave U publishing pair plus the M3 realm-admin pair; the remaining meta-plane phases (M4–M5b) append their descriptors here (`metaTools.ts` or the same file), and every filter below derives its membership from this one array plus each descriptor's `authority` id.
 
 ### `batch_precall` — variable
 
@@ -6812,6 +7244,10 @@ The path is resolved through the caller's workspace view by the VirtualFS: priva
 
 snake_case alias of `inspectAgentDescriptor`.
 
+### `inspect_realm` — variable
+
+snake_case alias of `inspectRealmDescriptor`.
+
 ### `inspectAgent` — variable
 
 camelCase alias of `inspectAgentDescriptor`.
@@ -6819,6 +7255,14 @@ camelCase alias of `inspectAgentDescriptor`.
 ### `inspectAgentDescriptor` — variable
 
 `inspect_agent` descriptor — inspect one target agent under the parental (inherent; registered direct spawns in the caller's own realm) or meta (exact scoped `@agent:inspect`) tier. Self-inspection is allowed. Every unauthorized target shares one uniform, realm-opaque `PERMISSION_DENIED`.
+
+### `inspectRealm` — variable
+
+camelCase alias of `inspectRealmDescriptor`.
+
+### `inspectRealmDescriptor` — variable
+
+`inspect_realm` descriptor — exact-grant-only (`@realm:inspect`) bounded read of one realm the caller's grant scope reaches: member roster with effective capability, attachments with tool ceiling and live connection state, launch provenance, and missing-extension disclosure. Realm ids, transport URLs, and credential material never appear. Every resolution failure shares one uniform, realm-opaque denial.
 
 ### `invocationToolDescriptors` — variable
 
@@ -7014,6 +7458,10 @@ Per-file byte cap applied to every resolved publishing reference (`{ sourceFile 
 
 Aggregate byte cap for one resolved hydration package (Wave U decision 9): resolved input values plus file contents may not exceed 8 MiB.
 
+### `realmAdminToolDescriptors` — variable
+
+Array of the M3 realm-admin authority descriptors: appended to `authorityToolDescriptors` by `realmTools.ts`, so their schemas are exposed through the generic exact-id filter and never through the canonical taxonomy.
+
 ### `replace_file_content` — variable
 
 snake_case alias of `replaceFileContentDescriptor`.
@@ -7144,6 +7592,10 @@ Args: optional `target_turn_id` selector. Delegates to `context.lifecyclePort.un
 
 snake_case alias of `updateAgentDescriptor`.
 
+### `update_realm` — variable
+
+snake_case alias of `updateRealmDescriptor`.
+
 ### `updateAgent` — variable
 
 camelCase alias of `updateAgentDescriptor`.
@@ -7151,6 +7603,14 @@ camelCase alias of `updateAgentDescriptor`.
 ### `updateAgentDescriptor` — variable
 
 `update_agent` descriptor — update one target agent's editable settings under the parental (inherent; registered direct spawns in the caller's own realm) or meta (exact scoped `@agent:edit`) tier. Editable: tool selector, privilege, trigger policy, system prompt, maxTurns, and name. The edit applies at the target's next safe state; the resulting state can never out-rank the caller. Operator-only keys fail the whole call.
+
+### `updateRealm` — variable
+
+camelCase alias of `updateRealmDescriptor`.
+
+### `updateRealmDescriptor` — variable
+
+`update_realm` descriptor — exact-grant-only (`@realm:edit`) bounded edit of one realm the caller's grant scope reaches: display metadata (`name`/`description`/`color`), one attach of an installed+connected extension, or one attachment tool-ceiling change. Membership, provenance, creation/deletion, detach/removal, raw attachment arrays, and every authority id are operator-only and fail the whole call uniformly; the host port applies the edit through the existing attach/ceiling paths and the safe-state member sweep.
 
 ### `vfsToolDescriptors` — variable
 
@@ -7260,10 +7720,10 @@ Args: `file_path` (required), exactly one of inline `data` or file-sourced `data
 
 ## Doc coverage
 
-- Top-level exports: 136
-- Declarations (exports + members): 143
-- Documented declarations: 143 / 143 (100%)
+- Top-level exports: 143
+- Declarations (exports + members): 150
+- Documented declarations: 150 / 150 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
-- Referenced but not exported (`ae-forgotten-export`): `AgentUpdateReceipt`, `ExecutionContext`, `JsonSchemaDraft07`, `PublicAgentDescriptor`, `PublishingFailure`, `sanitizeMetaUpdateParams`, `ToolDescriptor`, `ToolParams`, `ToolParams_2`, `ToolParams_3`, `ToolParams_4`, `ToolParams_5`, `ToolParams_6`, `ToolParams_7`, `ToolParams_8`, `ToolParams_9`, `UndoTurnPortResult`
+- Referenced but not exported (`ae-forgotten-export`): `AgentUpdateReceipt`, `ExecutionContext`, `JsonSchemaDraft07`, `PublicAgentDescriptor`, `PublishingFailure`, `RealmInspectReceipt`, `RealmUpdateReceipt`, `sanitizeMetaUpdateParams`, `sanitizeRealmAdminUpdateParams`, `ToolDescriptor`, `ToolParams`, `ToolParams_2`, `ToolParams_3`, `ToolParams_4`, `ToolParams_5`, `ToolParams_6`, `ToolParams_7`, `ToolParams_8`, `ToolParams_9`, `UndoTurnPortResult`
 - Unresolved `{@link}` targets (`ae-unresolved-link`): 8 (policy `none`; see `scripts/api_reports.mjs`)

@@ -39,7 +39,7 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 - `canonicalizeToolName` is exposed on the dispatcher as the shared alias-normalization authority so engine consumers (precall revalidation) do not duplicate alias maps
 - Per-call `callerContext` is caller data, never authority: the dispatcher strips its `isAdmin`/`isPrivileged`/`privileged` flags, authority-bearing `callerRole`/`role` aliases, `principal`/`authority` objects, and `allowedTools`, deriving privilege and capability only from trusted bound construction options and the injected identity port
 - Descriptor-authoritative capability: when the projection's frozen `AuthorityDescriptor` is present, capability derives from the descriptor alone — a wildcard/explicit grant authorizes, and a retired-selector entry authorizes exactly its expansion — any other outcome denies, and the deprecated legacy channels above apply only to descriptor-less callers
-- Authority meta tools (`import_realm_template`/`submit_hydration_package` today, the meta-plane tools as they land) are explicit-grant-only: they resolve through the separate `AUTHORITY_TOOL_REGISTRY` (never members of `TOOL_REGISTRY` or `ALL_TOOL_DESCRIPTORS`, never emitted by `getSandboxToolsSchema`), and authorization is the exact authority-id entry on the caller's frozen descriptor — the wildcard `'*'`, `privileged`, and every legacy channel are deliberately insufficient, an engine-internal descriptor stays authorized, and descriptor-less callers deny (INV-9 refinement)
+- Authority meta tools (`import_realm_template`/`submit_hydration_package` and the M3 `inspect_realm`/`update_realm`, plus the meta-plane tools as they land) are explicit-grant-only: they resolve through the separate `AUTHORITY_TOOL_REGISTRY` (never members of `TOOL_REGISTRY` or `ALL_TOOL_DESCRIPTORS`, never emitted by `getSandboxToolsSchema`), and authorization is the exact authority-id entry on the caller's frozen descriptor — the wildcard `'*'`, `privileged`, and every legacy channel are deliberately insufficient, an engine-internal descriptor stays authorized, and descriptor-less callers deny (INV-9 refinement)
 - Extension tools are exact-membership-only on the separate frozen `AuthorityDescriptor.extensions` axis: the dispatcher's extension branch is gated on an optional provider-registry port (bound at composition), authorize iff `authority.extensions.has(callName)`, with no wildcard/`privileged`/selector/alias/legacy fallback, engine-internal and anonymous/descriptor-less callers denying, and descriptor-probe throws failing closed; the axis is never populated from `allow` and an extension call never falls through to a baked handler or schema. After authorization, the branch resolves the frozen synthesized descriptor through the provider port's optional `resolveDescriptor` and executes it against the pinned `extensionExecutionPort` context key: a missing descriptor or execution port fails closed with `EXECUTION_FAILED`, an unresolved/catalog-less name stays `TOOL_NOT_FOUND`, and a port rejection propagates to the universal error shield as a redacted `EXECUTION_FAILED` receipt
 - Realm/workspace/tenant scope is never caller-supplied: the scope vocabulary (`workspaceId`/`workspace_id`, `realmId`/`realm_id`, `tenantId`/`tenant_id`, `scope`) is pinned at dispatcher construction and stripped from per-call `callerContext`; a scope claim may only ride trusted bound construction (and, once Realm lands, the trusted identity projection), never a tool call
 - Realm-exact caller resolution and canonical key binding: a construction-bound `realmId` resolves the caller projection for exactly that `(realmId, agentId)` registration and binds its canonical identity `key` as the execution context's `callerKey` (a pinned key — per-call `callerKey`/`caller_key` claims are stripped), so substrate contexts disambiguate the same literal id across Realms; an omitted Realm keeps the unique-match resolution and the bare-id channel
@@ -84,6 +84,7 @@ export interface ExecutionContext {
     readonly messagingBus?: unknown;
     // @deprecated
     readonly privileged?: boolean;
+    readonly realmAdminPort?: RealmAdminPort;
     readonly realmPublishingPort?: RealmPublishingPort;
     // Warning: (ae-forgotten-export) The symbol "AgentRuntime" needs to be exported by the entry point index.d.ts
     readonly runtime?: AgentRuntime;
@@ -157,12 +158,109 @@ export interface OpenAIToolDefinition {
 export type ParamSanitizerFn = (rawArgs?: unknown) => Record<string, unknown>;
 
 // @public
+export interface RealmAdminAttachmentView {
+    readonly conflictWith?: readonly string[];
+    readonly displayName?: string;
+    readonly extensionId: string;
+    readonly kind: string;
+    readonly live: 'connected' | 'disconnected' | 'conflict' | 'error' | 'unavailable';
+    readonly status: 'active' | 'conflict' | 'unavailable';
+    readonly toolSelection: RealmAdminToolSelection;
+}
+
+// @public
+export interface RealmAdminMemberView {
+    readonly id: string;
+    readonly name: string;
+    readonly parent?: string | null;
+    readonly privileged: boolean;
+    readonly role: string;
+    readonly state: string;
+    readonly tools: {
+        readonly baked: readonly string[];
+        readonly extensions: readonly string[];
+    };
+    readonly turns: number;
+    readonly workspace?: string;
+}
+
+// @public
+export interface RealmAdminPatch {
+    readonly attach?: {
+        readonly extensionId: string;
+        readonly toolSelection?: RealmAdminToolSelection;
+    };
+    readonly color?: string | null;
+    readonly description?: string | null;
+    readonly name?: string;
+    readonly toolSelection?: {
+        readonly extensionId: string;
+        readonly selection: RealmAdminToolSelection;
+    };
+}
+
+// @public
+export interface RealmAdminPort {
+    inspectRealm(input: {
+        actorRef: string | null;
+        realmLabel: string | null;
+    }): RealmInspectReceipt;
+    updateRealm(input: {
+        actorRef: string | null;
+        realmLabel: string | null;
+        patch: RealmAdminPatch;
+    }): RealmUpdateReceipt;
+}
+
+// @public
+export interface RealmAdminProvenanceView {
+    readonly inputHashes: Readonly<Record<string, string>>;
+    readonly launchedAt: string;
+    readonly missingExtensions?: readonly string[];
+    readonly packageDigest?: string;
+    readonly resolvedTools?: Readonly<Record<string, string>>;
+    readonly seedPaths: readonly string[];
+    readonly templateId: string;
+    readonly templateVersion: string;
+}
+
+// @public
+export interface RealmAdminRealmSummary {
+    readonly attachments: readonly {
+        readonly extensionId: string;
+        readonly toolSelection: RealmAdminToolSelection;
+    }[];
+    readonly color?: string | null;
+    readonly description?: string | null;
+    readonly name: string;
+}
+
+// @public
+export type RealmAdminToolSelection = 'all' | readonly string[];
+
+// @public
 export interface RealmEffectiveTemplateView {
     // Warning: (ae-forgotten-export) The symbol "BundleFiles" needs to be exported by the entry point index.d.ts
     readonly files: BundleFiles;
     // Warning: (ae-forgotten-export) The symbol "RealmTemplate" needs to be exported by the entry point index.d.ts
     readonly template: RealmTemplate;
     readonly version: string;
+}
+
+// @public
+export interface RealmInspectReceipt {
+    readonly attachments: readonly RealmAdminAttachmentView[];
+    readonly disclosure: {
+        readonly missingExtensions: readonly string[];
+    };
+    readonly members: readonly RealmAdminMemberView[];
+    readonly provenance?: RealmAdminProvenanceView;
+    readonly realm: {
+        readonly label: string;
+        readonly createdAt: number;
+        readonly memberCount: number;
+    };
+    readonly success: true;
 }
 
 // @public
@@ -183,6 +281,16 @@ export interface RealmTemplateImportView {
     readonly templateVersion: string;
     readonly totalImportedBytes: number;
     readonly warnings: readonly string[];
+}
+
+// @public
+export interface RealmUpdateReceipt {
+    readonly after: RealmAdminRealmSummary;
+    readonly applied: true;
+    readonly before: RealmAdminRealmSummary;
+    readonly fields: readonly string[];
+    readonly realm: string;
+    readonly success: true;
 }
 
 // @public
@@ -417,6 +525,7 @@ const context: ExecutionContext = {
 - **`lifecyclePort`** — Narrow lifecycle capability port consumed by scheduler, invocation, and lifecycle descriptors. Replaces private-subsystem reaches.
 - **`messagingBus`** — Injected Layer 0 Messaging Bus instance. Opaque to this contract: descriptor handlers narrow the capability they are configured to consume.
 - **`privileged`** — Privilege elevation flag in legacy agent configurations.
+- **`realmAdminPort`** — Injected M3 realm-admin host port consumed by the `inspect_realm` and `update_realm` authority meta tools (realm roster/attachments/ceiling/ provenance reads and the bounded realm edit surface). Trust boundary: pinned from bound construction; a per-call value is stripped and can never substitute the host port.
 - **`realmPublishingPort`** — Injected Wave U host publishing port consumed by the realm publishing meta tools (canonical template import, effective-catalog resolution, and the session candidate surface). Trust boundary: pinned from bound construction; a per-call value is stripped and can never substitute the host port.
 - **`runtime`** — Legacy Sandbox Runtime instance accepted from direct callers: the factory derives `lifecyclePort`/`identityPort` from it once and strips it before any descriptor handler sees the context (it is never forwarded).
 - **`toolRegistry`** — Injected Tool Registry / Reflection Subsystem instance. Opaque to this contract: descriptor handlers narrow the capability they are configured to consume.
@@ -578,6 +687,91 @@ Parameter sanitizer function signature. Normalizes raw/hallucinated parameters t
 
 Sanitized canonical parameter object
 
+### `RealmAdminAttachmentView` — interface
+
+One realm attachment view carrying the ceiling and live connection state.
+
+#### Members
+
+- **`conflictWith`** — Extension ids this attachment currently conflicts with, when any.
+- **`displayName`** — Operator-facing display name, when declared.
+- **`extensionId`** — Host-level extension id.
+- **`kind`** — Extension kind (`mcp`/`pack`).
+- **`live`** — Live connection state for the attachment.
+- **`status`** — Stored attachment status (`active`/`conflict`/`unavailable`).
+- **`toolSelection`** — Realm-level tool ceiling.
+
+### `RealmAdminMemberView` — interface
+
+One realm-member view in the bounded realm inspection projection.
+
+#### Members
+
+- **`id`** — Bare realm-local agent id.
+- **`name`** — Display name.
+- **`parent`** — Bare parent/creator id, when recorded and realm-opaque.
+- **`privileged`** — Effective privilege (registry inputs; wildcard counts as privileged).
+- **`role`** — Role label.
+- **`state`** — Lifecycle state.
+- **`tools`** — Effective capability: canonical baked tools (never authority ids) and granted extension call names.
+- **`turns`** — Completed turn count.
+- **`workspace`** — Realm-opaque workspace label (realm-global partitions read `global`; internal partitions are withheld).
+
+### `RealmAdminPatch` — interface
+
+One realm-admin edit patch (M3 closed shape): display metadata (`name`/`description`/`color`), one new attachment (`attach`), or one attachment ceiling change (`toolSelection`). Membership, provenance, creation/deletion, detach/removal, raw attachment arrays, and every authority id are operator-only and never accepted here.
+
+#### Members
+
+- **`attach`** — Attaches one installed+connected extension with an optional ceiling.
+- **`color`** — Replacement accent color, or `null` to clear it.
+- **`description`** — Replacement description, or `null` to clear it.
+- **`name`** — Replacement display name (non-empty).
+- **`toolSelection`** — Replaces one existing attachment's tool ceiling.
+
+### `RealmAdminPort` — interface
+
+Narrow host port consumed by the M3 realm-admin meta tools.
+
+The composition root (the sandbox store) implements this port over its real `realmRegistry` + `extensionRegistry` live state, runtime rosters, and the existing attach/ceiling + safe-state sweep internals. The port is trusted bound construction: per-call context cannot substitute it (`realmAdminPort` is a pinned context key), and the *authority verdict stays dispatcher-side* from the caller's frozen descriptor — the port only re-reads the registry-side grant scope (never a caller claim) and fails closed when the `actorRef` carries no matching active grant record, so a direct store call can never execute under the operator principal without an actor record (R6).
+
+Every target-resolution failure (missing/unknown actor record, missing grant, unknown/ambiguous/out-of-scope label) throws one uniform static `PERMISSION_DENIED` per operation; malformed patches throw `INVALID_ARGUMENTS`. Receipts and audits carry display labels and bare ids only — never realm ids, `realm:` paths, transport URLs, credential ids, or tokens.
+
+#### Members
+
+- **`inspectRealm`** — Inspects one realm under the caller's exact scoped `@realm:inspect` grant.
+- **`updateRealm`** — Updates one realm under the caller's exact scoped `@realm:edit` grant.
+
+### `RealmAdminProvenanceView` — interface
+
+Realm launch provenance projection (hashes and labels only).
+
+#### Members
+
+- **`inputHashes`** — Per-input content hashes (never raw input values).
+- **`launchedAt`** — ISO-8601 launch timestamp.
+- **`missingExtensions`** — Requested extension ids that did not resolve at launch.
+- **`packageDigest`** — Hydration-package content digest, when attached.
+- **`resolvedTools`** — Resolved launch tool references (call name → extension id).
+- **`seedPaths`** — Seed destination paths written at launch.
+- **`templateId`** — Template id the realm was launched from.
+- **`templateVersion`** — Template content version at launch.
+
+### `RealmAdminRealmSummary` — interface
+
+Label-only realm summary used by the update receipt's before/after pair.
+
+#### Members
+
+- **`attachments`** — Attachment ids with their tool ceilings.
+- **`color`** — Accent color, or absent when never set.
+- **`description`** — Description, or absent when never set.
+- **`name`** — Display name.
+
+### `RealmAdminToolSelection` — type alias
+
+Realm-level tool-selection ceiling of one realm extension attachment: `'all'` or an explicit non-empty list of sanitized model-facing call names.
+
 ### `RealmEffectiveTemplateView` — interface
 
 Structural view of one effective catalog template: the authored template (format v1 or v2), its bundle file bodies, and the canonical authored-form content version.
@@ -589,6 +783,19 @@ The port serves the **authored** template, never a normalized projection: the pu
 - **`files`** — Bundle file bodies the template references.
 - **`template`** — The effective (shipped or imported) authored template.
 - **`version`** — Canonical authored-form content version (`sha256:<hex>`).
+
+### `RealmInspectReceipt` — interface
+
+Bounded realm inspection receipt. Realm-id-free: label addressing only.
+
+#### Members
+
+- **`attachments`** — Realm attachments with ceiling and live connection state.
+- **`disclosure`** — Missing-extension disclosure.
+- **`members`** — Realm-exact member roster with effective capability.
+- **`provenance`** — Launch provenance, when the realm was launched from a template.
+- **`realm`** — Label-only realm metadata.
+- **`success`** — Always `true`; failures throw instead of returning a receipt.
 
 ### `RealmPublishingPort` — interface
 
@@ -618,6 +825,19 @@ The `import_realm_template` tool receipt additionally carries the handler-derive
 - **`templateVersion`** — Canonical content version of the imported bundle (`sha256:<hex>`).
 - **`totalImportedBytes`** — Effective total imported-template bytes after this import.
 - **`warnings`** — Catalog parse/review warnings (empty when none).
+
+### `RealmUpdateReceipt` — interface
+
+Bounded realm update receipt.
+
+#### Members
+
+- **`after`** — Label-only realm summary after the patch.
+- **`applied`** — Always `true`; the port applies the whole patch or throws.
+- **`before`** — Label-only realm summary before the patch.
+- **`fields`** — Ratified field tokens touched by the patch (`attachments`/`ceiling`/`name`/`description`/`color`).
+- **`realm`** — Realm display label (never the realm id).
+- **`success`** — Always `true`; failures throw instead of returning a receipt.
 
 ### `resolveToolPreset` — function
 
@@ -934,9 +1154,9 @@ function handleToolError(code: ToolSystemErrorCode, message: string) {
 
 ## Doc coverage
 
-- Top-level exports: 32
-- Declarations (exports + members): 114
-- Documented declarations: 114 / 114 (100%)
+- Top-level exports: 41
+- Declarations (exports + members): 171
+- Documented declarations: 171 / 171 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): `AgentIdentityPort`, `AgentIdentityProjection`, `AgentIdentityScope`, `AgentRuntime`, `BundleFiles`, `ExtensionExecutionPort`, `ExtensionToolDescriptor`, `LifecyclePort`, `PendingInstancePayload`, `RealmTemplate`
