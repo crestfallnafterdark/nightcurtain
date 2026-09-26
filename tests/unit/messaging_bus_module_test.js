@@ -22,6 +22,7 @@
  *   [ICD-A ea6d16e] Archived Broadcast Envelope Markers (`broadcast`/`recipients`)
  *   [MOD-21 W8-D 134c19e] Context-First Mailbox Routing & Sender Identity
  *   [Realm wave A 7387ce1] Realm-Scoped Delivery (cross-realm denial, bypass principals, filtered broadcast)
+ *   [I1-V F3 befbb40] InternalPrincipal bind brand/shape gate (forged candidates rejected)
  */
 
 import test from 'node:test';
@@ -1075,5 +1076,35 @@ test('21. [Realm wave A 7387ce1] identity-projection realm scope: cross-realm de
   plain.registerAgent('agent_b');
   assert.strictEqual(plain.sendMessage({ from: 'agent_a', to: 'agent_b', content: 'legacy' }).success, true);
   assert.deepStrictEqual([...plain.sendMessage({ from: 'agent_a', to: 'all', content: 'legacy all' }).recipients].sort(), ['agent_b']);
+});
+
+test('22. [I1-V F3 befbb40] bindInternalPrincipal requires the branded principal shape and rejects forgeries', () => {
+  const ENGINE_PRINCIPAL = Object.freeze({ kind: 'internal', subject: 'bus_engine' });
+
+  // The nominal frozen brand shape is the only accepted candidate.
+  const first = new MessagingBus();
+  assert.strictEqual(first.bindInternalPrincipal(ENGINE_PRINCIPAL), true, 'the branded principal binds');
+  assert.strictEqual(first.bindInternalPrincipal(ENGINE_PRINCIPAL), false, 'first bind wins, never rebound');
+
+  for (const [label, candidate] of [
+    ['undefined', undefined],
+    ['null', null],
+    ['string', 'not-an-object'],
+    ['number', 42],
+    ['array', []],
+    ['empty object', {}],
+    ['partial shape (no subject)', Object.freeze({ kind: 'internal' })],
+    ['blank subject', Object.freeze({ kind: 'internal', subject: '' })],
+    ['wrong kind', Object.freeze({ kind: 'agent', subject: 'bus_engine' })],
+    ['unfrozen lookalike', { kind: 'internal', subject: 'bus_engine' }]
+  ]) {
+    const bus = new MessagingBus();
+    assert.strictEqual(bus.bindInternalPrincipal(candidate), false, `${label} must be rejected`);
+    assert.strictEqual(
+      bus.bindInternalPrincipal(ENGINE_PRINCIPAL),
+      true,
+      `${label} must not consume the one-time binding`
+    );
+  }
 });
 

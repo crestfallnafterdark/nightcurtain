@@ -1530,6 +1530,26 @@ test('25. [MOD-21 W8-D c6e24c0] Injected instance binds the engine principal onc
   assert.strictEqual(late.bindInternalPrincipal('not-an-object'), false);
   assert.strictEqual(late.bindInternalPrincipal(internalPrincipal), true);
 
+  // I1-V F3 hardening (ticket befbb40): a candidate missing the nominal frozen
+  // `kind: 'internal'` + non-empty `subject` brand shape never binds and never
+  // consumes the one-time binding.
+  for (const [label, candidate] of [
+    ['empty object', {}],
+    ['array', []],
+    ['partial shape', Object.freeze({ kind: 'internal' })],
+    ['blank subject', Object.freeze({ kind: 'internal', subject: '' })],
+    ['wrong kind', Object.freeze({ kind: 'agent', subject: 'test_tenant_admin' })],
+    ['unfrozen lookalike', { kind: 'internal', subject: 'test_tenant_admin' }]
+  ]) {
+    const fresh = new VirtualFS();
+    assert.strictEqual(fresh.bindInternalPrincipal(candidate), false, `${label} must be rejected`);
+    assert.strictEqual(
+      fresh.bindInternalPrincipal(internalPrincipal),
+      true,
+      `${label} must not consume the one-time binding`
+    );
+  }
+
   // The bound engine path authorizes every administer member.
   const engine = new VirtualFS();
   engine.writeFile('/engine.txt', 'engine-content', { workspaceId: 'agent_bob', callerAgentId: 'agent_bob' });

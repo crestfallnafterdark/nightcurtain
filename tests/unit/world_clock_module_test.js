@@ -1262,6 +1262,26 @@ test('33. bindInternalPrincipal binds the composition-root reference once (MOD-2
     false,
     'constructor-bound instances are never rebound'
   );
+
+  // I1-V F3 hardening (ticket befbb40): a candidate missing the nominal frozen
+  // `kind: 'internal'` + non-empty `subject` brand shape never binds and never
+  // consumes the one-time binding.
+  for (const [label, candidate] of [
+    ['empty object', {}],
+    ['array', []],
+    ['partial shape', Object.freeze({ kind: 'internal' })],
+    ['blank subject', Object.freeze({ kind: 'internal', subject: '' })],
+    ['wrong kind', Object.freeze({ kind: 'agent', subject: 'test_clock_engine' })],
+    ['unfrozen lookalike', { kind: 'internal', subject: 'test_clock_engine' }]
+  ]) {
+    const fresh = new WorldClock({ autoSyncFs: false });
+    assert.strictEqual(fresh.bindInternalPrincipal(candidate), false, `${label} must be rejected`);
+    assert.strictEqual(
+      fresh.bindInternalPrincipal(TEST_INTERNAL_PRINCIPAL),
+      true,
+      `${label} must not consume the one-time binding`
+    );
+  }
 });
 
 test('34. Realm-prefixed partitions are confined for every ungrouped non-bypass caller (V10 F-V10-1)', () => {
