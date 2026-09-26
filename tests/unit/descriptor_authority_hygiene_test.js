@@ -58,6 +58,14 @@ const AUTHORITY = Object.freeze({
   visibility: 'owned'
 });
 
+/**
+ * Minimal identity port for descriptor-less host fixtures (ticket 376e37f):
+ * the spawn guard now refuses a bound caller with no usable identity channel,
+ * so fixtures that only exercise caller-context forwarding bind a port that
+ * resolves no registration (host semantics, no principal).
+ */
+const UNRESOLVED_IDENTITY_PORT = Object.freeze({ getAgentIdentity: () => null });
+
 // ============================================================================
 // 1. spawn_agent — identity-only caller scope, no config smuggling
 // ============================================================================
@@ -73,6 +81,7 @@ test('1. spawn_agent forwards identity-only caller scope to launchAgent', async 
 
   const dispatcher = createSandboxToolDispatcher({
     lifecyclePort,
+    identityPort: UNRESOLVED_IDENTITY_PORT,
     agentId: 'creator_agent',
     isAdmin: true,
     isPrivileged: true,
@@ -381,6 +390,7 @@ test('12. spawn_agent forwards the bound caller id despite per-call callerAgentI
 
   const dispatcher = createSandboxToolDispatcher({
     lifecyclePort,
+    identityPort: UNRESOLVED_IDENTITY_PORT,
     agentId: 'creator_agent',
     allowedTools: 'all'
   });

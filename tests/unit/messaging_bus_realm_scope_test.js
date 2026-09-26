@@ -20,6 +20,9 @@
  *   8. Wave I: a real runtime + real bus keep two realms' same-id agents
  *      distinct — canonical-key registration, realm-local bare-ref resolution,
  *      scoped fan-out, opaque ambiguous denial, and bare-id-only surfaces.
+ *   9. Ticket 1754637: a recycled-only canonical registration hydrated into a
+ *      bus whose identity port can no longer resolve it still projects the
+ *      bare id (no canonical-key echo, no realm vocabulary).
  *
  * Unit level: realm membership is supplied by an injected identity port; the
  * runtime producer wiring lands in Wave A (the projection fields are optional,
@@ -36,7 +39,7 @@ import assert from 'node:assert/strict';
 import '../test_env.js';
 import { MessagingBus, MESSAGING_ERROR_CODES } from '../../src/lib/sandbox/messagingBus/index.ts';
 import { VirtualFS } from '../../src/lib/sandbox/virtualFs/index.ts';
-import { AgentRuntime } from '../../src/lib/sandbox/runtime/index.ts';
+import { AgentRuntime, createAgentIdentityKey } from '../../src/lib/sandbox/runtime/index.ts';
 
 /**
  * Opaque engine-internal principal injected into the bus (composition-root
@@ -783,4 +786,39 @@ test('9. Ticket 5b5fe63: drainInbox(string, context) must not discard the truste
   } finally {
     runtime.destroy();
   }
+});
+
+// ============================================================================
+// 9. Recycled-only canonical registrations after hydration (ticket 1754637)
+// ============================================================================
+
+test('9. a hydrated recycled-only canonical key projects the bare id in denials and listings', () => {
+  const RECYCLED_KEY = createAgentIdentityKey('alpha', 'ghost');
+
+  // The source bus resolves the canonical key while the registration is live
+  // and memoizes the bare id at termination.
+  const source = new MessagingBus({
+    identityPort: {
+      getAgentIdentity: (agentId) => (agentId === RECYCLED_KEY
+        ? { id: 'ghost', key: RECYCLED_KEY, privileged: false, allowedTools: [] }
+        : null)
+    }
+  });
+  source.registerAgent('sender_agent');
+  source.markAgentTerminated(RECYCLED_KEY);
+  const snapshot = source.exportSnapshot();
+  assert.deepEqual(snapshot.terminatedAgents, [RECYCLED_KEY], 'the snapshot carries the canonical terminated key');
+
+  // Hydration into a bus whose identity port can no longer resolve the
+  // recycled registration: the in-memory memo is gone, so the projection must
+  // decode the canonical key itself.
+  const restored = new MessagingBus({ identityPort: { getAgentIdentity: () => null } });
+  restored.importSnapshot(snapshot);
+  const receipt = restored.sendMessage({ from: 'sender_agent', to: RECYCLED_KEY, content: 'wake' });
+  assert.equal(receipt.success, false);
+  assert.equal(receipt.code, MESSAGING_ERROR_CODES.AGENT_TERMINATED);
+  assert.ok(receipt.error.includes('ghost'), `the dead-letter error names the bare id: ${receipt.error}`);
+  assert.equal(receipt.error.includes(RECYCLED_KEY), false, 'the canonical key never echoes');
+  assert.equal(receipt.error.includes('realm:'), false, 'no internal realm vocabulary echoes');
+  assert.deepEqual(restored.getTerminatedAgents(), ['ghost'], 'terminated listings project the bare id');
 });

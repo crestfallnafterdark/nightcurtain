@@ -4722,6 +4722,28 @@ interface ResolvedFileTarget {
 }
 
 /**
+ * Validates a nominal engine `InternalPrincipal` candidate (I1-V F3, ticket
+ * befbb40): a frozen object that carries the engine brand fields
+ * (`kind: 'internal'` plus a non-empty diagnostic `subject`). The minter's
+ * private brand symbol is intentionally not importable here (the runtime
+ * composition root owns it and imports this module), so the gate validates the
+ * frozen nominal shape: plain objects, JSON-shaped copies, arrays, thawed
+ * candidates, and partial shapes are rejected. Only the composition-root
+ * reference should ever satisfy it.
+ *
+ * @param candidate - Candidate reference passed to `bindInternalPrincipal`.
+ * @returns True when the candidate carries the nominal engine-principal shape.
+ */
+function isInternalPrincipalCandidate(candidate: unknown): boolean {
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return false;
+  const branded = candidate as { kind?: unknown; subject?: unknown };
+  return branded.kind === 'internal'
+    && typeof branded.subject === 'string'
+    && branded.subject.length > 0
+    && Object.isFrozen(candidate);
+}
+
+/**
  * Core Virtual Filesystem subsystem class managing multi-tenant isolated in-memory workspaces.
  * Guarantees POSIX path normalization, deterministic permission checks, surgical replacements,
  * atomic RFC 6902 patching, jq/AST querying, and byte/word-budgeted output truncation.
@@ -5834,10 +5856,15 @@ export class VirtualFS {
    * wiring for injected substrates; MOD-21 W8-D).
    *
    * First bind wins: an instance constructed with `internalPrincipal` (or
-   * already bound) is never rebound, so no later caller can replace or forge
-   * the engine principal. Only the exact bound reference authorizes
-   * {@link deleteWorkspace}, {@link reset}, {@link exportSnapshot},
-   * {@link importSnapshot}, and {@link forAgent} through `options.principal`.
+   * already bound) is never rebound, so no later caller can replace the
+   * engine principal. The candidate must carry the nominal frozen
+   * engine-principal brand shape (`kind: 'internal'` plus a non-empty
+   * diagnostic `subject`); plain objects, JSON-shaped copies, arrays, thawed
+   * candidates, and partial shapes are rejected without consuming the
+   * one-time binding (I1-V F3 hardening, ticket befbb40). Only the exact bound
+   * reference authorizes {@link deleteWorkspace}, {@link reset},
+   * {@link exportSnapshot}, {@link importSnapshot}, and {@link forAgent}
+   * through `options.principal`.
    *
    * @param principal - The exact `InternalPrincipal` reference minted by the composition root.
    * @returns True when this call performed the one-time binding.
@@ -5852,7 +5879,7 @@ export class VirtualFS {
 
   bindInternalPrincipal(principal: object): boolean {
     if (this.#internalPrincipal) return false;
-    if (!principal || typeof principal !== 'object') return false;
+    if (!isInternalPrincipalCandidate(principal)) return false;
     this.#internalPrincipal = principal;
     return true;
   }
