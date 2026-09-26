@@ -95,6 +95,8 @@ Model credentials are not part of the agent schema: agents resolve their key thr
 
 ### 2.3 Tool Permission Presets
 
+Named tiers are generated from the frozen tool-family taxonomy (`tools/constants`); the retired `subagent_management` selector is not a tier member and stays accepted only through the deprecated alias window (it expands to `spawn_agent`, `kill_agent`, `invoke_agent`, `undo_turn`).
+
 | Preset Name | Identifier | Included Tool Whitelist |
 | :--- | :--- | :--- |
 | **Full Access (*)** | `'all'` | `['*']` (All virtual filesystem, messaging, scheduling, and runtime tools). |

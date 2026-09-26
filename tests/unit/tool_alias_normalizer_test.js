@@ -42,9 +42,10 @@ test('1. SANDBOX_TOOLS Master Enum & Immutability', () => {
   assert.ok(Object.isFrozen(SANDBOX_TOOLS), 'SANDBOX_TOOLS must be frozen');
 
   const expectedCanonicalTools = [
-    // VFS (11)
+    // VFS (12)
     'read_file', 'write_file', 'replace_file_content', 'copy_file', 'delete_file',
     'list_files', 'write_json', 'query_json', 'json_patch', 'grep', 'set_permissions',
+    'concat_files',
     // Messaging (8)
     'send_message', 'wait_for_mail', 'list_inbox', 'read_message', 'get_archive',
     'inline_file_in_message', 'get_inbox', 'drain_inbox',
@@ -60,7 +61,7 @@ test('1. SANDBOX_TOOLS Master Enum & Immutability', () => {
     'batch_precall', 'describe_tool'
   ];
 
-  assert.strictEqual(expectedCanonicalTools.length, 34, 'Must have exactly 34 canonical tools');
+  assert.strictEqual(expectedCanonicalTools.length, 35, 'Must have exactly 35 canonical tools');
 
   for (const toolName of expectedCanonicalTools) {
     const matchingKey = Object.keys(SANDBOX_TOOLS).find(k => SANDBOX_TOOLS[k] === toolName);
@@ -114,13 +115,13 @@ test('3. TOOL_PRESETS and resolveToolPreset Resolution', () => {
   assert.deepStrictEqual(resolveToolPreset(new Set(['read_file', 'send_message'])), ['read_file', 'send_message']);
 });
 
-test('4. Master TOOL_ALIAS_MAP and getCanonToolName across all 34 tools', () => {
+test('4. Master TOOL_ALIAS_MAP and getCanonToolName across all 35 tools', () => {
   assert.ok(TOOL_ALIAS_MAP, 'TOOL_ALIAS_MAP must be exported');
   assert.ok(Object.isFrozen(TOOL_ALIAS_MAP), 'TOOL_ALIAS_MAP must be frozen');
   assert.strictEqual(normalizeToolName, getCanonToolName, 'normalizeToolName must alias getCanonToolName');
 
-  // Test all 34 canonical names and camelCase variants
-  const all34Tools = [
+  // Test all 35 canonical names and camelCase variants
+  const all35Tools = [
     { canon: 'read_file', camel: 'readFile', aliases: ['virtualFs_readFile', 'fs_readFile', 'fs.readFile', 'virtualFs.readFile', 'fs_read_file', 'vfs_read_file', 'file_read', 'read'] },
     { canon: 'write_file', camel: 'writeFile', aliases: ['virtualFs_writeFile', 'fs_writeFile', 'fs.writeFile', 'virtualFs.writeFile', 'fs_write_file', 'vfs_write_file', 'save_file', 'write'] },
     { canon: 'replace_file_content', camel: 'replaceFileContent', aliases: ['virtualFs_replaceFileContent', 'fs_replaceFileContent', 'fs.replaceFileContent', 'replace_content', 'edit_file'] },
@@ -132,6 +133,7 @@ test('4. Master TOOL_ALIAS_MAP and getCanonToolName across all 34 tools', () => 
     { canon: 'json_patch', camel: 'jsonPatch', aliases: ['virtualFs_jsonPatch', 'fs_jsonPatch', 'fs.jsonPatch', 'patch_json', 'apply_json_patch'] },
     { canon: 'grep', camel: 'grep', aliases: ['virtualFs_grep', 'fs_grep', 'fs.grep', 'grep_search', 'search_files', 'find_in_files', 'search'] },
     { canon: 'set_permissions', camel: 'setPermissions', aliases: ['virtualFs_setPermissions', 'fs_setPermissions', 'fs.setPermissions', 'chmod', 'fs_chmod', 'set_mode'] },
+    { canon: 'concat_files', camel: 'concatFiles', aliases: ['virtualFs_concatFiles', 'fs_concatFiles', 'fs.concatFiles', 'fs_concat_files', 'vfs_concat_files', 'concat', 'join_files', 'merge_files'] },
     { canon: 'send_message', camel: 'sendMessage', aliases: ['messaging_sendMessage', 'messaging.sendMessage', 'msg_send', 'msg.send', 'runtime_sendMessage', 'send_mail', 'send'] },
     { canon: 'wait_for_mail', camel: 'waitForMail', aliases: ['runtime_waitForMail', 'runtime.waitForMail', 'wait_mail', 'wait_for_messages', 'await_mail'] },
     { canon: 'list_inbox', camel: 'listInbox', aliases: ['messaging_listInbox', 'messaging.listInbox', 'msg_listInbox', 'get_inbox_headers', 'check_inbox'] },
@@ -157,9 +159,9 @@ test('4. Master TOOL_ALIAS_MAP and getCanonToolName across all 34 tools', () => 
     { canon: 'describe_tool', camel: 'describeTool', aliases: ['system_describeTool', 'system.describeTool', 'tool_info', 'help', 'describe', 'inspect_tool'] }
   ];
 
-  assert.strictEqual(all34Tools.length, 34, 'Must verify all 34 tools');
+  assert.strictEqual(all35Tools.length, 35, 'Must verify all 35 tools');
 
-  for (const item of all34Tools) {
+  for (const item of all35Tools) {
     // Canonical name resolution
     assert.strictEqual(
       getCanonToolName(item.canon),

@@ -21,7 +21,6 @@ import {
   TOOL_TIER_EXPOSURE,
   TOOL_PRESETS,
   expandRetiredToolSelector,
-  generateToolPresets,
   isMutatingTool,
   resolveToolPreset
 } from '../../src/lib/sandbox/tools/constants/index.ts';
@@ -168,8 +167,8 @@ function normalizeEffectiveSet(input) {
   return [...out].sort();
 }
 
-/** The generated catalog under test (commit A: the temporarily exported generator). */
-const generatedCatalog = generateToolPresets();
+/** The generated catalog under test (the exported generated `TOOL_PRESETS`). */
+const generatedCatalog = TOOL_PRESETS;
 
 test('T1 every baked tool declares exactly one primary family', () => {
   assert.ok(Object.isFrozen(TOOL_FAMILIES), 'TOOL_FAMILIES must be frozen');
@@ -309,6 +308,17 @@ test('T8 retired selector window is canonical-keyed and stays reserved', () => {
   for (const spelling of ['manage_subagents', 'subagents', 'subagent_tools']) {
     assert.strictEqual(getCanonToolName(spelling), 'subagent_management', `'${spelling}' stays reserved`);
   }
+  // Resolution expands the canonical selector (string, CSV, array, and Set paths).
+  assert.deepStrictEqual(resolveToolPreset('subagent_management'), [...LEGACY_MANAGEMENT_EXPANSION]);
+  assert.deepStrictEqual(resolveToolPreset(['subagent_management']), [...LEGACY_MANAGEMENT_EXPANSION]);
+  assert.deepStrictEqual(resolveToolPreset(new Set(['subagent_management'])), [...LEGACY_MANAGEMENT_EXPANSION]);
+  assert.deepStrictEqual(
+    resolveToolPreset('read_file, subagent_management'),
+    ['read_file', ...LEGACY_MANAGEMENT_EXPANSION]
+  );
+  // Unknown names and spellings keep the pass-through/fail-closed semantics.
+  assert.deepStrictEqual(resolveToolPreset('unknown_tool'), ['unknown_tool']);
+  assert.deepStrictEqual(resolveToolPreset('manage_subagents'), ['manage_subagents']);
 });
 
 test('T9 orphans stay wildcard/custom-only', () => {

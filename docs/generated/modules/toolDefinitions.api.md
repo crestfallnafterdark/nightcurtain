@@ -38,7 +38,7 @@ Actual-edge cross-check is the Tier 2 architecture gate (`npm run gate:arch:json
 - `SERVICE_UNAVAILABLE` is contract-reserved: handlers never emit it themselves, and a missing required substrate surfaces from the error shield as `EXECUTION_FAILED`
 - `canonicalizeToolName` is exposed on the dispatcher as the shared alias-normalization authority so engine consumers (precall revalidation) do not duplicate alias maps
 - Per-call `callerContext` is caller data, never authority: the dispatcher strips its `isAdmin`/`isPrivileged`/`privileged` flags, authority-bearing `callerRole`/`role` aliases, `principal`/`authority` objects, and `allowedTools`, deriving privilege and capability only from trusted bound construction options and the injected identity port
-- Descriptor-authoritative capability: when the projection's frozen `AuthorityDescriptor` is present, capability derives from the descriptor alone — a wildcard/explicit/selector grant authorizes, any other outcome denies — and the deprecated legacy channels above apply only to descriptor-less callers
+- Descriptor-authoritative capability: when the projection's frozen `AuthorityDescriptor` is present, capability derives from the descriptor alone — a wildcard/explicit grant authorizes, and a retired-selector entry authorizes exactly its expansion — any other outcome denies, and the deprecated legacy channels above apply only to descriptor-less callers
 - Publishing meta tools (`import_realm_template`/`submit_hydration_package`) are explicit-grant-only: they resolve through the separate `PUBLISHING_TOOL_REGISTRY` (never members of `TOOL_REGISTRY` or `ALL_TOOL_DESCRIPTORS`, never emitted by `getSandboxToolsSchema`), and authorization is the exact `@template:authority`/`@hydration:authority` entry on the caller's frozen descriptor — the wildcard `'*'`, `privileged`, and every legacy channel are deliberately insufficient, an engine-internal descriptor stays authorized, and descriptor-less callers deny (INV-9 refinement)
 - Extension tools are exact-membership-only on the separate frozen `AuthorityDescriptor.extensions` axis: the dispatcher's extension branch is gated on an optional provider-registry port (bound at composition), authorize iff `authority.extensions.has(callName)`, with no wildcard/`privileged`/selector/alias/legacy fallback, engine-internal and anonymous/descriptor-less callers denying, and descriptor-probe throws failing closed; the axis is never populated from `allow` and an extension call never falls through to a baked handler or schema. After authorization, the branch resolves the frozen synthesized descriptor through the provider port's optional `resolveDescriptor` and executes it against the pinned `extensionExecutionPort` context key: a missing descriptor or execution port fails closed with `EXECUTION_FAILED`, an unresolved/catalog-less name stays `TOOL_NOT_FOUND`, and a port rejection propagates to the universal error shield as a redacted `EXECUTION_FAILED` receipt
 - Realm/workspace/tenant scope is never caller-supplied: the scope vocabulary (`workspaceId`/`workspace_id`, `realmId`/`realm_id`, `tenantId`/`tenant_id`, `scope`) is pinned at dispatcher construction and stripped from per-call `callerContext`; a scope claim may only ride trusted bound construction (and, once Realm lands, the trusted identity projection), never a tool call
@@ -603,7 +603,7 @@ Structural receipt returned by the host template-import path (Wave T realm templ
 
 Resolves a tool preset identifier, tool array, Set, or comma-separated string into a canonical array of permitted tool names or wildcard patterns.
 
-Supports: - Preset strings: `'manager'`, `'collaborator'`, `'readonly_collaborator'`, `'readonly'`, `'all'` - Wildcard string: `'*'` -> `['*']` - Comma-separated strings: `'read_file, write_file, send_message'` -> `['read_file', 'write_file', 'send_message']` - Arrays of tool names or presets: `['read_file', 'write_file']` - Sets of tool names: `new Set(['read_file', 'whoami'])` - Null or undefined: returns `[]`
+Supports: - Preset strings: `'manager'`, `'collaborator'`, `'readonly_collaborator'`, `'readonly'`, `'all'` - Wildcard string: `'*'` -> `['*']` - Retired selector (deprecated window): `'subagent_management'` -> `['spawn_agent', 'kill_agent', 'invoke_agent', 'undo_turn']` - Comma-separated strings: `'read_file, write_file, send_message'` -> `['read_file', 'write_file', 'send_message']` - Arrays of tool names or presets: `['read_file', 'write_file']` - Sets of tool names: `new Set(['read_file', 'whoami'])` - Null or undefined: returns `[]`
 
 #### Parameters
 
@@ -732,7 +732,9 @@ const schemas = getSandboxToolsSchema('collaborator', { includeReflection: true 
 
 Standard capability presets defining tool permission tiers for agents.
 
-- `all`: Full access to all 35 sandbox tools (`['*']`). - `manager`: VFS manipulation, messaging, scheduling, subagent lifecycle management, clock, and precall. - `collaborator`: Full VFS, messaging, scheduling, clock, and precall (no subagent lifecycle). - `readonly_collaborator`: Read-only VFS (`read_file`, `query_json`, `list_files`, `grep`), mailbox tools plus `send_message` (mail can be consumed by `read_message`/`get_inbox`), clock, precall. - `readonly`: Read-only VFS, mailbox tools (mail can be consumed by `read_message`/`get_inbox`; no `send_message`), whoami, clock, precall.
+Generated once (frozen) from the tool-family taxonomy: every named tier is the innate baseline plus its family members under FAMILY_TIER_PLAN/TOOL_TIER_EXPOSURE, filtered into canonical `SANDBOX_TOOLS` declaration order and duplicate-free — no hand-enumerated member list exists. The retired `subagent_management` selector is never a member; it is accepted only through the deprecated selector window (RETIRED_TOOL_SELECTORS) and expands to its four legacy tools.
+
+- `all`: Full access to all 35 sandbox tools (`['*']`). - `manager`: VFS manipulation, messaging, scheduling, subagent lifecycle, invocation, clock, and precall. - `collaborator`: Full VFS, messaging, scheduling, clock, and precall (no lifecycle/invocation). - `readonly_collaborator`: Read-only VFS, mailbox tools plus `send_message` (mail can be consumed by `read_message`/`get_inbox`), clock, and precall. - `readonly`: Read-only VFS, mailbox tools (mail can be consumed by `read_message`/`get_inbox`; no `send_message`), whoami, clock, and precall.
 
 #### Examples
 
@@ -787,7 +789,7 @@ const call: ToolCall = {
 
 ### `ToolDescriptor` — interface
 
-Canonical tool descriptor contract implemented by all 34 tools in the sandbox.
+Canonical tool descriptor contract implemented by all 35 tools in the sandbox.
 
 #### Examples
 
@@ -918,4 +920,4 @@ function handleToolError(code: ToolSystemErrorCode, message: string) {
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): `AgentIdentityPort`, `AgentIdentityProjection`, `AgentIdentityScope`, `AgentRuntime`, `BundleFiles`, `ExtensionExecutionPort`, `ExtensionToolDescriptor`, `LifecyclePort`, `PendingInstancePayload`, `RealmTemplate`
-- Unresolved `{@link}` targets (`ae-unresolved-link`): 0 (policy `none`; see `scripts/api_reports.mjs`)
+- Unresolved `{@link}` targets (`ae-unresolved-link`): 3 (policy `none`; see `scripts/api_reports.mjs`)

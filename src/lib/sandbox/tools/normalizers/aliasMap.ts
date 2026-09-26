@@ -620,7 +620,9 @@ export const TOOL_ALIAS_MAP: Readonly<Record<string, string>> = Object.freeze({
   'inspect_tool': SANDBOX_TOOLS.DESCRIBE_TOOL,
   'inspectTool': SANDBOX_TOOLS.DESCRIBE_TOOL,
 
-  // Subagent management category presets/aliases
+  // Deprecated retired-selector window (ticket 5efc129): the canonical id and
+  // its spellings stay reserved for derived call names; authorization
+  // compatibility expands the canonical id through `expandRetiredToolSelector`.
   'subagent_management': 'subagent_management',
   'manage_subagents': 'subagent_management',
   'subagents': 'subagent_management',

@@ -162,6 +162,18 @@ test('3. Capability Preset Resolution Engine (resolveToolPreset)', () => {
     ['read_file', 'send_message']
   );
 
+  // Retired selector window (deprecated): the canonical selector id expands in
+  // place to its fixed legacy tool list; alias spellings keep passing through
+  // canonical resolution for consumers that canonicalize before authorizing.
+  assert.deepStrictEqual(
+    resolveToolPreset('subagent_management'),
+    ['spawn_agent', 'kill_agent', 'invoke_agent', 'undo_turn']
+  );
+  assert.deepStrictEqual(resolveToolPreset(['manager', 'subagent_management']).slice(-4), [
+    'spawn_agent', 'kill_agent', 'invoke_agent', 'undo_turn'
+  ]);
+  assert.deepStrictEqual(resolveToolPreset('manage_subagents'), ['manage_subagents']);
+
   // Falsy / invalid inputs return empty array
   assert.deepStrictEqual(resolveToolPreset(null), []);
   assert.deepStrictEqual(resolveToolPreset(undefined), []);

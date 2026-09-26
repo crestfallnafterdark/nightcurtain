@@ -202,9 +202,13 @@ test('R12: a child never exceeds the spawner tools, for authority spawners too',
     const receipt = await dispatcher.executeTool('spawn_agent', { id: 'child_r12', toolPreset: 'manager' });
     assert.equal(receipt.success, true, `authority spawn must succeed: ${receipt.error}`);
     const child = childOf(runtime, 'child_r12');
+    // Generated tiers are sentinel-free, so the clamp intersects the child's
+    // concrete manager request against the spawner's own effective set and the
+    // spawner-owned `spawn_agent` now survives (post-rebuild normalization of
+    // an artifact the retired selector used to mask in this intersection).
     assert.deepStrictEqual(
       [...child.config.allowedTools].sort(),
-      ['read_file', 'write_file'],
+      ['read_file', 'spawn_agent', 'write_file'],
       'an authority child is clamped to the authority spawner own effective set'
     );
 

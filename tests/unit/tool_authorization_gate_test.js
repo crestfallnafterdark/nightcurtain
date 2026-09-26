@@ -6,8 +6,9 @@
  * When the identity projection carries the frozen registry `AuthorityDescriptor`,
  * the descriptor decides alone — allow iff it holds the wildcard `'*'`, an
  * explicit grant for the canonical tool (alias-written entries are canonicalized
- * to their canonical tool), or the matching subagent-management selector
- * sentinel; otherwise deny. No widening through `context.isAdmin`/`isPrivileged`
+ * to their canonical tool), or a grant entry canonicalizing to a retired
+ * selector (which authorizes exactly that selector's expansion through the
+ * deprecated window); otherwise deny. No widening through `context.isAdmin`/`isPrivileged`
  * or bound/identity `allowedTools`. Innate tools stay universally allowed, and
  * the legacy channels apply only to callers with no descriptor.
  *
@@ -231,6 +232,32 @@ test('8. the subagent_management selector sentinel grants exactly the subagent t
     ['spawn:child_agent', 'kill:child_agent', 'invoke:gate_agent->child_agent', 'undo:gate_agent:'],
     'only sentinel-scoped operations may run'
   );
+
+  // The window grants exactly the four legacy tools — never the observation
+  // half (`list_agents`) or any other tool the retired selector never covered.
+  const listAgentsRes = await dispatcher.executeTool('list_agents', {});
+  assert.equal(listAgentsRes.success, false, 'the selector window must not grant list_agents');
+  assert.equal(listAgentsRes.code, TOOL_SYSTEM_ERROR_CODES.PERMISSION_DENIED);
+
+  // Alias spellings resolve to the canonical selector and keep granting
+  // exactly its expansion through the descriptor path.
+  const spellingDispatcher = createDispatcher(
+    createIdentity({ allowedTools: [], authority: createAuthority(['manage_subagents']) }),
+    { lifecyclePort }
+  );
+  const spellingSpawn = await spellingDispatcher.executeTool('spawn_agent', { id: 'child_spelling' });
+  assert.equal(spellingSpawn.success, true, "the 'manage_subagents' spelling must grant the window expansion");
+  const spellingList = await spellingDispatcher.executeTool('list_agents', {});
+  assert.equal(spellingList.success, false, 'a spelled selector must not grant list_agents');
+  assert.equal(spellingList.code, TOOL_SYSTEM_ERROR_CODES.PERMISSION_DENIED);
+
+  // The descriptor-less legacy allowlist path expands spelled selectors too.
+  const legacyDispatcher = createDispatcher(null, { lifecyclePort, allowedTools: ['subagents'] });
+  const legacySpawn = await legacyDispatcher.executeTool('spawn_agent', { id: 'child_legacy' });
+  assert.equal(legacySpawn.success, true, 'a legacy spelled allowlist must grant the window expansion');
+  const legacyList = await legacyDispatcher.executeTool('list_agents', {});
+  assert.equal(legacyList.success, false, 'a legacy spelled allowlist must not grant list_agents');
+  assert.equal(legacyList.code, TOOL_SYSTEM_ERROR_CODES.PERMISSION_DENIED);
 });
 
 test('9. alias-written descriptor entries grant exactly their canonical tool (76fb539)', async () => {

@@ -11,11 +11,11 @@
  * @invariant Frozen error-code dictionary: `TOOL_SYSTEM_ERROR_CODES` freezes the canonical machine-readable codes (`TOOL_NOT_FOUND`, `PERMISSION_DENIED`, `INVALID_ARGUMENTS`, `SERVICE_UNAVAILABLE`, `PRECALL_FORBIDDEN`, `EXECUTION_FAILED`, `AGENT_ALREADY_EXISTS`); the dispatcher's universal error shield constrains every emitted failure receipt to this vocabulary, normalizing downstream subsystem codes outside it to `EXECUTION_FAILED`.
  * @invariant Tool-family taxonomy: `TOOL_FAMILIES` declares exactly one primary family — from the frozen 11-family vocabulary (`vfs.read`, `vfs.write`, `messaging.send`, `mailbox.read`, `mailbox.consume`, `lifecycle`, `invocation`, `scheduler`, `clock`, `world`, `precall`) — for every canonical `SANDBOX_TOOLS` entry; `FAMILY_TIER_PLAN` maps each family to its named tiers, and `TOOL_TIER_EXPOSURE` carries the explicit never/override decisions (an absent tool defaults to `'family'`).
  * @invariant Retired-selector window: `RETIRED_TOOL_SELECTORS` freezes the canonical `subagent_management` selector expansion (`spawn_agent`, `kill_agent`, `invoke_agent`, `undo_turn`, fixed legacy order), and `expandRetiredToolSelector` is a pure fail-closed lookup keyed by the canonical selector id only — spellings resolve through the alias normalizer.
- * @invariant Capability tiers: exactly five presets (`all`, `manager`, `collaborator`, `readonly_collaborator`, `readonly`), each a frozen string array; `all` is exactly `['*']`. The manager tier carries the aggregate `subagent_management` sentinel — not a canonical tool name — which the dispatcher expands to `spawn_agent`, `kill_agent`, `invoke_agent`, `undo_turn`.
+ * @invariant Capability tiers: exactly five presets (`all`, `manager`, `collaborator`, `readonly_collaborator`, `readonly`), each a frozen string array; `all` is exactly `['*']`. The named tiers are generated once from the family taxonomy (innate baseline + `FAMILY_TIER_PLAN`/`TOOL_TIER_EXPOSURE`, canonical declaration order, duplicate-free) — no hand-enumerated member list exists, and no tier carries the retired `subagent_management` selector.
  * @invariant Preset values are allowlist strings only: no execution-context or infrastructure configuration (model, provider, temperature, privilege/whitelist flags) is represented in the preset definitions.
  * @invariant Mutation-capability vocabulary: `MUTATING_TOOLS` and `READ_ONLY_TOOLS` partition every canonical `SANDBOX_TOOLS` entry exactly once (disjoint, union = the 35-name canonical set) as frozen arrays in canonical declaration order, and `isMutatingTool` is a pure membership probe over that vocabulary. The clock/event tools (`world_clock`, `event_list`) classify as mutating because they step simulation time and mutate VFS-backed event registries.
  * @invariant Publishing-tool vocabulary: `PUBLISHING_TOOLS` freezes the two publishing tool names (`import_realm_template`, `submit_hydration_package`) outside the canonical taxonomy — they are explicit-grant-only meta tools, never wildcard-implied capabilities.
- * @invariant `resolveToolPreset` is a pure resolver: `null`/`undefined`/empty input returns `[]`, the wildcard string returns exactly `['*']`, named presets resolve case-insensitively to fresh copies (never the frozen stored arrays), comma-separated strings are split and trimmed, and Sets/arrays are copied without mutation.
+ * @invariant `resolveToolPreset` is a pure resolver: `null`/`undefined`/empty input returns `[]`, the wildcard string returns exactly `['*']`, named presets resolve case-insensitively to fresh copies (never the frozen stored arrays), comma-separated strings are split and trimmed, Sets/arrays are copied without mutation, and every entry whose canonical form is a retired selector expands in place to that selector's frozen tool list (fixed legacy order, no de-duplication).
  */
 
 // ============================================================================
@@ -608,17 +608,17 @@ export const TOOL_FAMILIES: Readonly<Record<SandboxToolName, ToolFamily>> = Obje
  * ```
  */
 export const FAMILY_TIER_PLAN: Readonly<Record<ToolFamily, readonly ToolPresetName[]>> = Object.freeze({
-  'vfs.read': Object.freeze(['readonly', 'readonly_collaborator', 'collaborator', 'manager']),
-  'vfs.write': Object.freeze(['collaborator', 'manager']),
-  'messaging.send': Object.freeze(['readonly_collaborator', 'collaborator', 'manager']),
-  'mailbox.read': Object.freeze(['readonly', 'readonly_collaborator', 'collaborator', 'manager']),
-  'mailbox.consume': Object.freeze(['readonly', 'readonly_collaborator', 'collaborator', 'manager']),
-  lifecycle: Object.freeze(['manager']),
-  invocation: Object.freeze(['manager']),
-  scheduler: Object.freeze(['collaborator', 'manager']),
-  clock: Object.freeze([]),
-  world: Object.freeze([]),
-  precall: Object.freeze([])
+  'vfs.read': Object.freeze(['readonly', 'readonly_collaborator', 'collaborator', 'manager'] as const),
+  'vfs.write': Object.freeze(['collaborator', 'manager'] as const),
+  'messaging.send': Object.freeze(['readonly_collaborator', 'collaborator', 'manager'] as const),
+  'mailbox.read': Object.freeze(['readonly', 'readonly_collaborator', 'collaborator', 'manager'] as const),
+  'mailbox.consume': Object.freeze(['readonly', 'readonly_collaborator', 'collaborator', 'manager'] as const),
+  lifecycle: Object.freeze(['manager'] as const),
+  invocation: Object.freeze(['manager'] as const),
+  scheduler: Object.freeze(['collaborator', 'manager'] as const),
+  clock: Object.freeze([] as const),
+  world: Object.freeze([] as const),
+  precall: Object.freeze([] as const)
 });
 
 /**
@@ -660,7 +660,7 @@ export const TOOL_TIER_EXPOSURE: Readonly<Partial<Record<SandboxToolName, ToolEx
   [SANDBOX_TOOLS.WAIT_FOR_INVOCATION]: 'never',
   [SANDBOX_TOOLS.WORLD_CLOCK]: 'never',
   [SANDBOX_TOOLS.EVENT_LIST]: 'never',
-  [SANDBOX_TOOLS.INLINE_FILE_IN_MESSAGE]: Object.freeze(['collaborator', 'manager'])
+  [SANDBOX_TOOLS.INLINE_FILE_IN_MESSAGE]: Object.freeze(['collaborator', 'manager'] as const)
 });
 
 /**
@@ -715,19 +715,12 @@ function generateTier(tier: ToolPresetName): readonly string[] {
  * `readonly` — the spawn `toolPreset` enum order is unchanged. `all` is
  * exactly `['*']` and is never family-derived.
  *
- * Exported temporarily for the migration test; once the catalog switches to
- * this generator the function becomes module-private.
+ * Module-private: {@link TOOL_PRESETS} is the only exported catalog and is
+ * built from this generator exactly once.
  *
  * @returns A frozen preset catalog (`all` wildcard plus the four named tiers)
- *
- * @example
- * ```typescript
- * import { generateToolPresets } from './constants/index.ts';
- *
- * generateToolPresets().readonly.length; // 12
- * ```
  */
-export function generateToolPresets(): {
+function generateToolPresets(): {
   readonly all: readonly ['*'];
   readonly manager: readonly string[];
   readonly collaborator: readonly string[];
@@ -805,11 +798,19 @@ export function expandRetiredToolSelector(canonical: string): readonly SandboxTo
 /**
  * Standard capability presets defining tool permission tiers for agents.
  *
+ * Generated once (frozen) from the tool-family taxonomy: every named tier is
+ * the innate baseline plus its family members under
+ * {@link FAMILY_TIER_PLAN}/{@link TOOL_TIER_EXPOSURE}, filtered into canonical
+ * `SANDBOX_TOOLS` declaration order and duplicate-free — no hand-enumerated
+ * member list exists. The retired `subagent_management` selector is never a
+ * member; it is accepted only through the deprecated selector window
+ * ({@link RETIRED_TOOL_SELECTORS}) and expands to its four legacy tools.
+ *
  * - `all`: Full access to all 35 sandbox tools (`['*']`).
- * - `manager`: VFS manipulation, messaging, scheduling, subagent lifecycle management, clock, and precall.
- * - `collaborator`: Full VFS, messaging, scheduling, clock, and precall (no subagent lifecycle).
- * - `readonly_collaborator`: Read-only VFS (`read_file`, `query_json`, `list_files`, `grep`), mailbox tools plus `send_message` (mail can be consumed by `read_message`/`get_inbox`), clock, precall.
- * - `readonly`: Read-only VFS, mailbox tools (mail can be consumed by `read_message`/`get_inbox`; no `send_message`), whoami, clock, precall.
+ * - `manager`: VFS manipulation, messaging, scheduling, subagent lifecycle, invocation, clock, and precall.
+ * - `collaborator`: Full VFS, messaging, scheduling, clock, and precall (no lifecycle/invocation).
+ * - `readonly_collaborator`: Read-only VFS, mailbox tools plus `send_message` (mail can be consumed by `read_message`/`get_inbox`), clock, and precall.
+ * - `readonly`: Read-only VFS, mailbox tools (mail can be consumed by `read_message`/`get_inbox`; no `send_message`), whoami, clock, and precall.
  *
  * @readonly
  * @example
@@ -823,7 +824,7 @@ export function expandRetiredToolSelector(canonical: string): readonly SandboxTo
 export const TOOL_PRESETS: {
   /** Full access to all 35 sandbox tools wildcard */
   readonly all: readonly ['*'];
-  /** Manager tier: Full VFS, messaging, scheduler, subagent management, clock, and precall */
+  /** Manager tier: Full VFS, messaging, scheduler, subagent lifecycle, invocation, clock, and precall */
   readonly manager: readonly string[];
   /** Collaborator tier: Full VFS, messaging, scheduler, clock, and precall */
   readonly collaborator: readonly string[];
@@ -831,33 +832,7 @@ export const TOOL_PRESETS: {
   readonly readonly_collaborator: readonly string[];
   /** Read-only tier: Read-only VFS, mailbox tools, whoami, clock, and precall (mail can be consumed by read_message/get_inbox; no send_message) */
   readonly readonly: readonly string[];
-} = Object.freeze({
-  all: Object.freeze(['*'] as const),
-  manager: Object.freeze([
-    'read_file', 'write_file', 'copy_file', 'set_permissions', 'replace_file_content',
-    'write_json', 'query_json', 'list_files', 'delete_file', 'json_patch', 'grep',
-    'send_message', 'inline_file_in_message', 'get_inbox', 'list_inbox', 'read_message',
-    'get_archive', 'wait_for_mail', 'whoami', 'get_current_time', 'schedule',
-    'list_schedules', 'cancel_schedule', 'subagent_management', 'batch_precall'
-  ]),
-  collaborator: Object.freeze([
-    'read_file', 'write_file', 'copy_file', 'set_permissions', 'replace_file_content',
-    'write_json', 'query_json', 'list_files', 'delete_file', 'json_patch', 'grep',
-    'send_message', 'inline_file_in_message', 'get_inbox', 'list_inbox', 'read_message',
-    'get_archive', 'wait_for_mail', 'whoami', 'get_current_time', 'schedule',
-    'list_schedules', 'cancel_schedule', 'batch_precall'
-  ]),
-  readonly_collaborator: Object.freeze([
-    'read_file', 'query_json', 'list_files', 'grep', 'get_inbox', 'list_inbox',
-    'read_message', 'get_archive', 'wait_for_mail', 'send_message', 'whoami',
-    'get_current_time', 'batch_precall'
-  ]),
-  readonly: Object.freeze([
-    'read_file', 'query_json', 'list_files', 'grep', 'get_inbox', 'list_inbox',
-    'read_message', 'get_archive', 'wait_for_mail', 'whoami', 'get_current_time',
-    'batch_precall'
-  ])
-});
+} = Object.freeze(generateToolPresets());
 
 /**
  * Union type representing standard capability preset names.
@@ -873,12 +848,37 @@ function isToolPresetName(value: string): value is ToolPresetName {
 }
 
 /**
+ * Expands every entry whose canonical form is a retired selector in place,
+ * preserving entry order (deprecated window, module-private). Non-selector
+ * entries — including the alias spellings, unknown names, and non-strings —
+ * pass through unchanged.
+ *
+ * @param entries - Resolved entry list
+ * @returns A new list with retired selectors expanded
+ */
+function expandRetiredSelectorEntries(entries: readonly string[]): string[] {
+  const expanded: string[] = [];
+  for (const entry of entries) {
+    const retired = typeof entry === 'string'
+      ? expandRetiredToolSelector(entry.trim().toLowerCase())
+      : null;
+    if (retired) {
+      expanded.push(...retired);
+      continue;
+    }
+    expanded.push(entry);
+  }
+  return expanded;
+}
+
+/**
  * Resolves a tool preset identifier, tool array, Set, or comma-separated string
  * into a canonical array of permitted tool names or wildcard patterns.
  *
  * Supports:
  * - Preset strings: `'manager'`, `'collaborator'`, `'readonly_collaborator'`, `'readonly'`, `'all'`
  * - Wildcard string: `'*'` -\> `['*']`
+ * - Retired selector (deprecated window): `'subagent_management'` -\> `['spawn_agent', 'kill_agent', 'invoke_agent', 'undo_turn']`
  * - Comma-separated strings: `'read_file, write_file, send_message'` -\> `['read_file', 'write_file', 'send_message']`
  * - Arrays of tool names or presets: `['read_file', 'write_file']`
  * - Sets of tool names: `new Set(['read_file', 'whoami'])`
@@ -920,12 +920,12 @@ export function resolveToolPreset(
     }
     if (trimmed.includes(',')) {
       const parsed = trimmed.split(',').map(s => s.trim()).filter(Boolean);
-      return parsed.length > 0 ? parsed : [];
+      return parsed.length > 0 ? expandRetiredSelectorEntries(parsed) : [];
     }
-    return [trimmed];
+    return expandRetiredSelectorEntries([trimmed]);
   }
   if (input instanceof Set) {
-    return Array.from(input);
+    return expandRetiredSelectorEntries(Array.from(input));
   }
   if (Array.isArray(input)) {
     if (input.length === 0) return [];
@@ -935,7 +935,7 @@ export function resolveToolPreset(
         return [...TOOL_PRESETS[single]];
       }
     }
-    return [...input];
+    return expandRetiredSelectorEntries([...input]);
   }
   return [];
 }

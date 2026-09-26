@@ -28,7 +28,14 @@ test('1. TOOL_PRESETS Definition & Immutability', () => {
   }
 
   assert.deepStrictEqual(TOOL_PRESETS.all, ['*']);
-  assert.strictEqual(TOOL_PRESETS.manager.includes('subagent_management'), true);
+  // The retired selector is not a tier member; the deprecated window still
+  // resolves it to exactly the four legacy subagent-management tools.
+  assert.strictEqual(TOOL_PRESETS.manager.includes('subagent_management'), false);
+  assert.deepStrictEqual(
+    resolveToolPreset('subagent_management'),
+    ['spawn_agent', 'kill_agent', 'invoke_agent', 'undo_turn']
+  );
+  assert.strictEqual(TOOL_PRESETS.manager.includes('spawn_agent'), true);
   assert.strictEqual(TOOL_PRESETS.manager.includes('world_clock'), false);
   assert.strictEqual(TOOL_PRESETS.manager.includes('event_list'), false);
   assert.strictEqual(TOOL_PRESETS.collaborator.includes('subagent_management'), false);
