@@ -3301,8 +3301,11 @@ export class AgentRuntime {
         ? [...agent.config.tools]
         : (agent.config?.allowedTools === '*' || agent.config?.tools === '*' ? ['*'] : []));
     // M2: the queried registration's own authority ids (never scopes); the
-    // agent-facing path only ever queries the bound caller.
-    const grants = this.#lifecycleManager.getAuthorityGrants(agent.id);
+    // agent-facing path only ever queries the bound caller. Realm-exact
+    // lookup (ticket 5f34f18): the record's canonical `(realmId, agentId)`
+    // key resolves its own registry grants, so a same-literal-id agent in
+    // another Realm neither masks nor empties this registration's list.
+    const grants = this.#lifecycleManager.getAuthorityGrants(this.#agentIdentityKeyOf(agent));
     const authorities: string[] = [];
     for (let i = 0; i < grants.length; i++) authorities[authorities.length] = grants[i].id;
 

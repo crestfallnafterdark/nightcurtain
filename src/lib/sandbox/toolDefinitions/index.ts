@@ -1661,6 +1661,17 @@ export function createSandboxToolDispatcher(options: SandboxDispatcherOptions = 
     const identityScope: AgentIdentityScope | undefined = hasBoundRealmScope
       ? { realmId: rawBoundRealmId === null ? null : rawBoundRealmId as string }
       : undefined;
+    // Pinned canonical caller identity (ticket 5f34f18): a construction-bound
+    // `callerKey` is the same trusted pinned channel `realmId` is (the turn
+    // engine's production binding carries it while per-call claims are
+    // stripped), so the projection resolves by canonical key ahead of the
+    // scope/bare-id fallbacks. Without this, a caller whose bare id is
+    // registered in two Realms resolves ambiguous -> `null` and every
+    // authority-gated call default-denies even though the exact registration
+    // holds the approved grant.
+    const boundCallerKey = typeof boundOptions.callerKey === 'string' && boundOptions.callerKey
+      ? boundOptions.callerKey
+      : null;
     // Identity-port shielding (P2.4-O1): identity resolution is trusted
     // construction, but a throwing `getAgentIdentity` must never escape
     // `dispatch()`. The failure fails closed as a uniform typed denial — an
@@ -1670,7 +1681,11 @@ export function createSandboxToolDispatcher(options: SandboxDispatcherOptions = 
     let agentIdentity: AgentIdentityProjection | null = null;
     if (getAgentIdentity) {
       try {
-        agentIdentity = getAgentIdentity(agentId, identityScope);
+        if (boundCallerKey && agentId) {
+          const keyed = getAgentIdentity(boundCallerKey);
+          if (keyed && keyed.id === agentId) agentIdentity = keyed;
+        }
+        if (!agentIdentity) agentIdentity = getAgentIdentity(agentId, identityScope);
       } catch {
         return {
           success: false,
@@ -1681,15 +1696,16 @@ export function createSandboxToolDispatcher(options: SandboxDispatcherOptions = 
     }
 
     // Canonical identity key of the resolved caller (Wave I, ticket d57cbc1):
-    // bound into the execution context only when the caller resolved through
-    // the trusted realm-exact scope, so substrate contexts (bus/VFS/clock/
-    // scheduler/invocation) disambiguate same-literal-id registrations exactly.
-    // A unique-match resolution keeps the bare-id channel (substrates resolve
-    // it identically) and never presents an unverifiable key to a substrate
-    // wired with a different identity port. The key is trusted construction
-    // output: per-call `callerKey`/`caller_key` claims are pinned keys and are
-    // stripped before dispatch.
-    const callerKey = hasBoundRealmScope
+    // bound into the execution context when the caller resolved through the
+    // trusted realm-exact scope or the pinned canonical `callerKey`, so
+    // substrate contexts (bus/VFS/clock/scheduler/invocation) disambiguate
+    // same-literal-id registrations exactly. A unique-match resolution keeps
+    // the bare-id channel (substrates resolve it identically) and never
+    // presents an unverifiable key to a substrate wired with a different
+    // identity port. The key is trusted construction output: per-call
+    // `callerKey`/`caller_key` claims are pinned keys and are stripped before
+    // dispatch.
+    const callerKey = (hasBoundRealmScope || boundCallerKey !== null)
       && agentIdentity
       && typeof agentIdentity.key === 'string'
       && agentIdentity.key
