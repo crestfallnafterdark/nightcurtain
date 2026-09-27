@@ -1668,7 +1668,11 @@ export function createSandboxToolDispatcher(options: SandboxDispatcherOptions = 
     // scope/bare-id fallbacks. Without this, a caller whose bare id is
     // registered in two Realms resolves ambiguous -> `null` and every
     // authority-gated call default-denies even though the exact registration
-    // holds the approved grant.
+    // holds the approved grant. A bound key is authoritative: when it does not
+    // resolve to the bound subject (a stale key from before a recycle), the
+    // dispatcher must NOT fall back to the ambiguous bare id — that fallback
+    // could silently retarget the surviving same-literal-id twin (the pinned
+    // stale-key fail-closed contract, realm_identity_matrix 6d).
     const boundCallerKey = typeof boundOptions.callerKey === 'string' && boundOptions.callerKey
       ? boundOptions.callerKey
       : null;
@@ -1681,11 +1685,14 @@ export function createSandboxToolDispatcher(options: SandboxDispatcherOptions = 
     let agentIdentity: AgentIdentityProjection | null = null;
     if (getAgentIdentity) {
       try {
-        if (boundCallerKey && agentId) {
-          const keyed = getAgentIdentity(boundCallerKey);
-          if (keyed && keyed.id === agentId) agentIdentity = keyed;
+        if (boundCallerKey) {
+          if (agentId) {
+            const keyed = getAgentIdentity(boundCallerKey);
+            if (keyed && keyed.id === agentId) agentIdentity = keyed;
+          }
+        } else {
+          agentIdentity = getAgentIdentity(agentId, identityScope);
         }
-        if (!agentIdentity) agentIdentity = getAgentIdentity(agentId, identityScope);
       } catch {
         return {
           success: false,
