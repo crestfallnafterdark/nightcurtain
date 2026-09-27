@@ -22,7 +22,7 @@
  * @invariant MOD-20 preset composition root: the store owns the single `presetCatalog` instance over a snapshot-backed `{ load, save }` adapter, mirrors the active pointer and custom preset entries as snapshot state, persists catalog mutations through the existing debounced save, and hands the owned runtime only the frozen `ModelPresetSourcePort`.
  * @invariant Realm composition root: the store owns the single `realmRegistry` instance over a snapshot-backed `{ load, save }` adapter, mirrors the realm records into the reactive `realms` projection and the snapshot `realms` field, and persists registry mutations through the existing debounced save. Every store seeds the protected Generic default (`realm_generic`, display "Generic", renamable, non-deletable) at init and hands the registry its protected-id set, so removal is refused on every public surface; reconciliation keeps the seeded default in place — first — and a reset restores its pristine metadata, so the registry is never empty and every non-director launch has a Realm.
  * @invariant Realm launch atomicity: `launchRealmFromTemplate` creates the Realm record first and, when materialization, any member launch, a placement write, or a directive delivery fails, rolls the whole operation back (launched members purged, record removed, placement files already written best-effort evicted) before throwing a coded failure — a failed call never leaves a half-realm, and template lookup, preset binding, payload/input validation, and placement validation are all fail-closed.
- * @invariant H1 reload capability heal: on hydration completion the store runs an operator-context heal pass that restores only the persisted tool grants (`allowedTools`/`tools`/`toolPreset`) plus the per-agent extension selector (`extensionTools`) onto the restored agents; `privileged`, parentage (`spawnedBy`/`creatorId`), and realm membership are never restored from a snapshot — privilege and parentage stay default-deny/unbound (template-backed privilege is re-derived from trusted template specs) while membership hydrates through the runtime's scope-constraint path. The pass is idempotent (a second run reports `unchanged` and mutates nothing) and observable through the reactive `capabilityHealReport`. A legacy snapshot without the extension selector heals to the fail-closed empty selector — never the `'all'` default.
+ * @invariant H1 reload capability heal: on hydration completion the store runs an operator-context heal pass that restores the persisted tool grants (`allowedTools`/`tools`/`toolPreset`) plus the per-agent extension selector (`extensionTools`) onto the restored agents; `privileged`, parentage (`spawnedBy`/`creatorId`), and realm membership are never restored from a snapshot — parentage stays default-deny/unbound while membership hydrates through the runtime's scope-constraint path (ticket 6a0282b). A template-launched member whose persisted record lost its selectors re-derives its tool profile and its declared privilege from the trusted template provenance (effective catalog revision pinned to the realm's recorded `instance.templateVersion`, resolved through the same `resolveToolProfile` path the launch used — never from snapshot bytes, never wider than the spec); the same pass re-derives a template member's declared privilege even when its persisted selectors survived. A grant the pass could not apply (skipped/failed) is remembered as the member's last-known-good persistence fallback, so serialization never overwrites persisted selectors with the degraded empty state. The pass is idempotent (a second run reports `unchanged` and mutates nothing) and observable through the reactive `capabilityHealReport`. A legacy snapshot without the extension selector heals to the fail-closed empty selector — never the `'all'` default.
  * @invariant Hydration is storage-read-only: the whole `hydrateFromStorage` flow (catalog reconciliation, fingerprint heal, capability heal, runtime restore, resyncs, legacy-workspace remap) runs under an internal suppression guard so no catalog-adapter or pointer write can schedule the debounced autosave — a failed restore leaves the raw persisted bytes byte-identical and a successful one never rewrites them.
  * @invariant Realm-local store identity: agent-facing projections (`agents`, `recycleBin`, receipts, listings) always carry bare realm-local ids — canonical `(realmId, agentId)` keys and Realm vocabulary never surface; internal mailbox and clock-partition lookups resolve the canonical key through the runtime identity port realm-exactly, and an id registered in more than one Realm fails closed (zero unread, no wrong-Realm pick) instead of silently using the first registration. The store's late-bound identity bridge forwards the full `(agentId, scope)` resolution and enumeration so store-constructed substrates can resolve multi-Realm identities and fire the ambiguity guard.
  * @decision Downloads consume public VirtualFS APIs (`getFileRecord` for single files, `listFilesWithContent` for archives) instead of reaching into private VFS internals
@@ -37,7 +37,7 @@
  * @decision Realm membership is immutable: the store never moves or clears `realmId` (the restore-time ungrouping hygiene is retired because deletion now refuses non-empty realms). `deleteRealm` refuses a Realm with active or recycled members by default (`ERR_STORE_REALM_NOT_EMPTY`, "terminate or delete members first"), the explicit `{ recursive: true }` override purges every active member and empties every recycled member under the operator principal before removing the record, a per-member purge failure fails closed with a frozen `RealmDeletionReport` on `ERR_STORE_REALM_DELETE_FAILED` (the record survives), and the Generic default is always refused with `ERR_STORE_REALM_PROTECTED`
  * @decision Realm deletion counts memberships with the same trim semantics as the realm grouping/resolution (`resolveMemberRealmId`): a hydrated `'  realm_x  '` member blocks the default deletion of `realm_x` and is purged by the recursive override, so a padded membership can never be orphaned by a removed record
  * @decision Generic protection is enforced at the registry boundary: the store constructs the registry with `protectedIds: [realm_generic]`, so `removeRealm(realm_generic)` is a `false` no-op on every public surface including the raw `getRealmRegistry()` API, while renames and every other management operation stay available and reconciliation can never prune the seeded default
- * @decision The H1 heal reads only the persisted capability selectors as data and applies them through the runtime's gated config-update path with the store's operator principal (the runtime's host principal), while the snapshot privilege/parentage claims are ignored entirely — capability is restored, authority is never re-derived from the snapshot
+ * @decision The H1 heal reads only the persisted capability selectors as data and applies them through the runtime's gated config-update path with the store's operator principal (the runtime's host principal), while the snapshot privilege/parentage claims are ignored entirely — capability is restored, authority is never re-derived from the snapshot. The one privilege write (ticket 6a0282b) is the template-derived flag on a grant built from the trusted template catalog at the realm's recorded launch revision; a snapshot privilege claim is never read, and the derived flag never exceeds the spec's declared `privileged` value
  * @decision Template launch resolves baked templates by id and fails closed for unknown ids; member launch partitions the materialized plan grants — internal canonical/alias/wildcard names travel as `allowedTools`, resolved extension-derived call names travel as the member's effective `extensionTools` grant set (the whole Realm universe for an unrestricted member, exactly the referenced names for a restricted one), and unresolved references only ride the missing-tool disclosure — the declared preset name as inert `toolPreset` metadata, and the per-key preset binding (winning over the spec `modelPresetId`) as `presetId` resolved through the owned preset catalog — no model literals
  * @decision A failed template launch rolls back by purging every active member of the freshly created Realm under the operator principal and then removing the record through the recursive `deleteRealm` override (so a leftover member from a failed purge is retried by the same route); the thrown `ERR_STORE_REALM_LAUNCH_FAILED` error carries the original failure as `cause` plus the rollback report (`realmId`, `templateId`, `failedAgentId`, `rolledBack`, `terminatedMembers`, `evictedSeedFiles`, `rollbackFailures`), so a half-realm is never left un-described
  * @decision `launchRealmFromTemplate` applies a template's resolved launch plan inside the same atomic try: placement writes group by target in first-appearance order (one `seedRealm` call per target, reusing its fail-closed path/target validation and per-target write record), then every directive is delivered independently as an operator-attributed `source: 'realm_seed'` mailbox message addressed realm-exactly, `seed: false` skips placements and directives entirely, and a failure in either phase rolls back exactly like a member failure — including best-effort eviction of the files already written, reported as `evictedSeedFiles` (member private workspaces are evicted by the member purge; a realm-global partition is a VFS-reserved key, so its seeded files are deleted individually and an empty container key can remain)
@@ -141,11 +141,13 @@ import {
   BAKED_TEMPLATE_BUNDLES,
   REALM_ADMIN_DENIED_PATCH_KEYS,
   REALM_ADMIN_PATCH_FIELD_TOKENS,
+  deriveToolCallName,
   hashText,
   materializeTemplate,
   normalizeTemplate,
   parseTemplateBundle,
   payloadDigest,
+  resolveTemplateAgentCapabilities,
   serializeTemplateBundle,
   templateBundleVersion,
   templateUnsupportedAuthorities,
@@ -155,6 +157,7 @@ import type {
   AuthorityGrantSnapshotEntry,
   AuthorityScopeRecord,
   PendingInstancePayload,
+  RealmAgentCapabilityPlan,
   RealmInputValues,
   RealmInputValue,
   RealmLaunchAgentPlan,
@@ -2119,6 +2122,32 @@ export interface CapabilityHealReport {
   /** Per-agent outcomes in persisted-snapshot order. */
   readonly entries: readonly CapabilityHealEntry[];
 }
+
+/**
+ * One capability grant reconciled by the H1 reload capability heal: captured
+ * from the persisted snapshot (`hasAllowedSelector`/`hasExtensionSelector`
+ * mark which axes the record actually carried) and/or re-derived from the
+ * trusted template provenance (ticket 6a0282b). Module-local: the heal report
+ * is the only observable projection.
+ */
+interface CapabilityHealGrant {
+  agentId: string;
+  realmId: string | null;
+  allowedTools: readonly string[];
+  extensionSelector: 'all' | readonly string[];
+  /** True when the persisted record carried an own `allowedTools`/`tools`/`toolPreset` selector. */
+  hasAllowedSelector: boolean;
+  /** True when the persisted record carried an own `extensionTools` selector. */
+  hasExtensionSelector: boolean;
+  /** Template-derived privilege, or `undefined` for a non-template grant. */
+  privileged?: boolean;
+}
+
+/** Last-known-good selectors preserved for a member whose capability heal could not be applied. */
+type CapabilityPersistFallback = Pick<
+  CapabilityHealGrant,
+  'allowedTools' | 'extensionSelector' | 'hasAllowedSelector' | 'hasExtensionSelector'
+>;
 
 /**
  * One legacy private-workspace remap performed during hydration (Wave I,
@@ -4290,13 +4319,29 @@ export class SandboxStore {
    * of resolving ambiguous and being skipped. It is never applied back as a
    * membership write — membership hydrates through the runtime's own
    * scope-constraint path and is immutable at the API.
+   *
+   * Ticket 6a0282b: a template-launched member whose persisted record carries
+   * no capability selectors (the withheld snapshot state that a skipped heal
+   * once persisted) receives a grant re-derived from the trusted template
+   * provenance instead — `allowedTools` from the spec's resolved tool profile
+   * and `privileged` from the spec's declared flag. The per-axis
+   * `hasAllowedSelector`/`hasExtensionSelector` markers let the derivation
+   * repair exactly the axis the record lost without overwriting a persisted
+   * (possibly operator-edited) selector, and `privileged` is only ever set
+   * from the trusted template catalog — never from snapshot data.
    */
-  #capabilityHealGrants: ReadonlyArray<{
-    agentId: string;
-    realmId: string | null;
-    allowedTools: readonly string[];
-    extensionSelector: 'all' | readonly string[];
-  }> = [];
+  #capabilityHealGrants: ReadonlyArray<CapabilityHealGrant> = [];
+
+  /**
+   * Last-known-good capability selectors for members whose capability heal
+   * could not be applied (skipped/failed — ticket 6a0282b). `serialize()`
+   * overlays a missing (`undefined`) selector from this map, so a degraded
+   * runtime state produced by a skipped or failed heal can never overwrite
+   * the persisted last-known-good selectors with empty. An explicit operator
+   * edit writes an empty array (an own property) and therefore wins, and the
+   * whole map is rebuilt at every hydration boundary.
+   */
+  #capabilityPersistFallbacks: Map<string, CapabilityPersistFallback> = new Map();
 
   /**
    * Safe-state extension reauthorize queue (extension wave, P2.4): identity
@@ -11865,13 +11910,14 @@ export class SandboxStore {
 
   /**
    * Runs the H1 reload capability heal on demand: reconciles the tool grants
-   * captured from the persisted snapshot at hydration onto the currently
-   * registered agents, under the store's operator context. Only capability
-   * selectors (`allowedTools`/`tools`/`toolPreset`, resolved through the
-   * sandbox preset resolver) are applied — `privileged`, parentage, and realm
-   * membership are never read from the snapshot. The pass is idempotent (a
-   * second run reports `unchanged` and mutates nothing) and publishes its
-   * outcome on `capabilityHealReport`.
+   * captured (or template-re-derived — ticket 6a0282b) at hydration onto the
+   * currently registered agents, under the store's operator context. Only
+   * capability selectors (`allowedTools`/`tools`/`toolPreset`, resolved
+   * through the sandbox preset resolver) plus a template-derived privilege
+   * flag are applied — snapshot privilege claims, parentage, and realm
+   * membership are never read. The pass is idempotent (a second run reports
+   * `unchanged` and mutates nothing) and publishes its outcome on
+   * `capabilityHealReport`.
    *
    * The method is a safe retry point for the wildcard-grant case: when the
    * operator principal was not yet registered at hydration time those grants
@@ -12085,7 +12131,10 @@ export class SandboxStore {
     if (trust !== null) {
       withAdditions = { ...withAdditions, templateAuthorityTrust: trust };
     }
-    return withAdditions;
+    // Ticket 6a0282b: a capability heal that skipped/failed leaves the live
+    // runtime default-deny; the last-known-good selectors ride the snapshot
+    // instead of the degraded empty state so the loss is never persisted.
+    return this.#applyCapabilityPersistFallbacks(withAdditions);
   }
 
   /**
@@ -12144,6 +12193,9 @@ export class SandboxStore {
     this.#extensionSweepBlocked.clear();
     this.#pendingRegistrationSweep.clear();
     this.#storeLaunchGrantedKeys.clear();
+    // Ticket 6a0282b: the persistence fallbacks describe the topology being
+    // replaced; the heal pass below rebuilds them for the restored members.
+    this.#capabilityPersistFallbacks.clear();
     // Extension wave (P3.1): hydration is a restore boundary — live sessions
     // and catalogs belong to the topology being replaced, and the restored
     // state is by contract not-connected (no auto-connect here or later).
@@ -12200,6 +12252,11 @@ export class SandboxStore {
       // the runtime withholds them from the hydrated configs, so the store is
       // the only layer that can hand them back through the gated operator path.
       this.#captureCapabilityHealGrants(persistedState);
+      // Ticket 6a0282b: a template-launched member whose persisted record
+      // carries no selectors (the pre-fix skipped-heal data loss) re-derives
+      // its tool profile and privilege from the trusted template provenance,
+      // so a reload repairs the degradation instead of preserving it.
+      this.#deriveTemplateBackedCapabilityGrants(persistedState);
 
       const restored = restoreRuntimeEnvironment(persistedState, this.#runtime);
       // H1: reconcile the captured grants onto whatever the runtime restored.
@@ -12401,8 +12458,10 @@ export class SandboxStore {
     // (the counter returns to zero, so the next save starts a fresh session
     // numbering).
     this.#restoreSavedInstancePayloads(null);
-    // H1: a reset drops the captured hydration grants and the last heal report.
+    // H1: a reset drops the captured hydration grants, the persistence
+    // fallbacks, and the last heal report.
     this.#capabilityHealGrants = [];
+    this.#capabilityPersistFallbacks.clear();
     this.capabilityHealReport = null;
     // Extension wave: a reset drops the safe-state sweep queue and the
     // fail-closed sweep guard (no agent survives a runtime reset), and it
@@ -14882,12 +14941,7 @@ export class SandboxStore {
    * @param persisted - Snapshot the heal pass reconciles from (read-only).
    */
   #captureCapabilityHealGrants(persisted: SandboxPersistedState): void {
-    const grants: Array<{
-      agentId: string;
-      realmId: string | null;
-      allowedTools: readonly string[];
-      extensionSelector: 'all' | readonly string[];
-    }> = [];
+    const grants: CapabilityHealGrant[] = [];
     const entries = Array.isArray(persisted.agents) ? persisted.agents : [];
     for (const entry of entries) {
       if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
@@ -14932,8 +14986,127 @@ export class SandboxStore {
         allowedTools: Object.freeze(resolved),
         extensionSelector: hasExtensionField && persistedSelectorIsValid
           ? normalizeExtensionSelector(rawPersistedSelector)
-          : Object.freeze([])
+          : Object.freeze([]),
+        hasAllowedSelector: hasAllowedField,
+        hasExtensionSelector: hasExtensionField
       });
+    }
+    this.#capabilityHealGrants = grants;
+  }
+
+  /**
+   * Re-derives template-backed capability grants for restored realm members
+   * whose persisted record lost its selectors (ticket 6a0282b).
+   *
+   * Runs after `#captureCapabilityHealGrants` and before the runtime restore,
+   * over the reconciled realm records: a realm whose `templateId` resolves in
+   * the effective catalog and whose `instance.templateVersion` is exactly the
+   * current effective revision contributes the per-agent capability plans of
+   * that template. A member whose persisted record lost its `allowedTools`
+   * selector receives the plan's internal tool list, and every template member
+   * receives the plan's declared `privileged` flag — the exact values a launch
+   * would have applied — so the healing pass can restore them through the
+   * normal operator-gated path. A persisted `allowedTools` selector (possibly
+   * operator edited) always wins.
+   *
+   * The extension selector (`extensionTools`) is deliberately **not**
+   * re-derived: an absent extension selector keeps the established fail-closed
+   * empty heal (the extension wave's contract that missing selector data never
+   * resolves the `'all'` default), and a persisted selector stays as captured.
+   *
+   * Fail-closed guards: a realm without template provenance, an unresolvable
+   * or version-drifted template, a template/plan resolution error, or a
+   * persisted record whose membership is not exactly the realm id all skip the
+   * derivation (the member heals to whatever the snapshot itself provided).
+   * A launch that used `idOverrides` resolves to a different member id and is
+   * likewise skipped — derivation never widens another registration.
+   *
+   * @param persisted - Snapshot being hydrated (read-only).
+   */
+  #deriveTemplateBackedCapabilityGrants(persisted: SandboxPersistedState): void {
+    const grants = [...this.#capabilityHealGrants];
+    const grantIndex = new Map<string, number>();
+    grants.forEach((grant, index) => {
+      grantIndex.set(createAgentIdentityKey(grant.realmId, grant.agentId), index);
+    });
+    const persistedEntries = Array.isArray(persisted.agents) ? persisted.agents : [];
+
+    for (const realm of this.#realmRecords) {
+      const templateId = typeof realm.templateId === 'string' ? realm.templateId.trim() : '';
+      const instance = realm.instance;
+      if (!templateId || !instance || typeof instance.templateVersion !== 'string' || !instance.templateVersion) {
+        continue;
+      }
+      // Trust guard: the effective catalog revision must be exactly the
+      // revision the Realm was launched from — a replaced template may carry a
+      // different spec, and derivation must never widen past the launch spec.
+      if (this.#effectiveTemplateVersion(templateId) !== instance.templateVersion) continue;
+      const bundle = this.getRealmTemplateBundle(templateId);
+      if (!bundle) continue;
+      let plans: readonly RealmAgentCapabilityPlan[];
+      try {
+        plans = resolveTemplateAgentCapabilities(bundle.template);
+      } catch {
+        // A malformed catalog entry never fails hydration; the member falls
+        // back to the persisted selectors (fail closed).
+        continue;
+      }
+
+      // Internal allowlist partition mirrors the launch: every declared
+      // `<providerId>::<serverToolName>` reference resolves to its derived
+      // call name and never lands in `allowedTools` (extension names are
+      // granted only through the extension selector/descriptor axis).
+      const declaredExtensionCallNames = new Set<string>();
+      for (const reference of collectExtensionToolReferences(bundle.template)) {
+        const separatorIndex = reference.indexOf('::');
+        if (separatorIndex === -1) continue;
+        declaredExtensionCallNames.add(deriveToolCallName(reference.slice(separatorIndex + 2)));
+      }
+
+      for (const plan of plans) {
+        const hasPersistedRecord = persistedEntries.some((entry) => {
+          if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false;
+          const record = entry as { id?: unknown; config?: unknown };
+          if (record.id !== plan.agentId) return false;
+          const config = record.config;
+          if (!config || typeof config !== 'object' || Array.isArray(config)) return false;
+          return (config as { realmId?: unknown }).realmId === realm.id;
+        });
+        if (!hasPersistedRecord) continue;
+
+        const internalAllowedTools = plan.toolProfile.tools.filter(
+          (tool) => !declaredExtensionCallNames.has(tool)
+        );
+
+        const key = createAgentIdentityKey(realm.id, plan.agentId);
+        const existingIndex = grantIndex.get(key);
+        if (existingIndex !== undefined) {
+          const existing = grants[existingIndex];
+          grants[existingIndex] = Object.freeze({
+            ...existing,
+            // Defect repair: only a lost `allowedTools` axis is taken from the
+            // template; a persisted selector is never overwritten by the spec.
+            ...(existing.hasAllowedSelector
+              ? {}
+              : { allowedTools: Object.freeze([...internalAllowedTools]), hasAllowedSelector: true }),
+            privileged: plan.privileged === true
+          });
+          continue;
+        }
+
+        grants.push(Object.freeze({
+          agentId: plan.agentId,
+          realmId: realm.id,
+          allowedTools: Object.freeze([...internalAllowedTools]),
+          // No persisted extension selector: heal fail-closed-empty exactly
+          // like a legacy snapshot would (never re-derive `'all'`).
+          extensionSelector: Object.freeze([]) as readonly string[],
+          hasAllowedSelector: true,
+          hasExtensionSelector: false,
+          privileged: plan.privileged === true
+        }));
+        grantIndex.set(key, grants.length - 1);
+      }
     }
     this.#capabilityHealGrants = grants;
   }
@@ -15082,11 +15255,15 @@ export class SandboxStore {
    *    `'skipped'` (`'operator-authority-required'`), any other rejection is
    *    `'failed'`.
    *
-   * Only capability selectors are applied: `privileged`, parentage, and realm
-   * membership are never read from the snapshot. The pass never schedules the
-   * debounced autosave by itself; while hydrating the suppression guard makes
-   * any event-driven schedule inert, and a manual run persists through the
-   * normal `agent_config_updated` event.
+   * Only capability selectors are applied: parentage and realm membership are
+   * never read from the snapshot, and the only `privileged` write is the
+   * template-derived flag on a grant built from the trusted template catalog
+   * (ticket 6a0282b) — a snapshot privilege claim is never honored. The pass
+   * never schedules the debounced autosave by itself; while hydrating the
+   * suppression guard makes any event-driven schedule inert, and a manual run
+   * persists through the normal `agent_config_updated` event. A grant the pass
+   * could not apply is remembered as the member's last-known-good persistence
+   * fallback so the degraded runtime state is never serialized over it.
    *
    * @returns The published report, or `null` when no grants were captured.
    */
@@ -15119,6 +15296,7 @@ export class SandboxStore {
           allowedTools: grant.allowedTools,
           reason: 'agent-not-restored'
         });
+        this.#rememberCapabilityPersistFallback(grant, null);
         continue;
       }
 
@@ -15128,15 +15306,24 @@ export class SandboxStore {
       // a failed apply blocks the sweep for this member (fail closed — the
       // default `'all'` must never silently resolve on a failed heal).
       const memberKey = createAgentIdentityKey(resolveMemberRealmId(live), live.id);
+      // Ticket 6a0282b: the fallback key is the exact registration key (raw
+      // membership, never trimmed) so a skipped canonical lookup still maps
+      // back onto the record `serialize()` will emit.
+      const liveKey = createAgentIdentityKey(
+        typeof live.config?.realmId === 'string' && live.config.realmId ? live.config.realmId : null,
+        live.id
+      );
       const hasSelector = live.config
         ? Object.prototype.hasOwnProperty.call(live.config, 'extensionTools')
         : false;
       const currentSelector = normalizeExtensionSelector(live.config?.extensionTools);
+      let selectorApplied = true;
       if (!hasSelector || !extensionSelectorsEqual(currentSelector, grant.extensionSelector)) {
         try {
           this.#runtime.updateAgentConfig(targetRef, { extensionTools: grant.extensionSelector }, operator);
           this.#extensionSweepBlocked.delete(memberKey);
         } catch (err) {
+          selectorApplied = false;
           this.#extensionSweepBlocked.add(memberKey);
           console.warn(
             '[SandboxStore] extension selector heal failed:',
@@ -15150,7 +15337,11 @@ export class SandboxStore {
       const current = Array.isArray(live.config?.allowedTools)
         ? live.config.allowedTools.map((tool) => String(tool))
         : [];
-      if (capabilityGrantsEqual(current, grant.allowedTools)) {
+      // Template-derived privilege (ticket 6a0282b): only a grant carrying a
+      // `privileged: true` re-derivation from the trusted catalog widens the
+      // descriptor; the snapshot never contributes the flag.
+      const privilegeDiff = grant.privileged === true && live.config?.privileged !== true;
+      if (capabilityGrantsEqual(current, grant.allowedTools) && !privilegeDiff) {
         unchanged += 1;
         entries.push({
           agentId: grant.agentId,
@@ -15158,11 +15349,16 @@ export class SandboxStore {
           allowedTools: grant.allowedTools,
           reason: null
         });
+        if (selectorApplied) this.#capabilityPersistFallbacks.delete(liveKey);
+        else this.#rememberCapabilityPersistFallback(grant, liveKey);
         continue;
       }
 
       try {
-        this.#runtime.updateAgentConfig(targetRef, { allowedTools: [...grant.allowedTools] }, operator);
+        this.#runtime.updateAgentConfig(targetRef, {
+          allowedTools: [...grant.allowedTools],
+          ...(grant.privileged === true ? { privileged: true } : {})
+        }, operator);
         restored += 1;
         entries.push({
           agentId: grant.agentId,
@@ -15170,6 +15366,8 @@ export class SandboxStore {
           allowedTools: grant.allowedTools,
           reason: null
         });
+        if (selectorApplied) this.#capabilityPersistFallbacks.delete(liveKey);
+        else this.#rememberCapabilityPersistFallback(grant, liveKey);
       } catch (err) {
         const code = (err as { code?: string } | null)?.code;
         if (code === 'PERMISSION_DENIED') {
@@ -15189,6 +15387,7 @@ export class SandboxStore {
             reason: sanitizeDiagnosticError(err) || 'update-rejected'
           });
         }
+        this.#rememberCapabilityPersistFallback(grant, liveKey);
       }
     }
 
@@ -15205,6 +15404,109 @@ export class SandboxStore {
       this.#syncAgents();
     }
     return report;
+  }
+
+  /**
+   * Remembers the last-known-good capability selectors of a grant the heal
+   * could not apply (ticket 6a0282b), so `serialize()` never persists the
+   * degraded empty state over them. The entry is stored under the grant's
+   * canonical key and, when the live registration resolved, under the exact
+   * live key as well — a skipped canonical lookup (a malformed membership the
+   * runtime keyed verbatim) still maps back onto the record it must protect.
+   *
+   * @param grant - Heal grant whose selectors stay last-known-good.
+   * @param liveKey - Exact key of the live registration, or `null` when unresolved.
+   */
+  #rememberCapabilityPersistFallback(grant: CapabilityHealGrant, liveKey: string | null): void {
+    const entry: CapabilityPersistFallback = Object.freeze({
+      allowedTools: Object.freeze([...grant.allowedTools]),
+      extensionSelector: grant.extensionSelector === 'all'
+        ? 'all' as const
+        : Object.freeze([...grant.extensionSelector]),
+      hasAllowedSelector: grant.hasAllowedSelector,
+      hasExtensionSelector: grant.hasExtensionSelector
+    });
+    this.#capabilityPersistFallbacks.set(createAgentIdentityKey(grant.realmId, grant.agentId), entry);
+    if (liveKey) this.#capabilityPersistFallbacks.set(liveKey, entry);
+  }
+
+  /**
+   * Resolves the persistence fallback for one serialized record: the exact
+   * canonical key first, then — only when the exact key misses — a bare-id
+   * scan that applies while exactly one fallback entry matches (fail closed on
+   * ambiguity). The scan covers a skipped canonical heal whose grant was
+   * keyed by the trimmed membership while the runtime keyed the record
+   * verbatim; it never widens a same-literal-id twin because both the exact
+   * hit and the uniqueness guard keep each registration on its own entry.
+   *
+   * @param rawRealmId - Record's raw membership value (never trimmed).
+   * @param id - Record's realm-local agent id.
+   * @returns The matching fallback entry, or `undefined` when none/ambiguous.
+   */
+  #capabilityPersistFallbackFor(
+    rawRealmId: string | null,
+    id: string
+  ): CapabilityPersistFallback | undefined {
+    const exact = this.#capabilityPersistFallbacks.get(createAgentIdentityKey(rawRealmId, id));
+    if (exact) return exact;
+    let match: CapabilityPersistFallback | undefined;
+    for (const [key, entry] of this.#capabilityPersistFallbacks) {
+      const parsed = parseAgentIdentityKey(key);
+      if (!parsed || parsed.agentId !== id) continue;
+      if (match) return undefined;
+      match = entry;
+    }
+    return match;
+  }
+
+  /**
+   * Overlays the last-known-good capability selectors onto serialized agent
+   * records whose config lost an axis (ticket 6a0282b): only an **absent**
+   * selector is filled, so an explicit operator edit (including an explicit
+   * empty allowlist, which is an own property) always wins, and a legacy
+   * record that never had the extension axis is never widened with it.
+   *
+   * @param snapshot - Freshly serialized snapshot (mutated copies only).
+   * @returns Snapshot with the fallback selectors applied.
+   */
+  #applyCapabilityPersistFallbacks(snapshot: SandboxPersistedState): SandboxPersistedState {
+    if (this.#capabilityPersistFallbacks.size === 0) return snapshot;
+    const agents = Array.isArray(snapshot.agents) ? snapshot.agents : [];
+    if (agents.length === 0) return snapshot;
+    let patched = false;
+    const nextAgents = agents.map((entry) => {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return entry;
+      const record = entry as { id?: unknown; config?: unknown };
+      const id = typeof record.id === 'string' ? record.id : '';
+      const config = record.config;
+      if (!id || !config || typeof config !== 'object' || Array.isArray(config)) return entry;
+      const configRecord = config as Record<string, unknown>;
+      const rawRealmId = typeof configRecord.realmId === 'string' && configRecord.realmId
+        ? configRecord.realmId
+        : null;
+      const fallback = this.#capabilityPersistFallbackFor(rawRealmId, id);
+      if (!fallback) return entry;
+      const fillAllowed = configRecord.allowedTools === undefined && fallback.hasAllowedSelector;
+      const fillExtension = configRecord.extensionTools === undefined && fallback.hasExtensionSelector;
+      if (!fillAllowed && !fillExtension) return entry;
+      patched = true;
+      return {
+        ...(entry as unknown as Record<string, unknown>),
+        config: {
+          ...configRecord,
+          ...(fillAllowed ? { allowedTools: [...fallback.allowedTools] } : {}),
+          ...(fillExtension
+            ? {
+                extensionTools: fallback.extensionSelector === 'all'
+                  ? 'all'
+                  : [...fallback.extensionSelector]
+              }
+            : {})
+        }
+      };
+    });
+    if (!patched) return snapshot;
+    return { ...snapshot, agents: nextAgents as SandboxPersistedState['agents'] };
   }
 
   /**

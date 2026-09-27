@@ -90,7 +90,7 @@
 export { DEMO_TEMPLATE } from './demo.ts';
 export { BAKED_TEMPLATE_BUNDLES, getBakedTemplateBundle } from './bundles.ts';
 export { REALM_CONTENT_VERSION } from './content.generated.ts';
-export { materializeTemplate } from './materialize.ts';
+export { materializeTemplate, resolveTemplateAgentCapabilities } from './materialize.ts';
 export {
   composeAgentHistory,
   composeSystemPrompt,
@@ -131,6 +131,7 @@ export type {
   ParsedTemplateBundle,
   PendingInstancePayload,
   PromptPart,
+  RealmAgentCapabilityPlan,
   RealmAgentSpec,
   RealmAgentToolProfile,
   RealmComposedPrompt,

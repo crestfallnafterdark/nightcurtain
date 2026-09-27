@@ -27,6 +27,10 @@
     buildPresetModelConfig,
     presetEditorFieldVisibility
   } from './agentModelConfigHelpers.ts';
+  import {
+    parseAllowedToolsInput,
+    resolveAgentToolFormState
+  } from './agentToolSelectorHelpers.ts';
 
   // MOD-20 preset catalog: the single source of model truth. The panel binds
   // agents to catalog presets (binding-only, OPEN-1) and edits the bound
@@ -157,33 +161,12 @@
     modelPresetId = resolveAgentPresetId();
     seedPresetDraft(presetCatalog.getPreset(modelPresetId));
 
-    const rawTools = Array.isArray(agent.config?.allowedTools)
-      ? agent.config.allowedTools
-      : (agent.config?.allowedTools === '*' ? ['*'] : null);
-
-    if (!rawTools || (rawTools.length === 1 && rawTools[0] === '*')) {
-      toolPreset = 'all';
-      toolsString = '*';
-    } else {
-      const managerJoined = (TOOL_PRESETS.manager || []).join(', ');
-      const collabJoined = (TOOL_PRESETS.collaborator || []).join(', ');
-      const readonlyCollabJoined = (TOOL_PRESETS.readonly_collaborator || []).join(', ');
-      const readonlyJoined = (TOOL_PRESETS.readonly || []).join(', ');
-      const currentJoined = rawTools.join(', ');
-
-      if (currentJoined === managerJoined) {
-        toolPreset = 'manager';
-      } else if (currentJoined === collabJoined) {
-        toolPreset = 'collaborator';
-      } else if (currentJoined === readonlyCollabJoined) {
-        toolPreset = 'readonly_collaborator';
-      } else if (currentJoined === readonlyJoined) {
-        toolPreset = 'readonly';
-      } else {
-        toolPreset = 'custom';
-      }
-      toolsString = currentJoined;
-    }
+    // F10 (ticket 6a0282b): an absent selector is not Full Access — the
+    // resolver keeps the panel on runtime truth (default-deny) and reads a
+    // privileged agent's wildcard from `config.privileged`.
+    const toolForm = resolveAgentToolFormState(agent.config);
+    toolPreset = toolForm.toolPreset;
+    toolsString = toolForm.toolsString;
   }
 
   // Load runtime values as soon as an agent is selected; live edits are never
@@ -258,9 +241,9 @@
   }
 
   function parseAllowedTools() {
-    if (toolsString.trim() === '*') return ['*'];
-    const list = toolsString.split(',').map(t => t.trim()).filter(Boolean);
-    return list.length > 0 ? list : ['*'];
+    // F10 (ticket 6a0282b): an empty input is default-deny, never a silent
+    // Full Access widening — `*` is the only wildcard spelling.
+    return parseAllowedToolsInput(toolsString);
   }
 
   function handleNameInput(e) {

@@ -21,6 +21,7 @@ import {
   resolveToolProfile
 } from './validation.ts';
 import type {
+  RealmAgentCapabilityPlan,
   RealmComposeOptions,
   RealmLaunchAgentPlan,
   RealmLaunchPlan,
@@ -146,4 +147,54 @@ export function materializeTemplate(
     directives,
     agents
   });
+}
+
+/**
+ * Resolves the capability-relevant projection of every template agent without
+ * composing prompts, history, placements, or directives: each agent's literal
+ * id (from `idPattern`; no per-launch override), its resolved tool profile,
+ * and its declared privilege flag.
+ *
+ * This is the trusted-template source for the store's hydration provenance
+ * re-derivation (ticket 6a0282b): a restored realm member whose persisted
+ * record lost its capability selectors re-derives exactly the profile this
+ * helper reports, so capability never widens beyond the template spec. The
+ * profile resolves through the same `resolveToolProfile` path
+ * `materializeTemplate` uses, so the reported tools are the exact names a
+ * launch would hand the runtime allowlist. Legacy format-v1 documents are
+ * accepted through the same read shim.
+ *
+ * @param template - Template to project (legacy format-v1 documents accepted)
+ * @returns A deeply frozen per-agent capability projection in template order
+ * @throws `Error` - When the template or a spec/profile is invalid, or two specs resolve the same literal id
+ *
+ * @example
+ * ```typescript
+ * import { DEMO_TEMPLATE, resolveTemplateAgentCapabilities } from './realmCatalog/index.ts';
+ *
+ * const plans = resolveTemplateAgentCapabilities(DEMO_TEMPLATE);
+ * plans[0].toolProfile.preset; // 'manager'
+ * plans[0].privileged; // true
+ * ```
+ */
+export function resolveTemplateAgentCapabilities(
+  template: RealmTemplate
+): readonly RealmAgentCapabilityPlan[] {
+  const validated = normalizeTemplate(template);
+  const grantContext = createToolGrantContext(validated.toolContract, validated.providers, 'template');
+  const seenIds: Set<string> = new Set();
+  const plans: RealmAgentCapabilityPlan[] = validated.agents.map((spec) => {
+    const agentId = resolveAgentId(spec.key, spec.idPattern, undefined);
+    if (seenIds.has(agentId)) {
+      throw new Error(`template materializes duplicate agent id '${agentId}'`);
+    }
+    seenIds.add(agentId);
+    return {
+      key: spec.key,
+      agentId,
+      toolProfile: resolveToolProfile(spec.toolProfile, `agent '${spec.key}' toolProfile`, grantContext),
+      privileged: spec.privileged
+    };
+  });
+  return deepFreeze(plans);
 }

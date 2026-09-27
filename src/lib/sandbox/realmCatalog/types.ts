@@ -521,6 +521,32 @@ export interface RealmLaunchAgentPlan {
 }
 
 /**
+ * Capability-relevant projection of one template agent spec: the resolved
+ * literal id, the resolved tool profile, and the declared privilege flag,
+ * without any prompt/history/placement/directive composition.
+ *
+ * Consumed by the store's hydration provenance re-derivation (ticket 6a0282b):
+ * a restored realm member whose persisted record lost its capability selectors
+ * re-derives exactly the launch-time profile from the trusted template catalog
+ * instead of staying default-deny, and never widens beyond the spec.
+ */
+export interface RealmAgentCapabilityPlan {
+  /** Stable per-template agent key from the source spec. */
+  readonly key: string;
+  /**
+   * Resolved literal agent id from `idPattern` (no override). A launch that
+   * used an `idOverrides` entry resolves to a different id and therefore does
+   * not match this plan — consumers fail closed (no derivation) instead of
+   * widening another registration.
+   */
+  readonly agentId: string;
+  /** Resolved tool profile (the exact selector the launch would apply). */
+  readonly toolProfile: RealmLaunchToolProfile;
+  /** Declared privilege flag. */
+  readonly privileged: boolean;
+}
+
+/**
  * Authority ids the runtime understands (M1 authority-set generalization).
  *
  * The publishing pair (`@template:authority`/`@hydration:authority`) keeps its

@@ -39,7 +39,7 @@ import assert from 'node:assert/strict';
 import { AgentRuntime, createAgentIdentityKey } from '../../src/lib/sandbox/runtime/index.ts';
 import { SandboxStore } from '../../src/lib/sandbox/sandboxStore/index.svelte.ts';
 import { serializeTemplateBundle } from '../../src/lib/sandbox/realmCatalog/index.ts';
-import { createSandboxToolDispatcher } from '../../src/lib/sandbox/toolDefinitions/index.ts';
+import { createSandboxToolDispatcher, getSandboxToolsSchema } from '../../src/lib/sandbox/toolDefinitions/index.ts';
 import { VirtualFS } from '../../src/lib/sandbox/virtualFs/index.ts';
 import { MessagingBus } from '../../src/lib/sandbox/messagingBus/index.ts';
 import { loadSandboxState, saveSandboxState } from '../../src/lib/sandbox/sandboxPersistence/index.ts';
@@ -269,6 +269,19 @@ test('2. same-literal-id members of two realms restore realm-exactly, including 
   assert.ok(heal, 'hydration publishes the capability heal report');
   assert.equal(heal.failed, 0, `no heal failure: ${JSON.stringify(heal.entries)}`);
   assert.equal(heal.skipped, 0, `no same-literal-id member may be skipped: ${JSON.stringify(heal.entries)}`);
+
+  // Model-visible schema (the F8 symptom): the repaired member's descriptor
+  // must expose write/send tools again, not just innate + authority tools.
+  const repairedSchema = getSandboxToolsSchema([...secondArchitect.authority.allow])
+    .map((definition) => definition.function.name);
+  assert.ok(
+    repairedSchema.includes('write_file'),
+    `the repaired descriptor must expose write_file (schema: ${JSON.stringify(repairedSchema)})`
+  );
+  assert.ok(
+    repairedSchema.includes('send_message'),
+    `the repaired descriptor must expose send_message (schema: ${JSON.stringify(repairedSchema)})`
+  );
 
   // The repair is durable: a save after the heal persists the derived
   // selectors instead of the degraded empty state.

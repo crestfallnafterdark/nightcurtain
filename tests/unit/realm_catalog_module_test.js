@@ -67,6 +67,7 @@ import {
   parseTemplateBundle,
   resolveDirectives,
   resolvePlacements,
+  resolveTemplateAgentCapabilities,
   serializeTemplateBundle,
   summarizeAgentCapabilities,
   templateBundleVersion,
@@ -185,6 +186,7 @@ test('1. runtime surface exports the demo template, the baked bundles, and the p
     'payloadDigest',
     'resolveDirectives',
     'resolvePlacements',
+    'resolveTemplateAgentCapabilities',
     'serializeTemplateBundle',
     'summarizeAgentCapabilities',
     'templateBundleVersion',
@@ -200,6 +202,11 @@ test('1. runtime surface exports the demo template, the baked bundles, and the p
   assert.strictEqual(typeof resolvePlacements, 'function');
   assert.strictEqual(typeof resolveDirectives, 'function');
   assert.strictEqual(typeof summarizeAgentCapabilities, 'function');
+  assert.strictEqual(
+    typeof resolveTemplateAgentCapabilities,
+    'function',
+    'the hydration capability projection is part of the pure-helper surface'
+  );
   assert.strictEqual(typeof getBakedTemplateBundle, 'function');
   assert.strictEqual(typeof hashText, 'function');
   assert.strictEqual(typeof parseTemplateBundle, 'function');
