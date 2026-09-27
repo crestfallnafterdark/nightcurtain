@@ -216,6 +216,14 @@ export const REALM_CATALOG_ERROR_CODES: Readonly<{
 export const REALM_CONTENT_VERSION: string;
 
 // @public
+export interface RealmAgentCapabilityPlan {
+    readonly agentId: string;
+    readonly key: string;
+    readonly privileged: boolean;
+    readonly toolProfile: RealmLaunchToolProfile;
+}
+
+// @public
 export interface RealmAgentSpec {
     authorities?: readonly string[];
     history?: readonly RealmHistoryEntry[];
@@ -499,6 +507,9 @@ export interface ResolvedPayload {
 
 // @public
 export function resolvePlacements(placements: readonly RealmPlacement[], inputs?: readonly RealmTemplateInput[], options?: RealmComposeOptions): readonly RealmResolvedPlacement[];
+
+// @public
+export function resolveTemplateAgentCapabilities(template: RealmTemplate): readonly RealmAgentCapabilityPlan[];
 
 // @public
 export function serializeTemplateBundle(bundle: {
@@ -954,6 +965,19 @@ Frozen dictionary of catalog error codes.
 Stable content hash of the embedded baked bundles (`sha256:<hex>`).
 
 The hash covers the canonical embedded payload: templates in sorted id order, each manifest and its bundle files in sorted bundle-relative path order. Any content change changes the hash, and generation is byte-stable for unchanged sources.
+
+### `RealmAgentCapabilityPlan` — interface
+
+Capability-relevant projection of one template agent spec: the resolved literal id, the resolved tool profile, and the declared privilege flag, without any prompt/history/placement/directive composition.
+
+Consumed by the store's hydration provenance re-derivation (ticket 6a0282b): a restored realm member whose persisted record lost its capability selectors re-derives exactly the launch-time profile from the trusted template catalog instead of staying default-deny, and never widens beyond the spec.
+
+#### Members
+
+- **`agentId`** — Resolved literal agent id from `idPattern` (no override). A launch that used an `idOverrides` entry resolves to a different id and therefore does not match this plan — consumers fail closed (no derivation) instead of widening another registration.
+- **`key`** — Stable per-template agent key from the source spec.
+- **`privileged`** — Declared privilege flag.
+- **`toolProfile`** — Resolved tool profile (the exact selector the launch would apply).
 
 ### `RealmAgentSpec` — interface
 
@@ -1421,6 +1445,34 @@ const files = resolvePlacements(
 
 - `Error` - When placements, inputs, options, references, destinations, or required values are invalid
 
+### `resolveTemplateAgentCapabilities` — function
+
+Resolves the capability-relevant projection of every template agent without composing prompts, history, placements, or directives: each agent's literal id (from `idPattern`; no per-launch override), its resolved tool profile, and its declared privilege flag.
+
+This is the trusted-template source for the store's hydration provenance re-derivation (ticket 6a0282b): a restored realm member whose persisted record lost its capability selectors re-derives exactly the profile this helper reports, so capability never widens beyond the template spec. The profile resolves through the same `resolveToolProfile` path `materializeTemplate` uses, so the reported tools are the exact names a launch would hand the runtime allowlist. Legacy format-v1 documents are accepted through the same read shim.
+
+#### Parameters
+
+- `template` — Template to project (legacy format-v1 documents accepted)
+
+#### Returns
+
+A deeply frozen per-agent capability projection in template order
+
+#### Examples
+
+```typescript
+import { DEMO_TEMPLATE, resolveTemplateAgentCapabilities } from './realmCatalog/index.ts';
+
+const plans = resolveTemplateAgentCapabilities(DEMO_TEMPLATE);
+plans[0].toolProfile.preset; // 'manager'
+plans[0].privileged; // true
+```
+
+#### Throws
+
+- `Error` - When the template or a spec/profile is invalid, or two specs resolve the same literal id
+
 ### `serializeTemplateBundle` — function
 
 Renders a template bundle as canonical transport JSON.
@@ -1590,9 +1642,9 @@ The validated template reference
 
 ## Doc coverage
 
-- Top-level exports: 74
-- Declarations (exports + members): 227
-- Documented declarations: 227 / 227 (100%)
+- Top-level exports: 76
+- Declarations (exports + members): 233
+- Documented declarations: 233 / 233 (100%)
 - Missing TSDoc summaries: 0
 - API Extractor `ae-undocumented` (policy `error`): 0
 - Referenced but not exported (`ae-forgotten-export`): `ToolPresetName`, `TriggerPolicy`
