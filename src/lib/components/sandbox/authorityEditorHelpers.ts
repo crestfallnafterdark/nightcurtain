@@ -252,7 +252,10 @@ export interface AuthorityScopeDraftResult {
  *   never the explicit-empty deny (which only a stored empty array expresses);
  * - `ownSpawns: true` is kept explicit only when another selector is present
  *   (alone, or alongside no other selector, it is the id's default and the
- *   record collapses), while `ownSpawns: false` is an explicit selector;
+ *   record collapses); `ownSpawns: false` is dropped as absent because the
+ *   runtime matcher never honors a denial no other selector backs (it treats
+ *   `false` exactly like an absent key), so emitting it would only let the
+ *   summary claim a reach the engine does not enforce;
  * - `fields` is omitted when every declared token is selected; an empty
  *   selection stays as the explicit fail-closed deny `fields: []`;
  * - a draft equal to the id's default scope normalizes to `null`, keeping the
@@ -359,8 +362,6 @@ export function normalizeAuthorityScopeDraft(
       scope.targets !== undefined || scope.realms !== undefined || realmMembers.value === true;
     if (ownSpawns.value === true) {
       if (selectorPresent) scope.ownSpawns = true;
-    } else if (ownSpawns.value === false) {
-      scope.ownSpawns = false;
     }
     if (realmMembers.value === true) scope.realmMembers = true;
   }
@@ -396,10 +397,15 @@ export function normalizeAuthorityScopeDraft(
 /**
  * One-line scope summary for the operator list chip and the "Authority scopes"
  * dialog rail, in the approved deterministic grammar: reach (`N agent
- * targets` / `N realm targets` / `own spawns` / `no spawns` / `own realm` /
- * `realm members`) · realm bound (`N bound realms`) · fields (`fields: a, b`,
- * or `field edits denied` when the held scope carries the explicit fail-closed
+ * targets` / `N realm targets` / `own spawns` / `own realm` / `realm members`)
+ * · realm bound (`N bound realms`) · fields (`fields: a, b`, or
+ * `field edits denied` when the held scope carries the explicit fail-closed
  * deny `fields: []`).
+ *
+ * `ownSpawns: false` is treated as absent — the runtime matcher never honors a
+ * bare deny — so a false flag renders the id's default `own spawns` when no
+ * other selector is present and nothing when one is (the deny is already
+ * implicit there). No summary ever claims a reach the engine does not enforce.
  *
  * The publishing pair is unscoped and returns `''` (no chip), as do unknown or
  * malformed definitions. A `null`/malformed scope is the id's default
@@ -430,9 +436,10 @@ export function describeAuthorityScopeSummary(
     if (targets !== null) parts.push(`${targets.length} agent targets`);
     const realmMembers = record.realmMembers === true;
     const otherSelector = targets !== null || realmMembers;
-    if (record.ownSpawns === false) {
-      if (!otherSelector) parts.push('no spawns');
-    } else if (record.ownSpawns === true || !otherSelector) {
+    // `ownSpawns: false` is treated as absent: the runtime matcher only honors
+    // an explicit deny when another selector backs it, so a bare false never
+    // denies, and with a selector present the deny is already implicit.
+    if (record.ownSpawns === true || !otherSelector) {
       parts.push('own spawns');
     }
     if (realmMembers) parts.push('realm members');
