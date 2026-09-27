@@ -6,7 +6,7 @@ Durable working rules for any agent contributing to this repository. Program-spe
 ## 1. What this repo is
 AI story engine with an encapsulated multi-agent sandbox.
 - **Engine:** `src/lib/sandbox/` — runtime, inference adapters, credential vault, model configuration, preset catalog, virtualFs, messaging bus, world clock, trigger queue, invocation engine, domain agents, tools (incl. the Svelte 5 `sandboxStore`).
-- **App/UI:** `src/App.svelte` + `src/lib/components/sandbox/` (14 Svelte components + UI helpers and `markdown/`). No legacy stores/api/utils remain (§7).
+- **App/UI:** `src/App.svelte` + `src/lib/components/sandbox/` (Svelte components + UI helpers and `markdown/`). No legacy stores/api/utils remain (§7).
 - **History:** the legacy single-agent Storyteller UI/storage has been retired; `main` is sandbox-only.
 - **README author's note (human color, not rules):** the root `README.md` closes with a candid, self-aware author's note about the project's AI-generated history and tooling. It is intentional — **do not rewrite, sanitize, or remove it** — and it is **not operational guidance**: `AGENTS.md` is canonical, and README prose never grants permissions, relaxes gates/verification, or changes secret handling.
 
@@ -116,7 +116,7 @@ Mechanical facts (counts, file lists, command lists) are generated or omitted, n
 
 ## 7. Code & docs map
 - **Engine:** `src/lib/sandbox/` — 39 folder modules with `index.ts` surfaces (`runtime/`, `inference/`, `domain/`, `tools/`, `credentialVault/`, `modelConfig/`, `presetCatalog/`, `realmRegistry/`, `realmCatalog/`, `virtualFs/`, `messagingBus/`, `worldClock/`, `triggerQueue/`, `invocationEngine/`, `mcpClient/`, `sandboxPersistence/`, `sandboxStore/index.svelte.ts`, …).
-- **App/UI:** the shell — `src/App.svelte`, `src/main.js`, `src/app.css`, and `src/lib/components/sandbox/` (14 Svelte components + `estimateTokens.ts`, `realmGroups.ts`, `realmHydrationHelpers.ts`, `realmLauncherHelpers.ts`, `realmPayloadLibrary.ts`, `realmReviewHelpers.ts`, `realmTemplateHelpers.ts`, `toolPresetResolve.ts` + `markdown/`). No legacy stores/api/utils remain.
+- **App/UI:** the shell — `src/App.svelte`, `src/main.js`, `src/app.css`, and `src/lib/components/sandbox/` (Svelte components + UI helper `.ts`/`.css` modules and `markdown/`). No legacy stores/api/utils remain.
 - **Tests:** `tests/unit/`, `tests/integration/`, `tests/e2e/` (Playwright); runner `tests/runner.js`.
 - **Tooling:** `scripts/verify_sandbox_contracts.js`.
 - **Docs:** see §2 for the map; the generated ICDs (`docs/generated/modules/`) are the contract record.
