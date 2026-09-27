@@ -2194,7 +2194,7 @@ test('32. duplicate same-literal-id realms: the approved authority stays effecti
   // to the next turn on the same canonical binding.
   const revoked = await store.revokeTemplateAuthority(architectId, { realmId: second.realm.id });
   assert.ok(revoked, 'the realm-exact revoke resolves the second registration');
-  assert.equal([...revoked.authority.allow].includes(AGENT_AUTHORITIES.TEMPLATE), false);
+  assert.equal([...revoked.allow].includes(AGENT_AUTHORITIES.TEMPLATE), false);
   assert.equal(
     [...identityPort.getAgentIdentity(firstIdentity.key).authority.allow].includes(AGENT_AUTHORITIES.TEMPLATE),
     true,
