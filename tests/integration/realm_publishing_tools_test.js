@@ -2233,4 +2233,25 @@ test('32. duplicate same-literal-id realms: the approved authority stays effecti
     true,
     `the hydrated second-realm architect stays authorized on the canonical binding: ${JSON.stringify(restoredList)}`
   );
+
+  // H1 reload capability heal (F3): with duplicate bare ids the heal must
+  // resolve each captured grant realm-exactly. A bare-id target resolution
+  // skips every same-literal-id member as `agent-not-restored`, which empties
+  // the post-reload tool profile (the live F3 symptom).
+  const healReport = restored.store.capabilityHealReport;
+  assert.ok(healReport, 'the hydration heal publishes a report');
+  assert.equal(healReport.failed, 0, `the heal reports no failures: ${JSON.stringify(healReport.entries)}`);
+  assert.equal(
+    healReport.skipped,
+    0,
+    `no same-literal-id member may be skipped by the heal: ${JSON.stringify(healReport.entries)}`
+  );
+  assert.equal(healReport.restored, 4, "both realms' architect and genesis tool grants heal");
+  const restoredWhoami = await restoredDispatcher.executeTool('whoami', {});
+  assert.equal(restoredWhoami.success, true, JSON.stringify(restoredWhoami));
+  assert.deepEqual(restoredWhoami.allowedTools, ['read_file'], 'the healed tool profile is effective post-reload');
+  assert.ok(
+    restoredWhoami.authorities.includes(AGENT_AUTHORITIES.TEMPLATE),
+    `the healed registration still reports its authority: ${JSON.stringify(restoredWhoami)}`
+  );
 });
