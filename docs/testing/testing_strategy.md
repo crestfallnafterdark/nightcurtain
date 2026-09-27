@@ -23,7 +23,7 @@ graph TD
     end
 
     subgraph L1["Tier 1: Atomic Unit & Contract Testing (node --test)"]
-        UNIT["58 Unit Suites (tests/unit/)<br/>• Pure Functions & Algorithms<br/>• DeepSeek Reasoning Hygiene (INV-REASONING-STRING)<br/>• JSON Pointers, Parsers, Preset Catalog, LoRA Tags<br/>• Module Contracts & Provider Adapters"]
+        UNIT["60 Unit Suites (tests/unit/)<br/>• Pure Functions & Algorithms<br/>• DeepSeek Reasoning Hygiene (INV-REASONING-STRING)<br/>• JSON Pointers, Parsers, Preset Catalog, LoRA Tags<br/>• Module Contracts & Provider Adapters"]
     end
 
     L1 --> L2
@@ -101,7 +101,7 @@ The master runner executes all Unit and Integration suites in strict sub-process
 // Sample output format from tests/runner.js:
 // ======================================================================
 //   AGENTIC SANDBOX STUDIO MASTER TEST SUITE RUNNER
-//   Total Suites: 115 (58 Unit, 57 Integration)
+//   Total Suites: 117 (60 Unit, 57 Integration)
 // ======================================================================
 //   [Unit       ] deepseek_provider_test.js                  ✔ PASS (42ms)
 //   [Unit       ] deepseek_reasoning_hygiene_test.js         ✔ PASS (18ms)
@@ -109,7 +109,7 @@ The master runner executes all Unit and Integration suites in strict sub-process
 //   [Integration] tool_contract_security_gating_test.js      ✔ PASS (115ms)
 //   [Integration] mail_injection_precall_pipeline_test.js    ✔ PASS (188ms)
 // ======================================================================
-//   Suites:       115 passed, 115 total
+//   Suites:       117 passed, 117 total
 //   Failed:       0 failed
 //   Duration:     3.42s
 // ======================================================================
@@ -126,7 +126,7 @@ All Node-based test suites import [`tests/test_env.js`](../../tests/test_env.js)
 
 ## 4. Test Suite Inventory & Classification
 
-The project includes **115 native test suites** (58 unit, 57 integration) and **10 browser E2E specs**:
+The project includes **117 native test suites** (60 unit, 57 integration) and **10 browser E2E specs**:
 
 > **Canonical inventory.** This chapter is the single source of truth for test-suite counts and per-file listings; [`unit_and_integration.md`](unit_and_integration.md) cross-links here instead of duplicating it.
 
@@ -134,6 +134,8 @@ The project includes **115 native test suites** (58 unit, 57 integration) and **
 | Suite File | Primary Target Module | Verification Focus |
 |---|---|---|
 | [`agent_model_config_helpers_test.js`](../../tests/unit/agent_model_config_helpers_test.js) | `src/lib/components/sandbox/agentModelConfigHelpers.ts` | Bound-preset model-config resolution, capability-gated preset-editor field visibility, capability-gated config building (no dead `routing`/`url` fields). |
+| [`authority_editor_helpers_test.js`](../../tests/unit/authority_editor_helpers_test.js) | `src/lib/components/sandbox/authorityEditorHelpers.ts` + `realmReviewHelpers.ts` | Operator authority editor (ticket 62d89b8): seven-id table in declaration order with classes/scoped flags and power copy, publishing-pair copy pinned byte-for-byte to `META_AUTHORITY_TOGGLES`, per-agent grant/scope projection from the store detail listing, draft normalization mirroring `validateAuthorityScope` (class-allowed keys, trim + dedupe, prototype-vocabulary refusal, class-invalid rejection, all-default → `null`, all-field-selected → default, `fields: []` explicit deny), frozen scope output. |
+| [`authority_editor_store_test.js`](../../tests/unit/authority_editor_store_test.js) | `src/lib/sandbox/sandboxStore/index.svelte.ts` + `authorityEditorHelpers.ts` | Operator authority editor wiring over a real store: scope-aware `listAuthorityGrantDetails()` projection (legacy bare string → `scope: null`), frozen copies that cannot mutate registry state, generic realm-exact grant/revoke seam, re-grant replaces the record, same-literal-id agents in two Realms never retargeted, inline failure surfacing. |
 | [`contracts_gate_test.js`](../../tests/unit/contracts_gate_test.js) | `scripts/verify_sandbox_contracts.js` + gate tooling | Seven static encapsulation gates execute and pass (verifier, dependency-cruiser, TSDoc, contract-types, module contracts, report freshness, sandbox lint). |
 | [`custom_tool_gate_test.js`](../../tests/unit/custom_tool_gate_test.js) | `src/lib/sandbox/runtime/turnExecutionEngine/index.ts` | Custom-handler gate: wildcard/authority-only invocation, explicit allowlists insufficient, anonymous denial, schema exposure blocked, no name-shadow fallthrough. |
 | [`deepseek_provider_test.js`](../../tests/unit/deepseek_provider_test.js) | `src/lib/sandbox/inference/DeepSeekProvider/index.ts` | DeepSeek adapter wire contract, SSE streaming, retry/backoff defaults. |
@@ -287,8 +289,8 @@ sequenceDiagram
     G1-->>Dev: Gate 1 Passed (0 lint / sync errors)
 
     Dev->>G2: npm test (tests/runner.js)
-    Note over G2: Executes 115 suites (58 Unit, 57 Integration) under 120s timeout
-    G2-->>Dev: Gate 2 Passed (115/115 passed, 0 failures)
+    Note over G2: Executes 117 suites (60 Unit, 57 Integration) under 120s timeout
+    G2-->>Dev: Gate 2 Passed (117/117 passed, 0 failures)
 
     Dev->>G3: npm run build (vite build)
     Note over G3: Compiles Svelte 5 runes, WASM modules, top-level awaits
