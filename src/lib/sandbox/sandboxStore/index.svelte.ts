@@ -2523,6 +2523,31 @@ function resolveRealmBypassTargetRef(agentId: string, scope?: AgentIdentityScope
 }
 
 /**
+ * Deep-freezes a copy of one registry-side authority scope for the operator
+ * projection (ticket 62d89b8): the record object and every list array are
+ * copies, so nothing the caller receives aliases registry state. Unknown keys
+ * are dropped exactly like the grant-core validator's normalized shape.
+ *
+ * @param scope - Registry-side scope record (trusted runtime state).
+ * @returns A deep-frozen copy carrying only the schema's known keys.
+ */
+function freezeAuthorityScopeCopy(scope: AuthorityScopeRecord): AuthorityScopeRecord {
+  const copy: {
+    targets?: readonly string[];
+    ownSpawns?: boolean;
+    realmMembers?: boolean;
+    realms?: readonly string[];
+    fields?: readonly string[];
+  } = {};
+  if (Array.isArray(scope.targets)) copy.targets = Object.freeze(scope.targets.slice());
+  if (typeof scope.ownSpawns === 'boolean') copy.ownSpawns = scope.ownSpawns;
+  if (typeof scope.realmMembers === 'boolean') copy.realmMembers = scope.realmMembers;
+  if (Array.isArray(scope.realms)) copy.realms = Object.freeze(scope.realms.slice());
+  if (Array.isArray(scope.fields)) copy.fields = Object.freeze(scope.fields.slice());
+  return Object.freeze(copy) as AuthorityScopeRecord;
+}
+
+/**
  * Structural guard for a MOD-20 catalog preset loaded from a persisted
  * snapshot: non-empty string `id`/`name`, boolean `isCustom`, and a
  * `modelConfig` object with non-empty string `providerId`/`modelId`.
@@ -5705,6 +5730,54 @@ export class SandboxStore {
     for (const authorityId of Object.keys(listing)) {
       Object.defineProperty(frozen, authorityId, {
         value: Object.freeze([...listing[authorityId]]),
+        writable: false,
+        enumerable: true,
+        configurable: false
+      });
+    }
+    return Object.freeze(frozen);
+  }
+
+  /**
+   * Lists the exportable authority-grant entries of the active agents with
+   * their registry-side scopes (M2 projection; ticket 62d89b8 operator
+   * authority editor): per authority id, frozen `{ ref, scope }` details where
+   * a legacy unscoped grant (the bare canonical identity-key string) is
+   * normalized to `scope: null`. This is the scope-aware companion of
+   * `listAuthorityGrants` that lets the Agent Settings authority editor
+   * render and round-trip existing narrowings; every entry is preserved — a
+   * scoped grant is never flattened and an unscoped grant is never widened.
+   *
+   * Host/operator-only surface: scopes are registry-side data — they never
+   * reach an agent-facing receipt, listing, error, descriptor, schema, or
+   * audit payload. The returned record, every entry, and every scope (with its
+   * list arrays) are deep-frozen copies, so a caller can never mutate registry
+   * state through this projection.
+   *
+   * @returns Frozen `{ ref, scope }` entries per authority id (declaration order; ids with no holder omitted).
+   */
+  listAuthorityGrantDetails(): Readonly<
+    Record<string, readonly { ref: string; scope: AuthorityScopeRecord | null }[]>
+  > {
+    const listing = this.#runtime.listAuthorityGrantRecords();
+    const frozen: Record<string, readonly { ref: string; scope: AuthorityScopeRecord | null }[]> = {};
+    for (const authorityId of Object.keys(listing)) {
+      const entries = listing[authorityId];
+      const projected: { ref: string; scope: AuthorityScopeRecord | null }[] = [];
+      for (let i = 0; i < entries.length; i++) {
+        const entry = entries[i];
+        if (typeof entry === 'string') {
+          projected[projected.length] = Object.freeze({ ref: entry, scope: null });
+          continue;
+        }
+        const hasScope = Boolean(entry.scope) && Object.keys(entry.scope as AuthorityScopeRecord).length > 0;
+        projected[projected.length] = Object.freeze({
+          ref: entry.ref,
+          scope: hasScope ? freezeAuthorityScopeCopy(entry.scope as AuthorityScopeRecord) : null
+        });
+      }
+      Object.defineProperty(frozen, authorityId, {
+        value: Object.freeze(projected),
         writable: false,
         enumerable: true,
         configurable: false
