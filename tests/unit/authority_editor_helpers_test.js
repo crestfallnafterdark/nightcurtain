@@ -1,13 +1,16 @@
 /**
  * @file tests/unit/authority_editor_helpers_test.js
  * @description Operator authority editor helper tests (`authorityEditorHelpers.ts`,
- *   ticket 62d89b8). Pure vocabulary/normalization/state rules over the seven
- *   authority ids: the display table (declaration order, classes, scope flags,
- *   power copy), the per-agent grant/scope projection read out of the store's
- *   `listAuthorityGrantDetails()` shape, and the draft normalizer that mirrors
- *   the runtime `validateAuthorityScope` vocabulary (class-allowed keys, trim +
+ *   ticket 62d89b8; redesign d7131dc). Pure vocabulary/normalization/state rules
+ *   over the seven authority ids: the display table (declaration order, classes,
+ *   scope flags, one-line copy, the `warning` field on the three high-impact
+ *   ids), the per-agent grant/scope projection read out of the store's
+ *   `listAuthorityGrantDetails()` shape, the draft normalizer that mirrors the
+ *   runtime `validateAuthorityScope` vocabulary (class-allowed keys, trim +
  *   dedupe, prototype-vocabulary refusal, all-default → `null`, empty list input
- *   = key absent, `fields` omitted when every declared token is selected).
+ *   = key absent, `fields` omitted when every declared token is selected, and
+ *   the additive optional `field` hint on mapped failures), and the
+ *   `describeAuthorityScopeSummary` chip/rail grammar (deterministic part order).
  *
  *   Zero-Mock: these are the real helper exports; the grant/revoke seam is
  *   exercised against a real `sandboxStore` in
@@ -21,6 +24,7 @@ import assert from 'node:assert/strict';
 import {
   AUTHORITY_EDITOR_TOGGLES,
   buildAuthorityEditorState,
+  describeAuthorityScopeSummary,
   normalizeAuthorityScopeDraft
 } from '../../src/lib/components/sandbox/authorityEditorHelpers.ts';
 import { META_AUTHORITY_TOGGLES } from '../../src/lib/components/sandbox/realmReviewHelpers.ts';
@@ -43,7 +47,7 @@ function togglesById() {
   return new Map(AUTHORITY_EDITOR_TOGGLES.map((toggle) => [toggle.authority, toggle]));
 }
 
-test('1. the editor table exposes all seven ids in declaration order with classes, scope flags, and power copy', () => {
+test('1. the editor table exposes all seven ids in declaration order with classes, scope flags, and short copy', () => {
   assert.deepStrictEqual(
     AUTHORITY_EDITOR_TOGGLES.map((toggle) => toggle.authority),
     [...AUTHORITY_IDS],
@@ -68,7 +72,8 @@ test('1. the editor table exposes all seven ids in declaration order with classe
   }
 
   // The publishing pair keeps the source-compatible `META_AUTHORITY_TOGGLES`
-  // copy byte-for-byte, so the existing subsection is untouched by this table.
+  // copy byte-for-byte (the shortened hydration line moves both files at once;
+  // the template line stays as-is).
   assert.deepStrictEqual(
     [byId.get(TEMPLATE), byId.get(HYDRATION)].map(({ authority, label, description }) => ({
       authority,
@@ -78,11 +83,31 @@ test('1. the editor table exposes all seven ids in declaration order with classe
     META_AUTHORITY_TOGGLES.map(({ authority, label, description }) => ({ authority, label, description }))
   );
 
-  // Power warnings name the concrete reach of the dangerous ids.
-  assert.match(byId.get(AGENT_EDIT).description, /tools, privilege, policy, and prompt/);
-  assert.match(byId.get(REALM_EDIT).description, /attachments/);
-  assert.match(byId.get(REALM_EDIT).description, /ceiling/);
-  assert.match(byId.get(EXTENSIONS).description, /realm-wide/);
+  // The compact one-line copy from the approved design (no "Powerful:" prose).
+  assert.strictEqual(byId.get(TEMPLATE).description, 'Import realm template bundles into the host catalog.');
+  assert.strictEqual(byId.get(HYDRATION).description, 'Submit instance payloads for host review.');
+  assert.strictEqual(byId.get(AGENT_INSPECT).description, 'Read other agents’ role, tools, and prompt.');
+  assert.strictEqual(byId.get(AGENT_EDIT).description, 'Change other agents’ tools, policy, or prompt.');
+  assert.strictEqual(byId.get(REALM_INSPECT).description, 'Read realm settings, attachments, and tool ceiling.');
+  assert.strictEqual(byId.get(REALM_EDIT).description, 'Change realm settings, attachments, and tool ceiling.');
+  assert.strictEqual(byId.get(EXTENSIONS).description, 'Attach extensions realm-wide for every member.');
+
+  // The three high-impact ids carry the amber-warning copy; the rest do not.
+  assert.strictEqual(
+    byId.get(AGENT_EDIT).warning,
+    'High impact — edits other agents’ tools and prompt.'
+  );
+  assert.strictEqual(
+    byId.get(REALM_EDIT).warning,
+    'High impact — changes the tools every member can reach.'
+  );
+  assert.strictEqual(
+    byId.get(EXTENSIONS).warning,
+    'High impact — target realm members gain these tools.'
+  );
+  for (const id of [TEMPLATE, HYDRATION, AGENT_INSPECT, REALM_INSPECT]) {
+    assert.strictEqual(byId.get(id).warning, undefined, `${id} carries no high-impact warning`);
+  }
 });
 
 test('2. buildAuthorityEditorState projects the live grant/scope listing per id', () => {
@@ -302,4 +327,118 @@ test('6. normalization freezes the built scope and its list arrays', () => {
   assert.ok(Object.isFrozen(result.scope.targets), 'targets is frozen');
   assert.ok(Object.isFrozen(result.scope.realms), 'realms is frozen');
   assert.ok(Object.isFrozen(result.scope.fields), 'fields is frozen');
+});
+
+test('7. scope summaries follow the deterministic chip grammar for all seven ids', () => {
+  const byId = togglesById();
+  const summary = (id, scope) => describeAuthorityScopeSummary(byId.get(id), scope);
+
+  // Publishing ids are unscoped and carry no chip; unknown ids speak nothing.
+  assert.strictEqual(summary(TEMPLATE, null), '');
+  assert.strictEqual(summary(HYDRATION, { targets: ['x'] }), '');
+  assert.strictEqual(describeAuthorityScopeSummary(null, null), '');
+  assert.strictEqual(describeAuthorityScopeSummary(undefined, null), '');
+  assert.strictEqual(describeAuthorityScopeSummary({ authority: '@nope:authority' }, null), '');
+
+  // Granted, default scope (`scope: null`): each id's documented default.
+  assert.strictEqual(summary(AGENT_INSPECT, null), 'own spawns');
+  assert.strictEqual(summary(AGENT_EDIT, null), 'own spawns');
+  assert.strictEqual(summary(REALM_INSPECT, null), 'own realm');
+  assert.strictEqual(summary(REALM_EDIT, null), 'own realm');
+  assert.strictEqual(summary(EXTENSIONS, null), 'own realm');
+
+  // Granted, narrowed — the three examples from the approved design.
+  assert.strictEqual(
+    summary(AGENT_EDIT, { targets: ['worker', 'coordinator'], fields: ['tools', 'prompt'] }),
+    '2 agent targets · fields: tools, prompt'
+  );
+  assert.strictEqual(
+    summary(REALM_EDIT, { targets: ['r1', 'r2'], fields: ['attachments', 'name'] }),
+    '2 realm targets · fields: attachments, name'
+  );
+  assert.strictEqual(
+    summary(EXTENSIONS, { targets: ['r1', 'r2', 'r3'] }),
+    '3 realm targets'
+  );
+
+  // Reach selectors, realm bound, and the field-deny marker.
+  assert.strictEqual(
+    summary(AGENT_INSPECT, { targets: ['peer'], ownSpawns: true, realms: ['r2'] }),
+    '1 agent targets · own spawns · 1 bound realms'
+  );
+  assert.strictEqual(summary(AGENT_INSPECT, { ownSpawns: false }), 'no spawns');
+  assert.strictEqual(
+    summary(AGENT_INSPECT, { realmMembers: true, realms: ['r1', 'r2'] }),
+    'realm members · 2 bound realms'
+  );
+  assert.strictEqual(
+    summary(AGENT_EDIT, { targets: ['peer'], realms: ['r1'], fields: [] }),
+    '1 agent targets · 1 bound realms · field edits denied'
+  );
+  assert.strictEqual(summary(REALM_EDIT, { fields: [] }), 'own realm · field edits denied');
+
+  // An explicit empty target list is a fail-closed deny, never the default.
+  assert.strictEqual(summary(AGENT_INSPECT, { targets: [] }), '0 agent targets');
+  assert.strictEqual(summary(REALM_INSPECT, { targets: [] }), '0 realm targets');
+
+  // Deterministic part order: targets → own spawns → realm members → realm
+  // bound → fields (field tokens render in declared vocabulary order).
+  assert.strictEqual(
+    summary(AGENT_EDIT, {
+      fields: ['prompt', 'tools'],
+      realms: ['r1'],
+      realmMembers: true,
+      ownSpawns: true,
+      targets: ['a', 'b']
+    }),
+    '2 agent targets · own spawns · realm members · 1 bound realms · fields: tools, prompt'
+  );
+
+  // A selector-free scope object collapses to the id's default reach.
+  assert.strictEqual(summary(AGENT_INSPECT, {}), 'own spawns');
+  assert.strictEqual(summary(REALM_INSPECT, {}), 'own realm');
+});
+
+test('8. normalization failures carry the additive optional field hint where a control maps', () => {
+  const targetsError = normalizeAuthorityScopeDraft({ targets: 'ok, __proto__' }, AGENT_INSPECT);
+  assert.strictEqual(targetsError.error.length > 0, true);
+  assert.strictEqual(targetsError.field, 'targets');
+
+  assert.strictEqual(
+    normalizeAuthorityScopeDraft({ targets: ['ok', 7] }, AGENT_INSPECT).field,
+    'targets'
+  );
+  assert.strictEqual(
+    normalizeAuthorityScopeDraft({ realms: ['ok', 7] }, AGENT_INSPECT).field,
+    'realms'
+  );
+  assert.strictEqual(
+    normalizeAuthorityScopeDraft({ fields: ['nope'] }, AGENT_EDIT).field,
+    'fields'
+  );
+  assert.strictEqual(
+    normalizeAuthorityScopeDraft({ targets: 'x' }, TEMPLATE).field,
+    'targets',
+    'a class-invalid rendered key still maps to its control'
+  );
+  assert.strictEqual(
+    normalizeAuthorityScopeDraft({ realms: 'r1' }, REALM_EDIT).field,
+    'realms'
+  );
+
+  // Unmapped failure classes carry no hint at all (never a fabricated control).
+  assert.strictEqual(
+    normalizeAuthorityScopeDraft({ ownSpawns: 'yes' }, AGENT_INSPECT).field,
+    undefined
+  );
+  assert.strictEqual(normalizeAuthorityScopeDraft([], AGENT_INSPECT).field, undefined);
+  assert.strictEqual(
+    normalizeAuthorityScopeDraft({ targets: 'x' }, '@nope:authority').field,
+    undefined
+  );
+  assert.strictEqual(
+    'field' in normalizeAuthorityScopeDraft({ targets: 'peer' }, AGENT_INSPECT),
+    false,
+    'successful results stay exactly `{ scope, error }`'
+  );
 });
