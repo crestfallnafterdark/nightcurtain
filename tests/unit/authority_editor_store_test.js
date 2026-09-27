@@ -69,7 +69,8 @@ test('1. the editor grants, projects, scopes, and revokes through a real store',
     assert.deepStrictEqual(store.listAuthorityGrantDetails()[AGENT_INSPECT], [{ ref: agentKey, scope: null }]);
 
     // A normalized scope draft re-grants with the exact registry-side narrowing
-    // and replaces (never duplicates) the record for that id.
+    // and replaces (never duplicates) the record for that id; the draft's
+    // `ownSpawns:false` is a no-op the normalizer drops (runtime-identical).
     const normalized = normalizeAuthorityScopeDraft(
       { targets: 'peer-one, peer-two', realms: 'realm-remote', ownSpawns: false, realmMembers: true },
       AGENT_INSPECT
@@ -91,7 +92,6 @@ test('1. the editor grants, projects, scopes, and revokes through a real store',
       scope: {
         targets: ['peer-one', 'peer-two'],
         realms: ['realm-remote'],
-        ownSpawns: false,
         realmMembers: true
       }
     });
@@ -116,7 +116,6 @@ test('1. the editor grants, projects, scopes, and revokes through a real store',
         scope: {
           targets: ['peer-one', 'peer-two'],
           realms: ['realm-remote'],
-          ownSpawns: false,
           realmMembers: true
         }
       }
