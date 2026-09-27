@@ -101,7 +101,7 @@ The master runner executes all Unit and Integration suites in strict sub-process
 // Sample output format from tests/runner.js:
 // ======================================================================
 //   AGENTIC SANDBOX STUDIO MASTER TEST SUITE RUNNER
-//   Total Suites: 117 (60 Unit, 57 Integration)
+//   Total Suites: 119 (61 Unit, 58 Integration)
 // ======================================================================
 //   [Unit       ] deepseek_provider_test.js                  ✔ PASS (42ms)
 //   [Unit       ] deepseek_reasoning_hygiene_test.js         ✔ PASS (18ms)
@@ -126,7 +126,7 @@ All Node-based test suites import [`tests/test_env.js`](../../tests/test_env.js)
 
 ## 4. Test Suite Inventory & Classification
 
-The project includes **117 native test suites** (60 unit, 57 integration) and **10 browser E2E specs**:
+The project includes **119 native test suites** (61 unit, 58 integration) and **10 browser E2E specs**:
 
 > **Canonical inventory.** This chapter is the single source of truth for test-suite counts and per-file listings; [`unit_and_integration.md`](unit_and_integration.md) cross-links here instead of duplicating it.
 
@@ -134,6 +134,7 @@ The project includes **117 native test suites** (60 unit, 57 integration) and **
 | Suite File | Primary Target Module | Verification Focus |
 |---|---|---|
 | [`agent_model_config_helpers_test.js`](../../tests/unit/agent_model_config_helpers_test.js) | `src/lib/components/sandbox/agentModelConfigHelpers.ts` | Bound-preset model-config resolution, capability-gated preset-editor field visibility, capability-gated config building (no dead `routing`/`url` fields). |
+| [`agent_tool_selector_helpers_test.js`](../../tests/unit/agent_tool_selector_helpers_test.js) | `src/lib/components/sandbox/agentToolSelectorHelpers.ts` | Agent Settings tool-permission form truth (ticket `6a0282b`, F10): a withheld/degraded `allowedTools` selector reads as default-deny — never Full Access — and a blank whitelist edit persists default-deny instead of widening to `*`. |
 | [`authority_editor_helpers_test.js`](../../tests/unit/authority_editor_helpers_test.js) | `src/lib/components/sandbox/authorityEditorHelpers.ts` + `realmReviewHelpers.ts` | Operator authority editor (ticket 62d89b8): seven-id table in declaration order with classes/scoped flags and power copy, publishing-pair copy pinned byte-for-byte to `META_AUTHORITY_TOGGLES`, per-agent grant/scope projection from the store detail listing, draft normalization mirroring `validateAuthorityScope` (class-allowed keys, trim + dedupe, prototype-vocabulary refusal, class-invalid rejection, all-default → `null`, all-field-selected → default, `fields: []` explicit deny), frozen scope output. |
 | [`authority_editor_store_test.js`](../../tests/unit/authority_editor_store_test.js) | `src/lib/sandbox/sandboxStore/index.svelte.ts` + `authorityEditorHelpers.ts` | Operator authority editor wiring over a real store: scope-aware `listAuthorityGrantDetails()` projection (legacy bare string → `scope: null`), frozen copies that cannot mutate registry state, generic realm-exact grant/revoke seam, re-grant replaces the record, same-literal-id agents in two Realms never retargeted, inline failure surfacing. |
 | [`contracts_gate_test.js`](../../tests/unit/contracts_gate_test.js) | `scripts/verify_sandbox_contracts.js` + gate tooling | Seven static encapsulation gates execute and pass (verifier, dependency-cruiser, TSDoc, contract-types, module contracts, report freshness, sandbox lint). |
@@ -237,6 +238,7 @@ The project includes **117 native test suites** (60 unit, 57 integration) and **
 | [`spawn_receipt_opacity_test.js`](../../tests/integration/spawn_receipt_opacity_test.js) | `ToolDispatcher` + `AgentRuntime` | `spawn_agent` receipt bounded projection (no raw `Agent`/`realmId`), denial opacity, workspace-label sanitization, real-turn history receipt. |
 | [`studio_recycle_bin_test.js`](../../tests/integration/studio_recycle_bin_test.js) | `SandboxStore` + `AgentRuntime` | Recycle bin state, badge counters, restore/purge lifecycle. |
 | [`template_baked_history_test.js`](../../tests/integration/template_baked_history_test.js) | `SandboxStore` + `realmCatalog` + `AgentRuntime` + persistence | Baked prologue opener: system + declared history present before any turn, no model call, launch-generated message ids (INV-7), byte-stable runtime/store snapshot round-trips. |
+| [`template_capability_hydration_test.js`](../../tests/integration/template_capability_hydration_test.js) | `SandboxStore` + `realmCatalog` + `AgentRuntime` + persistence | Template capability hydration (ticket `6a0282b`): reload restore re-derives a template member's declared privilege and tool profile from trusted provenance (pinned to `instance.templateVersion`); same-literal-id members across two realms restore realm-exactly; a skipped/failed heal never overwrites persisted selectors with empty. |
 | [`template_package_launch_test.js`](../../tests/integration/template_package_launch_test.js) | `SandboxStore` + `realmCatalog` + `VirtualFS` + `AgentRuntime` | Hydration-package launch: generated input composition (review values win), origin-aware seed files into realm-global/member workspaces, required/fixed/unknown rejections, version-mismatch policy, providers gate with zero side effects. |
 | [`template_persistence_roundtrip_test.js`](../../tests/integration/template_persistence_roundtrip_test.js) | `SandboxStore` + `sandboxPersistence` + `realmRegistry` | Imported bundle + provenance persistence: fresh-store hydration, canonical export equality, source labels, caps/quota typed rollback. |
 | [`template_roundtrip_test.js`](../../tests/integration/template_roundtrip_test.js) | `SandboxStore` + `realmCatalog` | Transport round-trip: import → export → re-import identical `templateBundleVersion`, shipped→imported catalog resolution, shadow/delete-restore semantics. |
@@ -289,7 +291,7 @@ sequenceDiagram
     G1-->>Dev: Gate 1 Passed (0 lint / sync errors)
 
     Dev->>G2: npm test (tests/runner.js)
-    Note over G2: Executes 117 suites (60 Unit, 57 Integration) under 120s timeout
+    Note over G2: Executes 119 suites (61 Unit, 58 Integration) under 120s timeout
     G2-->>Dev: Gate 2 Passed (117/117 passed, 0 failures)
 
     Dev->>G3: npm run build (vite build)
