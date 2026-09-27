@@ -535,7 +535,9 @@
 
   /**
    * Seeds one row's scope draft from the held scope (`null` = the id default:
-   * own spawns for `@agent:*` — checked — and every declared field token).
+   * own spawns for `@agent:*` — checked — and every declared field token). The
+   * draft carries only class-allowed keys, so the fail-closed normalizer never
+   * sees a class-invalid key the UI did not render.
    *
    * @param {object} toggle - Authority editor toggle definition.
    * @param {object | null} scope - Held registry scope, or `null`.
@@ -544,13 +546,17 @@
   function seedAuthorityScopeDraft(toggle, scope) {
     const vocabulary = AUTHORITY_SCOPE_FIELDS[toggle.authority] ?? [];
     const scopeRecord = scope && typeof scope === 'object' ? scope : null;
-    return {
+    /** @type {{targets: string, fields: string[], realms?: string, ownSpawns?: boolean, realmMembers?: boolean}} */
+    const draft = {
       targets: Array.isArray(scopeRecord?.targets) ? scopeRecord.targets.join(', ') : '',
-      realms: Array.isArray(scopeRecord?.realms) ? scopeRecord.realms.join(', ') : '',
-      ownSpawns: scopeRecord ? scopeRecord.ownSpawns === true : true,
-      realmMembers: scopeRecord?.realmMembers === true,
       fields: Array.isArray(scopeRecord?.fields) ? [...scopeRecord.fields] : [...vocabulary]
     };
+    if (toggle.class === 'agent') {
+      draft.realms = Array.isArray(scopeRecord?.realms) ? scopeRecord.realms.join(', ') : '';
+      draft.ownSpawns = scopeRecord ? scopeRecord.ownSpawns === true : true;
+      draft.realmMembers = scopeRecord?.realmMembers === true;
+    }
+    return draft;
   }
 
   /** Re-reads the scope-aware operator grant registry. */
