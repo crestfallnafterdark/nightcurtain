@@ -34,7 +34,11 @@
  *      `templateAuthorityTrust`), revoke, kill drops grants, legacy snapshots
  *      byte-compatible;
  *   8. smuggling: `updateAgentConfig`, launch/spawn configs, and capability
- *      selectors can never place the authority ids.
+ *      selectors can never place the authority ids;
+ *   9. duplicate same-literal-id realms (ticket 5f34f18): an approved launch
+ *      grant stays effective on a canonical `callerKey`-bound dispatcher
+ *      (the production turn binding) and in `whoami`, live revoke/regrant
+ *      propagates, and hydration restores the realm-exact grants.
  *
  * Zero-Mock Verification: every engine class (store, runtime, VirtualFS,
  * messaging bus, realm registry, preset catalog, realmCatalog helpers) is the
@@ -2113,4 +2117,120 @@ test('31. [M1] audit vocabulary: generic events for the rest, legacy names for t
   const serializedEvents = JSON.stringify(events);
   assert.equal(serializedEvents.includes('child-1'), false, 'audit never carries scope values');
   assert.equal(/realm:/.test(serializedEvents), false, 'audit payloads stay realm-opaque');
+});
+
+// ============================================================================
+// 9. Duplicate same-literal-id realms (ticket 5f34f18)
+// ============================================================================
+
+test('32. duplicate same-literal-id realms: the approved authority stays effective on the canonical callerKey binding', async () => {
+  const { runtime, store } = createFixtureStore();
+  importFixture(store, createFixtureTemplate());
+  const approvals = [
+    { agentKey: 'architect', authority: AGENT_AUTHORITIES.TEMPLATE },
+    { agentKey: 'genesis', authority: AGENT_AUTHORITIES.HYDRATION }
+  ];
+  // The same template launches twice: the two realms each register the same
+  // literal `architect`/`genesis` ids (the live Session Zero duplicate case).
+  const first = await launchFixture(store, FIXTURE_ID, { authorityApprovals: approvals, seed: false });
+  const second = await launchFixture(store, FIXTURE_ID, { authorityApprovals: approvals, seed: false });
+  const architectId = `${FIXTURE_ID}-architect`;
+
+  const identityPort = runtime.createAgentIdentityPort();
+  const firstIdentity = identityPort.getAgentIdentity(architectId, { realmId: first.realm.id });
+  const secondIdentity = identityPort.getAgentIdentity(architectId, { realmId: second.realm.id });
+  assert.ok(firstIdentity && secondIdentity, 'both same-literal-id registrations resolve realm-exactly');
+  assert.notEqual(firstIdentity.key, secondIdentity.key, 'each realm owns its own canonical registration');
+  assert.equal(identityPort.getAgentIdentity(architectId), null, 'the shared bare id is ambiguous for the host lookup');
+  for (const identity of [firstIdentity, secondIdentity]) {
+    assert.ok(
+      [...identity.authority.allow].includes(AGENT_AUTHORITIES.TEMPLATE),
+      'the approved launch grant is registered on the realm-exact descriptor'
+    );
+  }
+  // Persistence currency: exactly the two canonical keys, no bare id.
+  assert.deepEqual(
+    [...store.listMetaAuthorityGrants().template].sort(),
+    [firstIdentity.key, secondIdentity.key].sort(),
+    'the approved grants persist as canonical identity keys only'
+  );
+
+  // Production turn binding (turn engine): the trusted canonical `callerKey`
+  // is pinned at dispatcher construction with no realm scope bound.
+  const dispatcherFor = (identity) => createPublishingDispatcher(store, runtime, architectId, {
+    callerKey: identity.key,
+    lifecyclePort: runtime.createLifecyclePort()
+  });
+  const firstDispatcher = dispatcherFor(firstIdentity);
+  const secondDispatcher = dispatcherFor(secondIdentity);
+
+  const firstList = await firstDispatcher.executeTool(REALM_KNOWLEDGE_TOOLS.LIST_TEMPLATES, {});
+  assert.equal(firstList.success, true, `the first realm's architect must list templates: ${JSON.stringify(firstList)}`);
+  const secondList = await secondDispatcher.executeTool(REALM_KNOWLEDGE_TOOLS.LIST_TEMPLATES, {});
+  assert.equal(
+    secondList.success,
+    true,
+    `the second realm's same-id architect must keep its approved authority: ${JSON.stringify(secondList)}`
+  );
+
+  const secondImport = await secondDispatcher.executeTool(PUBLISHING_TOOLS.IMPORT_REALM_TEMPLATE, {
+    manifest: { formatVersion: 1, template: createFixtureTemplate({ id: 'up-duplicate-realm-import' }), files: {} }
+  });
+  assert.equal(secondImport.success, true, JSON.stringify(secondImport));
+  assert.equal(secondImport.imported, true, 'the realm-exact caller imports through the real publishing path');
+  assert.equal(/realm:/.test(JSON.stringify(secondImport)), false, 'the import receipt stays realm-opaque');
+
+  // Agent-visible identity: whoami reports the held authority for the exact
+  // registration instead of the ambiguous-bare-id empty list.
+  const whoami = await secondDispatcher.executeTool('whoami', {});
+  assert.equal(whoami.success, true, JSON.stringify(whoami));
+  assert.ok(
+    whoami.authorities.includes(AGENT_AUTHORITIES.TEMPLATE),
+    `whoami must report the held authority: ${JSON.stringify(whoami)}`
+  );
+  assert.equal(/realm:/.test(JSON.stringify(whoami)), false, 'the whoami receipt stays realm-opaque');
+
+  // A live operator revoke/regrant through the store (realm-exact) propagates
+  // to the next turn on the same canonical binding.
+  const revoked = await store.revokeTemplateAuthority(architectId, { realmId: second.realm.id });
+  assert.ok(revoked, 'the realm-exact revoke resolves the second registration');
+  assert.equal([...revoked.authority.allow].includes(AGENT_AUTHORITIES.TEMPLATE), false);
+  assert.equal(
+    [...identityPort.getAgentIdentity(firstIdentity.key).authority.allow].includes(AGENT_AUTHORITIES.TEMPLATE),
+    true,
+    "the first realm's same-id architect is untouched by the second realm's revoke"
+  );
+  const revokedList = await secondDispatcher.executeTool(REALM_KNOWLEDGE_TOOLS.LIST_TEMPLATES, {});
+  assert.equal(revokedList.success, false, 'the revoked registration is denied at the next call');
+  assert.equal(revokedList.code, 'PERMISSION_DENIED');
+
+  const regranted = await store.grantTemplateAuthority(architectId, { realmId: second.realm.id });
+  assert.ok(regranted, 'the realm-exact regrant resolves the second registration');
+  const regrantedList = await secondDispatcher.executeTool(REALM_KNOWLEDGE_TOOLS.LIST_TEMPLATES, {});
+  assert.equal(regrantedList.success, true, `the live regrant propagates to the runtime: ${JSON.stringify(regrantedList)}`);
+
+  // Hydration round-trip: both canonical grants restore and stay effective.
+  sharedLocalStorage.clear();
+  assert.equal(store.saveToStorage(), true);
+  const restored = createFixtureStore({ autoHydrate: true });
+  assert.deepEqual(
+    [...restored.store.listMetaAuthorityGrants().template].sort(),
+    [firstIdentity.key, secondIdentity.key].sort(),
+    'hydration restores exactly the two canonical grants'
+  );
+  const restoredIdentity = restored.runtime.createAgentIdentityPort().getAgentIdentity(architectId, { realmId: second.realm.id });
+  assert.ok(
+    restoredIdentity && [...restoredIdentity.authority.allow].includes(AGENT_AUTHORITIES.TEMPLATE),
+    'the hydrated grant rebuilds into the realm-exact descriptor'
+  );
+  const restoredDispatcher = createPublishingDispatcher(restored.store, restored.runtime, architectId, {
+    callerKey: restoredIdentity.key,
+    lifecyclePort: restored.runtime.createLifecyclePort()
+  });
+  const restoredList = await restoredDispatcher.executeTool(REALM_KNOWLEDGE_TOOLS.LIST_TEMPLATES, {});
+  assert.equal(
+    restoredList.success,
+    true,
+    `the hydrated second-realm architect stays authorized on the canonical binding: ${JSON.stringify(restoredList)}`
+  );
 });
