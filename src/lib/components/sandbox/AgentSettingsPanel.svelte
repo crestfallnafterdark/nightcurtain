@@ -1,13 +1,19 @@
 <script>
   import { sandboxStore } from '../../sandbox/sandboxStore/index.svelte.ts';
   import { SANDBOX_TOOLS, TOOL_PRESETS } from '$lib/sandbox/toolDefinitions/index.ts';
-  import { AGENT_AUTHORITIES } from '../../sandbox/realmCatalog/index.ts';
+  import { AGENT_AUTHORITIES, AUTHORITY_SCOPE_FIELDS } from '../../sandbox/realmCatalog/index.ts';
   import { createAgentIdentityKey } from '../../sandbox/runtime/index.ts';
   import {
     META_AUTHORITY_TOGGLES,
     applyMetaAuthorityToggle,
     buildMetaAuthorityToggleState
   } from './realmReviewHelpers.ts';
+  import {
+    AUTHORITY_EDITOR_TOGGLES,
+    applyAuthorityGrantToggle,
+    buildAuthorityEditorState,
+    normalizeAuthorityScopeDraft
+  } from './authorityEditorHelpers.ts';
   import {
     applyAgentExtensionSelectorToggle,
     buildAgentLiveExtensionTuningProjection,
@@ -505,6 +511,202 @@
     setFieldFeedback(field, result.error, 'error');
     showFeedback(result.error, 'error');
   }
+
+  // Ticket 62d89b8 operator authority editor: the five meta-plane ids with a
+  // per-row scope editor. The publishing pair keeps its dedicated subsection
+  // above; these rows read the additive host-only
+  // `listAuthorityGrantDetails()` projection (scope-aware), render a live
+  // GRANTED tag, and apply through the generic realm-exact
+  // `applyAuthorityGrantToggle` seam — a re-grant replaces the record for that
+  // id. Scope drafts are seeded from the store projection; an empty list input
+  // means the id's default, never an explicit-empty deny.
+  const META_CAPABILITY_EDITOR_ROWS = AUTHORITY_EDITOR_TOGGLES.filter(
+    (toggle) => toggle.class !== 'publishing'
+  );
+
+  /** @type {Record<string, readonly {ref: string, scope: object | null}[]>} */
+  let authorityGrantDetails = $state({});
+  /** @type {Record<string, {targets: string, realms: string, ownSpawns: boolean, realmMembers: boolean, fields: string[]}>} */
+  let authorityScopeDrafts = $state({});
+  let lastAuthorityDetailsAgentKey = $state(/** @type {string | null} */(null));
+
+  /** Live per-id grant/scope state of the selected agent. */
+  let authorityEditorState = $derived(buildAuthorityEditorState(authorityGrantDetails, metaAuthorityAgentKey));
+
+  /**
+   * Seeds one row's scope draft from the held scope (`null` = the id default:
+   * own spawns for `@agent:*` — checked — and every declared field token).
+   *
+   * @param {object} toggle - Authority editor toggle definition.
+   * @param {object | null} scope - Held registry scope, or `null`.
+   * @returns {object} Draft state for the scope editor.
+   */
+  function seedAuthorityScopeDraft(toggle, scope) {
+    const vocabulary = AUTHORITY_SCOPE_FIELDS[toggle.authority] ?? [];
+    const scopeRecord = scope && typeof scope === 'object' ? scope : null;
+    return {
+      targets: Array.isArray(scopeRecord?.targets) ? scopeRecord.targets.join(', ') : '',
+      realms: Array.isArray(scopeRecord?.realms) ? scopeRecord.realms.join(', ') : '',
+      ownSpawns: scopeRecord ? scopeRecord.ownSpawns === true : true,
+      realmMembers: scopeRecord?.realmMembers === true,
+      fields: Array.isArray(scopeRecord?.fields) ? [...scopeRecord.fields] : [...vocabulary]
+    };
+  }
+
+  /** Re-reads the scope-aware operator grant registry. */
+  function refreshAuthorityGrantDetails() {
+    authorityGrantDetails = sandboxStore.listAuthorityGrantDetails();
+  }
+
+  /** Re-seeds every meta-capability row's draft from the live registry. */
+  function seedAuthorityScopeDrafts() {
+    const state = buildAuthorityEditorState(authorityGrantDetails, metaAuthorityAgentKey);
+    /** @type {Record<string, object>} */
+    const next = {};
+    for (const toggle of META_CAPABILITY_EDITOR_ROWS) {
+      next[toggle.authority] = seedAuthorityScopeDraft(toggle, state[toggle.authority]?.scope ?? null);
+    }
+    authorityScopeDrafts = next;
+  }
+
+  /** Re-seeds one row's draft from the live registry (post-apply). */
+  function seedAuthorityScopeDraftFor(authority) {
+    const toggle = META_CAPABILITY_EDITOR_ROWS.find((entry) => entry.authority === authority);
+    if (!toggle) return;
+    const state = buildAuthorityEditorState(authorityGrantDetails, metaAuthorityAgentKey);
+    authorityScopeDrafts = {
+      ...authorityScopeDrafts,
+      [authority]: seedAuthorityScopeDraft(toggle, state[authority]?.scope ?? null)
+    };
+  }
+
+  $effect(() => {
+    const currentKey = agentKey;
+    if (currentKey !== lastAuthorityDetailsAgentKey) {
+      lastAuthorityDetailsAgentKey = currentKey;
+      refreshAuthorityGrantDetails();
+      seedAuthorityScopeDrafts();
+    }
+  });
+
+  /**
+   * Patches one field of a row's scope draft.
+   *
+   * @param {string} authority - Authority id.
+   * @param {string} key - Draft key (`targets`/`realms`/`ownSpawns`/`realmMembers`/`fields`).
+   * @param {unknown} value - Next value.
+   */
+  function updateAuthorityScopeDraft(authority, key, value) {
+    const draft = authorityScopeDrafts[authority];
+    if (!draft) return;
+    authorityScopeDrafts = { ...authorityScopeDrafts, [authority]: { ...draft, [key]: value } };
+  }
+
+  /**
+   * Toggles one field token in a row's draft selection.
+   *
+   * @param {string} authority - Authority id.
+   * @param {string} token - Field token.
+   * @param {boolean} checked - Requested state.
+   */
+  function handleAuthorityFieldToggle(authority, token, checked) {
+    const draft = authorityScopeDrafts[authority];
+    if (!draft) return;
+    const current = Array.isArray(draft.fields) ? draft.fields : [];
+    const next = checked ? [...current, token] : current.filter((entry) => entry !== token);
+    updateAuthorityScopeDraft(authority, 'fields', next);
+  }
+
+  /**
+   * Applies one meta-capability toggle through the real store: enabling grants
+   * the id unscoped (the dedicated "Apply scope" action narrows it) and
+   * disabling revokes it. Failures are surfaced inline; the caller re-reads
+   * the live projection.
+   *
+   * @param {string} authority - Exact authority id.
+   * @param {boolean} enabled - Requested state.
+   */
+  async function handleAuthorityToggle(authority, enabled) {
+    if (!agent) return;
+    const field = `authority-editor:${authority}`;
+    setFieldFeedback(field, enabled ? 'Granting…' : 'Revoking…', 'pending');
+    const result = await applyAuthorityGrantToggle(sandboxStore, {
+      agentId: agent.id,
+      authority,
+      enabled,
+      scope: null,
+      realmId: resolveAgentRealmId(agent)
+    });
+    refreshAuthorityGrantDetails();
+    if (result.ok) {
+      seedAuthorityScopeDraftFor(authority);
+      setFieldFeedback(field, enabled ? 'Granted unscoped' : 'Revoked', 'success');
+      showFeedback(
+        enabled
+          ? `Granted ${authority} to ${agent.name || agent.id} (unscoped default).`
+          : `Revoked ${authority} from ${agent.name || agent.id}.`,
+        'success'
+      );
+      return;
+    }
+    setFieldFeedback(field, result.error, 'error');
+    showFeedback(result.error, 'error');
+  }
+
+  /**
+   * Normalizes the row's scope draft and re-grants the id with it (a re-grant
+   * replaces the record for that id); invalid drafts surface their inline
+   * error and never reach the store.
+   *
+   * @param {string} authority - Exact authority id.
+   */
+  async function handleAuthorityScopeApply(authority) {
+    if (!agent) return;
+    const field = `authority-scope:${authority}`;
+    const normalized = normalizeAuthorityScopeDraft(authorityScopeDrafts[authority], authority);
+    if (normalized.error) {
+      setFieldFeedback(field, normalized.error, 'error');
+      showFeedback(normalized.error, 'error');
+      return;
+    }
+    setFieldFeedback(field, 'Applying scope…', 'pending');
+    const result = await applyAuthorityGrantToggle(sandboxStore, {
+      agentId: agent.id,
+      authority,
+      enabled: true,
+      scope: normalized.scope,
+      realmId: resolveAgentRealmId(agent)
+    });
+    refreshAuthorityGrantDetails();
+    if (result.ok) {
+      seedAuthorityScopeDraftFor(authority);
+      setFieldFeedback(field, normalized.scope ? 'Scope applied' : 'Default scope applied', 'success');
+      showFeedback(
+        normalized.scope
+          ? `Scoped ${authority} for ${agent.name || agent.id}.`
+          : `${authority} for ${agent.name || agent.id} narrowed to the id's default scope.`,
+        'success'
+      );
+      return;
+    }
+    setFieldFeedback(field, result.error, 'error');
+    showFeedback(result.error, 'error');
+  }
+
+  /** Meta-capability rows with live state and their seeded scope drafts. */
+  let authorityEditorRows = $derived(META_CAPABILITY_EDITOR_ROWS.map((toggle) => ({
+    ...toggle,
+    enabled: authorityEditorState[toggle.authority]?.enabled === true,
+    scope: authorityEditorState[toggle.authority]?.scope ?? null,
+    draft: authorityScopeDrafts[toggle.authority] ?? seedAuthorityScopeDraft(toggle, null),
+    vocabulary: AUTHORITY_SCOPE_FIELDS[toggle.authority] ?? []
+  })));
+
+  /** State-accurate default-scope line for one row. */
+  function describeAuthorityDefaultScope(row) {
+    if (row.class === 'agent') return 'own direct spawns';
+    return 'own realm';
+  }
 </script>
 
 <div class="agent-settings-pane">
@@ -845,6 +1047,157 @@
                       <span class="policy-desc">{toggle.description}</span>
                     </div>
                   </label>
+                {/each}
+              </div>
+
+              <div class="publishing-grants">
+                <div class="publishing-grants-head">
+                  <span class="publishing-grants-title">Meta capabilities (operator grants)</span>
+                  <span class="publishing-distinct">explicit · scoped</span>
+                </div>
+                <span class="policy-desc">
+                  The M2–M4 meta-plane capabilities. Never implied by Sudo/Administrative Authority, the wildcard
+                  grant, or a tool profile — each is an explicit, revocable operator grant enforced registry-side.
+                  Scope bounds are registry-side too: an empty target list means the id's default
+                  (own spawns for @agent:*, own realm for @realm:* / @extensions:authority) rather than an
+                  explicit-empty deny, and clearing every field token denies all field edits (fail-closed).
+                </span>
+                {#each authorityEditorRows as row (row.authority)}
+                  <div class="authority-editor-row">
+                    <label class="authority-toggle" class:active={row.enabled}>
+                      <input
+                        type="checkbox"
+                        class="checkbox-input authority-checkbox"
+                        checked={row.enabled}
+                        onchange={(event) => handleAuthorityToggle(row.authority, event.currentTarget.checked)}
+                      />
+                      <div class="policy-details">
+                        <div class="policy-title-row">
+                          <span class="policy-title">{row.label}</span>
+                          <span class="authority-id font-mono">{row.authority}</span>
+                          {#if row.enabled}
+                            <span class="authority-live-tag font-mono">GRANTED</span>
+                          {/if}
+                          {#if fieldFeedback[`authority-editor:${row.authority}`]}
+                            <span
+                              class="field-status"
+                              class:pending={fieldFeedback[`authority-editor:${row.authority}`].type === 'pending'}
+                              class:error={fieldFeedback[`authority-editor:${row.authority}`].type === 'error'}
+                            >
+                              {fieldFeedback[`authority-editor:${row.authority}`].msg}
+                            </span>
+                          {/if}
+                        </div>
+                        <span class="policy-desc">{row.description}</span>
+                      </div>
+                    </label>
+
+                    {#if row.scoped}
+                      <div class="authority-scope-editor">
+                        <span class="field-hint">
+                          {#if row.enabled}
+                            {row.scope
+                              ? `Narrowed scope applied (${row.authority}) — editing below replaces the record.`
+                              : `Unscoped grant (${row.authority}) — the id default applies: ${describeAuthorityDefaultScope(row)}.`}
+                          {:else}
+                            Not granted. The toggle grants the unscoped default; use the action below to grant with a
+                            scope directly.
+                          {/if}
+                        </span>
+                        {#if row.class === 'agent'}
+                          <div class="authority-scope-row">
+                            <label class="authority-scope-check">
+                              <input
+                                type="checkbox"
+                                class="checkbox-input authority-checkbox"
+                                checked={row.draft.ownSpawns}
+                                onchange={(event) => updateAuthorityScopeDraft(row.authority, 'ownSpawns', event.currentTarget.checked)}
+                              />
+                              <span>Own direct spawns</span>
+                            </label>
+                            <label class="authority-scope-check">
+                              <input
+                                type="checkbox"
+                                class="checkbox-input authority-checkbox"
+                                checked={row.draft.realmMembers}
+                                onchange={(event) => updateAuthorityScopeDraft(row.authority, 'realmMembers', event.currentTarget.checked)}
+                              />
+                              <span>Every member of the bound realms</span>
+                            </label>
+                          </div>
+                          <label class="authority-scope-field">
+                            <span>Agent id targets — comma or newline separated (empty = no agent-target selector)</span>
+                            <input
+                              type="text"
+                              class="input-field font-mono"
+                              value={row.draft.targets}
+                              oninput={(event) => updateAuthorityScopeDraft(row.authority, 'targets', event.currentTarget.value)}
+                              placeholder="e.g. worker, coordinator"
+                            />
+                          </label>
+                          <label class="authority-scope-field">
+                            <span>Realm bound — comma or newline separated (empty = the holder's own realm)</span>
+                            <input
+                              type="text"
+                              class="input-field font-mono"
+                              value={row.draft.realms}
+                              oninput={(event) => updateAuthorityScopeDraft(row.authority, 'realms', event.currentTarget.value)}
+                              placeholder="e.g. realm_generic"
+                            />
+                          </label>
+                        {:else}
+                          <label class="authority-scope-field">
+                            <span>Realm id targets — comma or newline separated (empty = the holder's own realm)</span>
+                            <input
+                              type="text"
+                              class="input-field font-mono"
+                              value={row.draft.targets}
+                              oninput={(event) => updateAuthorityScopeDraft(row.authority, 'targets', event.currentTarget.value)}
+                              placeholder="e.g. realm_generic"
+                            />
+                          </label>
+                        {/if}
+                        {#if row.vocabulary.length > 0}
+                          <div class="authority-scope-fields">
+                            <span class="authority-scope-label">
+                              Editable fields — all selected = the id default; none selected denies every field edit
+                            </span>
+                            <div class="authority-scope-row">
+                              {#each row.vocabulary as token (token)}
+                                <label class="authority-scope-check">
+                                  <input
+                                    type="checkbox"
+                                    class="checkbox-input authority-checkbox"
+                                    checked={row.draft.fields.includes(token)}
+                                    onchange={(event) => handleAuthorityFieldToggle(row.authority, token, event.currentTarget.checked)}
+                                  />
+                                  <span class="font-mono">{token}</span>
+                                </label>
+                              {/each}
+                            </div>
+                          </div>
+                        {/if}
+                        <div class="authority-scope-actions">
+                          <button
+                            type="button"
+                            class="authority-scope-apply"
+                            onclick={() => handleAuthorityScopeApply(row.authority)}
+                          >
+                            {row.enabled ? 'Apply scope' : 'Grant with scope'}
+                          </button>
+                          {#if fieldFeedback[`authority-scope:${row.authority}`]}
+                            <span
+                              class="field-status"
+                              class:pending={fieldFeedback[`authority-scope:${row.authority}`].type === 'pending'}
+                              class:error={fieldFeedback[`authority-scope:${row.authority}`].type === 'error'}
+                            >
+                              {fieldFeedback[`authority-scope:${row.authority}`].msg}
+                            </span>
+                          {/if}
+                        </div>
+                      </div>
+                    {/if}
+                  </div>
                 {/each}
               </div>
             </section>
@@ -1506,6 +1859,91 @@
     border: 1px solid rgba(52, 211, 153, 0.35);
     background: rgba(52, 211, 153, 0.12);
     color: #34d399;
+  }
+
+  /* Ticket 62d89b8 operator authority editor: scope rows under each toggle. */
+  .authority-editor-row {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .authority-scope-editor {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin: -0.2rem 0 0.2rem;
+    padding: 0.65rem 0.75rem;
+    border: 1px dashed var(--border-color, #334155);
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.15);
+  }
+
+  .authority-scope-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.75rem;
+  }
+
+  .authority-scope-check {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.75rem;
+    color: var(--text-muted, #94a3b8);
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .authority-scope-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--text-muted, #94a3b8);
+  }
+
+  .authority-scope-field .input-field {
+    font-size: 0.78rem;
+    padding: 0.4rem 0.55rem;
+  }
+
+  .authority-scope-fields {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+
+  .authority-scope-label {
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--text-muted, #94a3b8);
+  }
+
+  .authority-scope-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+  }
+
+  .authority-scope-apply {
+    align-self: flex-start;
+    padding: 0.35rem 0.7rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #c084fc;
+    background: rgba(168, 85, 247, 0.12);
+    border: 1px solid rgba(168, 85, 247, 0.45);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .authority-scope-apply:hover {
+    background: rgba(168, 85, 247, 0.22);
+    border-color: rgba(168, 85, 247, 0.65);
   }
 
   .policy-details {
