@@ -1743,7 +1743,7 @@ export const META_AUTHORITY_TOGGLES: readonly MetaAuthorityToggleDefinition[] = 
   Object.freeze({
     authority: AGENT_AUTHORITIES.HYDRATION,
     label: 'Hydration publishing',
-    description: 'Submit validated instance payloads (hydration candidates) for review.'
+    description: 'Submit instance payloads for host review.'
   })
 ]);
 

@@ -1,0 +1,421 @@
+/**
+ * "Authority scopes" dialog stylesheet (redesign d7131dc).
+ *
+ * Imported once by `AuthorityScopesDialog.svelte`; every rule is explicitly
+ * scoped under `.authority-scopes-modal`, so the file never leaks into the
+ * rest of the app (the `realmManagerUi.css` convention). `.modal-backdrop`
+ * and `.glass-panel` come from `app.css`.
+ *
+ * Palette: the authority purple/slate accents already used by the Security &
+ * Authority card — the card keeps its palette by explicit operator decision
+ * (the app is mid-migration to the obsidian/bronze tokens).
+ */
+
+.authority-scopes-modal {
+  width: min(880px, 96vw);
+  max-height: 92vh;
+  overflow: hidden;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 1.25rem 1.35rem;
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+
+.authority-scopes-modal .modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  padding-bottom: 0.9rem;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.authority-scopes-modal .header-left {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+}
+
+.authority-scopes-modal .icon-chip {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  background: rgba(168, 85, 247, 0.12);
+  border: 1px solid rgba(168, 85, 247, 0.35);
+  color: #c084fc;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.authority-scopes-modal .modal-title {
+  font-size: 1.2rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.authority-scopes-modal .modal-sub {
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  margin: 0.15rem 0 0 0;
+}
+
+.authority-scopes-modal .btn-close {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0.35rem;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.authority-scopes-modal .btn-close:hover {
+  color: var(--text-primary);
+  background: var(--bg-surface);
+}
+
+/* ---- Master–detail layout ------------------------------------------------ */
+
+.authority-scopes-modal .authority-scopes-body {
+  display: grid;
+  grid-template-columns: 210px minmax(0, 1fr);
+  gap: 1rem;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.authority-scopes-modal .authority-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 0.6rem 0 0;
+  border-right: 1px solid var(--border-subtle);
+}
+
+.authority-scopes-modal .rail-heading {
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  padding: 0.3rem 0.45rem 0.15rem;
+}
+
+.authority-scopes-modal .rail-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  width: 100%;
+  text-align: left;
+  padding: 0.5rem 0.6rem;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.authority-scopes-modal .rail-tab:hover {
+  border-color: var(--border-hover);
+}
+
+.authority-scopes-modal .rail-tab.active {
+  background: rgba(168, 85, 247, 0.12);
+  border-color: rgba(168, 85, 247, 0.5);
+}
+
+.authority-scopes-modal .rail-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+}
+
+.authority-scopes-modal .rail-name {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.authority-scopes-modal .rail-tab.active .rail-name {
+  color: #c084fc;
+}
+
+.authority-scopes-modal .rail-state {
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 0.05rem 0.28rem;
+  border-radius: 4px;
+  color: var(--text-muted);
+  border: 1px solid var(--border-color);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.authority-scopes-modal .rail-state.granted {
+  color: #34d399;
+  border-color: rgba(52, 211, 153, 0.35);
+  background: rgba(52, 211, 153, 0.1);
+}
+
+.authority-scopes-modal .rail-summary {
+  font-size: 0.66rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---- Detail pane --------------------------------------------------------- */
+
+.authority-scopes-modal .authority-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+  overflow-y: auto;
+  min-height: 0;
+  padding-right: 0.25rem;
+}
+
+.authority-scopes-modal .detail-title-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.authority-scopes-modal .detail-title {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.authority-scopes-modal .authority-id {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+.authority-scopes-modal .authority-live-tag {
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 0.08rem 0.35rem;
+  border-radius: 4px;
+  border: 1px solid rgba(52, 211, 153, 0.35);
+  background: rgba(52, 211, 153, 0.12);
+  color: #34d399;
+}
+
+.authority-scopes-modal .status-line {
+  font-size: 0.76rem;
+  color: var(--text-secondary);
+}
+
+.authority-scopes-modal .status-line.granted {
+  color: #34d399;
+}
+
+.authority-scopes-modal .power-hint {
+  font-size: 0.74rem;
+  color: #fcd34d;
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  background: rgba(245, 158, 11, 0.07);
+  border-radius: 6px;
+  padding: 0.45rem 0.6rem;
+}
+
+.authority-scopes-modal .section-label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.authority-scopes-modal .check-row {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.authority-scopes-modal .authority-checkbox {
+  accent-color: #a855f7;
+  cursor: pointer;
+}
+
+.authority-scopes-modal .field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.authority-scopes-modal .field label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.authority-scopes-modal .field-hint {
+  font-size: 0.68rem;
+  color: var(--text-muted);
+}
+
+.authority-scopes-modal .input-field {
+  width: 100%;
+  font-size: 0.78rem;
+  padding: 0.45rem 0.55rem;
+  color: var(--text-primary);
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+}
+
+.authority-scopes-modal .input-field::placeholder {
+  color: var(--text-muted);
+}
+
+.authority-scopes-modal .input-field.invalid {
+  border-color: rgba(239, 68, 68, 0.55);
+}
+
+.authority-scopes-modal .field-error {
+  font-size: 0.7rem;
+  color: #f87171;
+}
+
+.authority-scopes-modal .token-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.9rem;
+}
+
+.authority-scopes-modal .token {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.authority-scopes-modal .dialog-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin-top: auto;
+  padding-top: 0.4rem;
+}
+
+.authority-scopes-modal .btn-scope {
+  padding: 0.45rem 0.8rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #c084fc;
+  background: rgba(168, 85, 247, 0.12);
+  border: 1px solid rgba(168, 85, 247, 0.45);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.authority-scopes-modal .btn-scope:hover:not(:disabled) {
+  background: rgba(168, 85, 247, 0.22);
+}
+
+.authority-scopes-modal .btn-ghost {
+  padding: 0.45rem 0.8rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.authority-scopes-modal .btn-ghost:hover:not(:disabled) {
+  border-color: var(--border-hover);
+  color: var(--text-primary);
+}
+
+.authority-scopes-modal .btn-scope:disabled,
+.authority-scopes-modal .btn-ghost:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.authority-scopes-modal .discard-note {
+  font-size: 0.68rem;
+  color: var(--text-muted);
+}
+
+.authority-scopes-modal .field-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #34d399;
+}
+
+.authority-scopes-modal .field-status.pending {
+  color: #93c5fd;
+}
+
+.authority-scopes-modal .field-status.error {
+  color: #f87171;
+}
+
+.authority-scopes-modal .modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border-subtle);
+}
+
+/* app.css removes global outlines, so the dialog re-introduces a visible
+   focus ring for keyboard users (never color-only). */
+.authority-scopes-modal button:focus-visible,
+.authority-scopes-modal .input-field:focus-visible {
+  outline: 2px solid rgba(168, 85, 247, 0.55);
+  outline-offset: 1px;
+}
+
+.authority-scopes-modal .input-field:focus-visible {
+  border-color: rgba(168, 85, 247, 0.6);
+}
+
+/* The app has no global `.font-mono` helper; the dialog's mono rails/chips
+   rely on this scoped rule. */
+.authority-scopes-modal .font-mono {
+  font-family: var(--font-mono);
+}
+
+@media (max-width: 720px) {
+  .authority-scopes-modal .authority-scopes-body {
+    grid-template-columns: 1fr;
+  }
+
+  .authority-scopes-modal .authority-rail {
+    border-right: none;
+    border-bottom: 1px solid var(--border-subtle);
+    padding: 0 0 0.6rem;
+    max-height: 180px;
+  }
+}

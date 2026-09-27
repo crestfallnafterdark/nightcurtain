@@ -1,13 +1,16 @@
 /**
- * Operator authority editor helpers (ticket 62d89b8).
+ * Operator authority editor helpers (ticket 62d89b8; compact-row redesign
+ * d7131dc).
  *
  * Pure, UI-framework-free projections for the Agent Settings
- * "Meta capabilities (operator grants)" subsection: the seven authority ids
- * with their display metadata, the per-agent grant/scope projection read from
+ * "Meta capabilities" subsection: the seven authority ids
+ * with their display metadata (one-line descriptions plus the high-impact
+ * `warning` copy), the per-agent grant/scope projection read from
  * the store's host-only `listAuthorityGrantDetails()` surface, the operator
  * draft normalizer that mirrors the runtime `validateAuthorityScope`
- * vocabulary, and the generic realm-exact grant/revoke seam the panel calls
- * through ({@link applyAuthorityGrantToggle}).
+ * vocabulary, the one-line scope summary that drives the row chip and the
+ * "Authority scopes" dialog rail, and the generic realm-exact grant/revoke
+ * seam the panel calls through ({@link applyAuthorityGrantToggle}).
  *
  * `META_AUTHORITY_TOGGLES` and `applyMetaAuthorityToggle`
  * (`realmReviewHelpers.ts`) stay the source-compatible publishing-pair
@@ -40,20 +43,26 @@ export interface AuthorityEditorToggleDefinition {
   readonly authority: string;
   /** Short display label. */
   readonly label: string;
-  /** State-accurate description, including the power warning for dangerous ids. */
+  /** One-line, state-accurate description. */
   readonly description: string;
   /** Display class (also the scope-key class the normalizer enforces). */
   readonly class: AuthorityEditorClass;
   /** Whether the id accepts a registry-side scope (the publishing pair does not). */
   readonly scoped: boolean;
+  /**
+   * One-line high-impact warning for the dangerous ids (tooltip/aria name and
+   * dialog detail line); absent for ids that need no extra affordance.
+   */
+  readonly warning?: string;
 }
 
 /**
  * The seven operator authority rows, in `AUTHORITY_IDS` declaration order. The
- * publishing pair carries the exact `META_AUTHORITY_TOGGLES` copy so the
- * existing subsection is unchanged; the five meta-plane ids state what they
- * reach, and the three dangerous ids name their concrete power (agent edits,
- * realm metadata/attachment edits, realm-wide extension attachment).
+ * publishing pair carries the exact `META_AUTHORITY_TOGGLES` copy (hydration
+ * shortened with the approved redesign; the template line is unchanged); the
+ * five meta-plane ids state their reach in one line, and the three dangerous
+ * ids additionally carry `warning` copy for the amber affordance and the
+ * dialog detail.
  */
 export const AUTHORITY_EDITOR_TOGGLES: readonly AuthorityEditorToggleDefinition[] = Object.freeze([
   Object.freeze({
@@ -66,47 +75,47 @@ export const AUTHORITY_EDITOR_TOGGLES: readonly AuthorityEditorToggleDefinition[
   Object.freeze({
     authority: AGENT_AUTHORITIES.HYDRATION,
     label: 'Hydration publishing',
-    description: 'Submit validated instance payloads (hydration candidates) for review.',
+    description: 'Submit instance payloads for host review.',
     class: 'publishing',
     scoped: false
   }),
   Object.freeze({
     authority: AGENT_AUTHORITIES.AGENT_INSPECT,
     label: 'Agent inspection',
-    description: 'Inspect other agents — role, tools, privilege, policy, and prompt — within the bounds below.',
+    description: 'Read other agents’ role, tools, and prompt.',
     class: 'agent',
     scoped: true
   }),
   Object.freeze({
     authority: AGENT_AUTHORITIES.AGENT_EDIT,
     label: 'Agent editing',
-    description:
-      'Powerful: edits other agents\' tools, privilege, policy, and prompt. Every update must pass the resulting-state bound (the editor can never grant more than it holds).',
+    description: 'Change other agents’ tools, policy, or prompt.',
     class: 'agent',
-    scoped: true
+    scoped: true,
+    warning: 'High impact — edits other agents’ tools and prompt.'
   }),
   Object.freeze({
     authority: AGENT_AUTHORITIES.REALM_INSPECT,
     label: 'Realm inspection',
-    description: 'Inspect realm records — attachments, tool ceiling, name, description, and color — within the bounds below.',
+    description: 'Read realm settings, attachments, and tool ceiling.',
     class: 'realm',
     scoped: true
   }),
   Object.freeze({
     authority: AGENT_AUTHORITIES.REALM_EDIT,
     label: 'Realm editing',
-    description:
-      'Powerful: edits realm attachments, tool ceiling, name, description, and color. Attachments change the extension tool surface every member of the realm can reach.',
+    description: 'Change realm settings, attachments, and tool ceiling.',
     class: 'realm',
-    scoped: true
+    scoped: true,
+    warning: 'High impact — changes the tools every member can reach.'
   }),
   Object.freeze({
     authority: AGENT_AUTHORITIES.EXTENSIONS,
     label: 'Extension attachment',
-    description:
-      'Powerful: lists installed extensions and attaches them realm-wide — every member of a target realm gains their tools. Attach actions are audit-attributed to the holder.',
+    description: 'Attach extensions realm-wide for every member.',
     class: 'extensions',
-    scoped: true
+    scoped: true,
+    warning: 'High impact — target realm members gain these tools.'
   })
 ]);
 
@@ -222,6 +231,12 @@ export interface AuthorityScopeDraftResult {
   readonly scope: AuthorityScopeRecord | null;
   /** Operator-readable inline error; empty on success. */
   readonly error: string;
+  /**
+   * Additive optional hint naming the draft control the error maps to
+   * (`targets` / `realms` / `fields`); absent when the failure maps to no
+   * rendered control. Never set on success.
+   */
+  readonly field?: 'targets' | 'realms' | 'fields';
 }
 
 /**
@@ -251,12 +266,15 @@ export function normalizeAuthorityScopeDraft(
   draft: AuthorityScopeDraft | null | undefined,
   authorityId: unknown
 ): AuthorityScopeDraftResult {
+  /** Builds a failure result, carrying the control hint only when one maps. */
+  const fail = (error: string, field?: 'targets' | 'realms' | 'fields'): AuthorityScopeDraftResult =>
+    field ? { scope: null, error, field } : { scope: null, error };
   const id = typeof authorityId === 'string' ? authorityId : '';
   const definition = AUTHORITY_EDITOR_TOGGLES.find((toggle) => toggle.authority === id);
-  if (!definition) return { scope: null, error: `Unknown authority id "${id}".` };
+  if (!definition) return fail(`Unknown authority id "${id}".`);
   if (draft === null || draft === undefined) draft = {};
   if (typeof draft !== 'object' || Array.isArray(draft)) {
-    return { scope: null, error: 'The authority scope draft must be a plain object.' };
+    return fail('The authority scope draft must be a plain object.');
   }
   const record = draft as Record<string, unknown>;
   const vocabulary = AUTHORITY_SCOPE_FIELDS[id] ?? [];
@@ -275,26 +293,35 @@ export function normalizeAuthorityScopeDraft(
   for (const key of Object.keys(record)) {
     const value = record[key];
     if (value === undefined || value === null) continue;
-    if (!allowed.has(key)) return { scope: null, error: `The "${key}" scope key is not available for ${id}.` };
+    if (!allowed.has(key)) {
+      const hint = key === 'targets' || key === 'realms' || key === 'fields' ? key : undefined;
+      return fail(`The "${key}" scope key is not available for ${id}.`, hint);
+    }
   }
 
-  const readList = (key: string): { entries: readonly string[]; error: string } => {
+  const readList = (
+    key: 'targets' | 'realms'
+  ): { entries: readonly string[]; error: string; field?: 'targets' | 'realms' } => {
     const value = record[key];
     if (value === undefined || value === null) return { entries: Object.freeze([]), error: '' };
     let raw: readonly unknown[];
     if (typeof value === 'string') raw = value.split(/[\n,]+/);
     else if (Array.isArray(value)) raw = value;
-    else return { entries: Object.freeze([]), error: `The "${key}" bound must be a list of ids.` };
+    else return { entries: Object.freeze([]), error: `The "${key}" bound must be a list of ids.`, field: key };
     const entries: string[] = [];
     for (let i = 0; i < raw.length; i++) {
       const item = raw[i];
       if (typeof item !== 'string') {
-        return { entries: Object.freeze([]), error: `Every "${key}" entry must be a string id.` };
+        return { entries: Object.freeze([]), error: `Every "${key}" entry must be a string id.`, field: key };
       }
       const entry = item.trim();
       if (entry.length === 0) continue;
       if (AUTHORITY_SCOPE_FORBIDDEN_ENTRIES.has(entry)) {
-        return { entries: Object.freeze([]), error: `The "${key}" entry "${entry}" is reserved prototype vocabulary.` };
+        return {
+          entries: Object.freeze([]),
+          error: `The "${key}" entry "${entry}" is reserved prototype vocabulary.`,
+          field: key
+        };
       }
       if (!entries.includes(entry)) entries[entries.length] = entry;
     }
@@ -317,17 +344,17 @@ export function normalizeAuthorityScopeDraft(
 
   if (agentClass || realmClass) {
     const targets = readList('targets');
-    if (targets.error) return { scope: null, error: targets.error };
+    if (targets.error) return fail(targets.error, targets.field);
     if (targets.entries.length > 0) scope.targets = targets.entries;
   }
   if (agentClass) {
     const realms = readList('realms');
-    if (realms.error) return { scope: null, error: realms.error };
+    if (realms.error) return fail(realms.error, realms.field);
     if (realms.entries.length > 0) scope.realms = realms.entries;
     const ownSpawns = readFlag('ownSpawns');
-    if (ownSpawns.error) return { scope: null, error: ownSpawns.error };
+    if (ownSpawns.error) return fail(ownSpawns.error);
     const realmMembers = readFlag('realmMembers');
-    if (realmMembers.error) return { scope: null, error: realmMembers.error };
+    if (realmMembers.error) return fail(realmMembers.error);
     const selectorPresent =
       scope.targets !== undefined || scope.realms !== undefined || realmMembers.value === true;
     if (ownSpawns.value === true) {
@@ -343,17 +370,17 @@ export function normalizeAuthorityScopeDraft(
       let raw: readonly unknown[];
       if (typeof value === 'string') raw = value.split(/[\n,]+/);
       else if (Array.isArray(value)) raw = value;
-      else return { scope: null, error: 'The "fields" selection must be a list of field tokens.' };
+      else return fail('The "fields" selection must be a list of field tokens.', 'fields');
       const selected: string[] = [];
       for (let i = 0; i < raw.length; i++) {
         const item = raw[i];
         if (typeof item !== 'string') {
-          return { scope: null, error: 'Every "fields" entry must be a field token.' };
+          return fail('Every "fields" entry must be a field token.', 'fields');
         }
         const token = item.trim();
         if (token.length === 0) continue;
         if (!vocabulary.includes(token)) {
-          return { scope: null, error: `"${token}" is not a field token for ${id}.` };
+          return fail(`"${token}" is not a field token for ${id}.`, 'fields');
         }
         if (!selected.includes(token)) selected[selected.length] = token;
       }
@@ -364,6 +391,71 @@ export function normalizeAuthorityScopeDraft(
   }
   if (Object.keys(scope).length === 0) return { scope: null, error: '' };
   return { scope: Object.freeze(scope) as AuthorityScopeRecord, error: '' };
+}
+
+/**
+ * One-line scope summary for the operator list chip and the "Authority scopes"
+ * dialog rail, in the approved deterministic grammar: reach (`N agent
+ * targets` / `N realm targets` / `own spawns` / `no spawns` / `own realm` /
+ * `realm members`) · realm bound (`N bound realms`) · fields (`fields: a, b`,
+ * or `field edits denied` when the held scope carries the explicit fail-closed
+ * deny `fields: []`).
+ *
+ * The publishing pair is unscoped and returns `''` (no chip), as do unknown or
+ * malformed definitions. A `null`/malformed scope is the id's default
+ * (`own spawns` for `@agent:*`, `own realm` for the realm class). An explicit
+ * empty list stays visible as `0 agent targets` / `0 realm targets` — the
+ * fail-closed deny is never rendered as the default reach. Field tokens render
+ * in declared vocabulary order, so the summary is deterministic.
+ *
+ * @param definition - Editor row definition (the id resolves through the canonical table).
+ * @param scope - Held registry-side scope (`null` = the id's default scope).
+ * @returns Chip/rail summary string; `''` when the id has no scope summary.
+ */
+export function describeAuthorityScopeSummary(
+  definition: AuthorityEditorToggleDefinition | null | undefined,
+  scope: AuthorityScopeRecord | null | undefined
+): string {
+  if (!definition || typeof definition !== 'object') return '';
+  const canonical = AUTHORITY_EDITOR_TOGGLES.find((toggle) => toggle.authority === definition.authority);
+  if (!canonical || canonical.scoped !== true) return '';
+  const record = scope && typeof scope === 'object' && !Array.isArray(scope) ? scope : null;
+  const agentClass = canonical.class === 'agent';
+  const fallback = agentClass ? 'own spawns' : 'own realm';
+  if (!record) return fallback;
+
+  const parts: string[] = [];
+  const targets = Array.isArray(record.targets) ? record.targets : null;
+  if (agentClass) {
+    if (targets !== null) parts.push(`${targets.length} agent targets`);
+    const realmMembers = record.realmMembers === true;
+    const otherSelector = targets !== null || realmMembers;
+    if (record.ownSpawns === false) {
+      if (!otherSelector) parts.push('no spawns');
+    } else if (record.ownSpawns === true || !otherSelector) {
+      parts.push('own spawns');
+    }
+    if (realmMembers) parts.push('realm members');
+  } else if (targets !== null) {
+    parts.push(`${targets.length} realm targets`);
+  } else {
+    parts.push('own realm');
+  }
+  if (Array.isArray(record.realms)) parts.push(`${record.realms.length} bound realms`);
+
+  const vocabulary = AUTHORITY_SCOPE_FIELDS[canonical.authority] ?? [];
+  if (vocabulary.length > 0 && Array.isArray(record.fields)) {
+    const ordered: string[] = [];
+    for (const token of vocabulary) {
+      if (record.fields.includes(token)) ordered.push(token);
+    }
+    for (const token of record.fields) {
+      if (typeof token === 'string' && !ordered.includes(token)) ordered.push(token);
+    }
+    parts.push(ordered.length === 0 ? 'field edits denied' : `fields: ${ordered.join(', ')}`);
+  }
+  if (parts.length === 0) return fallback;
+  return parts.join(' · ');
 }
 
 /**
