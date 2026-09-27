@@ -4283,9 +4283,17 @@ export class SandboxStore {
    * snapshot granted nothing before the extension wave). The selector is
    * state; the effective grant set is recomputed from the live Realm universe
    * by the extension sweep after the attachment heal.
+   *
+   * The captured `realmId` is identity targeting only (ticket 5f34f18): the
+   * heal resolves each grant through the canonical `(realmId, agentId)` key so
+   * a same-literal-id member in another Realm is healed realm-exactly instead
+   * of resolving ambiguous and being skipped. It is never applied back as a
+   * membership write — membership hydrates through the runtime's own
+   * scope-constraint path and is immutable at the API.
    */
   #capabilityHealGrants: ReadonlyArray<{
     agentId: string;
+    realmId: string | null;
     allowedTools: readonly string[];
     extensionSelector: 'all' | readonly string[];
   }> = [];
@@ -14866,13 +14874,17 @@ export class SandboxStore {
    * later reconcile compares canonical lists. Entries with no selector or an
    * empty resolved grant are skipped (default-deny stays the baseline).
    * Deliberately never reads `privileged`, `spawnedBy`/`creatorId`, or
-   * `realmId` — authority and membership are not capability data.
+   * `realmId` as capability data — authority and membership are not grants.
+   * The persisted membership is captured alongside purely as an identity
+   * targeting scope (ticket 5f34f18), so the heal resolves each same-literal-id
+   * registration realm-exactly; it is never applied back as a membership write.
    *
    * @param persisted - Snapshot the heal pass reconciles from (read-only).
    */
   #captureCapabilityHealGrants(persisted: SandboxPersistedState): void {
     const grants: Array<{
       agentId: string;
+      realmId: string | null;
       allowedTools: readonly string[];
       extensionSelector: 'all' | readonly string[];
     }> = [];
@@ -14911,8 +14923,12 @@ export class SandboxStore {
       // resolve the `'all'` default against the Realm universe (F1).
       const rawPersistedSelector = record.extensionTools;
       const persistedSelectorIsValid = rawPersistedSelector === 'all' || Array.isArray(rawPersistedSelector);
+      const persistedRealmId = typeof record.realmId === 'string' && record.realmId.trim()
+        ? record.realmId.trim()
+        : null;
       grants.push({
         agentId,
+        realmId: persistedRealmId,
         allowedTools: Object.freeze(resolved),
         extensionSelector: hasExtensionField && persistedSelectorIsValid
           ? normalizeExtensionSelector(rawPersistedSelector)
@@ -15089,7 +15105,12 @@ export class SandboxStore {
     let failed = 0;
 
     for (const grant of grants) {
-      const live = typeof this.#runtime.getAgent === 'function' ? this.#runtime.getAgent(grant.agentId) : null;
+      // Realm-exact targeting (ticket 5f34f18): the captured membership
+      // resolves the canonical `(realmId, agentId)` registration, so a
+      // same-literal-id member in another Realm heals its own grant instead of
+      // resolving ambiguous and being skipped as not-restored.
+      const targetRef = createAgentIdentityKey(grant.realmId, grant.agentId);
+      const live = typeof this.#runtime.getAgent === 'function' ? this.#runtime.getAgent(targetRef) : null;
       if (!live) {
         skipped += 1;
         entries.push({
@@ -15113,7 +15134,7 @@ export class SandboxStore {
       const currentSelector = normalizeExtensionSelector(live.config?.extensionTools);
       if (!hasSelector || !extensionSelectorsEqual(currentSelector, grant.extensionSelector)) {
         try {
-          this.#runtime.updateAgentConfig(grant.agentId, { extensionTools: grant.extensionSelector }, operator);
+          this.#runtime.updateAgentConfig(targetRef, { extensionTools: grant.extensionSelector }, operator);
           this.#extensionSweepBlocked.delete(memberKey);
         } catch (err) {
           this.#extensionSweepBlocked.add(memberKey);
@@ -15141,7 +15162,7 @@ export class SandboxStore {
       }
 
       try {
-        this.#runtime.updateAgentConfig(grant.agentId, { allowedTools: [...grant.allowedTools] }, operator);
+        this.#runtime.updateAgentConfig(targetRef, { allowedTools: [...grant.allowedTools] }, operator);
         restored += 1;
         entries.push({
           agentId: grant.agentId,
