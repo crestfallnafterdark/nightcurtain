@@ -182,7 +182,8 @@ test('3. normalization: agent-class drafts trim, dedupe, and drop class-invalid 
   );
   assert.deepStrictEqual(
     normalizeAuthorityScopeDraft({ targets: 'peer-one, peer-two', ownSpawns: false }, AGENT_INSPECT),
-    { scope: { targets: ['peer-one', 'peer-two'], ownSpawns: false }, error: '' }
+    { scope: { targets: ['peer-one', 'peer-two'] }, error: '' },
+    'ownSpawns:false is a no-op (the runtime matcher never honors it) and is dropped'
   );
   assert.deepStrictEqual(
     normalizeAuthorityScopeDraft({ targets: ['peer-one', 'peer-two'] }, AGENT_INSPECT),
@@ -191,12 +192,13 @@ test('3. normalization: agent-class drafts trim, dedupe, and drop class-invalid 
   );
   assert.deepStrictEqual(
     normalizeAuthorityScopeDraft({ realms: 'r2, r3', realmMembers: true, ownSpawns: false }, AGENT_INSPECT),
-    { scope: { realms: ['r2', 'r3'], realmMembers: true, ownSpawns: false }, error: '' }
+    { scope: { realms: ['r2', 'r3'], realmMembers: true }, error: '' },
+    'a false ownSpawns alongside other selectors is dropped too (runtime-identical)'
   );
   assert.deepStrictEqual(
     normalizeAuthorityScopeDraft({ ownSpawns: false }, AGENT_INSPECT),
-    { scope: { ownSpawns: false }, error: '' },
-    'an explicit ownSpawns:false draft is not the default'
+    { scope: null, error: '' },
+    'a bare ownSpawns:false is the id default — the matcher treats false as absent, so it can never deny'
   );
 
   const proto = normalizeAuthorityScopeDraft({ targets: 'ok, __proto__' }, AGENT_INSPECT);
@@ -366,7 +368,16 @@ test('7. scope summaries follow the deterministic chip grammar for all seven ids
     summary(AGENT_INSPECT, { targets: ['peer'], ownSpawns: true, realms: ['r2'] }),
     '1 agent targets · own spawns · 1 bound realms'
   );
-  assert.strictEqual(summary(AGENT_INSPECT, { ownSpawns: false }), 'no spawns');
+  assert.strictEqual(
+    summary(AGENT_INSPECT, { ownSpawns: false }),
+    'own spawns',
+    'ownSpawns:false is treated as absent — the runtime matcher never honors a bare deny'
+  );
+  assert.strictEqual(
+    summary(AGENT_INSPECT, { targets: ['peer'], ownSpawns: false }),
+    '1 agent targets',
+    'the dropped no-op selector never claims “no spawns”'
+  );
   assert.strictEqual(
     summary(AGENT_INSPECT, { realmMembers: true, realms: ['r1', 'r2'] }),
     'realm members · 2 bound realms'
