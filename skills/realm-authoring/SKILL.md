@@ -12,7 +12,11 @@ description: >-
 
 # Realm authoring (format v2)
 
-**Status:** living skill (format v2; the v1 contract is a historical snapshot) · **Last verified:** 2026-09-23.
+**Status:** living skill · **Last verified:** 2026-09-27 · **Drift gate:** the fixture harness below
+(`node skills/realm-authoring/fixtures/run_fixtures.mjs`) runs the engine's real `realmCatalog`
+validator, so any engine change that invalidates a documented shape turns it red. Re-run it after
+touching `src/lib/sandbox/realmCatalog/`, `src/lib/sandbox/tools/`, or this skill. It is run
+manually; it is not wired into `npm run verify`.
 
 You author two portable artifacts for the ai-story Realm engine. The host app owns import,
 review, and launch; this skill owns authoring and pre-flight validation.
@@ -30,8 +34,9 @@ artifacts are authored in format v2.
 Ground rules:
 
 - Unknown fields are rejected at every level — misspellings fail closed, never drop.
-- No secrets or executable code in artifacts: `providers[].authRef` is a vault key *name*, never the
-  key itself, and templates request providers rather than shipping them.
+- No secrets or executable code in artifacts: templates request extensions rather than shipping them,
+  and credential binding is wholly user-side. The deprecated `providers[].authRef` hint, when present,
+  is a vault key *name* — never the key itself (ticket `44a5cd1`).
 - The engine (`src/lib/sandbox/realmCatalog/`) is the validation authority; the CLI below calls it
   directly. Never hand-roll a schema check.
 
@@ -66,7 +71,8 @@ Ground rules:
 2. Author `template.json`: top level, `inputs` (each with `id`, `label`, `shape` (`text` or
    `files`), and optional `brief`/`required`/`default`/`defaultFile`/`help`/`multiline`), `agents`,
    optional `placements` (`{ inputId | file, target, path | root }`), optional `directives`
-   (`{ inputId | text, target: { agent } }`), and optional `toolContract`/`providers`. Every
+   (`{ inputId | text, target: { agent } }`), and optional `providers` (concrete extension
+   requests). `toolContract` is deprecated — see **Deprecated fields** below. Every
    `file`/`defaultFile`/placement-`file` reference must exist under the directory.
 3. Assemble the transport bundle: inline `template.json` as `template` and every referenced text
    file as a `files` entry keyed by bundle-relative path. This bundle is the importable artifact.
@@ -89,8 +95,11 @@ Ground rules:
 
 7. Hand off: call the host's `import_realm_template` / `submit_hydration_package` with
    `dry_run: true` first (the identical resolve→validate pipeline with zero side effects), then
-   without it once clean. The host resolves `{ "sourceFile": "<caller-visible path>" }` refs
-   host-side, caps the payloads, and validates with the same catalog code.
+   without it once clean. The validated artifact itself is inline-only; the publish tools
+   additionally accept tool-layer `{ "sourceFile": "<caller-visible path>" }` conveniences — a
+   whole bundle `files` value, a whole payload `text` value, and per-entry
+   `{ "path", "sourceFile" }` in a payload `files` value — which the host resolves through the
+   caller's workspace view, caps, and validates with the same catalog code.
 
 Minimal transport envelope:
 
@@ -110,11 +119,59 @@ Caps enforced host-side: 2 MiB per file; 3 MiB per bundle; 8 MiB per payload sub
 Required: `key` (unique template-local identity), `idPattern` (literal, realm-opaque id — no `{…}`
 placeholders, no realm vocabulary), `name`, `role`, `prompt` (ordered parts: `file` / `input` /
 `text`; a `files`-input reference names exactly one file with `path`), `toolProfile` (exactly one of
-`preset` or `tools`; `tools` entries must be canonical tool names or declared requirement ids),
-`privileged` (boolean).
+`preset` or `tools`), `privileged` (boolean).
 
-Optional: `authorities`, `triggerPolicy` (display-only — never rely on it at runtime),
-`modelPresetId`, `initialPrompt`, `history` (baked prologue seeded without a model call).
+Optional: `authorities`, `triggerPolicy` (display-only — the runtime stores and echoes the label but
+never gates a turn on it), `modelPresetId`, `initialPrompt`, `history` (baked prologue seeded
+without a model call).
+
+### Tool entries (`toolProfile.tools`)
+
+Every entry must resolve, and resolution fails closed (engine: `resolveToolGrantEntry()` /
+`resolveToolProfile()` in `realmCatalog/validation.ts`; `RealmAgentToolProfile` in
+`realmCatalog/types.ts`). An entry may be:
+
+- the wildcard `'*'` (explicit grant; `privileged` is a separate escalation);
+- a **canonical tool name** from `tools/constants` (`SANDBOX_TOOLS`);
+- an **alias spelling** of a canonical tool, accepted exactly as declared — the resolved profile
+  and the runtime allowlist keep the declared spelling while the capability summary canonicalizes
+  it;
+- a declared legacy `toolContract` **requirement id**, resolved to its derived call name
+  (deprecated — see below);
+- an **extension tool reference** `<providerId>::<serverToolName>`: the provider id must be
+  declared by the owning template's `providers`, and the granted model-facing call name is
+  `deriveToolCallName(<serverToolName>)` — every character outside `[A-Za-z0-9_]` becomes `_`, per
+  character, with no collapsing, case folding, or trimming (`lore.lookup` → `lore_lookup`).
+
+Derived call names (`deriveToolCallName` / `isReservedToolCallName` in
+`tools/normalizers/toolCallNames.ts`) must be **unreserved** and **unique**:
+
+- reserved names — every canonical name, alias spelling, retired-selector spelling, and publishing
+  meta-tool spelling (`import_realm_template`, `submit_hydration_package`), plus
+  `__proto__`/`constructor`/`prototype` — fail closed, so a template-derived call can never shadow
+  a baked or publishing tool;
+- the uniqueness ledger is template-wide, not per agent: two declared sources that derive the same
+  call name (two extension references, or a requirement id and an extension reference) fail
+  validation even when they appear in different agents' profiles.
+
+An undeclared provider id or an empty server tool name also fails closed, and publishing meta-tool
+spellings are never recognized grants.
+
+### Deprecated fields (ticket `44a5cd1`)
+
+The legacy capability layer is still accepted — validation keeps working and requirement-id grants
+keep resolving — but it is scheduled for removal at the next format revision, so do not include it
+in new bundles:
+
+- `toolContract` (and `toolContract.requirements`) — retired capability layer; reference concrete
+  extension tools in `toolProfile.tools` instead.
+- `providers[].provides` — accepted and shape-checked, never resolved.
+- `providers[].authRef` — informational vault key *name* hint, accepted, never resolved;
+  credentials stay user-side.
+
+`providers` itself is **current**, not deprecated: its entries (`kind: "mcp"` with exactly one
+transport, or `kind: "pack"` with a `publisher/name` id) are the concrete extension requests that
+declare the provider ids extension tool references require.
 
 ### Declared authorities (`authorities`)
 
@@ -131,6 +188,10 @@ template bundles) and `@hydration:authority` (submit payloads). They are declara
 - `privileged` and wildcard tool profiles never imply these grants. Declare only what the agent
   genuinely needs — e.g. the Session Zero convention grants `@template:authority` to Architect and
   `@hydration:authority` to Genesis, never jointly. See `fixtures/reference/` for a worked example.
+- Holding either grant also exposes its M5b read-side meta tools at turn time: `list_templates` +
+  `get_template` under `@template:authority`, and `list_hydration_packages` under
+  `@hydration:authority` (`REALM_KNOWLEDGE_TOOLS` in `tools/constants`). They arrive with the
+  approval; they are not part of the declaration.
 
 ## Inputs, placements, and directives
 
@@ -139,9 +200,11 @@ template bundles) and `@hydration:authority` (submit payloads). They are declara
   base64) and have no prefills.
 - A prompt/history `input` part injects a `text` value, or exactly one file of a `files` input
   (named by `path`). A `files` input is never injected wholesale.
-- A placement writes a text value, a bundle file, or a whole fileset into a workspace:
-  `{ inputId, target: "realm" | { agent }, path }` for single values/one-file filesets,
-  `{ inputId, target, root }` for multi-file filesets (`root + file.path`).
+- A placement names exactly one source, one target (`"realm"` or `{ agent }`), and exactly one
+  destination. Sources: a declared input (`inputId`) or a bundle file (`file`, which requires
+  `path`). Destinations: `path` for a `text` input, a bundle file, or a one-file fileset; `root` for
+  a multi-file `files` input only (`root + file.path`, a `/` inserted when the root omits one).
+  `{ inputId, target, path | root }` / `{ file, target, path }`.
 - A directive delivers an operator-attributed mailbox message at launch: `{ inputId | text,
   target: { agent } }`. An optional input that resolves empty delivers nothing.
 - A `required` input that resolves empty fails the launch closed.
@@ -151,9 +214,12 @@ template bundles) and `@hydration:authority` (submit payloads). They are declara
 - Template `id` equals the bundle directory name; `agents` is non-empty with unique `key`.
 - Input ids are unique; prompt/history `input` parts, placements, and directives must reference
   declared inputs.
-- `idPattern` is a literal id: `{`/`}` and realm vocabulary are rejected. Ids confer no authority.
+- `idPattern` must be a literal agent id: placeholder syntax (`{`/`}` — the retired `{realm}` token
+  included) is rejected. Ids are realm-opaque — never embed realm vocabulary (`realm:`, realm ids)
+  in one — and confer no authority.
 - Requirement ids are namespaced (`text.similarity`); the derived model-facing call name
-  (`text_similarity`) must be unique within an agent's resolved tool set.
+  (`text_similarity`) must be unreserved and unique across the template's declared sources, not just
+  within one agent's resolved tool set (the derived-name ledger is template-wide).
 - Paths: no null bytes, no `..` segments; identifiers and path segments reject `__proto__`,
   `constructor`, `prototype`.
 
@@ -186,9 +252,15 @@ usage/input error · `3` unexpected. Red/green fixtures and a harness:
 node skills/realm-authoring/fixtures/run_fixtures.mjs
 ```
 
-`fixtures/valid/` holds the passing bundle + package pair and the canonical version they pin;
-`fixtures/invalid/` holds one red case per validation rule (unknown field, dangling prompt,
-missing required coverage, undeclared input, fixed-placement entry, stale version);
-`fixtures/reference/` holds the declared-authorities workup — a pre-release engine build that
-predates the additive `authorities` field rejects it as an unknown field, so validate it against
-the build you will import into.
+Fixture layout ([`fixtures/README.md`](fixtures/README.md) is the full case table):
+
+- `fixtures/valid/` — the green format-v2 pair (`authoring_demo_v2`): a pinned multi-part `files`
+  input, realm/agent/file placements, a directive, an alias tool entry, an extension tool
+  reference, and a declared authority. The payload pins the bundle's canonical version.
+- `fixtures/reference/` — the format-v2 declared-authorities workup (Architect →
+  `@template:authority`, Genesis → `@hydration:authority`, both `privileged: true`).
+- `fixtures/legacy/` — the format-v1 demo pair and the pre-cutover authorities workup, kept green
+  through the engine's read shim so the compatibility path stays regression-covered.
+- `fixtures/invalid/` — red cases, v1 and v2, one per fail-closed rule (unknown field, dangling
+  prompt, files part without `path`, totality violation, undeclared provider, reserved derived call
+  name, missing required coverage, undeclared input, fixed-placement entry, stale version).

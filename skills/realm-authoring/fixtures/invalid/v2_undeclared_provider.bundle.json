@@ -1,0 +1,21 @@
+{
+  "formatVersion": 2,
+  "template": {
+    "formatVersion": 2,
+    "id": "v2_undeclared_provider_fixture",
+    "name": "V2 Undeclared Provider Fixture",
+    "description": "Red fixture: an extension tool reference to a provider id the template's providers do not declare must fail closed.",
+    "agents": [
+      {
+        "key": "worker",
+        "idPattern": "worker",
+        "name": "Worker",
+        "role": "Worker",
+        "prompt": [{ "kind": "text", "text": "Work." }],
+        "toolProfile": { "tools": ["acme-lore::lore.lookup"] },
+        "privileged": false
+      }
+    ]
+  },
+  "files": {}
+}

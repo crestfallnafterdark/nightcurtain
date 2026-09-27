@@ -1,0 +1,29 @@
+{
+  "formatVersion": 2,
+  "template": {
+    "formatVersion": 2,
+    "id": "v2_files_part_fixture",
+    "name": "V2 Files Part Fixture",
+    "description": "Red fixture: a prompt part that references a files input without a file selection path must fail closed (a files input is never injected wholesale).",
+    "inputs": [
+      {
+        "id": "lore",
+        "label": "Lore",
+        "shape": "files",
+        "required": true
+      }
+    ],
+    "agents": [
+      {
+        "key": "worker",
+        "idPattern": "worker",
+        "name": "Worker",
+        "role": "Worker",
+        "prompt": [{ "kind": "input", "inputId": "lore" }],
+        "toolProfile": { "preset": "readonly" },
+        "privileged": false
+      }
+    ]
+  },
+  "files": {}
+}

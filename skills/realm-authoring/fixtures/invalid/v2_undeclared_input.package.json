@@ -1,0 +1,13 @@
+{
+  "formatVersion": 2,
+  "templateId": "authoring_demo_v2",
+  "templateVersion": "sha256:d285cda39caf0dff68e8392116bfdbebb8aa1fd0aef70a5a1e65c1520077eec7",
+  "inputs": {
+    "topicx": { "text": "A value for an input the template never declared." },
+    "lore": {
+      "files": [
+        { "path": "01_index.md", "content": "# Index\n" }
+      ]
+    }
+  }
+}

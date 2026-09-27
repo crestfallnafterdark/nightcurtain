@@ -1,6 +1,6 @@
-# Format v1 — snapshot (may evolve pre-release)
+# Format v1 — snapshot (historical, not maintained)
 
-**Status:** snapshot of the accepted format-v1 contract (extracted 2026-09-21) · **Last verified:** 2026-09-21.
+**Status:** historical snapshot of the accepted format-v1 contract (extracted 2026-09-21; superseded by format v2) · **Last verified:** 2026-09-27 — v1 documents still validate through the engine's read shim, and the green `fixtures/legacy/` documents pin that compatibility. This file is not updated for engine changes beyond the frozen v1 contract.
 
 > **Historical snapshot (post-cutover).** The engine's canonical format is now v2
 > (`skills/realm-authoring/SKILL.md`). This file documents the frozen format-v1 contract that

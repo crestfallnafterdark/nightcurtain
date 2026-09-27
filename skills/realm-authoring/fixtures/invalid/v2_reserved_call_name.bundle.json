@@ -1,0 +1,28 @@
+{
+  "formatVersion": 2,
+  "template": {
+    "formatVersion": 2,
+    "id": "v2_reserved_call_name_fixture",
+    "name": "V2 Reserved Call Name Fixture",
+    "description": "Red fixture: an extension tool reference whose derived call name resolves to a reserved baked tool name must fail closed.",
+    "agents": [
+      {
+        "key": "worker",
+        "idPattern": "worker",
+        "name": "Worker",
+        "role": "Worker",
+        "prompt": [{ "kind": "text", "text": "Work." }],
+        "toolProfile": { "tools": ["acme-lore::read_file"] },
+        "privileged": false
+      }
+    ],
+    "providers": [
+      {
+        "kind": "mcp",
+        "id": "acme-lore",
+        "transport": { "kind": "http", "url": "https://mcp.example.com/lore" }
+      }
+    ]
+  },
+  "files": {}
+}

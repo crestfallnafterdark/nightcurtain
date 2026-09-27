@@ -1,0 +1,28 @@
+{
+  "formatVersion": 2,
+  "template": {
+    "formatVersion": 2,
+    "id": "v2_totality_fixture",
+    "name": "V2 Totality Fixture",
+    "description": "Red fixture: a declared format-v2 input that no prompt, history, placement, or directive consumes violates the totality rule.",
+    "inputs": [
+      {
+        "id": "unused",
+        "label": "Unused",
+        "shape": "text"
+      }
+    ],
+    "agents": [
+      {
+        "key": "worker",
+        "idPattern": "worker",
+        "name": "Worker",
+        "role": "Worker",
+        "prompt": [{ "kind": "text", "text": "Work." }],
+        "toolProfile": { "preset": "readonly" },
+        "privileged": false
+      }
+    ]
+  },
+  "files": {}
+}

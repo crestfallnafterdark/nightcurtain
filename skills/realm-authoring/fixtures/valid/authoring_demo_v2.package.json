@@ -1,0 +1,27 @@
+{
+  "formatVersion": 2,
+  "templateId": "authoring_demo_v2",
+  "templateVersion": "sha256:d285cda39caf0dff68e8392116bfdbebb8aa1fd0aef70a5a1e65c1520077eec7",
+  "inputs": {
+    "topic": { "text": "A two-agent newsroom covering a slow-burn civic infrastructure investigation." },
+    "lore": {
+      "files": [
+        {
+          "path": "01_index.md",
+          "content": "# Lore index\n\n- 02_factions.md — who wants what, and why\n"
+        },
+        {
+          "path": "02_factions.md",
+          "content": "# Factions\n\nThe water authority, the contractor, and the residents' association each hold one piece of the timeline.\n"
+        }
+      ]
+    },
+    "briefing": { "text": "The demo realm follows how a two-agent newsroom covers a slow-burn civic infrastructure investigation." }
+  },
+  "provenance": {
+    "producer": "realm-authoring skill fixture",
+    "generatedAt": "2026-09-27T00:00:00Z",
+    "model": "offline fixture",
+    "reviewedBy": "author"
+  }
+}

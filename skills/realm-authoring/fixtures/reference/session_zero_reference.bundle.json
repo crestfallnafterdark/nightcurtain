@@ -1,20 +1,25 @@
 {
-  "formatVersion": 1,
+  "formatVersion": 2,
   "template": {
-    "formatVersion": 1,
+    "formatVersion": 2,
     "id": "session_zero_reference",
     "name": "Session Zero (reference)",
     "description": "Reference twin of the shipped Session Zero generator realm: Architect authors template bundles, Genesis hydrates instance payloads.",
-    "notes": "Reference fixture for AgentSpec.authorities. The declarations are inert until the operator approves them per agent in the mandatory launch review.",
-    "hydration": {
-      "brief": "Produce the Architect's template-authoring assignment and, when asked, the Genesis hydration assignment."
-    },
+    "notes": "Reference fixture for AgentSpec.authorities and the M5b read-side meta tools. The declarations are inert until the operator approves them per agent in the mandatory launch review; privileged and the wildcard never imply them.",
     "inputs": [
       {
         "id": "assignment",
         "label": "Assignment",
         "help": "What the operator wants authored (Architect) or hydrated (Genesis).",
+        "shape": "text",
         "required": true
+      },
+      {
+        "id": "handoff_notes",
+        "label": "Handoff notes",
+        "help": "Optional operator notes seeded under the realm-global handoff/ root; absent notes write nothing.",
+        "shape": "files",
+        "brief": "Optional operator notes for this generation session (one markdown file attached at launch; absent notes are skipped)."
       }
     ],
     "agents": [
@@ -66,32 +71,23 @@
         },
         "privileged": true,
         "authorities": ["@hydration:authority"],
-        "initialPrompt": "Assemble the requested hydration package, validate it with dry runs, then submit it."
+        "initialPrompt": "Assemble the requested hydration payload, validate it with dry runs, then submit it."
       }
     ],
-    "seed": {
-      "files": [
-        {
-          "path": "handoff/briefing.md",
-          "target": "realm",
-          "origin": "user",
-          "brief": "Optional operator handoff notes for this session."
-        },
-        {
-          "path": "assignments/architect.md",
-          "target": { "agent": "architect" },
-          "origin": "generated",
-          "brief": "The template-authoring assignment for the Architect."
-        }
-      ],
-      "directive": {
-        "targetAgentKey": "architect",
-        "text": "Read your assignment and author the requested template bundle."
+    "placements": [
+      { "inputId": "handoff_notes", "target": "realm", "root": "handoff/" },
+      { "file": "files/assignment_seed.md", "target": { "agent": "architect" }, "path": "assignment.md" }
+    ],
+    "directives": [
+      {
+        "text": "Read your assignment and author the requested template bundle.",
+        "target": { "agent": "architect" }
       }
-    }
+    ]
   },
   "files": {
-    "prompts/architect.md": "# Architect protocol\n\nYou author Realm format-v1 template bundles for the engine. Work file-first: draft parts under `/global/drafts/`, assemble the transport JSON `{ formatVersion: 1, template, files }`, validate it with the host's `dry_run` path, and only then call the import tool. Never inline large payloads through context when a file reference will do.\n",
-    "prompts/genesis.md": "# Genesis protocol\n\nYou produce hydration packages for an already-imported template. Read the template's declared inputs and seed slots first, assemble `{ formatVersion, templateId, templateVersion, inputs, files, provenance }` against the template's current canonical version, validate it with the host's `dry_run` path, and only then submit it for review.\n"
+    "files/assignment_seed.md": "# Assignment seed\n\nThe operator assignment arrives in your prompt. Draft the bundle under `/drafts/`, validate it, then import it.\n",
+    "prompts/architect.md": "# Architect protocol\n\nYou author Realm format-v2 template bundles for the engine. Work file-first: draft the parts under `/drafts/`, assemble the transport JSON `{ formatVersion: 2, template, files }`, validate it with the host's `dry_run` path, and only then call the import tool. Never inline large payloads through context when a file reference will do.\n",
+    "prompts/genesis.md": "# Genesis protocol\n\nYou produce format-v2 hydration payloads for an already-imported template. Read the template's declared inputs first, assemble `{ formatVersion: 2, templateId, templateVersion, inputs, provenance }` against the template's current canonical version, validate it with the host's `dry_run` path, and only then submit it for review. Move fileset bytes by `{ path, sourceFile }` reference; never inline a whole corpus.\n"
   }
 }

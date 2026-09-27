@@ -1,0 +1,13 @@
+{
+  "formatVersion": 2,
+  "templateId": "authoring_demo_v2",
+  "templateVersion": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "inputs": {
+    "topic": { "text": "A topic hydrated against an older template revision." },
+    "lore": {
+      "files": [
+        { "path": "01_index.md", "content": "# Index\n\nPinned to a stale template version.\n" }
+      ]
+    }
+  }
+}

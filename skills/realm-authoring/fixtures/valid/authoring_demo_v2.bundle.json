@@ -1,0 +1,105 @@
+{
+  "formatVersion": 2,
+  "template": {
+    "formatVersion": 2,
+    "id": "authoring_demo_v2",
+    "name": "Authoring Demo (format v2)",
+    "description": "Green format-v2 fixture: a pinned multi-part files input, realm/agent/file placements, a launch directive, an extension tool reference, and a declared publishing authority.",
+    "notes": "Current-format twin of legacy/authoring_demo_v1: one two-agent realm re-authored against the format-v2 schema. Validated by the real realmCatalog through scripts/validate_realm_artifacts.mjs.",
+    "inputs": [
+      {
+        "id": "topic",
+        "label": "Topic",
+        "shape": "text",
+        "help": "The subject of the realm; supplied by the operator at launch.",
+        "required": true
+      },
+      {
+        "id": "lore",
+        "label": "Lore corpus",
+        "shape": "files",
+        "help": "Ordered markdown files. Each part is pinned into the Director prompt by path and the whole fileset is seeded under the realm-global lore/ root.",
+        "required": true,
+        "brief": "One markdown file per lore topic; order the files by path with 01_index.md first."
+      },
+      {
+        "id": "briefing",
+        "label": "Opening briefing",
+        "shape": "text",
+        "help": "Optional one-paragraph briefing placed into the Director's private workspace.",
+        "brief": "One paragraph framing the topic for the Director."
+      }
+    ],
+    "agents": [
+      {
+        "key": "director",
+        "idPattern": "demo-director",
+        "name": "Director",
+        "role": "Story director",
+        "prompt": [
+          { "kind": "file", "path": "prompts/director.md" },
+          { "kind": "input", "inputId": "briefing" },
+          { "kind": "input", "inputId": "lore", "path": "01_index.md" },
+          { "kind": "input", "inputId": "lore", "path": "02_factions.md" },
+          { "kind": "text", "text": "Ground every scene in the pinned lore files." },
+          { "kind": "input", "inputId": "topic" }
+        ],
+        "toolProfile": {
+          "tools": [
+            "virtualFs.readFile",
+            "write_file",
+            "list_files",
+            "read_message",
+            "send_message",
+            "whoami",
+            "acme-lore::lore.lookup"
+          ]
+        },
+        "privileged": false,
+        "authorities": ["@template:authority"],
+        "initialPrompt": "Open from the briefing and start the first scene.",
+        "history": [
+          {
+            "role": "assistant",
+            "content": [{ "kind": "text", "text": "Director online. The lore corpus is pinned." }]
+          }
+        ]
+      },
+      {
+        "key": "narrator",
+        "idPattern": "demo-narrator",
+        "name": "Narrator",
+        "role": "Narrator",
+        "prompt": [
+          { "kind": "file", "path": "prompts/narrator.md" },
+          { "kind": "input", "inputId": "topic" }
+        ],
+        "toolProfile": { "preset": "readonly_collaborator" },
+        "privileged": false
+      }
+    ],
+    "placements": [
+      { "inputId": "lore", "target": "realm", "root": "lore/" },
+      { "inputId": "briefing", "target": { "agent": "director" }, "path": "briefing.md" },
+      { "file": "files/roster.md", "target": { "agent": "narrator" }, "path": "roster.md" }
+    ],
+    "directives": [
+      {
+        "text": "Open the session from the briefing and hand the floor to the Narrator.",
+        "target": { "agent": "director" }
+      }
+    ],
+    "providers": [
+      {
+        "kind": "mcp",
+        "id": "acme-lore",
+        "transport": { "kind": "http", "url": "https://mcp.example.com/lore" }
+      }
+    ]
+  },
+  "files": {
+    "files/roster.md": "# Cast roster\n\nThe Director holds the floor; the Narrator voices every scene once it starts.\n",
+    "prompts/director.md": "# Director protocol\n\nYou direct a two-agent session. The briefing frames the topic, the pinned lore parts are your canon, and the whole fileset is also seeded under `/global/lore/` for the Narrator.\n",
+    "prompts/narrator.md": "# Narrator protocol\n\nYou narrate the scenes the Director opens. Stay inside the Director's frame and never invent lore the Director has not established.\n"
+  }
+}
