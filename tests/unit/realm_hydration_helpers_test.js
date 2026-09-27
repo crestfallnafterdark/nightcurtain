@@ -156,7 +156,7 @@ test('buildRealmFileAttachmentViews joins every file under a root destination', 
 
 test('buildRealmInputRequirementReviews carries label, brief, required, shape and placement mapping', () => {
   const reviews = buildRealmInputRequirementReviews(SESSION_TEMPLATE);
-  assert.deepEqual(reviews.map((entry) => entry.id), ['assignment', 'target_template', 'handoff_notes']);
+  assert.deepEqual(reviews.map((entry) => entry.id), ['assignment', 'target_template', 'handoff_notes', 'source_pack']);
   const assignment = reviews.find((entry) => entry.id === 'assignment');
   assert.equal(assignment.required, true);
   assert.equal(assignment.shape, 'text');
@@ -167,6 +167,11 @@ test('buildRealmInputRequirementReviews carries label, brief, required, shape an
   assert.match(notes.brief, /operator notes/i);
   assert.equal(notes.placements.length, 1);
   assert.equal(notes.placements[0].destination, 'handoff/notes.md');
+  const sourcePack = reviews.find((entry) => entry.id === 'source_pack');
+  assert.equal(sourcePack.shape, 'files');
+  assert.equal(sourcePack.required, false);
+  assert.equal(sourcePack.placements.length, 1);
+  assert.equal(sourcePack.placements[0].destination, 'source/');
   assert.deepEqual(buildRealmInputRequirementReviews(null), []);
 });
 
