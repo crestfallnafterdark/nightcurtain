@@ -8,10 +8,14 @@
  *   1. the baked `session_zero` bundle validates through the real catalog,
  *      declares the per-agent authorities, is privileged, and carries the
  *      plumbing tool profiles; the publishing tools stay explicit-grant-only
- *      (never profile-selectable) and the composed prompts carry the protocols;
+ *      (never profile-selectable) and the composed prompts carry the protocols
+ *      (including the operator-staged `/global/source/` ingress and the
+ *      handoff-wake rule);
  *   2. launch review: both declared authorities approved per agent, applied
  *      under the operator principal, recorded in `metaAuthorityGrants`, and the
- *      exact set trusted (`templateAuthorityTrust`);
+ *      exact set trusted (`templateAuthorityTrust`); approval additionally
+ *      exposes the M5b read tools (`list_templates`/`get_template` to
+ *      Architect, `list_hydration_packages` to Genesis) and nothing wider;
  *   3. Architect authors a bundle by reference under `/global/...`, iterates
  *      with `import_realm_template { dry_run: true }` (zero side effects), then
  *      imports for real and hands off the canonical version;
@@ -19,8 +23,13 @@
  *      (`source_file`/`append`), iterates with
  *      `submit_hydration_package { dry_run: true }`, then submits for real and
  *      a pending candidate is stored;
- *   5. privilege enables in-realm peer private-workspace reads both ways;
- *   6. the reviewed candidate attaches through the existing launch path and
+ *   5. the same two-agent flow authors a **format-v2** template leg: declared
+ *      placements, one `files` input pinned by multiple
+ *      `{ kind: 'input', inputId, path }` prompt parts in order, a v2 payload
+ *      with per-entry `{ path, sourceFile }` fileset entries, and a launch that
+ *      composes the pinned paths and seeds every declared destination;
+ *   6. privilege enables in-realm peer private-workspace reads both ways;
+ *   7. the reviewed candidate attaches through the existing launch path and
  *      seeds the instance content.
  *
  * Zero-Mock Verification: real `SandboxStore`/`AgentRuntime`/`VirtualFS`/
@@ -41,14 +50,29 @@ import {
   materializeTemplate,
   templateUnsupportedAuthorities
 } from '../../src/lib/sandbox/realmCatalog/index.ts';
-import { createSandboxToolDispatcher } from '../../src/lib/sandbox/toolDefinitions/index.ts';
-import { PUBLISHING_TOOLS } from '../../src/lib/sandbox/tools/constants/index.ts';
+import {
+  createSandboxToolDispatcher,
+  getSandboxToolsSchema
+} from '../../src/lib/sandbox/toolDefinitions/index.ts';
+import { getAuthorityToolSchemas } from '../../src/lib/sandbox/tools/descriptors/index.ts';
+import {
+  PUBLISHING_TOOLS,
+  REALM_KNOWLEDGE_TOOLS
+} from '../../src/lib/sandbox/tools/constants/index.ts';
 
 /** Shipped generator realm under test. */
 const TEMPLATE_ID = 'session_zero';
 
-/** Minimal realm the end-to-end fixture authors, imports, and hydrates. */
+/** Minimal realm the end-to-end fixture authors, imports, and hydrates (v1 leg). */
 const SMOKE_TEMPLATE_ID = 'session-zero-smoke';
+
+/** Format-v2 leg: placements plus a fileset pinned by multiple prompt parts. */
+const SMOKE_TEMPLATE_ID_V2 = 'session-zero-smoke-v2';
+
+/** M5b realm-knowledge read tools exposed only by an approved exact authority. */
+const LIST_TEMPLATES = REALM_KNOWLEDGE_TOOLS.LIST_TEMPLATES;
+const GET_TEMPLATE = REALM_KNOWLEDGE_TOOLS.GET_TEMPLATE;
+const LIST_HYDRATION_PACKAGES = REALM_KNOWLEDGE_TOOLS.LIST_HYDRATION_PACKAGES;
 
 /** Plumbing tool names the shipped profiles must carry. */
 const PLUMBING_TOOLS = Object.freeze([
@@ -291,6 +315,175 @@ async function createSessionZeroRun() {
   assert.equal(submitReal.stored, true);
   assert.equal(submitReal.templateVersion, importReal.templateVersion);
 
+  // --- Format-v2 leg: the Architect authors placements plus one fileset input
+  // pinned by multiple `{ kind: 'input', inputId, path }` prompt parts in order;
+  // Genesis hydrates it with per-entry `{ path, sourceFile }` fileset entries.
+  const v2WorkDir = `/global/work/${SMOKE_TEMPLATE_ID_V2}`;
+  const v2Lore = [
+    ['01_open.md', 'The lamp is lit for the drowned.'],
+    ['02_close.md', 'The keeper never asks the water why.']
+  ];
+  for (const [name, body] of v2Lore) {
+    const written = await architectDispatcher.executeTool('write_file', {
+      file_path: `${v2WorkDir}/drafts/${name}`,
+      content: body
+    });
+    assert.equal(written.success, true, JSON.stringify(written));
+  }
+  const v2Joined = await architectDispatcher.executeTool('concat_files', {
+    sources: [`${v2WorkDir}/drafts/01_open.md`, `${v2WorkDir}/drafts/02_close.md`],
+    destination: `${v2WorkDir}/prompts/keeper.md`,
+    separator: '\n\n'
+  });
+  assert.equal(v2Joined.success, true, JSON.stringify(v2Joined));
+
+  const v2Spec = {
+    formatVersion: 2,
+    id: SMOKE_TEMPLATE_ID_V2,
+    name: 'Session Zero Smoke v2',
+    description: 'Format-v2 realm authored by the Session Zero end-to-end fixture.',
+    inputs: [
+      { id: 'premise', label: 'Premise', shape: 'text', brief: 'One premise sentence.', required: true },
+      { id: 'lore', label: 'Lore corpus', shape: 'files', brief: 'World lore files, one per chapter.' }
+    ],
+    placements: [
+      { inputId: 'premise', target: 'realm', path: 'premise.md' },
+      { inputId: 'lore', target: 'realm', root: 'lore/' }
+    ],
+    agents: [
+      {
+        key: 'keeper',
+        idPattern: 'keeper',
+        name: 'Keeper',
+        role: 'narrator',
+        prompt: [
+          { kind: 'file', path: 'prompts/keeper.md' },
+          { kind: 'input', inputId: 'lore', path: '01_open.md' },
+          { kind: 'input', inputId: 'lore', path: '02_close.md' },
+          { kind: 'input', inputId: 'premise' }
+        ],
+        toolProfile: { tools: [] },
+        privileged: false
+      }
+    ]
+  };
+  const v2SpecWrite = await architectDispatcher.executeTool('write_json', {
+    file_path: `${v2WorkDir}/template.json`,
+    data: v2Spec
+  });
+  assert.equal(v2SpecWrite.success, true, JSON.stringify(v2SpecWrite));
+  const v2ManifestWrite = await architectDispatcher.executeTool('write_json', {
+    file_path: `${v2WorkDir}/import.manifest.json`,
+    data: {
+      formatVersion: 2,
+      template: v2Spec,
+      files: { 'prompts/keeper.md': { sourceFile: `${v2WorkDir}/prompts/keeper.md` } }
+    }
+  });
+  assert.equal(v2ManifestWrite.success, true, JSON.stringify(v2ManifestWrite));
+
+  const v2ImportDry = await architectDispatcher.executeTool(PUBLISHING_TOOLS.IMPORT_REALM_TEMPLATE, {
+    manifest_file: `${v2WorkDir}/import.manifest.json`,
+    dry_run: true
+  });
+  assert.equal(v2ImportDry.success, true, JSON.stringify(v2ImportDry));
+  assert.equal(v2ImportDry.imported, false);
+  assert.equal(v2ImportDry.sourceFormatVersion, 2);
+  assert.equal(store.getRealmTemplateBundle(SMOKE_TEMPLATE_ID_V2), null, 'the v2 dry run imports nothing');
+
+  const v2ImportReal = await architectDispatcher.executeTool(PUBLISHING_TOOLS.IMPORT_REALM_TEMPLATE, {
+    manifest_file: `${v2WorkDir}/import.manifest.json`
+  });
+  assert.equal(v2ImportReal.success, true, JSON.stringify(v2ImportReal));
+  assert.equal(v2ImportReal.imported, true);
+  assert.equal(v2ImportReal.sourceFormatVersion, 2);
+  assert.equal(v2ImportReal.templateVersion, v2ImportDry.templateVersion, 'the v2 dry run and real import agree');
+  const v2Bundle = store.getRealmTemplateBundle(SMOKE_TEMPLATE_ID_V2);
+  assert.ok(v2Bundle, 'the v2 import is registered');
+  assert.equal(v2Bundle.template.formatVersion, 2);
+  assert.deepEqual(v2Bundle.template.placements, [
+    { inputId: 'premise', target: 'realm', path: 'premise.md' },
+    { inputId: 'lore', target: 'realm', root: 'lore/' }
+  ]);
+
+  // Hand off with the pinned version. (The wake itself is `send_message`,
+  // documented in both protocols; the fixture must not trigger a model turn,
+  // so the mail wake path is exercised by the trigger-queue suite instead.)
+  const v2HandoffWrite = await architectDispatcher.executeTool('write_file', {
+    file_path: `/global/handoff/${SMOKE_TEMPLATE_ID_V2}.md`,
+    content: [
+      `templateId: ${SMOKE_TEMPLATE_ID_V2}`,
+      `version: ${v2ImportReal.templateVersion}`,
+      'inputs: premise (text, required); lore (files, optional; prompt pins 01_open.md + 02_close.md)',
+      `spec: ${v2WorkDir}/template.json`
+    ].join('\n')
+  });
+  assert.equal(v2HandoffWrite.success, true, JSON.stringify(v2HandoffWrite));
+
+  // --- Genesis (v2 leg): per-entry sourceFile references, cover check against
+  // the pinned prompt paths, dry-run, submit.
+  const v2PremiseBody = 'One lamp, one keeper, one drowned harbor.';
+  const v2PremiseWrite = await genesisDispatcher.executeTool('write_file', {
+    file_path: `${v2WorkDir}/payload/premise.md`,
+    content: v2PremiseBody
+  });
+  assert.equal(v2PremiseWrite.success, true, JSON.stringify(v2PremiseWrite));
+  for (const [name, body] of v2Lore) {
+    const written = await genesisDispatcher.executeTool('write_file', {
+      file_path: `${v2WorkDir}/payload/lore/${name}`,
+      content: `${body}\n`
+    });
+    assert.equal(written.success, true, JSON.stringify(written));
+  }
+  const v2HydrateManifest = {
+    formatVersion: 2,
+    templateId: SMOKE_TEMPLATE_ID_V2,
+    templateVersion: v2ImportReal.templateVersion,
+    inputs: {
+      premise: { sourceFile: `${v2WorkDir}/payload/premise.md` },
+      lore: {
+        files: [
+          { path: '01_open.md', sourceFile: `${v2WorkDir}/payload/lore/01_open.md` },
+          { path: '02_close.md', sourceFile: `${v2WorkDir}/payload/lore/02_close.md` }
+        ]
+      }
+    },
+    provenance: {
+      producer: 'Genesis',
+      generatedAt: '2026-09-27T00:00:00.000Z',
+      model: 'fixture',
+      reviewedBy: 'fixture'
+    }
+  };
+  const v2HydrateWrite = await genesisDispatcher.executeTool('write_json', {
+    file_path: `${v2WorkDir}/hydrate.manifest.json`,
+    data: v2HydrateManifest
+  });
+  assert.equal(v2HydrateWrite.success, true, JSON.stringify(v2HydrateWrite));
+
+  const v2SubmitDry = await genesisDispatcher.executeTool(PUBLISHING_TOOLS.SUBMIT_HYDRATION_PACKAGE, {
+    manifest_file: `${v2WorkDir}/hydrate.manifest.json`,
+    dry_run: true
+  });
+  assert.equal(v2SubmitDry.success, true, JSON.stringify(v2SubmitDry));
+  assert.equal(v2SubmitDry.dryRun, true);
+  assert.equal(v2SubmitDry.stored, false);
+  assert.equal(v2SubmitDry.sourceFormatVersion, 2);
+  assert.deepEqual(v2SubmitDry.inputIds, ['premise', 'lore']);
+  assert.deepEqual(v2SubmitDry.fileEntries, [
+    { path: 'lore/01_open.md', target: 'realm' },
+    { path: 'lore/02_close.md', target: 'realm' }
+  ]);
+  assert.equal(store.getPendingInstancePayload(SMOKE_TEMPLATE_ID_V2), null, 'the v2 dry_run stores no candidate');
+
+  const v2SubmitReal = await genesisDispatcher.executeTool(PUBLISHING_TOOLS.SUBMIT_HYDRATION_PACKAGE, {
+    manifest_file: `${v2WorkDir}/hydrate.manifest.json`
+  });
+  assert.equal(v2SubmitReal.success, true, JSON.stringify(v2SubmitReal));
+  assert.equal(v2SubmitReal.stored, true);
+  assert.equal(v2SubmitReal.sourceFormatVersion, 2);
+  assert.equal(v2SubmitReal.templateVersion, v2ImportReal.templateVersion);
+
   // --- Peer notes: each member writes one private-workspace file.
   const genesisNote = 'genesis private note: candidate ready for review.';
   const architectNote = 'architect private note: smoke bundle imported.';
@@ -323,7 +516,14 @@ async function createSessionZeroRun() {
     loreOne,
     loreTwo,
     genesisNote,
-    architectNote
+    architectNote,
+    v2WorkDir,
+    v2Lore,
+    v2PremiseBody,
+    v2ImportDry,
+    v2ImportReal,
+    v2SubmitDry,
+    v2SubmitReal
   };
 }
 
@@ -364,6 +564,22 @@ test('1. the baked session_zero bundle is a valid two-agent generator realm with
   assert.deepEqual(architectSpec.authorities, [AGENT_AUTHORITIES.TEMPLATE]);
   assert.deepEqual(genesisSpec.authorities, [AGENT_AUTHORITIES.HYDRATION]);
 
+  // Inputs: the optional source_pack ingress is staged under /global/source/,
+  // and handoff_notes documents its exactly-one-file placement contract.
+  const inputsById = new Map((template.inputs ?? []).map((input) => [input.id, input]));
+  assert.deepEqual([...inputsById.keys()], ['assignment', 'target_template', 'handoff_notes', 'source_pack']);
+  const sourcePack = inputsById.get('source_pack');
+  assert.equal(sourcePack.shape, 'files');
+  assert.equal(sourcePack.required, undefined, 'source_pack is optional');
+  const handoffNotes = inputsById.get('handoff_notes');
+  assert.match(handoffNotes.brief, /exactly one file/, 'the single-file placement contract is documented');
+  assert.ok(
+    (template.placements ?? []).some(
+      (placement) => placement.inputId === 'source_pack' && placement.target === 'realm' && placement.root === 'source/'
+    ),
+    'source_pack is placed under source/'
+  );
+
   // The publishing tools are explicit-grant-only and outside the canonical
   // taxonomy: no toolProfile selector may name them (U-P decision, ticket
   // 2518510). The profiles carry the file plumbing instead.
@@ -374,6 +590,7 @@ test('1. the baked session_zero bundle is a valid two-agent generator realm with
     for (const plumbing of PLUMBING_TOOLS) {
       assert.ok(tools.includes(plumbing), `${spec.key} carries the '${plumbing}' plumbing tool`);
     }
+    assert.ok(tools.includes('send_message'), `${spec.key} carries the handoff-wake tool`);
     for (const publishing of publishingNames) {
       assert.equal(tools.includes(publishing), false, `${spec.key} never profile-selects '${publishing}'`);
     }
@@ -389,6 +606,31 @@ test('1. the baked session_zero bundle is a valid two-agent generator realm with
     },
     bundleFiles: bundle.files
   });
+  const planWithPack = materializeTemplate(template, {
+    realmId: 'session_zero_probe',
+    inputs: {
+      assignment: { shape: 'text', text: 'Probe the protocols.' },
+      target_template: { shape: 'text', text: '' },
+      source_pack: {
+        shape: 'files',
+        files: [
+          { path: 'director_protocol.md', content: 'Director protocol.' },
+          { path: 'lore/01_open.md', content: 'Opening lore.' }
+        ]
+      }
+    },
+    bundleFiles: bundle.files
+  });
+  assert.deepEqual(
+    planWithPack.placements
+      .filter((placement) => placement.path.startsWith('source/'))
+      .map((placement) => ({ path: placement.path, target: placement.target, content: placement.content })),
+    [
+      { path: 'source/director_protocol.md', target: 'realm', content: 'Director protocol.' },
+      { path: 'source/lore/01_open.md', target: 'realm', content: 'Opening lore.' }
+    ],
+    'the source pack resolves under source/ at launch composition'
+  );
   const architectPrompt = plan.agents.find((agent) => agent.key === 'architect').systemPrompt;
   const genesisPrompt = plan.agents.find((agent) => agent.key === 'genesis').systemPrompt;
   for (const prompt of [architectPrompt, genesisPrompt]) {
@@ -396,11 +638,16 @@ test('1. the baked session_zero bundle is a valid two-agent generator realm with
     assert.match(prompt, /operator-owned content/);
     assert.match(prompt, /dry_run/);
     assert.match(prompt, /\/global\/handoff\//);
+    assert.match(prompt, /\/global\/source\//);
+    assert.match(prompt, /send_message/);
   }
   assert.match(architectPrompt, /ARCHITECT — TEMPLATE AUTHORING PROTOCOL/);
   assert.match(architectPrompt, new RegExp(PUBLISHING_TOOLS.IMPORT_REALM_TEMPLATE));
+  assert.match(architectPrompt, new RegExp(LIST_TEMPLATES));
+  assert.match(architectPrompt, new RegExp(GET_TEMPLATE));
   assert.match(genesisPrompt, /GENESIS — PAYLOAD GENERATION PROTOCOL/);
   assert.match(genesisPrompt, new RegExp(PUBLISHING_TOOLS.SUBMIT_HYDRATION_PACKAGE));
+  assert.match(genesisPrompt, new RegExp(LIST_HYDRATION_PACKAGES));
   assert.match(genesisPrompt, /sourceFile/);
   store.destroy();
 });
@@ -497,7 +744,10 @@ test('4. Genesis submits a matching package and a pending candidate is stored fo
   assert.equal(candidate.payload.files[0].path, 'lore/world.md');
   assert.equal(candidate.payload.files[0].content, `${loreOne}\n${loreTwo}`);
   assert.ok(Object.isFrozen(candidate));
-  assert.deepEqual(store.listPendingInstancePayloads().map((entry) => entry.templateId), [SMOKE_TEMPLATE_ID]);
+  assert.deepEqual(
+    store.listPendingInstancePayloads().map((entry) => entry.templateId).sort(),
+    [SMOKE_TEMPLATE_ID, SMOKE_TEMPLATE_ID_V2].sort()
+  );
 });
 
 // ============================================================================
@@ -538,4 +788,117 @@ test('6. the reviewed candidate attaches through the existing launch path', asyn
   assert.ok(worldRecord, 'the candidate file was seeded at launch');
   assert.equal(worldRecord.content, `${run.loreOne}\n${run.loreTwo}`);
   assert.ok(run.store.getPendingInstancePayload(SMOKE_TEMPLATE_ID), 'the candidate stays session-only after attach');
+});
+
+// ============================================================================
+// 7. Format-v2 leg: placements + a pinned multi-part fileset
+// ============================================================================
+
+test('7. the format-v2 leg authors placements plus a pinned multi-part fileset and hydrates it', async () => {
+  const run = await getSessionZeroRun();
+  const { store, vfs, principal, architect } = run;
+
+  // The candidate is a format-v2 payload whose lore fileset arrived entirely
+  // through per-entry `{ path, sourceFile }` references.
+  const candidate = store.getPendingInstancePayload(SMOKE_TEMPLATE_ID_V2);
+  assert.ok(candidate, 'the v2 candidate is stored');
+  assert.equal(candidate.templateId, SMOKE_TEMPLATE_ID_V2);
+  assert.equal(candidate.templateVersion, run.v2ImportReal.templateVersion);
+  assert.equal(candidate.payload.formatVersion, 2);
+  assert.equal(candidate.payload.inputs.premise.text, run.v2PremiseBody);
+  assert.deepEqual(
+    candidate.payload.inputs.lore.files.map((file) => file.path),
+    ['01_open.md', '02_close.md']
+  );
+  assert.match(candidate.payload.inputs.lore.files[0].content, /lamp is lit/);
+  assert.deepEqual(candidate.payload.provenance, {
+    producer: 'Genesis',
+    generatedAt: '2026-09-27T00:00:00.000Z',
+    model: 'fixture',
+    reviewedBy: 'fixture'
+  });
+  assert.deepEqual(
+    run.v2SubmitDry.fileEntries,
+    run.v2SubmitReal.fileEntries,
+    'the dry run and the real receipt agree on destinations'
+  );
+
+  // Launching the candidate composes the pinned prompt paths — a fileset
+  // missing `01_open.md`/`02_close.md` would fail here even though the submit
+  // dry run passed — and seeds every declared destination.
+  const launched = await store.launchRealmFromTemplate(SMOKE_TEMPLATE_ID_V2, {
+    package: candidate.payload
+  });
+  assert.equal(launched.agents.length, 1, 'the v2 smoke realm launched its single member');
+  const workspaceId = `realm:${launched.realm.id}:global`;
+  const readSeed = (path) => vfs.getFileRecord(path, {
+    workspaceId,
+    callerAgentId: architect.id,
+    principal
+  });
+  const premise = readSeed('/premise.md');
+  assert.ok(premise, 'the text placement seeded premise.md');
+  assert.equal(premise.content, run.v2PremiseBody);
+  const firstLore = readSeed('/lore/01_open.md');
+  const secondLore = readSeed('/lore/02_close.md');
+  assert.ok(firstLore && secondLore, 'both pinned fileset files were placed under lore/');
+  assert.match(firstLore.content, /lamp is lit/);
+  assert.match(secondLore.content, /never asks the water why/);
+});
+
+// ============================================================================
+// 8. M5b read tools: exact-authority exposure
+// ============================================================================
+
+test('8. the M5b read tools surface exactly with the approved publishing authorities', async () => {
+  const run = await getSessionZeroRun();
+  const { runtime, launched, architect, genesis } = run;
+  const identityPort = runtime.createAgentIdentityPort();
+  const architectAllow = [
+    ...identityPort.getAgentIdentity(architect.id, { realmId: launched.realm.id }).authority.allow
+  ];
+  const genesisAllow = [
+    ...identityPort.getAgentIdentity(genesis.id, { realmId: launched.realm.id }).authority.allow
+  ];
+
+  assert.deepEqual(
+    getAuthorityToolSchemas(architectAllow).map((definition) => definition.function.name).sort(),
+    [PUBLISHING_TOOLS.IMPORT_REALM_TEMPLATE, LIST_TEMPLATES, GET_TEMPLATE].sort(),
+    'the architect approval exposes its publishing tool plus the two template reads'
+  );
+  assert.deepEqual(
+    getAuthorityToolSchemas(genesisAllow).map((definition) => definition.function.name).sort(),
+    [PUBLISHING_TOOLS.SUBMIT_HYDRATION_PACKAGE, LIST_HYDRATION_PACKAGES].sort(),
+    'the genesis approval exposes its publishing tool plus the hydration listing'
+  );
+  const canonical = getSandboxToolsSchema('all').map((definition) => definition.function.name);
+  for (const name of [LIST_TEMPLATES, GET_TEMPLATE, LIST_HYDRATION_PACKAGES]) {
+    assert.equal(canonical.includes(name), false, `'${name}' stays outside the canonical taxonomy`);
+  }
+
+  // Real dispatcher calls: the approved holder succeeds, the other authority denies.
+  const listed = await run.architectDispatcher.executeTool(LIST_TEMPLATES, {});
+  assert.equal(listed.success, true, JSON.stringify(listed));
+  assert.ok(listed.templates.some((entry) => entry.templateId === TEMPLATE_ID), 'the shipped Session Zero is listed');
+  const described = await run.architectDispatcher.executeTool(GET_TEMPLATE, { templateId: SMOKE_TEMPLATE_ID_V2 });
+  assert.equal(described.success, true, JSON.stringify(described));
+  assert.equal(described.templateId, SMOKE_TEMPLATE_ID_V2);
+  assert.equal(described.templateVersion, run.v2ImportReal.templateVersion);
+  assert.deepEqual(described.template.placements, [
+    { inputId: 'premise', target: 'realm', path: 'premise.md' },
+    { inputId: 'lore', target: 'realm', root: 'lore/' }
+  ]);
+  const packages = await run.genesisDispatcher.executeTool(LIST_HYDRATION_PACKAGES, {});
+  assert.equal(packages.success, true, JSON.stringify(packages));
+  assert.ok(
+    packages.pending.some((entry) => entry.templateId === SMOKE_TEMPLATE_ID_V2),
+    'the v2 candidate is listed for the hydration authority'
+  );
+
+  const crossAuthority = await run.architectDispatcher.executeTool(LIST_HYDRATION_PACKAGES, {});
+  assert.equal(crossAuthority.success, false);
+  assert.equal(crossAuthority.code, 'PERMISSION_DENIED');
+  const crossPublishing = await run.genesisDispatcher.executeTool(GET_TEMPLATE, { templateId: SMOKE_TEMPLATE_ID_V2 });
+  assert.equal(crossPublishing.success, false);
+  assert.equal(crossPublishing.code, 'PERMISSION_DENIED');
 });

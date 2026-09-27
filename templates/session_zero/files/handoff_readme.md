@@ -14,7 +14,12 @@ workspaces.
   manifest (`{ formatVersion: 2, template, files }`).
 - `/global/work/<template_id>/hydrate.manifest.json` — Genesis's format-v2
   payload submission manifest.
-- `/global/handoff/notes.md` — operator notes attached at launch (when provided).
+- `/global/source/` — operator-staged source material for this run (protocol
+  prompts, briefs, lore), staged from the optional `source_pack` launch input.
+  Read it; never edit it.
+- `/global/handoff/notes.md` — operator notes attached at launch (when provided;
+  a single file).
 
 Bytes move by reference: manifests name `sourceFile` paths and the host resolves
-them at submit time, so large content never transits a model's context.
+them at submit time, so large content never transits a model's context. Payload
+fileset entries carry their own `{ path, sourceFile }` per-entry references.

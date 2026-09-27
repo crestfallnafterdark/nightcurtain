@@ -1,6 +1,6 @@
 # session_zero — template bundle
 
-**Status:** Shipped bundle content · **Last verified:** 2026-09-22.
+**Status:** Shipped bundle content · **Last verified:** 2026-09-27.
 
 One generator realm hosting both generator agents on the format-v2 template
 primitives. *Session Zero* is an ordinary template: it is launched through the
@@ -13,13 +13,16 @@ validated tool paths.
 - `template.json` — manifest: two privileged agents (`architect`, `genesis`),
   each with ordered prompt parts (shared operational rules → agent protocol →
   the `assignment` and `target_template` launch inputs), an explicit plumbing
-  `toolProfile`, and a declared publishing authority. Two placements seed the
+  `toolProfile`, and a declared publishing authority. Three placements seed the
   realm workspace at launch: the bundled `files/handoff_readme.md` body lands at
-  `/global/handoff/README.md`, and the optional `handoff_notes` files input
-  lands at `/global/handoff/notes.md`.
+  `/global/handoff/README.md`, the optional `handoff_notes` files input lands at
+  `/global/handoff/notes.md` (attach exactly one file), and the optional
+  `source_pack` files input is staged under `/global/source/`.
 - `prompts/operational_rules.md` — the shared operational contract: workspace
-  view, `/global/...` handoff conventions, caps, typed-error recovery loop, and
-  the operator-content prohibition.
+  view, `/global/...` handoff conventions, the peer-wake rule, the M5b read
+  tools that arrive with an approved publishing grant, caps, typed-error
+  recovery loop, and the operator-content prohibition (operator-staged
+  `/global/source/` content is in remit).
 - `prompts/architect_protocol.md` — template-authoring procedure (author parts
   as files by reference, assemble the transport manifest, `dry_run`, import,
   hand off) with a worked example.
@@ -28,7 +31,9 @@ validated tool paths.
   submit, report) with a worked example.
 - `files/handoff_readme.md` — bundle file placed at `/global/handoff/README.md`
   at launch; the `handoff_notes` files input is placed at
-  `/global/handoff/notes.md` when the operator attaches notes.
+  `/global/handoff/notes.md` when the operator attaches notes, and the
+  `source_pack` files input is staged under `/global/source/` when the operator
+  attaches source material.
 - `README.md` — this human doc (not embedded in any prompt).
 
 ## Authorities and approval
@@ -52,17 +57,31 @@ validated tool paths.
 
 ## Worked flow
 
-1. Launch Session Zero, fill the `assignment` input, and approve both declared
-   authorities in the review (optionally trust the template).
-2. Architect authors bundle files under `/global/work/<id>/`, writes
-   `import.manifest.json`, iterates with
-   `import_realm_template { manifest_file, dry_run: true }`, then imports for
-   real and writes `/global/handoff/<id>.md` (template id + canonical version).
-3. Genesis reads the handoff, assembles the payload input bodies by reference,
-   writes the format-v2 payload manifest (pinned `templateVersion`), iterates
-   with `submit_hydration_package { manifest_file, dry_run: true }`, then
-   submits for real; the candidate is session-only until the operator reviews
-   and attaches it at launch.
+1. **Stage, then launch.** Before launching, attach the source material — the
+   protocol prompts, briefs, and lore the run should author from — to the
+   optional `source_pack` input; the files are staged under `/global/source/`
+   at launch. Fill the `assignment` input (and optionally `target_template` and
+   one `handoff_notes` file), then approve both declared authorities in the
+   review (optionally trust the template).
+2. Architect reads `/global/source/` and `/global/handoff/`, authors bundle
+   files under `/global/work/<id>/`, writes `import.manifest.json`, iterates
+   with `import_realm_template { manifest_file, dry_run: true }`, imports for
+   real, then writes `/global/handoff/<id>.md` (template id + canonical
+   version) and **`send_message`s `genesis`** so the hydration leg wakes — mail
+   notifications drive turn activation, nothing polls.
+3. Genesis wakes on that mail, reads the handoff, pins the canonical
+   `templateVersion`, assembles the payload input bodies by reference — fileset
+   entries per-entry `{ path, sourceFile }` — verifies the target template's
+   pinned prompt `path`s are all covered, writes the format-v2 payload
+   manifest, iterates with `submit_hydration_package { manifest_file,
+   dry_run: true }`, then submits for real; the candidate is session-only until
+   the operator reviews and attaches it at launch.
+
+With the authorities approved, the host additionally exposes the M5b read
+tools: `list_templates` + `get_template` to Architect (read back the effective
+imported model and version) and `list_hydration_packages` to Genesis (confirm
+the stored candidate and its digest). They appear because the exact grant was
+approved — never through wildcard, presets, or `privileged`.
 
 ## Owner decisions (2026-09-21/22)
 

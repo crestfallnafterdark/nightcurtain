@@ -24,7 +24,14 @@
       "label": "Handoff notes",
       "shape": "files",
       "help": "Optional operator notes written to /global/handoff/notes.md at launch; absent notes write nothing.",
-      "brief": "Optional operator notes for this generation session (attached at launch; absent notes are skipped)."
+      "brief": "Optional operator notes for this generation session: attach exactly one file, written to /global/handoff/notes.md (absent notes are skipped; a multi-file attachment fails the launch)."
+    },
+    {
+      "id": "source_pack",
+      "label": "Source pack",
+      "shape": "files",
+      "help": "Optional operator-staged source material for this generation run (protocol prompts, briefs, lore); every attached file lands under /global/source/ and is read-only input.",
+      "brief": "Attach the source files this run authors from or hydrates with; they are staged under /global/source/ at launch (absent pack stages nothing)."
     }
   ],
   "agents": [
@@ -93,6 +100,7 @@
   ],
   "placements": [
     { "file": "files/handoff_readme.md", "target": "realm", "path": "handoff/README.md" },
-    { "inputId": "handoff_notes", "target": "realm", "path": "handoff/notes.md" }
+    { "inputId": "handoff_notes", "target": "realm", "path": "handoff/notes.md" },
+    { "inputId": "source_pack", "target": "realm", "root": "source/" }
   ]
 }
