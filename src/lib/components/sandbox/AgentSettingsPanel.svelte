@@ -526,7 +526,7 @@
 
   /** @type {Record<string, readonly {ref: string, scope: object | null}[]>} */
   let authorityGrantDetails = $state({});
-  /** @type {Record<string, {targets: string, realms: string, ownSpawns: boolean, realmMembers: boolean, fields: string[]}>} */
+  /** @type {Record<string, {targets: string, fields: string[], realms?: string, ownSpawns?: boolean, realmMembers?: boolean}>} */
   let authorityScopeDrafts = $state({});
   let lastAuthorityDetailsAgentKey = $state(/** @type {string | null} */(null));
 
@@ -567,7 +567,7 @@
   /** Re-seeds every meta-capability row's draft from the live registry. */
   function seedAuthorityScopeDrafts() {
     const state = buildAuthorityEditorState(authorityGrantDetails, metaAuthorityAgentKey);
-    /** @type {Record<string, object>} */
+    /** @type {Record<string, {targets: string, fields: string[], realms?: string, ownSpawns?: boolean, realmMembers?: boolean}>} */
     const next = {};
     for (const toggle of META_CAPABILITY_EDITOR_ROWS) {
       next[toggle.authority] = seedAuthorityScopeDraft(toggle, state[toggle.authority]?.scope ?? null);
