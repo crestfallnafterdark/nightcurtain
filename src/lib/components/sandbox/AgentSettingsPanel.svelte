@@ -532,7 +532,7 @@
 
   /** @type {Record<string, readonly {ref: string, scope: object | null}[]>} */
   let authorityGrantDetails = $state({});
-  /** @type {Record<string, {targets: string, fields: string[], realms?: string, ownSpawns?: boolean, realmMembers?: boolean}>} */
+  /** @type {Record<string, {targets: string, fields?: string[], realms?: string, ownSpawns?: boolean, realmMembers?: boolean}>} */
   let authorityScopeDrafts = $state({});
   let lastAuthorityDetailsAgentKey = $state(/** @type {string | null} */(null));
 
@@ -553,7 +553,11 @@
    * Seeds one row's scope draft from the held scope (`null` = the id default:
    * own spawns for `@agent:*` — checked — and every declared field token). The
    * draft carries only class-allowed keys, so the fail-closed normalizer never
-   * sees a class-invalid key the UI did not render.
+   * sees a class-invalid key the UI did not render: `fields` is seeded only
+   * when the id declares an `AUTHORITY_SCOPE_FIELDS` vocabulary (defect
+   * 9b14928 — an always-seeded `fields: []` rejected every save for
+   * `@agent:inspect` / `@realm:inspect` / `@extensions:authority`, whose
+   * allowed-key set has no `fields`).
    *
    * @param {object} toggle - Authority editor toggle definition.
    * @param {object | null} scope - Held registry scope, or `null`.
@@ -562,11 +566,13 @@
   function seedAuthorityScopeDraft(toggle, scope) {
     const vocabulary = AUTHORITY_SCOPE_FIELDS[toggle.authority] ?? [];
     const scopeRecord = scope && typeof scope === 'object' ? scope : null;
-    /** @type {{targets: string, fields: string[], realms?: string, ownSpawns?: boolean, realmMembers?: boolean}} */
+    /** @type {{targets: string, fields?: string[], realms?: string, ownSpawns?: boolean, realmMembers?: boolean}} */
     const draft = {
-      targets: Array.isArray(scopeRecord?.targets) ? scopeRecord.targets.join(', ') : '',
-      fields: Array.isArray(scopeRecord?.fields) ? [...scopeRecord.fields] : [...vocabulary]
+      targets: Array.isArray(scopeRecord?.targets) ? scopeRecord.targets.join(', ') : ''
     };
+    if (vocabulary.length > 0) {
+      draft.fields = Array.isArray(scopeRecord?.fields) ? [...scopeRecord.fields] : [...vocabulary];
+    }
     if (toggle.class === 'agent') {
       draft.realms = Array.isArray(scopeRecord?.realms) ? scopeRecord.realms.join(', ') : '';
       draft.ownSpawns = scopeRecord ? scopeRecord.ownSpawns === true : true;
@@ -583,7 +589,7 @@
   /** Re-seeds every meta-capability row's draft from the live registry. */
   function seedAuthorityScopeDrafts() {
     const state = buildAuthorityEditorState(authorityGrantDetails, metaAuthorityAgentKey);
-    /** @type {Record<string, {targets: string, fields: string[], realms?: string, ownSpawns?: boolean, realmMembers?: boolean}>} */
+    /** @type {Record<string, {targets: string, fields?: string[], realms?: string, ownSpawns?: boolean, realmMembers?: boolean}>} */
     const next = {};
     for (const toggle of META_CAPABILITY_EDITOR_ROWS) {
       next[toggle.authority] = seedAuthorityScopeDraft(toggle, state[toggle.authority]?.scope ?? null);

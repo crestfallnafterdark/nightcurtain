@@ -29,7 +29,7 @@
    * @property {string} warning One-line high-impact warning (empty when none).
    * @property {boolean} enabled Whether the selected agent holds the id.
    * @property {import('../../sandbox/realmCatalog/index.ts').AuthorityScopeRecord | null} scope Held scope (`null` = the id default).
-   * @property {{ targets: string, fields: readonly string[], realms?: string, ownSpawns?: boolean, realmMembers?: boolean }} draft Seeded operator draft.
+   * @property {{ targets: string, fields?: readonly string[], realms?: string, ownSpawns?: boolean, realmMembers?: boolean }} draft Seeded operator draft (`fields` is absent for ids with no declared vocabulary).
    * @property {readonly string[]} vocabulary Declared field-token vocabulary.
    * @property {string} summary One-line scope summary for the rail.
    * @property {boolean} canSave False only for a granted no-op draft.
@@ -362,7 +362,7 @@
                   <input
                     type="checkbox"
                     class="authority-checkbox"
-                    checked={activeRow.draft.fields.includes(token)}
+                    checked={(activeRow.draft.fields ?? []).includes(token)}
                     onchange={(event) => onfieldtoggle(activeRow.authority, token, event.currentTarget.checked)}
                   />
                   {token}
